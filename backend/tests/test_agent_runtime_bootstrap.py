@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,6 +23,8 @@ from scripts import bootstrap_langgraph_checkpointer as bootstrap_command
 _PACKAGE_VERSION = '3.1.2-test'
 _EXPECTED_REVISION = len(PostgresSaver.MIGRATIONS) - 1
 _APPLIED_AT = datetime(2026, 8, 26, 9, 30, tzinfo=UTC)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_BOOTSTRAP_SCRIPT = _REPO_ROOT / 'scripts' / 'bootstrap_langgraph_checkpointer.py'
 
 
 class _FakeQueryResult:
@@ -136,6 +142,20 @@ def _postgres_settings(*, strict: bool = True) -> Settings:
         paraworks_database_url=None,
         database_url='postgresql+psycopg://runtime:credential-marker@db/checkpoints',
         langgraph_strict_msgpack=strict,
+    )
+
+
+def _run_bootstrap_process(args: list[str]) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment['PARAWORKS_DEMO_MODE'] = 'credential-marker'
+    return subprocess.run(
+        [sys.executable, str(_BOOTSTRAP_SCRIPT), *args],
+        cwd=_REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
     )
 
 
@@ -397,6 +417,113 @@ def test_pool_close_failure_is_sanitized() -> None:
     assert pool.close_calls == 1
 
 
+def test_successful_commit_followed_by_pool_close_failure_is_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.agent_runtime import bootstrap
+
+    events: list[str] = []
+    pool = _FakePool(
+        events,
+        _EXPECTED_REVISION,
+        close_error=RuntimeError('credential-marker'),
+    )
+    saver = _FakeSaver(events)
+    store = _SessionStore(events)
+    monkeypatch.setattr(bootstrap, 'version', lambda _name: _PACKAGE_VERSION)
+
+    with pytest.raises(CheckpointBootstrapError) as exc_info:
+        bootstrap_langgraph_checkpointer(
+            _postgres_settings(),
+            backup_confirmed=True,
+            pool_factory=lambda _dsn: pool,  # type: ignore[arg-type]
+            saver_factory=lambda _pool, _serializer: saver,  # type: ignore[arg-type]
+            session_factory=lambda: _FakeSession(store),  # type: ignore[arg-type]
+            now=lambda: _APPLIED_AT,
+        )
+
+    assert str(exc_info.value) == 'checkpoint bootstrap failed'
+    assert 'credential-marker' not in str(exc_info.value)
+    assert saver.setup_calls == 1
+    assert store.add_calls == 1
+    assert store.commit_calls == 1
+    assert pool.close_calls == 1
+
+
+def test_lazy_session_factory_failure_is_sanitized_and_closes_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.agent_runtime import bootstrap
+
+    events: list[str] = []
+    pool = _FakePool(events, _EXPECTED_REVISION)
+    saver = _FakeSaver(events)
+    monkeypatch.setattr(bootstrap, 'version', lambda _name: _PACKAGE_VERSION)
+
+    def failing_session_factory() -> _FakeSession:
+        raise RuntimeError('credential-marker')
+
+    with pytest.raises(CheckpointBootstrapError) as exc_info:
+        bootstrap_langgraph_checkpointer(
+            _postgres_settings(),
+            backup_confirmed=True,
+            pool_factory=lambda _dsn: pool,  # type: ignore[arg-type]
+            saver_factory=lambda _pool, _serializer: saver,  # type: ignore[arg-type]
+            session_factory=failing_session_factory,  # type: ignore[arg-type]
+        )
+
+    assert str(exc_info.value) == 'checkpoint bootstrap failed'
+    assert 'credential-marker' not in str(exc_info.value)
+    assert saver.setup_calls == 1
+    assert pool.close_calls == 1
+
+
+def test_importing_operator_command_has_no_settings_side_effect() -> None:
+    environment = os.environ.copy()
+    environment['PARAWORKS_DEMO_MODE'] = 'credential-marker'
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            '-c',
+            'import scripts.bootstrap_langgraph_checkpointer; print("imported")',
+        ],
+        cwd=_REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == 'imported\n'
+    assert completed.stderr == ''
+
+
+@pytest.mark.parametrize('args', [[], ['--unknown', 'credential-marker']])
+def test_operator_argument_errors_happen_before_invalid_settings(
+    args: list[str],
+) -> None:
+    completed = _run_bootstrap_process(args)
+
+    assert completed.returncode == 2
+    assert completed.stdout == ''
+    assert 'invalid arguments' in completed.stderr
+    assert 'credential-marker' not in completed.stderr
+    assert 'Traceback' not in completed.stderr
+
+
+def test_operator_invalid_settings_failure_is_bounded() -> None:
+    completed = _run_bootstrap_process(['--confirm-backup'])
+
+    assert completed.returncode == 1
+    assert completed.stdout == ''
+    assert completed.stderr == 'checkpoint bootstrap failed\n'
+    assert 'credential-marker' not in completed.stderr
+    assert 'Traceback' not in completed.stderr
+
+
 def test_operator_command_requires_backup_confirmation_before_service_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -435,6 +562,32 @@ def test_operator_command_accepts_only_the_confirmation_flag(
     output = capsys.readouterr()
     assert 'postgresql://' not in output.err
     assert 'secret' not in output.err
+
+
+def test_operator_command_rejects_abbreviated_confirmation_without_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        bootstrap_command,
+        'get_settings',
+        lambda: calls.append('settings'),
+    )
+    monkeypatch.setattr(
+        bootstrap_command,
+        'bootstrap_langgraph_checkpointer',
+        lambda *args, **kwargs: calls.append('bootstrap'),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        bootstrap_command.main(['--confirm'])
+
+    assert exc_info.value.code == 2
+    assert calls == []
+    output = capsys.readouterr()
+    assert 'invalid arguments' in output.err
+    assert '--confirm' not in output.err
 
 
 def test_operator_command_prints_only_the_safe_bootstrap_result(

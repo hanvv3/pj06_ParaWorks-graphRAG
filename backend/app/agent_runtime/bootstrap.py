@@ -17,7 +17,6 @@ from backend.app.agent_runtime.checkpointing import (
     sqlalchemy_url_to_psycopg_dsn,
 )
 from backend.app.core.config import Settings
-from backend.app.db.session import SessionLocal
 from backend.app.models import AgentRuntimeSchemaVersion
 
 
@@ -38,6 +37,12 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _default_session_factory() -> Session:
+    from backend.app.db.session import SessionLocal
+
+    return SessionLocal()
+
+
 def bootstrap_langgraph_checkpointer(
     settings: Settings,
     *,
@@ -46,7 +51,7 @@ def bootstrap_langgraph_checkpointer(
     saver_factory: Callable[
         [object, SerializerProtocol], PostgresSaver
     ] = build_postgres_saver,
-    session_factory: Callable[[], Session] = SessionLocal,
+    session_factory: Callable[[], Session] = _default_session_factory,
     now: Callable[[], datetime] = utc_now,
 ) -> BootstrapResult:
     if not backup_confirmed:
