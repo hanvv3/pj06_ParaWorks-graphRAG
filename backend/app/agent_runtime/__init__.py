@@ -3,6 +3,13 @@ from backend.app.agent_runtime.bootstrap import (
     CheckpointBootstrapError,
     bootstrap_langgraph_checkpointer,
 )
+from backend.app.agent_runtime.checkpoint_execution import (
+    CheckpointConfirmation,
+    CheckpointConfirmationError,
+    checkpoint_config,
+    invoke_and_confirm_checkpoint,
+    require_resumable_checkpoint,
+)
 from backend.app.agent_runtime.contracts import (
     AgentCostBudgetDecision,
     AgentManifest,
@@ -23,6 +30,10 @@ from backend.app.agent_runtime.evidence_summary import build_evidence_summary
 from backend.app.agent_runtime.fingerprints import (
     canonical_json_bytes,
     keyed_fingerprint,
+)
+from backend.app.agent_runtime.graph_versions import (
+    GraphVersionRegistry,
+    RuntimeVersionUnavailable,
 )
 from backend.app.agent_runtime.orchestration import (
     AgentWorkflow,
@@ -64,9 +75,12 @@ __all__ = [
     'AgentRunResult',
     'BootstrapResult',
     'CheckpointBootstrapError',
+    'CheckpointConfirmation',
+    'CheckpointConfirmationError',
     'CheckpointPruneResult',
     'EvidenceMessage',
     'EvidencePacket',
+    'GraphVersionRegistry',
     'PermissionContext',
     'LangChainProjectRouterModel',
     'ProjectOption',
@@ -79,6 +93,7 @@ __all__ = [
     'ReviewGraphOutput',
     'ReviewGraphState',
     'ReviewRuntimeContext',
+    'RuntimeVersionUnavailable',
     'TokenUsage',
     'apply_project_routing_to_payload',
     'build_project_tools',
@@ -88,10 +103,13 @@ __all__ = [
     'build_company_memory_workflow',
     'bootstrap_langgraph_checkpointer',
     'canonical_json_bytes',
+    'checkpoint_config',
     'evaluate_agent_cost_budget',
     'estimate_agent_run_cost',
     'keyed_fingerprint',
+    'invoke_and_confirm_checkpoint',
     'prune_expired_checkpoints',
     'route_projects_for_candidates',
+    'require_resumable_checkpoint',
     'score_project_aliases',
 ]
