@@ -1,6 +1,6 @@
 # ParaWorks Portfolio Log
 
-Last updated: 2026-08-26
+Last updated: 2026-08-27
 
 This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
@@ -28,8 +28,11 @@ demo story changes.
   persisted interrupt ids/JSON-safe values, while translating resume saver
   connection or deserialization failures to the bounded
   `checkpoint_unavailable` category.
+- Bounded cyclic and excessively deep interrupt normalization to the opaque
+  `checkpoint interrupt state mismatch` category, preventing raw recursion
+  failures from escaping the runtime boundary.
 - Verification recorded zero new non-Slack backend failures. The focused suite
-  passed 222 tests, the non-Slack gate passed 715 tests with one existing
+  passed 224 tests, the non-Slack gate passed 717 tests with one existing
   optional pgvector skip, and the full suite retained exactly the ten visible
   user-deferred Slack failures.
 - Deliverable C remains a separate, unimplemented Review Queue HITL V2 slice

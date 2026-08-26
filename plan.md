@@ -385,11 +385,14 @@ Tasks:
   - Checkpoint confirmation now matches the exact ordered returned/saved
     interrupt ids and JSON-safe values, and resume availability sanitizes
     saver connection/deserialization failures as `checkpoint_unavailable`.
+    Cyclic or excessively deep interrupt values are also bounded to the opaque
+    `checkpoint interrupt state mismatch` error instead of leaking recursion
+    failures.
   - The non-Slack backend gate is green and the same ten deferred Slack
     failures remain visible in the complete backend suite. Latest gates:
-    dedicated PostgreSQL `30 passed`, focused Deliverable B `222 passed`,
-    non-Slack backend `715 passed, 1 skipped, 10 deselected`, and full backend
-    `10 failed, 715 passed, 1 skipped` with only the deferred Slack ids.
+    dedicated PostgreSQL `30 passed`, focused Deliverable B `224 passed`,
+    non-Slack backend `717 passed, 1 skipped, 10 deselected`, and full backend
+    `10 failed, 717 passed, 1 skipped` with only the deferred Slack ids.
   - Deliverable C still has no implementation authorization. Review Queue HITL
     V2 requires its separate implementation plan to be reviewed first.
 - User-directed execution order for the remaining program:

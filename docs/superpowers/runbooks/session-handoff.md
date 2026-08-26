@@ -1,12 +1,13 @@
 # ParaWorks Harness Session Handoff
 
-Updated: 2026-08-26
+Updated: 2026-08-27
 
 ## 2026-08-26 Runtime Deliverable B complete
 
 - Deliverable B runtime/checkpoint primitives are complete through
-  implementation rollback point `5b05bc8` (including the exact interrupt and
-  resumability error hardening in `5b05bc8`, the narrow Alembic
+  implementation rollback point `4a1867a` (including bounded cyclic/deep
+  interrupt normalization in `4a1867a`, exact interrupt and resumability
+  error hardening in `5b05bc8`, the narrow Alembic
   logging correction in `e847608`, the original restart test in `403600b`,
   and the no-fix Ruff import correction in `e44dc4f`).
 - The locked Review workflow version is `company-memory-review-v2.0`.
@@ -26,7 +27,7 @@ Updated: 2026-08-26
   uv run --locked pytest backend/tests/test_agent_runtime_postgres_checkpoint.py -q
   ```
 
-  Final-wave result: `30 passed, 1 warning in 26.10s`, with no
+  Current-HEAD result: `30 passed, 1 warning in 0.75s`, with no
   skip. It proved a real interrupt, pool A shutdown, independent pool/saver B
   restart, same-thread resume, checkpoint-id progression, root namespace,
   fail-before-mutation database/user identity checks, every stored/decoded
@@ -37,11 +38,13 @@ Updated: 2026-08-26
 - Confirmation compares the exact ordered returned/persisted interrupt ids and
   recursively validated JSON-safe values before separately enforcing the
   expected pause state. Resume saver read failures are bounded to
-  `checkpoint_unavailable` without provider, DSN, or marker leakage.
-- Complete focused result: `222 passed, 9 warnings`. Non-Slack gate:
-  `715 passed, 1 skipped, 10 deselected, 9 warnings`; the one skip is the
+  `checkpoint_unavailable` without provider, DSN, or marker leakage. Cyclic or
+  excessively deep values are bounded to `checkpoint interrupt state mismatch`
+  rather than leaking a raw `RecursionError`.
+- Complete focused result: `224 passed, 9 warnings`. Non-Slack gate:
+  `717 passed, 1 skipped, 10 deselected, 9 warnings`; the one skip is the
   existing optional pgvector integration test. Full backend result:
-  `10 failed, 715 passed, 1 skipped, 9 warnings`; the failures are exactly the
+  `10 failed, 717 passed, 1 skipped, 9 warnings`; the failures are exactly the
   ten user-deferred Slack ids and symptoms recorded in the Deliverable B plan.
 - The exact lock check resolved 99 packages. The exact planned Ruff gate and
   an independent `ruff check --no-fix` run both report `All checks passed!`
