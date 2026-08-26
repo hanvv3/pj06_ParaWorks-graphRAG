@@ -1,9 +1,16 @@
+from __future__ import annotations
+
 import math
 from collections.abc import Callable, Mapping, Sequence
-from typing import Annotated, Protocol
+from typing import TYPE_CHECKING, Annotated, Protocol
 
 from langgraph.runtime import Runtime
 from typing_extensions import TypedDict
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+    from backend.app.agent_runtime.registry import AgentRegistry
 
 MAX_COMPLETED_NODES = 64
 MAX_ERROR_CODES = 16
@@ -188,13 +195,23 @@ class PermissionResolver(Protocol):
         raise NotImplementedError
 
 
+class ReviewDraftService(Protocol):
+    def draft(self, *, workflow_thread_id: str) -> None:
+        raise NotImplementedError
+
+
+class ReviewLeaseService(Protocol):
+    def acquire(self, *, workflow_thread_id: str) -> str:
+        raise NotImplementedError
+
+
 class ReviewRuntimeContext(TypedDict):
-    session_factory: Callable[[], object]
+    session_factory: Callable[[], Session]
     actor_subject_id: str
     permission_resolver: PermissionResolver
-    agent_registry: object
-    draft_service: object
-    lease_service: object
+    agent_registry: AgentRegistry
+    draft_service: ReviewDraftService
+    lease_service: ReviewLeaseService
 
 
 ReviewRuntime = Runtime[ReviewRuntimeContext]

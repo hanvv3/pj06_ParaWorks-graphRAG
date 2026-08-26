@@ -20,6 +20,7 @@ class Settings(BaseSettings):
         'local-development-agent-runtime-fingerprint-secret'
     )
     agent_runtime_fingerprint_key_version: str = 'v1'
+    agent_runtime_security_scope_id: str = 'default'
     auth_session_cookie_name: str = 'paraworks_session'
     auth_refresh_cookie_name: str = 'paraworks_refresh'
     auth_session_secret: str = 'local-development-session-secret'

@@ -1,0 +1,471 @@
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass
+from threading import RLock
+from uuid import uuid4
+
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
+
+from backend.app.agent_runtime.canonical_sources import (
+    ResolvedSourceVersion,
+    ReviewWorkflowPreflightError,
+    build_keyed_fingerprint,
+    resolve_source_versions,
+)
+from backend.app.agent_runtime.fingerprints import fingerprint_secret_bytes
+from backend.app.agent_runtime.registry import AgentRegistry
+from backend.app.core.config import Settings
+from backend.app.core.demo_auth import DemoUser
+from backend.app.ingestion.source_versions import (
+    SourceVersionRef,
+    normalize_source_version_refs,
+)
+from backend.app.models.agent_workflows import (
+    AgentWorkflowEvidenceRef,
+    AgentWorkflowRequest,
+    AgentWorkflowThread,
+)
+from backend.app.models.source import Source
+from backend.app.schemas.review_workflow import (
+    COMPANY_MEMORY_INPUT_SCHEMA_VERSION,
+    COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+    COMPANY_MEMORY_REVIEW_WORKFLOW,
+    COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+    ReviewWorkflowRunRequest,
+    normalize_agent_names,
+)
+
+EVIDENCE_VERSION_HASH_SCHEMA = 'review-evidence-versions:v1'
+INPUT_HASH_POLICY = 'review-workflow-batch:v1'
+
+# SQLite/demo has no cross-process lock primitive. This lock only serializes
+# preflight lookup/create operations within one Python process.
+_SQLITE_PREFLIGHT_LOCK = RLock()
+
+
+@dataclass(frozen=True)
+class PreparedReviewRequest:
+    source_refs: tuple[ResolvedSourceVersion, ...]
+    agent_names: tuple[str, ...]
+    input_hash: str
+    evidence_version_hash: str
+    selection_policy_version: str
+
+
+@dataclass(frozen=True)
+class WorkflowPreflightResult:
+    thread: AgentWorkflowThread
+    created: bool
+    shared_reuse: bool
+
+
+def prepare_review_request(
+    db: Session,
+    *,
+    request: ReviewWorkflowRunRequest,
+    actor: DemoUser,
+    registry: AgentRegistry,
+    settings: Settings,
+) -> PreparedReviewRequest:
+    try:
+        agent_names = normalize_agent_names(request.agent_names)
+        source_refs = normalize_source_version_refs(request.source_refs)
+    except ValueError as exc:
+        raise ReviewWorkflowPreflightError('invalid_input', str(exc)) from None
+    if not settings.agent_runtime_security_scope_id.strip():
+        raise ReviewWorkflowPreflightError(
+            'invalid_input',
+            'server security scope is not configured',
+        )
+    for agent_name in agent_names:
+        try:
+            manifest = registry.get(agent_name)
+        except KeyError:
+            raise ReviewWorkflowPreflightError(
+                'invalid_input',
+                'requested agent is not registered',
+            ) from None
+        if manifest.name != agent_name:
+            raise ReviewWorkflowPreflightError(
+                'invalid_input',
+                'requested agent manifest does not match its registry key',
+            )
+
+    resolved_refs = resolve_source_versions(
+        db,
+        refs=source_refs,
+        actor=actor,
+        settings=settings,
+    )
+    evidence_version_hash = build_keyed_fingerprint(
+        [asdict(ref) for ref in resolved_refs],
+        settings=settings,
+        schema_version=EVIDENCE_VERSION_HASH_SCHEMA,
+        policy_version=COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+    )
+    input_hash = build_keyed_fingerprint(
+        {
+            'security_scope_id': settings.agent_runtime_security_scope_id,
+            'workflow_name': COMPANY_MEMORY_REVIEW_WORKFLOW,
+            'graph_version': COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+            'evidence_version_hash': evidence_version_hash,
+            'agent_names': list(agent_names),
+            'selection_policy_version': COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+        },
+        settings=settings,
+        schema_version=COMPANY_MEMORY_INPUT_SCHEMA_VERSION,
+        policy_version=INPUT_HASH_POLICY,
+    )
+    return PreparedReviewRequest(
+        source_refs=resolved_refs,
+        agent_names=agent_names,
+        input_hash=input_hash,
+        evidence_version_hash=evidence_version_hash,
+        selection_policy_version=COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+    )
+
+
+def advisory_key_from_hmac(value: str) -> int:
+    unsigned = int(value[:16], 16)
+    return unsigned - (1 << 64) if unsigned >= (1 << 63) else unsigned
+
+
+def create_or_reuse_review_thread(
+    db: Session,
+    *,
+    prepared: PreparedReviewRequest,
+    request: ReviewWorkflowRunRequest,
+    actor: DemoUser,
+    settings: Settings,
+) -> WorkflowPreflightResult:
+    creator_thread = _find_creator_thread(
+        db,
+        actor=actor,
+        client_request_id=request.client_request_id,
+        settings=settings,
+    )
+    if creator_thread is not None:
+        return _creator_replay_or_conflict(
+            db,
+            thread=creator_thread,
+            prepared=prepared,
+            actor=actor,
+            settings=settings,
+        )
+
+    # End the read-only creator lookup transaction before waiting on SQLite's
+    # process lock or starting PostgreSQL's advisory-lock transaction.
+    db.rollback()
+    postgres = _dialect_name(db) == 'postgresql'
+    lock_context = nullcontext() if postgres else _SQLITE_PREFLIGHT_LOCK
+    with lock_context:
+        try:
+            if postgres:
+                db.execute(
+                    text('SELECT pg_advisory_xact_lock(:key)'),
+                    {'key': advisory_key_from_hmac(prepared.input_hash)},
+                )
+
+            creator_thread = _find_creator_thread(
+                db,
+                actor=actor,
+                client_request_id=request.client_request_id,
+                settings=settings,
+            )
+            if creator_thread is not None:
+                result = _creator_replay_or_conflict(
+                    db,
+                    thread=creator_thread,
+                    prepared=prepared,
+                    actor=actor,
+                    settings=settings,
+                )
+                db.commit()
+                return result
+
+            _ensure_prepared_is_current(
+                db,
+                prepared=prepared,
+                actor=actor,
+                settings=settings,
+            )
+            shared_thread = _find_shared_thread(
+                db,
+                prepared=prepared,
+                settings=settings,
+            )
+            if shared_thread is not None:
+                db.commit()
+                return WorkflowPreflightResult(
+                    thread=shared_thread,
+                    created=False,
+                    shared_reuse=True,
+                )
+
+            thread = _create_thread_rows(
+                db,
+                prepared=prepared,
+                request=request,
+                actor=actor,
+                settings=settings,
+                checkpoint_store='postgres' if postgres else 'memory',
+            )
+            db.commit()
+            return WorkflowPreflightResult(
+                thread=thread,
+                created=True,
+                shared_reuse=False,
+            )
+        except Exception:
+            db.rollback()
+            raise
+
+
+def _find_creator_thread(
+    db: Session,
+    *,
+    actor: DemoUser,
+    client_request_id: str | None,
+    settings: Settings,
+) -> AgentWorkflowThread | None:
+    if client_request_id is None:
+        return None
+    return db.scalars(
+        select(AgentWorkflowThread).where(
+            AgentWorkflowThread.security_scope_id
+            == settings.agent_runtime_security_scope_id,
+            AgentWorkflowThread.workflow_name == COMPANY_MEMORY_REVIEW_WORKFLOW,
+            AgentWorkflowThread.owner_subject_id == actor.id,
+            AgentWorkflowThread.client_request_id == client_request_id,
+        )
+    ).first()
+
+
+def _creator_replay_or_conflict(
+    db: Session,
+    *,
+    thread: AgentWorkflowThread,
+    prepared: PreparedReviewRequest,
+    actor: DemoUser,
+    settings: Settings,
+) -> WorkflowPreflightResult:
+    if not _thread_matches(db, thread=thread, prepared=prepared, settings=settings):
+        raise ReviewWorkflowPreflightError(
+            'idempotency_key_reused',
+            'client request key was already used for a different request',
+        )
+    _ensure_prepared_is_current(
+        db,
+        prepared=prepared,
+        actor=actor,
+        settings=settings,
+    )
+    return WorkflowPreflightResult(
+        thread=thread,
+        created=False,
+        shared_reuse=False,
+    )
+
+
+def _find_shared_thread(
+    db: Session,
+    *,
+    prepared: PreparedReviewRequest,
+    settings: Settings,
+) -> AgentWorkflowThread | None:
+    candidates = db.scalars(
+        select(AgentWorkflowThread)
+        .where(
+            AgentWorkflowThread.security_scope_id
+            == settings.agent_runtime_security_scope_id,
+            AgentWorkflowThread.workflow_name == COMPANY_MEMORY_REVIEW_WORKFLOW,
+            AgentWorkflowThread.graph_version == COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+            AgentWorkflowThread.input_hash == prepared.input_hash,
+            AgentWorkflowThread.evidence_version_hash
+            == prepared.evidence_version_hash,
+        )
+        .order_by(AgentWorkflowThread.created_at, AgentWorkflowThread.thread_id)
+    ).all()
+    return next(
+        (
+            thread
+            for thread in candidates
+            if _thread_matches(
+                db,
+                thread=thread,
+                prepared=prepared,
+                settings=settings,
+            )
+        ),
+        None,
+    )
+
+
+def _thread_matches(
+    db: Session,
+    *,
+    thread: AgentWorkflowThread,
+    prepared: PreparedReviewRequest,
+    settings: Settings,
+) -> bool:
+    if (
+        thread.security_scope_id != settings.agent_runtime_security_scope_id
+        or thread.workflow_name != COMPANY_MEMORY_REVIEW_WORKFLOW
+        or thread.graph_version != COMPANY_MEMORY_REVIEW_GRAPH_VERSION
+        or thread.input_hash != prepared.input_hash
+        or thread.evidence_version_hash != prepared.evidence_version_hash
+    ):
+        return False
+    stored_request = db.scalars(
+        select(AgentWorkflowRequest).where(
+            AgentWorkflowRequest.workflow_thread_id == thread.thread_id
+        )
+    ).first()
+    _, fingerprint_key_version = fingerprint_secret_bytes(settings)
+    if stored_request is None or (
+        stored_request.input_schema_version != COMPANY_MEMORY_INPUT_SCHEMA_VERSION
+        or stored_request.request_kind != 'review_source_versions'
+        or tuple(stored_request.agent_names) != prepared.agent_names
+        or stored_request.selection_policy_version
+        != prepared.selection_policy_version
+        or stored_request.input_hash != prepared.input_hash
+        or stored_request.fingerprint_key_version != fingerprint_key_version
+    ):
+        return False
+    stored_refs = db.scalars(
+        select(AgentWorkflowEvidenceRef)
+        .where(AgentWorkflowEvidenceRef.workflow_thread_id == thread.thread_id)
+        .order_by(AgentWorkflowEvidenceRef.ordinal)
+    ).all()
+    return tuple(_stored_evidence_values(ref) for ref in stored_refs) == tuple(
+        _resolved_evidence_values(ordinal, ref)
+        for ordinal, ref in enumerate(prepared.source_refs)
+    )
+
+
+def _ensure_prepared_is_current(
+    db: Session,
+    *,
+    prepared: PreparedReviewRequest,
+    actor: DemoUser,
+    settings: Settings,
+) -> None:
+    source_ids = [ref.canonical_row_id for ref in prepared.source_refs]
+    sources = db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
+    by_id = {source.id: source for source in sources}
+    if len(by_id) != len(source_ids) or any(
+        by_id[source_id].permission_level not in actor.permission_levels
+        for source_id in source_ids
+        if source_id in by_id
+    ):
+        raise ReviewWorkflowPreflightError(
+            'not_found',
+            'source reference was not found',
+        )
+    current_refs = tuple(
+        SourceVersionRef(
+            source_type=ref.source_type,  # type: ignore[arg-type]
+            source_id=by_id[ref.canonical_row_id].source_id,
+            version_or_signature=ref.content_signature,
+        )
+        for ref in prepared.source_refs
+    )
+    current = resolve_source_versions(
+        db,
+        refs=current_refs,
+        actor=actor,
+        settings=settings,
+    )
+    if current != prepared.source_refs:
+        raise ReviewWorkflowPreflightError(
+            'evidence_changed',
+            'source evidence changed; synchronize again',
+        )
+
+
+def _create_thread_rows(
+    db: Session,
+    *,
+    prepared: PreparedReviewRequest,
+    request: ReviewWorkflowRunRequest,
+    actor: DemoUser,
+    settings: Settings,
+    checkpoint_store: str,
+) -> AgentWorkflowThread:
+    thread_id = uuid4().hex
+    _, fingerprint_key_version = fingerprint_secret_bytes(settings)
+    thread = AgentWorkflowThread(
+        thread_id=thread_id,
+        workflow_name=COMPANY_MEMORY_REVIEW_WORKFLOW,
+        graph_version=COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+        checkpoint_thread_id=f'review-v2:{uuid4().hex}',
+        checkpoint_store=checkpoint_store,
+        owner_subject_id=actor.id,
+        security_scope_id=settings.agent_runtime_security_scope_id,
+        client_request_id=request.client_request_id,
+        input_hash=prepared.input_hash,
+        evidence_version_hash=prepared.evidence_version_hash,
+        status='created',
+    )
+    stored_request = AgentWorkflowRequest(
+        workflow_thread_id=thread_id,
+        input_schema_version=COMPANY_MEMORY_INPUT_SCHEMA_VERSION,
+        request_kind='review_source_versions',
+        agent_names=list(prepared.agent_names),
+        selection_policy_version=prepared.selection_policy_version,
+        input_hash=prepared.input_hash,
+        fingerprint_key_version=fingerprint_key_version,
+    )
+    evidence_rows = [
+        AgentWorkflowEvidenceRef(
+            workflow_thread_id=thread_id,
+            ordinal=ordinal,
+            canonical_source_type=ref.source_type,
+            canonical_table=ref.canonical_table,
+            canonical_row_id=ref.canonical_row_id,
+            document_version_id=ref.document_version_id,
+            external_revision=ref.external_revision,
+            content_signature=ref.content_signature,
+            permission_level_snapshot=ref.permission_level,
+            content_fingerprint=ref.content_fingerprint,
+        )
+        for ordinal, ref in enumerate(prepared.source_refs)
+    ]
+    db.add_all([thread, stored_request, *evidence_rows])
+    db.flush()
+    return thread
+
+
+def _stored_evidence_values(ref: AgentWorkflowEvidenceRef) -> tuple[object, ...]:
+    return (
+        ref.ordinal,
+        ref.canonical_source_type,
+        ref.canonical_table,
+        ref.canonical_row_id,
+        ref.document_version_id,
+        ref.external_revision,
+        ref.content_signature,
+        ref.permission_level_snapshot,
+        ref.content_fingerprint,
+    )
+
+
+def _resolved_evidence_values(
+    ordinal: int,
+    ref: ResolvedSourceVersion,
+) -> tuple[object, ...]:
+    return (
+        ordinal,
+        ref.source_type,
+        ref.canonical_table,
+        ref.canonical_row_id,
+        ref.document_version_id,
+        ref.external_revision,
+        ref.content_signature,
+        ref.permission_level,
+        ref.content_fingerprint,
+    )
+
+
+def _dialect_name(db: Session) -> str:
+    return db.get_bind().dialect.name
