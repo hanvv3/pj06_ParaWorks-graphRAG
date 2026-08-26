@@ -1,12 +1,20 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.base import BaseCheckpointSaver, CheckpointTuple
 
 from backend.app.agent_runtime.checkpointing import CheckpointUnavailableError
 
 
 class CheckpointConfirmationError(RuntimeError):
     pass
+
+
+_CHECKPOINT_CONFIRMATION_FAILED = 'checkpoint confirmation failed'
+_CHECKPOINT_IDENTITY_MISMATCH = 'checkpoint identity mismatch'
+_CHECKPOINT_SNAPSHOT_IDENTITY_MISMATCH = (
+    'checkpoint snapshot identity mismatch'
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,68 @@ def require_resumable_checkpoint(
     return config
 
 
+def _read_checkpoint_tuple(
+    saver: BaseCheckpointSaver,
+    config: dict[str, dict[str, str]],
+) -> CheckpointTuple | None:
+    try:
+        return saver.get_tuple(config)
+    except Exception:
+        raise CheckpointConfirmationError(
+            _CHECKPOINT_CONFIRMATION_FAILED
+        ) from None
+
+
+def _configurable_values(
+    config: object,
+    *,
+    error_message: str,
+) -> Mapping[str, object]:
+    if not isinstance(config, Mapping):
+        raise CheckpointConfirmationError(error_message)
+    configurable = config.get('configurable')
+    if not isinstance(configurable, Mapping):
+        raise CheckpointConfirmationError(error_message)
+    return configurable
+
+
+def _tuple_configurable_values(
+    saved: object,
+    *,
+    error_message: str,
+) -> Mapping[str, object]:
+    try:
+        config = saved.config
+    except Exception:
+        raise CheckpointConfirmationError(error_message) from None
+    return _configurable_values(config, error_message=error_message)
+
+
+def _previous_checkpoint_id(saved: CheckpointTuple | None) -> str | None:
+    if saved is None:
+        return None
+    configurable = _tuple_configurable_values(
+        saved,
+        error_message=_CHECKPOINT_IDENTITY_MISMATCH,
+    )
+    checkpoint_id = configurable.get('checkpoint_id')
+    if type(checkpoint_id) is str and checkpoint_id:
+        return checkpoint_id
+    return None
+
+
+def _read_graph_snapshot(
+    graph: object,
+    config: dict[str, dict[str, str]],
+) -> object:
+    try:
+        return graph.get_state(config)  # type: ignore[attr-defined]
+    except Exception:
+        raise CheckpointConfirmationError(
+            _CHECKPOINT_CONFIRMATION_FAILED
+        ) from None
+
+
 def invoke_and_confirm_checkpoint(
     *,
     graph: object,
@@ -46,6 +116,8 @@ def invoke_and_confirm_checkpoint(
     expect_interrupt: bool,
 ) -> CheckpointConfirmation:
     config = checkpoint_config(checkpoint_thread_id)
+    before = _read_checkpoint_tuple(saver, config)
+    previous_checkpoint_id = _previous_checkpoint_id(before)
     result = graph.invoke(  # type: ignore[attr-defined]
         command_or_input,
         config,
@@ -54,24 +126,62 @@ def invoke_and_confirm_checkpoint(
     )
     if not isinstance(result, dict):
         raise CheckpointConfirmationError('graph result must be a mapping')
-    saved = saver.get_tuple(config)
+    saved = _read_checkpoint_tuple(saver, config)
     if saved is None:
         raise CheckpointConfirmationError('checkpoint was not persisted')
-    saved_config = saved.config.get('configurable', {})
+    snapshot = _read_graph_snapshot(graph, config)
+    saved_config = _tuple_configurable_values(
+        saved,
+        error_message=_CHECKPOINT_IDENTITY_MISMATCH,
+    )
     saved_thread_id = saved_config.get('thread_id')
     checkpoint_id = saved_config.get('checkpoint_id')
     checkpoint_ns = saved_config.get('checkpoint_ns', '')
-    if saved_thread_id != checkpoint_thread_id or not checkpoint_id:
-        raise CheckpointConfirmationError('checkpoint identity mismatch')
-    if checkpoint_ns != '':
+    if (
+        type(saved_thread_id) is not str
+        or saved_thread_id != checkpoint_thread_id
+        or type(checkpoint_id) is not str
+        or not checkpoint_id
+    ):
+        raise CheckpointConfirmationError(_CHECKPOINT_IDENTITY_MISMATCH)
+    if type(checkpoint_ns) is not str or checkpoint_ns != '':
         raise CheckpointConfirmationError(
             'top-level checkpoint namespace must be root'
         )
-    snapshot = graph.get_state(config)  # type: ignore[attr-defined]
-    returned_interrupt = bool(result.get('__interrupt__'))
-    pending_interrupt = any(
-        bool(getattr(task, 'interrupts', ())) for task in snapshot.tasks
+    if checkpoint_id == previous_checkpoint_id:
+        raise CheckpointConfirmationError('checkpoint did not advance')
+    try:
+        snapshot_config = snapshot.config
+    except Exception:
+        raise CheckpointConfirmationError(
+            _CHECKPOINT_SNAPSHOT_IDENTITY_MISMATCH
+        ) from None
+    snapshot_values = _configurable_values(
+        snapshot_config,
+        error_message=_CHECKPOINT_SNAPSHOT_IDENTITY_MISMATCH,
     )
+    snapshot_identity = (
+        snapshot_values.get('thread_id'),
+        snapshot_values.get('checkpoint_id'),
+        snapshot_values.get('checkpoint_ns', ''),
+    )
+    if snapshot_identity != (
+        saved_thread_id,
+        checkpoint_id,
+        checkpoint_ns,
+    ):
+        raise CheckpointConfirmationError(
+            _CHECKPOINT_SNAPSHOT_IDENTITY_MISMATCH
+        )
+    returned_interrupt = bool(result.get('__interrupt__'))
+    try:
+        pending_interrupt = any(
+            bool(getattr(task, 'interrupts', ())) for task in snapshot.tasks
+        )
+    except Exception:
+        raise CheckpointConfirmationError(
+            'checkpoint interrupt state mismatch'
+        ) from None
     if returned_interrupt != pending_interrupt or returned_interrupt != expect_interrupt:
         raise CheckpointConfirmationError(
             'checkpoint interrupt state mismatch'
