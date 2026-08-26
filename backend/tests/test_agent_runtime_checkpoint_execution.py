@@ -81,6 +81,44 @@ class MissingReturnedInterruptGraph(ObservedGraph):
         }
 
 
+class ForgedReturnedInterruptGraph(ObservedGraph):
+    def __init__(
+        self,
+        graph: object,
+        event_log: list[str],
+        *,
+        forged_id: str | None = None,
+        forged_value: object | None = None,
+    ) -> None:
+        super().__init__(graph, event_log)
+        self._forged_id = forged_id
+        self._forged_value = forged_value
+
+    def invoke(
+        self,
+        command_or_input: object,
+        config: dict[str, dict[str, str]],
+        **kwargs: object,
+    ) -> object:
+        result = super().invoke(command_or_input, config, **kwargs)
+        assert isinstance(result, dict)
+        returned = result['__interrupt__']
+        assert isinstance(returned, list) and len(returned) == 1
+        actual = returned[0]
+        assert isinstance(actual, Interrupt)
+        return {
+            **result,
+            '__interrupt__': [Interrupt(
+                value=(
+                    actual.value
+                    if self._forged_value is None
+                    else self._forged_value
+                ),
+                id=actual.id if self._forged_id is None else self._forged_id,
+            )],
+        }
+
+
 class ObservedInMemorySaver(InMemorySaver):
     def __init__(self, event_log: list[str]) -> None:
         super().__init__(serde=build_strict_checkpoint_serializer())
@@ -351,6 +389,40 @@ def test_confirmation_fails_when_returned_and_pending_interrupts_disagree() -> N
         )
 
 
+@pytest.mark.parametrize(
+    ('forged_id', 'forged_value'),
+    [
+        ('forged-interrupt-id', None),
+        (None, {'kind': 'forged_review_resolution'}),
+    ],
+)
+def test_confirmation_rejects_same_presence_forged_interrupts(
+    forged_id: str | None,
+    forged_value: object | None,
+) -> None:
+    event_log: list[str] = []
+    saver = ObservedInMemorySaver(event_log)
+    graph = ForgedReturnedInterruptGraph(
+        _build_test_graph(saver),
+        event_log,
+        forged_id=forged_id,
+        forged_value=forged_value,
+    )
+
+    with pytest.raises(
+        CheckpointConfirmationError,
+        match='^checkpoint interrupt state mismatch$',
+    ):
+        invoke_and_confirm_checkpoint(
+            graph=graph,
+            saver=saver,
+            command_or_input=_checkpoint_state(),
+            checkpoint_thread_id='checkpoint-thread-1',
+            runtime_context={'pause': True},
+            expect_interrupt=True,
+        )
+
+
 def test_confirmation_rejects_expected_interrupt_when_graph_is_terminal() -> None:
     saver = InMemorySaver(serde=build_strict_checkpoint_serializer())
     graph = _build_test_graph(saver)
@@ -474,6 +546,8 @@ def test_resume_confirmation_requires_checkpoint_progression() -> None:
     )
 
     assert resumed.checkpoint_id != paused.checkpoint_id
+    assert paused.interrupted is True
+    assert resumed.interrupted is False
 
 
 def test_confirmation_rejects_a_wrong_saved_thread_id() -> None:
@@ -590,6 +664,19 @@ def test_restart_with_a_new_memory_saver_reports_checkpoint_unavailable() -> Non
         match='^checkpoint_unavailable$',
     ):
         require_resumable_checkpoint(saver_b, 'checkpoint-thread-1')
+
+
+def test_require_resumable_checkpoint_sanitizes_saver_read_failure() -> None:
+    with pytest.raises(CheckpointUnavailableError) as exc_info:
+        require_resumable_checkpoint(
+            ExplodingSaver(),  # type: ignore[arg-type]
+            'checkpoint-thread-1',
+        )
+
+    assert str(exc_info.value) == 'checkpoint_unavailable'
+    assert 'credential-marker' not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
 
 
 def test_checkpoint_tuple_contains_only_safe_opaque_state() -> None:

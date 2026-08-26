@@ -1,7 +1,9 @@
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from langgraph.checkpoint.base import BaseCheckpointSaver, CheckpointTuple
+from langgraph.types import Interrupt
 
 from backend.app.agent_runtime.checkpointing import CheckpointUnavailableError
 
@@ -39,7 +41,11 @@ def require_resumable_checkpoint(
     checkpoint_thread_id: str,
 ) -> dict[str, dict[str, str]]:
     config = checkpoint_config(checkpoint_thread_id)
-    if saver.get_tuple(config) is None:
+    try:
+        saved = saver.get_tuple(config)
+    except Exception:
+        raise CheckpointUnavailableError('checkpoint_unavailable') from None
+    if saved is None:
         raise CheckpointUnavailableError('checkpoint_unavailable')
     return config
 
@@ -104,6 +110,63 @@ def _read_graph_snapshot(
         raise CheckpointConfirmationError(
             _CHECKPOINT_CONFIRMATION_FAILED
         ) from None
+
+
+def _normalize_interrupt_value(value: object) -> object:
+    if value is None:
+        return ('none',)
+    if type(value) is bool:
+        return ('bool', value)
+    if type(value) is int:
+        return ('int', value)
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise CheckpointConfirmationError(
+                'checkpoint interrupt state mismatch'
+            )
+        return ('float', value)
+    if type(value) is str:
+        return ('str', value)
+    if type(value) is list:
+        return (
+            'list',
+            tuple(_normalize_interrupt_value(item) for item in value),
+        )
+    if type(value) is dict:
+        if any(type(key) is not str for key in value):
+            raise CheckpointConfirmationError(
+                'checkpoint interrupt state mismatch'
+            )
+        return (
+            'dict',
+            tuple(
+                (key, _normalize_interrupt_value(value[key]))
+                for key in sorted(value)
+            ),
+        )
+    raise CheckpointConfirmationError(
+        'checkpoint interrupt state mismatch'
+    )
+
+
+def _normalize_interrupt_sequence(
+    interrupts: object,
+) -> tuple[tuple[str, object], ...]:
+    if type(interrupts) not in {list, tuple}:
+        raise CheckpointConfirmationError(
+            'checkpoint interrupt state mismatch'
+        )
+    normalized: list[tuple[str, object]] = []
+    for pending in interrupts:
+        if type(pending) is not Interrupt or type(pending.id) is not str:
+            raise CheckpointConfirmationError(
+                'checkpoint interrupt state mismatch'
+            )
+        normalized.append((
+            pending.id,
+            _normalize_interrupt_value(pending.value),
+        ))
+    return tuple(normalized)
 
 
 def invoke_and_confirm_checkpoint(
@@ -173,16 +236,28 @@ def invoke_and_confirm_checkpoint(
         raise CheckpointConfirmationError(
             _CHECKPOINT_SNAPSHOT_IDENTITY_MISMATCH
         )
-    returned_interrupt = bool(result.get('__interrupt__'))
     try:
-        pending_interrupt = any(
-            bool(getattr(task, 'interrupts', ())) for task in snapshot.tasks
+        pending_interrupts = tuple(
+            pending
+            for task in snapshot.tasks
+            for pending in getattr(task, 'interrupts', ())
         )
     except Exception:
         raise CheckpointConfirmationError(
             'checkpoint interrupt state mismatch'
         ) from None
-    if returned_interrupt != pending_interrupt or returned_interrupt != expect_interrupt:
+    returned_interrupts = _normalize_interrupt_sequence(
+        result.get('__interrupt__', ())
+    )
+    normalized_pending_interrupts = _normalize_interrupt_sequence(
+        pending_interrupts
+    )
+    if returned_interrupts != normalized_pending_interrupts:
+        raise CheckpointConfirmationError(
+            'checkpoint interrupt state mismatch'
+        )
+    returned_interrupt = bool(returned_interrupts)
+    if returned_interrupt != expect_interrupt:
         raise CheckpointConfirmationError(
             'checkpoint interrupt state mismatch'
         )
