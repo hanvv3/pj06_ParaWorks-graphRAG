@@ -199,7 +199,7 @@ def _draft_review_candidates_node(
             memory_items = create_memory_extraction_review_items(db=db, packet=memory_packet)
         return state.complete_node(
             'draft_review_candidates',
-            review_boundary='human_approval_required',
+            review_boundary='metadata_only',
             slack_review_items_created=len(slack_items),
             mail_document_review_items_created=len(mail_document_items),
             memory_review_items_created=len(memory_items),
@@ -415,12 +415,12 @@ def _build_planning_rag_packet(
 def _build_review_queue_hitl_checkpoint(*, review_items: list) -> dict:
     review_item_ids = [item.id for item in review_items if item.id is not None]
     return {
-        'checkpoint_type': 'review_queue',
+        'checkpoint_type': 'review_queue_metadata',
         'node_name': 'draft_review_candidates',
-        'status': 'awaiting_human_review' if review_item_ids else 'no_review_items',
+        'status': 'metadata_only',
         'review_item_ids': review_item_ids,
-        'resume_from_node': 'retrieve_company_memory',
-        'resume_policy': 'resume_after_review_queue_resolution',
+        'resume_from_node': None,
+        'resume_policy': 'not_resumable',
         'required_review_statuses': ['approved', 'rejected', 'needs_more_evidence'],
         'trusted_knowledge_requires_approval': True,
         'paid_llm_calls': False,

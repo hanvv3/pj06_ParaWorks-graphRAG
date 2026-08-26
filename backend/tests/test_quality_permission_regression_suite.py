@@ -129,8 +129,8 @@ def test_quality_suite_company_memory_emits_review_checkpoint_without_paid_calls
     )
 
     checkpoint = result.outputs['hitl_checkpoint']
-    assert checkpoint['status'] == 'awaiting_human_review'
-    assert checkpoint['checkpoint_type'] == 'review_queue'
+    assert checkpoint['status'] == 'metadata_only'
+    assert checkpoint['checkpoint_type'] == 'review_queue_metadata'
     assert checkpoint['trusted_knowledge_requires_approval'] is True
     assert checkpoint['paid_llm_calls'] is False
     assert len(checkpoint['review_item_ids']) == 6
@@ -162,8 +162,8 @@ def test_quality_suite_cache_hit_does_not_duplicate_agent_runs_or_review_items(d
         question='Redis job state',
     )
 
-    assert first.outputs['hitl_checkpoint']['status'] == 'awaiting_human_review'
-    assert second.outputs['hitl_checkpoint']['status'] == 'no_review_items'
+    assert first.outputs['hitl_checkpoint']['status'] == 'metadata_only'
+    assert second.outputs['hitl_checkpoint']['status'] == 'metadata_only'
     assert second.outputs['cost_plan']['slack_agent']['action'] == 'use_cache'
     assert second.outputs['cost_plan']['mail_document_agent']['action'] == 'use_cache'
     assert second.outputs['cost_plan']['rag_orchestrator_agent']['action'] == 'use_cache'

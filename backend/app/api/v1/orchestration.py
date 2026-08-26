@@ -37,8 +37,9 @@ def _cost_policy_response() -> dict:
         'budget_actions': ['run', 'skip', 'use_cache'],
         'paid_llm_calls_in_status_api': False,
         'requires_explicit_run': True,
-        'hitl_checkpointing': True,
-        'checkpoint_store': 'review_queue',
+        'hitl_checkpointing': False,
+        'checkpoint_store': 'none',
+        'review_boundary': 'metadata_only',
         'trusted_knowledge_requires_approval': True,
     }
 

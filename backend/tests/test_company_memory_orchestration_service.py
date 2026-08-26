@@ -80,13 +80,14 @@ def test_company_memory_orchestration_runs_real_agent_services(db_session: Sessi
     assert result.outputs['mail_document_review_items_created'] == 1
     assert result.outputs['memory_review_items_created'] == 4
     assert result.outputs['rag_agent_run_created'] is True
+    assert result.outputs['review_boundary'] == 'metadata_only'
     assert result.outputs['hitl_checkpoint'] == {
-        'checkpoint_type': 'review_queue',
+        'checkpoint_type': 'review_queue_metadata',
         'node_name': 'draft_review_candidates',
-        'status': 'awaiting_human_review',
+        'status': 'metadata_only',
         'review_item_ids': [1, 2, 3, 4, 5, 6],
-        'resume_from_node': 'retrieve_company_memory',
-        'resume_policy': 'resume_after_review_queue_resolution',
+        'resume_from_node': None,
+        'resume_policy': 'not_resumable',
         'required_review_statuses': ['approved', 'rejected', 'needs_more_evidence'],
         'trusted_knowledge_requires_approval': True,
         'paid_llm_calls': False,
