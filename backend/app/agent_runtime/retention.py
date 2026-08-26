@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from psycopg_pool import ConnectionPool
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.agent_runtime.checkpointing import (
@@ -23,6 +23,23 @@ TERMINAL_PRUNABLE_STATUSES = (
     'cancelled',
 )
 _CHECKPOINT_UNAVAILABLE = 'checkpoint_unavailable'
+_CHECKPOINT_PRUNE_LOCK_ID = 2026082607
+_REMAINING_CHECKPOINTS_SQL = """
+    SELECT DISTINCT thread_id
+    FROM (
+        SELECT thread_id
+        FROM checkpoint_writes
+        WHERE thread_id = ANY(%s)
+        UNION
+        SELECT thread_id
+        FROM checkpoint_blobs
+        WHERE thread_id = ANY(%s)
+        UNION
+        SELECT thread_id
+        FROM checkpoints
+        WHERE thread_id = ANY(%s)
+    ) AS remaining
+"""
 
 
 @dataclass(frozen=True)
@@ -44,6 +61,55 @@ def _default_session_factory() -> Session:
     return SessionLocal()
 
 
+def _load_candidate_page(
+    session: Session,
+    *,
+    cutoff: datetime,
+    page_size: int,
+    after_terminal_at: datetime | None = None,
+    after_thread_id: str | None = None,
+) -> list[tuple[str, datetime, str]]:
+    terminal_at = func.coalesce(
+        AgentWorkflowThread.completed_at,
+        AgentWorkflowThread.cancelled_at,
+        AgentWorkflowThread.updated_at,
+    )
+    statement = (
+        select(
+            AgentWorkflowThread.checkpoint_thread_id,
+            terminal_at,
+            AgentWorkflowThread.thread_id,
+        )
+        .where(AgentWorkflowThread.status.in_(TERMINAL_PRUNABLE_STATUSES))
+        .where(AgentWorkflowThread.checkpoint_store == 'postgres')
+        .where(terminal_at < cutoff)
+        .order_by(terminal_at, AgentWorkflowThread.thread_id)
+        .limit(page_size)
+    )
+    if after_terminal_at is not None and after_thread_id is not None:
+        statement = statement.where(
+            or_(
+                terminal_at > after_terminal_at,
+                and_(
+                    terminal_at == after_terminal_at,
+                    AgentWorkflowThread.thread_id > after_thread_id,
+                ),
+            )
+        )
+    return [tuple(row) for row in session.execute(statement).all()]
+
+
+def _remaining_checkpoint_thread_ids(
+    connection: object,
+    candidate_ids: list[str],
+) -> set[str]:
+    rows = connection.execute(
+        _REMAINING_CHECKPOINTS_SQL,
+        (candidate_ids, candidate_ids, candidate_ids),
+    ).fetchall()
+    return {row['thread_id'] for row in rows}
+
+
 def prune_expired_checkpoints(
     settings: Settings,
     *,
@@ -62,46 +128,64 @@ def prune_expired_checkpoints(
         cutoff = now() - timedelta(
             days=settings.langgraph_checkpoint_retention_days
         )
-        terminal_at = func.coalesce(
-            AgentWorkflowThread.completed_at,
-            AgentWorkflowThread.cancelled_at,
-            AgentWorkflowThread.updated_at,
-        )
         with session_factory() as session:
-            checkpoint_thread_ids = list(
-                session.scalars(
-                    select(AgentWorkflowThread.checkpoint_thread_id)
-                    .where(
-                        AgentWorkflowThread.status.in_(
-                            TERMINAL_PRUNABLE_STATUSES
-                        )
-                    )
-                    .where(AgentWorkflowThread.checkpoint_store == 'postgres')
-                    .where(terminal_at < cutoff)
-                    .order_by(terminal_at, AgentWorkflowThread.thread_id)
-                    .limit(limit)
-                )
+            candidate_page = _load_candidate_page(
+                session,
+                cutoff=cutoff,
+                page_size=limit,
             )
 
-        if not checkpoint_thread_ids:
-            return CheckpointPruneResult(0, 0, 0, 0, cutoff)
+            if not candidate_page:
+                return CheckpointPruneResult(0, 0, 0, 0, cutoff)
 
-        pool = pool_factory(dsn)
-        pool.open(wait=True)
-        with pool.connection() as connection:
-            deleted_writes = connection.execute(
-                'DELETE FROM checkpoint_writes WHERE thread_id = ANY(%s)',
-                (checkpoint_thread_ids,),
-            ).rowcount
-            deleted_blobs = connection.execute(
-                'DELETE FROM checkpoint_blobs WHERE thread_id = ANY(%s)',
-                (checkpoint_thread_ids,),
-            ).rowcount
-            deleted_checkpoints = connection.execute(
-                'DELETE FROM checkpoints WHERE thread_id = ANY(%s)',
-                (checkpoint_thread_ids,),
-            ).rowcount
-            connection.commit()
+            pool = pool_factory(dsn)
+            pool.open(wait=True)
+            with pool.connection() as connection, connection.transaction():
+                connection.execute(
+                    'SELECT pg_advisory_xact_lock(%s)',
+                    (_CHECKPOINT_PRUNE_LOCK_ID,),
+                )
+                checkpoint_thread_ids: list[str] = []
+                while candidate_page:
+                    candidate_ids = [row[0] for row in candidate_page]
+                    remaining_ids = _remaining_checkpoint_thread_ids(
+                        connection,
+                        candidate_ids,
+                    )
+                    checkpoint_thread_ids.extend(
+                        checkpoint_thread_id
+                        for checkpoint_thread_id in candidate_ids
+                        if checkpoint_thread_id in remaining_ids
+                    )
+                    if len(checkpoint_thread_ids) >= limit:
+                        checkpoint_thread_ids = checkpoint_thread_ids[:limit]
+                        break
+                    if len(candidate_page) < limit:
+                        break
+                    _, after_terminal_at, after_thread_id = candidate_page[-1]
+                    candidate_page = _load_candidate_page(
+                        session,
+                        cutoff=cutoff,
+                        page_size=limit,
+                        after_terminal_at=after_terminal_at,
+                        after_thread_id=after_thread_id,
+                    )
+
+                if not checkpoint_thread_ids:
+                    return CheckpointPruneResult(0, 0, 0, 0, cutoff)
+
+                deleted_writes = connection.execute(
+                    'DELETE FROM checkpoint_writes WHERE thread_id = ANY(%s)',
+                    (checkpoint_thread_ids,),
+                ).rowcount
+                deleted_blobs = connection.execute(
+                    'DELETE FROM checkpoint_blobs WHERE thread_id = ANY(%s)',
+                    (checkpoint_thread_ids,),
+                ).rowcount
+                deleted_checkpoints = connection.execute(
+                    'DELETE FROM checkpoints WHERE thread_id = ANY(%s)',
+                    (checkpoint_thread_ids,),
+                ).rowcount
 
         return CheckpointPruneResult(
             selected_thread_count=len(checkpoint_thread_ids),
