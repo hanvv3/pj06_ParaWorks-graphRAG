@@ -1,4 +1,5 @@
 import math
+import sys
 from typing import NotRequired
 
 import pytest
@@ -421,6 +422,66 @@ def test_confirmation_rejects_same_presence_forged_interrupts(
             runtime_context={'pause': True},
             expect_interrupt=True,
         )
+
+
+def test_confirmation_bounds_a_cyclic_interrupt_value() -> None:
+    cyclic_value: list[object] = []
+    cyclic_value.append(cyclic_value)
+    event_log: list[str] = []
+    saver = ObservedInMemorySaver(event_log)
+    graph = ForgedReturnedInterruptGraph(
+        _build_test_graph(saver),
+        event_log,
+        forged_value=cyclic_value,
+    )
+
+    with pytest.raises(
+        CheckpointConfirmationError,
+        match='^checkpoint interrupt state mismatch$',
+    ) as exc_info:
+        invoke_and_confirm_checkpoint(
+            graph=graph,
+            saver=saver,
+            command_or_input=_checkpoint_state(),
+            checkpoint_thread_id='checkpoint-thread-1',
+            runtime_context={'pause': True},
+            expect_interrupt=True,
+        )
+
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
+
+
+def test_confirmation_bounds_an_excessively_deep_interrupt_value() -> None:
+    deeply_nested_value: list[object] = []
+    cursor = deeply_nested_value
+    for _ in range(sys.getrecursionlimit() + 100):
+        nested: list[object] = []
+        cursor.append(nested)
+        cursor = nested
+    event_log: list[str] = []
+    saver = ObservedInMemorySaver(event_log)
+    graph = ForgedReturnedInterruptGraph(
+        _build_test_graph(saver),
+        event_log,
+        forged_value=deeply_nested_value,
+    )
+
+    with pytest.raises(
+        CheckpointConfirmationError,
+        match='^checkpoint interrupt state mismatch$',
+    ) as exc_info:
+        invoke_and_confirm_checkpoint(
+            graph=graph,
+            saver=saver,
+            command_or_input=_checkpoint_state(),
+            checkpoint_thread_id='checkpoint-thread-1',
+            runtime_context={'pause': True},
+            expect_interrupt=True,
+        )
+
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
 
 
 def test_confirmation_rejects_expected_interrupt_when_graph_is_terminal() -> None:

@@ -162,9 +162,15 @@ def _normalize_interrupt_sequence(
             raise CheckpointConfirmationError(
                 'checkpoint interrupt state mismatch'
             )
+        try:
+            normalized_value = _normalize_interrupt_value(pending.value)
+        except RecursionError:
+            raise CheckpointConfirmationError(
+                'checkpoint interrupt state mismatch'
+            ) from None
         normalized.append((
             pending.id,
-            _normalize_interrupt_value(pending.value),
+            normalized_value,
         ))
     return tuple(normalized)
 
