@@ -1,3 +1,5 @@
+import json
+
 from backend.app.agent_runtime import EvidenceMessage, EvidencePacket, PermissionContext
 from backend.app.agents.memory_extraction_agent.langchain_adapter import (
     LangChainMemoryExtractionModel,
@@ -55,7 +57,7 @@ def test_langchain_memory_adapter_uses_structured_output_contract() -> None:
     assert 'Use only the provided evidence' in chat_model.structured_model.messages[0][1]
 
 
-def test_render_memory_extraction_prompt_bounds_evidence_text() -> None:
+def test_render_memory_extraction_prompt_bounds_entire_evidence_envelope() -> None:
     packet = build_packet(text='A' * 120)
 
     prompt = render_memory_extraction_prompt(
@@ -65,10 +67,20 @@ def test_render_memory_extraction_prompt_bounds_evidence_text() -> None:
         max_input_chars=32,
     )
 
-    assert 'timeline_event' in prompt
-    assert 'source-1' in prompt
-    assert 'A' * 32 in prompt
-    assert 'A' * 33 not in prompt
+    payload = json.loads(prompt)
+
+    assert payload['expected_item_type'] == 'timeline_event'
+    assert payload['evidence'] == [
+        {
+            'source_id': 'source-1',
+            'source_url': 'https://example.test/sou',
+        }
+    ]
+    assert sum(
+        len(value)
+        for row in payload['evidence']
+        for value in row.values()
+    ) == 32
 
 
 def build_packet(text: str = 'Decision: Redis queue progress moves into company memory.') -> EvidencePacket:

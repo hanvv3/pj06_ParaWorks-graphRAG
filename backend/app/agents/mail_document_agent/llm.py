@@ -8,6 +8,9 @@ from backend.app.agent_runtime import (
     TokenUsage,
     evaluate_agent_cost_budget,
 )
+from backend.app.agent_runtime.langchain_evidence import (
+    render_bounded_evidence_rows,
+)
 from backend.app.agents.mail_document_agent.agent import MailDocumentAgentModelResponse
 
 DEFAULT_OPENAI_MODEL = 'gpt-5.4-mini'
@@ -206,40 +209,18 @@ def render_mail_docs_llm_prompt(
     *,
     max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
 ) -> str:
-    evidence_rows = []
-    remaining_chars = max_input_chars
-    for message in packet.messages:
-        source_snippet = message.source_snippet[
-            : max(0, min(len(message.source_snippet), remaining_chars))
-        ]
-        remaining_chars -= len(source_snippet)
-        text = message.text[: max(0, min(len(message.text), remaining_chars))]
-        remaining_chars -= len(text)
-        evidence_rows.append(
-            {
-                'source_type': message.metadata.get('source_type', 'unknown'),
-                'source_id': message.source_id,
-                'source_url': message.source_url,
-                'source_snippet': source_snippet,
-                'timestamp': message.timestamp,
-                'author': message.author,
-                'permission_level': message.permission_level,
-                'metadata': message.metadata,
-                'parser_status': message.metadata.get('parser_status'),
-                'section_path': message.metadata.get('section_path'),
-                'calendar_id': message.metadata.get('calendar_id'),
-                'calendar_name': message.metadata.get('calendar_summary'),
-                'calendar_start': message.metadata.get('event_start') or message.metadata.get('start'),
-                'calendar_end': message.metadata.get('event_end') or message.metadata.get('end'),
-                'calendar_location': message.metadata.get('location'),
-                'calendar_organizer': message.metadata.get('organizer_email'),
-                'calendar_attendee_domains': message.metadata.get('attendee_domains'),
-                'event_context_key': message.metadata.get('event_context_key'),
-                'text': text,
-            }
-        )
-        if remaining_chars <= 0:
-            break
+    evidence_rows = render_bounded_evidence_rows(
+        packet,
+        max_input_chars=max_input_chars,
+    )
+    return _render_mail_docs_prompt(packet, evidence_rows=evidence_rows)
+
+
+def _render_mail_docs_prompt(
+    packet: EvidencePacket,
+    *,
+    evidence_rows: list[dict[str, Any]],
+) -> str:
 
     return json.dumps(
         {
@@ -363,24 +344,64 @@ def _preflight_response(
 
 def _estimated_token_usage(packet: EvidencePacket, settings: MailDocumentLlmSettings) -> TokenUsage:
     max_input_chars = _effective_max_input_chars(settings)
-    prompt = render_mail_document_langchain_invocation(
+    prompt = _render_legacy_mail_budget_prompt(
         packet,
         max_input_chars=max_input_chars,
-    ).canonical_description()
+    )
     affordable_prompt_chars = _affordable_prompt_chars(settings)
     for _ in range(4):
         if affordable_prompt_chars is None or len(prompt) <= affordable_prompt_chars or max_input_chars <= 0:
             break
         overage = len(prompt) - affordable_prompt_chars
         max_input_chars = max(0, max_input_chars - overage - 128)
-        prompt = render_mail_document_langchain_invocation(
+        prompt = _render_legacy_mail_budget_prompt(
             packet,
             max_input_chars=max_input_chars,
-        ).canonical_description()
+        )
     return TokenUsage(
-        input_tokens=max(1, len(prompt) // 4),
+        input_tokens=max(1, len(prompt)),
         output_tokens=settings.max_output_tokens,
     )
+
+
+def _render_legacy_mail_budget_prompt(
+    packet: EvidencePacket,
+    *,
+    max_input_chars: int,
+) -> str:
+    """Reproduce the pre-round-2 estimate shape; never send this to a provider."""
+
+    evidence_rows: list[dict[str, Any]] = []
+    remaining_chars = max_input_chars
+    for message in packet.messages:
+        text = message.text[: max(0, min(len(message.text), remaining_chars))]
+        remaining_chars -= len(text)
+        evidence_rows.append(
+            {
+                'source_type': message.metadata.get('source_type', 'unknown'),
+                'source_id': message.source_id,
+                'source_url': message.source_url,
+                'timestamp': message.timestamp,
+                'author': message.author,
+                'permission_level': message.permission_level,
+                'parser_status': message.metadata.get('parser_status'),
+                'section_path': message.metadata.get('section_path'),
+                'calendar_id': message.metadata.get('calendar_id'),
+                'calendar_name': message.metadata.get('calendar_summary'),
+                'calendar_start': message.metadata.get('event_start')
+                or message.metadata.get('start'),
+                'calendar_end': message.metadata.get('event_end')
+                or message.metadata.get('end'),
+                'calendar_location': message.metadata.get('location'),
+                'calendar_organizer': message.metadata.get('organizer_email'),
+                'calendar_attendee_domains': message.metadata.get('attendee_domains'),
+                'event_context_key': message.metadata.get('event_context_key'),
+                'text': text,
+            }
+        )
+        if remaining_chars <= 0:
+            break
+    return _render_mail_docs_prompt(packet, evidence_rows=evidence_rows)
 
 
 def _effective_max_input_chars(settings: MailDocumentLlmSettings) -> int:
@@ -399,8 +420,7 @@ def _affordable_prompt_chars(settings: MailDocumentLlmSettings) -> int | None:
     remaining_input_units = total_budget_units - reserved_output_units
     if remaining_input_units <= 0:
         return 0
-    affordable_input_tokens = remaining_input_units // settings.input_cost_per_1m
-    return int(affordable_input_tokens * 4)
+    return int(remaining_input_units // settings.input_cost_per_1m)
 
 
 def _available_providers(

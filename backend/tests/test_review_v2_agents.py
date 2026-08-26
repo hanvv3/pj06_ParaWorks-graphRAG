@@ -26,6 +26,7 @@ from backend.app.agents.mail_document_agent import (
     MailDocumentAgentModelResponse,
     MailDocumentLlmSettings,
     build_langchain_mail_document_agent_model,
+    build_mail_document_llm_preflight,
 )
 from backend.app.agents.mail_document_agent.llm import render_mail_docs_llm_prompt
 from backend.app.agents.memory_extraction_agent import render_memory_extraction_prompt
@@ -169,16 +170,55 @@ def _packet() -> EvidencePacket:
     )
 
 
-def _configured_settings() -> Settings:
+def _configured_settings(**overrides) -> Settings:
+    values = {
+        '_env_file': None,
+        'paraworks_demo_mode': False,
+        'agent_llm_enabled': True,
+        'openai_api_key': 'test-only-key',
+        'gemini_api_key': None,
+        'agent_llm_provider_order': 'openai',
+        'agent_llm_max_estimated_cost_usd': 1.0,
+    }
+    values.update(overrides)
     return Settings(
-        _env_file=None,
-        paraworks_demo_mode=False,
-        agent_llm_enabled=True,
-        openai_api_key='test-only-key',
-        gemini_api_key=None,
-        agent_llm_provider_order='openai',
-        agent_llm_max_estimated_cost_usd=1.0,
+        **values,
     )
+
+
+def _assert_bounded_private_evidence(
+    messages,
+    *,
+    max_input_chars: int,
+    approved_marker: str,
+    sensitive_marker: str,
+) -> None:
+    user_payload = json.loads(messages[1][1])
+    evidence_rows = user_payload['evidence']
+    value_chars = sum(
+        len(value)
+        if isinstance(value, str)
+        else len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(',', ':'),
+                default=str,
+            )
+        )
+        for row in evidence_rows
+        for value in row.values()
+        if value is not None
+    )
+    provider_payload = messages[1][1]
+
+    assert value_chars <= max_input_chars
+    assert approved_marker in provider_payload
+    assert sensitive_marker not in provider_payload
+    assert 'raw_body' not in provider_payload
+    assert 'oauth_token' not in provider_payload
+    assert 'unapproved_metadata' not in provider_payload
 
 
 def test_catalog_registers_only_exact_public_manifest_names() -> None:
@@ -250,7 +290,7 @@ def test_preflight_counts_rendered_prompt_urls_snippets_and_metadata(
         Settings(_env_file=None, paraworks_demo_mode=True)
     )
     packet = _packet()
-    packet.messages[0].metadata['review_marker'] = 'metadata-is-counted'
+    packet.messages[0].metadata['parser_status_reason'] = 'metadata-is-counted'
 
     adapter = catalog.get(agent_name)
     rendered_input = adapter.render_estimation_input(packet)
@@ -268,7 +308,8 @@ def test_preflight_counts_rendered_prompt_urls_snippets_and_metadata(
     assert decision.token_usage.input_tokens == max(1, len(rendered_input) // 4)
 
 
-def test_mail_preflight_estimation_exactly_matches_langchain_invocation_payload() -> None:
+def test_mail_payload_bounds_allowlisted_metadata_and_drops_sensitive_values() -> None:
+    max_input_chars = 256
     chat_model = _FakeMailChatModel()
 
     def mail_builder(_settings: MailDocumentLlmSettings):
@@ -278,7 +319,7 @@ def test_mail_preflight_estimation_exactly_matches_langchain_invocation_payload(
             chat_model=chat_model,
             # Deliberately differs from Settings so the adapter must consume
             # the actual model's shared renderer configuration.
-            max_input_chars=32,
+            max_input_chars=max_input_chars,
         )
 
     catalog = build_review_agent_catalog(
@@ -287,7 +328,17 @@ def test_mail_preflight_estimation_exactly_matches_langchain_invocation_payload(
         chat_model_builder=lambda _settings, **_kwargs: _FakeStructuredChatModel(),
     )
     packet = _packet()
-    packet.messages[0].metadata['review_marker'] = 'actual-mail-metadata'
+    approved_marker = 'mail-approved-reason'
+    sensitive_marker = 'mail-secret-value'
+    packet.messages[0].metadata.update(
+        {
+            'parser_status': 'metadata_only',
+            'parser_status_reason': approved_marker + ('R' * 4_000),
+            'raw_body': sensitive_marker + ('S' * 4_000),
+            'oauth_token': 'oauth-secret-token',
+            'unapproved_metadata': 'must-not-reach-provider',
+        }
+    )
     adapter = catalog.get('mail_document_agent')
 
     adapter.run(packet)
@@ -297,24 +348,41 @@ def test_mail_preflight_estimation_exactly_matches_langchain_invocation_payload(
         chat_model.invoked_messages,
         schema=None,
     )
-    assert 'actual-mail-metadata' in captured
     assert packet.messages[0].source_snippet in captured
     assert adapter.render_estimation_input(packet) == captured
     assert adapter.preflight(packet).token_usage.input_tokens == max(
         1,
         len(captured) // 4,
     )
+    _assert_bounded_private_evidence(
+        chat_model.invoked_messages,
+        max_input_chars=max_input_chars,
+        approved_marker=approved_marker,
+        sensitive_marker=sensitive_marker,
+    )
+    assert packet.messages[0].metadata['parser_status_reason'] not in captured
 
 
-def test_memory_preflight_estimation_exactly_matches_messages_and_schema_payload() -> None:
+def test_memory_payload_bounds_allowlisted_metadata_and_drops_sensitive_values() -> None:
+    max_input_chars = 256
     chat_model = _FakeStructuredChatModel()
     catalog = build_review_agent_catalog(
-        _configured_settings(),
+        _configured_settings(agent_llm_max_input_chars=max_input_chars),
         mail_model_builder=lambda _settings: _FakeMailModel(),
         chat_model_builder=lambda _settings, **_kwargs: chat_model,
     )
     packet = _packet()
-    packet.messages[0].metadata['review_marker'] = 'actual-memory-metadata'
+    approved_marker = 'memory-approved-reason'
+    sensitive_marker = 'memory-secret-value'
+    packet.messages[0].metadata.update(
+        {
+            'parser_status': 'error',
+            'parser_status_reason': approved_marker + ('R' * 4_000),
+            'raw_body': sensitive_marker + ('S' * 4_000),
+            'oauth_token': 'oauth-secret-token',
+            'unapproved_metadata': 'must-not-reach-provider',
+        }
+    )
     adapter = catalog.get('history_agent')
 
     result = adapter.run(packet)
@@ -325,7 +393,6 @@ def test_memory_preflight_estimation_exactly_matches_messages_and_schema_payload
         chat_model.invoked_messages,
         schema=chat_model.structured_schema,
     )
-    assert 'actual-memory-metadata' in captured
     assert packet.messages[0].source_snippet in captured
     assert adapter.render_estimation_input(packet) == captured
     assert adapter.preflight(packet).token_usage.input_tokens == max(
@@ -333,6 +400,39 @@ def test_memory_preflight_estimation_exactly_matches_messages_and_schema_payload
         len(captured) // 4,
     )
     assert result.cost.token_usage.input_tokens == max(1, len(captured) // 4)
+    _assert_bounded_private_evidence(
+        chat_model.invoked_messages,
+        max_input_chars=max_input_chars,
+        approved_marker=approved_marker,
+        sensitive_marker=sensitive_marker,
+    )
+    assert packet.messages[0].metadata['parser_status_reason'] not in captured
+
+
+@pytest.mark.parametrize(
+    ('budget_limit_usd', 'expected_action', 'expected_budget_status'),
+    [
+        (0.0006, 'skip', 'over_budget'),
+        (0.0007, 'run', 'within_budget'),
+    ],
+)
+def test_legacy_mail_preflight_preserves_literal_conservative_budget_boundary(
+    budget_limit_usd: float,
+    expected_action: str,
+    expected_budget_status: str,
+) -> None:
+    result = build_mail_document_llm_preflight(
+        packet=_packet(),
+        settings=MailDocumentLlmSettings(
+            enabled=True,
+            provider_order=('openai',),
+            openai_api_key='test-only-key',
+            max_estimated_cost_usd=budget_limit_usd,
+        ),
+    )
+
+    assert result['action'] == expected_action
+    assert result['budget_status'] == expected_budget_status
 
 
 def test_catalog_passes_each_adapter_output_cap_to_its_model_builder() -> None:

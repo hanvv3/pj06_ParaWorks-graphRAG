@@ -4,6 +4,9 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from backend.app.agent_runtime import EvidencePacket, LangChainInvocationPayload
+from backend.app.agent_runtime.langchain_evidence import (
+    render_bounded_evidence_rows,
+)
 from backend.app.agents.memory_extraction_agent.agent import (
     MemoryExtractionModelResponse,
 )
@@ -69,29 +72,10 @@ def render_memory_extraction_prompt(
     task_name: str,
     max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
 ) -> str:
-    evidence_rows = []
-    remaining_chars = max_input_chars
-    for message in packet.messages:
-        source_snippet = message.source_snippet[
-            : max(0, min(len(message.source_snippet), remaining_chars))
-        ]
-        remaining_chars -= len(source_snippet)
-        text = message.text[: max(0, min(len(message.text), remaining_chars))]
-        remaining_chars -= len(text)
-        evidence_rows.append(
-            {
-                'source_id': message.source_id,
-                'source_url': message.source_url,
-                'source_snippet': source_snippet,
-                'timestamp': message.timestamp,
-                'author': message.author,
-                'permission_level': message.permission_level,
-                'metadata': message.metadata,
-                'text': text,
-            }
-        )
-        if remaining_chars <= 0:
-            break
+    evidence_rows = render_bounded_evidence_rows(
+        packet,
+        max_input_chars=max_input_chars,
+    )
 
     return json.dumps(
         {
