@@ -361,13 +361,18 @@ Tasks:
 - Include target ReviewItem ids, required statuses, resume node, and resume
   policy. Done.
 - Expose checkpoint policy through orchestration status APIs. Done.
-- Current priority: implement
-  `docs/superpowers/specs/2026-08-26-langchain-langgraph-runtime-foundation-design.md`.
-- The user approved the revised Review Queue trust-boundary contract on
-  2026-08-26. Deliverable A now has an execution-ready plan at
-  `docs/superpowers/plans/2026-08-26-langchain-langgraph-dependency-compatibility.md`.
-- Execute only Deliverable A from that plan first; do not combine dependency
-  compatibility with runtime/checkpoint production code.
+- Deliverable A dependency compatibility: Done.
+  - Locked LangChain 1.3.17, LangGraph 1.2.11, langchain-openai 1.6.0,
+    langchain-google-genai 4.3.5, and langgraph-checkpoint-postgres 3.1.2.
+  - Added no-network version, provider constructor, structured-output,
+    `create_agent`, runtime-context, interrupt/resume, and checkpointer import
+    compatibility tests.
+  - Complete backend baseline comparison: old lock `506 passed, 11 failed,
+    1 skipped`; accepted lock `518 passed, 11 failed, 1 skipped`. The same 11
+    failures are pre-existing, so this deliverable introduced zero new backend
+    failures.
+- Next: write and review the separate Deliverable B runtime/checkpoint
+  primitives implementation plan. Do not begin Review HITL V2 in this slice.
 - Execute the reviewed foundation as four independent green deliverables:
   dependency compatibility, runtime/checkpoint primitives, Review Queue HITL
   V2, and the RAG retriever/graph V2 migration.

@@ -6,6 +6,23 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-26 LangChain·LangGraph dependency compatibility
+
+- Upgraded and locked the approved dependency lines: LangChain 1.3.17,
+  LangGraph 1.2.11, langchain-openai 1.6.0,
+  langchain-google-genai 4.3.5, and
+  langgraph-checkpoint-postgres 3.1.2.
+- Added no-network compatibility coverage for the current OpenAI/Gemini
+  constructors, LangChain structured output and `create_agent`, typed LangGraph
+  runtime context, `interrupt()` / `Command(resume=...)`, and PostgreSQL saver
+  imports.
+- The focused AI integration suite passed. Complete backend comparison recorded
+  old lock `506 passed, 11 failed, 1 skipped` and accepted lock `518 passed,
+  11 failed, 1 skipped`; the 11 failures are identical pre-existing failures,
+  so this deliverable introduced zero new backend failures. This deliverable
+  changes no production route, graph topology, Review Queue behavior, or RAG
+  behavior.
+
 ## 2026-08-26 LangChain·LangGraph runtime foundation design
 
 - Audited the installed architecture and confirmed that ParaWorks calls real

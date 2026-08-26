@@ -2,6 +2,24 @@
 
 Updated: 2026-08-26
 
+## 2026-08-26 LangChain·LangGraph dependency compatibility
+
+- Deliverable A is complete with LangChain 1.3.17, LangGraph 1.2.11,
+  langchain-openai 1.6.0, langchain-google-genai 4.3.5, and
+  langgraph-checkpoint-postgres 3.1.2 locked.
+- The complete backend comparison is old lock `506 passed, 11 failed,
+  1 skipped` versus accepted lock `518 passed, 11 failed, 1 skipped`; all 11
+  failures are identical pre-existing failures, so Deliverable A introduced
+  zero new backend failures. Do not describe the full repository suite as
+  all-green.
+- `backend/tests/test_langchain_langgraph_dependency_compat.py` proves the
+  supported version ranges and no-network API surfaces.
+- `PostgresSaver` is import-ready only. No saver lifecycle, `.setup()`, schema,
+  feature flag, runtime context contract, or public V2 route was implemented in
+  Deliverable A.
+- The next worker must write the Deliverable B runtime/checkpoint primitives
+  plan from the approved foundation spec before changing production code.
+
 ## 2026-08-26 LangChain·LangGraph runtime foundation decision
 
 - The user approved a focused runtime refactor before Neo4j GraphRAG work.
