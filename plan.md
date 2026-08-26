@@ -371,8 +371,24 @@ Tasks:
     1 skipped`; accepted lock `518 passed, 11 failed, 1 skipped`. The same 11
     failures are pre-existing, so this deliverable introduced zero new backend
     failures.
-- Next: write and review the separate Deliverable B runtime/checkpoint
-  primitives implementation plan. Do not begin Review HITL V2 in this slice.
+- Deliverable B runtime/checkpoint primitives plan: Ready for review.
+  - Execute `docs/superpowers/plans/2026-08-26-langgraph-runtime-checkpoint-primitives.md`
+    only after explicit implementation approval.
+  - First repair the one stale non-Slack preflight permission fixture, then
+    build JSON-safe state/fingerprint contracts, workflow persistence schema,
+    checkpointer lifecycle/bootstrap, and graph-version confirmation
+    primitives without adding public V2 routes.
+- User-directed execution order for the remaining program:
+  1. Deliverable B runtime/checkpoint primitives.
+  2. Deliverable C Review Queue HITL V2.
+  3. Deliverable D and GraphRAG using Gmail, Drive, Calendar, approved
+     knowledge, and deterministic fixtures as the primary evidence path.
+  4. Slack data recovery and Slack-related regressions last, after choosing
+     between deterministic local reconstruction, a newly seeded Slack
+     workspace, or an alternate chat connector.
+- Do not skip or hide Slack regressions while they are deferred. Keep the ten
+  known Slack-related backend failures visible in the full-suite report and
+  require every non-Slack gate to remain green.
 - Execute the reviewed foundation as four independent green deliverables:
   dependency compatibility, runtime/checkpoint primitives, Review Queue HITL
   V2, and the RAG retriever/graph V2 migration.

@@ -2,6 +2,34 @@
 
 Updated: 2026-08-26
 
+## 2026-08-26 Runtime Deliverable B plan and Slack deferral
+
+- The user directed all Slack-related remediation to the final phase because
+  the former live Slack data source is no longer available. Do not skip,
+  delete, weaken, or mark the affected tests `xfail`; keep them visible until
+  a separate Slack recovery design is approved.
+- The accepted dependency lock has 11 pre-existing backend failures. Ten are
+  Slack-related and deferred. The only non-Slack failure is
+  `test_mail_document_agent_preflight_reports_cost_without_running_llm`.
+- Root cause is confirmed: the test seeds `restricted` Drive evidence but uses
+  the `PermissionContext` default `('public', 'internal')`. Permission hardening
+  commit `b6c5d04` updated the production filter and similar test callers but
+  missed this preflight fixture. A diagnostic run returned `default_count=0`
+  and `explicit_count=1`. Production API/company-memory paths already pass the
+  authenticated user's exact permission levels, so do not weaken the runtime
+  filter or infer access from the `admin` role string.
+- The implementation-ready Deliverable B plan is
+  `docs/superpowers/plans/2026-08-26-langgraph-runtime-checkpoint-primitives.md`.
+  It begins with the bounded test-only permission fixture repair, then adds
+  source-agnostic state/fingerprint, workflow schema, checkpointer lifecycle,
+  explicit bootstrap, graph version, and saver-confirmation primitives.
+- Deliverable B must not add a public V2 route, Review Queue state transition,
+  RAG cutover, Neo4j component, or Slack change. Gmail, Drive, Calendar,
+  approved knowledge, deterministic fixtures, and fake models remain the
+  verification path.
+- Next work classification: actual implementation. Obtain explicit approval
+  before executing Task 1 or changing production/test code.
+
 ## 2026-08-26 LangChain·LangGraph dependency compatibility
 
 - Deliverable A is complete with LangChain 1.3.17, LangGraph 1.2.11,
