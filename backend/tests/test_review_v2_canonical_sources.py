@@ -164,8 +164,22 @@ def test_hidden_source_is_not_distinguishable_from_missing(db_session) -> None:
     _source(
         db_session,
         source_type='gmail',
-        source_id='gmail:hidden-message',
+        source_id='gmail:hidden-correct',
         signature='hidden-signature',
+        permission_level='restricted',
+    )
+    _source(
+        db_session,
+        source_type='drive',
+        source_id='gmail:hidden-wrong-type',
+        signature='hidden-signature',
+        permission_level='restricted',
+    )
+    _source(
+        db_session,
+        source_type='gmail',
+        source_id='gmail:hidden-wrong-signature',
+        signature='current-hidden-signature',
         permission_level='restricted',
     )
     actor = _actor(permissions={'public', 'internal'})
@@ -173,7 +187,9 @@ def test_hidden_source_is_not_distinguishable_from_missing(db_session) -> None:
     failures = []
 
     for source_id, signature in (
-        ('gmail:hidden-message', 'hidden-signature'),
+        ('gmail:hidden-correct', 'hidden-signature'),
+        ('gmail:hidden-wrong-type', 'hidden-signature'),
+        ('gmail:hidden-wrong-signature', 'requested-old-signature'),
         ('gmail:missing-message', 'missing-signature'),
     ):
         with pytest.raises(ReviewWorkflowPreflightError) as exc_info:
@@ -186,9 +202,9 @@ def test_hidden_source_is_not_distinguishable_from_missing(db_session) -> None:
             )
         failures.append((type(exc_info.value), exc_info.value.code, str(exc_info.value)))
 
-    assert failures[0] == failures[1]
+    assert all(failure == failures[-1] for failure in failures)
     assert failures[0][1] == 'not_found'
-    assert 'hidden-message' not in failures[0][2]
+    assert 'hidden' not in failures[0][2]
 
 
 def test_changed_source_signature_raises_evidence_changed(db_session) -> None:
@@ -292,3 +308,78 @@ def test_parsed_drive_ref_rechecks_current_document_version_and_parser_revision(
     assert second.external_revision == 'parser-revision-2'
     assert second.content_fingerprint != first.content_fingerprint
     assert len(second.content_fingerprint) == 64
+
+
+@pytest.mark.parametrize(
+    ('field', 'changed_value'),
+    [
+        ('document_version_label', 'parser-version-2'),
+        ('revision_id', 'parser-revision-2'),
+        ('content_signature', 'parser-signature-2'),
+    ],
+)
+def test_parsed_drive_fingerprint_binds_each_parser_version_field_independently(
+    db_session,
+    field: str,
+    changed_value: str,
+) -> None:
+    source = _source(
+        db_session,
+        source_type='drive',
+        source_id='drive:parser-provenance',
+        signature='drive:parser-provenance:stable-source-signature',
+    )
+    document = Document(
+        source_id=source.id,
+        title='Parser provenance',
+        current_version='document-v1',
+    )
+    db_session.add(document)
+    db_session.flush()
+    document_version = DocumentVersion(
+        document_id=document.id,
+        version='document-v1',
+        body='sensitive parsed content',
+    )
+    db_session.add(document_version)
+    db_session.flush()
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=document_version.id,
+        source_id=source.id,
+        parser_name='pypdf',
+        parser_status='parsed',
+        document_version_label='parser-version-1',
+        revision_id='parser-revision-1',
+        content_signature='parser-signature-1',
+        chunk_count=1,
+    )
+    db_session.add(parser_run)
+    db_session.flush()
+    request = _request(
+        (
+            'drive',
+            source.source_id,
+            'drive:parser-provenance:stable-source-signature',
+        )
+    )
+    registry = _registry('mail_document_agent')
+    baseline = prepare_review_request(
+        db_session,
+        request=request,
+        actor=_actor(),
+        registry=registry,
+        settings=_settings(),
+    ).source_refs[0]
+
+    setattr(parser_run, field, changed_value)
+    db_session.flush()
+    changed = prepare_review_request(
+        db_session,
+        request=request,
+        actor=_actor(),
+        registry=registry,
+        settings=_settings(),
+    ).source_refs[0]
+
+    assert changed.content_fingerprint != baseline.content_fingerprint

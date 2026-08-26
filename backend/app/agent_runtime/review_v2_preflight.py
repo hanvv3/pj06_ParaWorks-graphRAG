@@ -37,6 +37,8 @@ from backend.app.schemas.review_workflow import (
 
 EVIDENCE_VERSION_HASH_SCHEMA = 'review-evidence-versions:v1'
 INPUT_HASH_POLICY = 'review-workflow-batch:v1'
+CREATOR_LOCK_HASH_SCHEMA = 'review-creator-key:v1'
+CREATOR_LOCK_HASH_POLICY = 'review-workflow-creator-lock:v1'
 
 # SQLite/demo has no cross-process lock primitive. This lock only serializes
 # preflight lookup/create operations within one Python process.
@@ -145,13 +147,19 @@ def create_or_reuse_review_thread(
         settings=settings,
     )
     if creator_thread is not None:
-        return _creator_replay_or_conflict(
-            db,
-            thread=creator_thread,
-            prepared=prepared,
-            actor=actor,
-            settings=settings,
-        )
+        try:
+            result = _creator_replay_or_conflict(
+                db,
+                thread=creator_thread,
+                prepared=prepared,
+                actor=actor,
+                settings=settings,
+            )
+            db.commit()
+            return result
+        except Exception:
+            db.rollback()
+            raise
 
     # End the read-only creator lookup transaction before waiting on SQLite's
     # process lock or starting PostgreSQL's advisory-lock transaction.
@@ -161,10 +169,16 @@ def create_or_reuse_review_thread(
     with lock_context:
         try:
             if postgres:
-                db.execute(
-                    text('SELECT pg_advisory_xact_lock(:key)'),
-                    {'key': advisory_key_from_hmac(prepared.input_hash)},
-                )
+                for advisory_key in _postgres_advisory_keys(
+                    prepared=prepared,
+                    request=request,
+                    actor=actor,
+                    settings=settings,
+                ):
+                    db.execute(
+                        text('SELECT pg_advisory_xact_lock(:key)'),
+                        {'key': advisory_key},
+                    )
 
             creator_thread = _find_creator_thread(
                 db,
@@ -239,6 +253,30 @@ def _find_creator_thread(
             AgentWorkflowThread.client_request_id == client_request_id,
         )
     ).first()
+
+
+def _postgres_advisory_keys(
+    *,
+    prepared: PreparedReviewRequest,
+    request: ReviewWorkflowRunRequest,
+    actor: DemoUser,
+    settings: Settings,
+) -> tuple[int, ...]:
+    keys = {advisory_key_from_hmac(prepared.input_hash)}
+    if request.client_request_id is not None:
+        creator_hash = build_keyed_fingerprint(
+            {
+                'security_scope_id': settings.agent_runtime_security_scope_id,
+                'workflow_name': COMPANY_MEMORY_REVIEW_WORKFLOW,
+                'owner_subject_id': actor.id,
+                'client_request_id': request.client_request_id,
+            },
+            settings=settings,
+            schema_version=CREATOR_LOCK_HASH_SCHEMA,
+            policy_version=CREATOR_LOCK_HASH_POLICY,
+        )
+        keys.add(advisory_key_from_hmac(creator_hash))
+    return tuple(sorted(keys))
 
 
 def _creator_replay_or_conflict(

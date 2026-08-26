@@ -106,6 +106,7 @@ def _resolve_source_version(
     document_version_label: str | None = None
     parser_name: str | None = None
     parser_status: str | None = None
+    parser_version_label: str | None = None
     parser_signature: str | None = None
     external_revision = _optional_string(
         metadata.get('revision_id') or metadata.get('external_revision')
@@ -144,6 +145,7 @@ def _resolve_source_version(
         if parser_run is not None:
             parser_name = parser_run.parser_name
             parser_status = parser_run.parser_status
+            parser_version_label = parser_run.document_version_label
             parser_signature = parser_run.content_signature or None
             external_revision = parser_run.revision_id or external_revision
 
@@ -157,6 +159,7 @@ def _resolve_source_version(
         'parser_name': parser_name,
         'parser_signature': parser_signature,
         'parser_status': parser_status,
+        'parser_version_label': parser_version_label,
         'permission_level': source.permission_level,
         'source_type': ref.source_type,
     }
