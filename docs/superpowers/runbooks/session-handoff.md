@@ -43,6 +43,13 @@ Updated: 2026-08-26
 - RAG V2 must validate structured answer blocks against server-issued evidence
   slots and project only selected canonical citations. Keep it in shadow mode
   until faithfulness does not regress.
+- The user approved the revised Review Queue state machine and exactly-once
+  promotion contract on 2026-08-26.
+- The first execution plan is
+  `docs/superpowers/plans/2026-08-26-langchain-langgraph-dependency-compatibility.md`.
+  It covers Deliverable A only: target dependency ranges, targeted `uv.lock`
+  refresh, and no-network compatibility tests. Runtime/checkpoint production
+  code remains Deliverable B.
 - No production code has been changed for this decision yet.
 
 ## 2026-05-16 Dashboard calendar sync and Review bulk actions

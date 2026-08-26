@@ -39,6 +39,12 @@ demo story changes.
   reference server-issued evidence slots. Only selected, revalidated canonical
   records become public citations, and RAG V2 remains shadow-only until its
   faithfulness evaluation matches or exceeds the legacy baseline.
+- After user approval of the revised trust-boundary contract, converted the
+  first green slice into a separate execution plan for dependency
+  compatibility. It fixes exact supported minor lines, a targeted uv lock
+  refresh, no-network provider/structured-output/agent tests, LangGraph
+  runtime-context and interrupt smoke coverage, and a hard stop before any
+  runtime behavior change.
 
 ## 2026-05-16 Docker Postgres port fallback
 

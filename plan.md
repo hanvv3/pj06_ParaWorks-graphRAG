@@ -363,6 +363,11 @@ Tasks:
 - Expose checkpoint policy through orchestration status APIs. Done.
 - Current priority: implement
   `docs/superpowers/specs/2026-08-26-langchain-langgraph-runtime-foundation-design.md`.
+- The user approved the revised Review Queue trust-boundary contract on
+  2026-08-26. Deliverable A now has an execution-ready plan at
+  `docs/superpowers/plans/2026-08-26-langchain-langgraph-dependency-compatibility.md`.
+- Execute only Deliverable A from that plan first; do not combine dependency
+  compatibility with runtime/checkpoint production code.
 - Execute the reviewed foundation as four independent green deliverables:
   dependency compatibility, runtime/checkpoint primitives, Review Queue HITL
   V2, and the RAG retriever/graph V2 migration.
