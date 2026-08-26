@@ -20,6 +20,25 @@ demo story changes.
 - Kept Neo4j, graph projection, and `neo4j-graphrag` implementation out of this
   first slice so the runtime foundation remains independently testable and
   reversible.
+- Re-reviewed the design against current LangGraph persistence semantics and
+  the ParaWorks trust boundary, then split delivery into four independently
+  verifiable stages instead of one broad refactor.
+- Added explicit thread ownership, DB-enforced idempotency, checkpoint failure
+  reconciliation, strict checkpoint serialization, graph versioning, legacy
+  route compatibility, bounded hidden-match semantics, and server-derived
+  citation rules.
+- A final adversarial review corrected the checkpointer contract: application
+  graph versions no longer misuse `checkpoint_ns`, initial/resume invokes use
+  synchronous durability, and application status changes only after the saved
+  tuple is confirmed.
+- Hardened the trust boundary with canonical source/version-only Review inputs,
+  keyed fingerprints, short claim leases around out-of-transaction model work,
+  payload-safe idempotency keys, and DB-unique promotion provenance on every
+  knowledge table including generated Timeline rows.
+- Replaced "cite the whole evidence window" with structured answer blocks that
+  reference server-issued evidence slots. Only selected, revalidated canonical
+  records become public citations, and RAG V2 remains shadow-only until its
+  faithfulness evaluation matches or exceeds the legacy baseline.
 
 ## 2026-05-16 Docker Postgres port fallback
 

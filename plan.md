@@ -363,12 +363,26 @@ Tasks:
 - Expose checkpoint policy through orchestration status APIs. Done.
 - Current priority: implement
   `docs/superpowers/specs/2026-08-26-langchain-langgraph-runtime-foundation-design.md`.
-- Upgrade the verified LangChain/LangGraph minor lines and lock them.
-- Replace the linear callable wrapper with typed state and conditional routing.
-- Add real `interrupt()` / `Command(resume=...)` behavior and production
-  PostgreSQL checkpoint persistence.
+- Execute the reviewed foundation as four independent green deliverables:
+  dependency compatibility, runtime/checkpoint primitives, Review Queue HITL
+  V2, and the RAG retriever/graph V2 migration.
+- Keep legacy orchestration routes stable while disabled-by-default V2 routes
+  prove actual `interrupt()` / `Command(resume=...)` and PostgreSQL
+  checkpointing.
+- Enforce thread-bound DB idempotency and ReviewItem state transitions before
+  enabling durable HITL.
+- Keep LangGraph `checkpoint_ns` at the root namespace; select immutable graph
+  versions through the application thread registry and require synchronous
+  saver confirmation before reporting a durable pause.
+- Add canonical workflow evidence references, short claim/lease transactions,
+  and per-knowledge-table `source_review_item_id` uniqueness so retries and
+  concurrent single/bulk approvals cannot duplicate promotion or generated
+  Timeline rows.
 - Put keyword and pgvector behind a common retriever port before adding the
-  Neo4j retriever branch.
+  Neo4j retriever branch, while keeping the RAG graph independent of
+  checkpointer availability.
+- Require structured claim-to-evidence slot mapping and faithfulness parity in
+  shadow mode before cutting RAG V2 over to `/ask`, `/search`, or assistant.
 
 ### Milestone 5. Connector Quality Hardening
 

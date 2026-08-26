@@ -5,6 +5,9 @@ Updated: 2026-08-26
 ## 2026-08-26 LangChain·LangGraph runtime foundation decision
 
 - The user approved a focused runtime refactor before Neo4j GraphRAG work.
+- A second architecture review split the work into four independent
+  deliverables: dependency compatibility, runtime/checkpoint primitives,
+  Review Queue HITL V2, and RAG retriever/graph V2.
 - Current code imports and invokes real LangChain/LangGraph libraries, but the
   graph is a linear callable wrapper without conditional routing, durable
   checkpointing, or actual `interrupt()` / `Command(resume=...)` behavior.
@@ -15,7 +18,31 @@ Updated: 2026-08-26
   before starting Neo4j foundation work.
 - Preserve `EvidencePacket`, `PermissionContext`, Review Queue promotion,
   permission filtering, citations, cache, cost, and SQLite smoke contracts.
-- `needs_more_evidence` remains unresolved and must not resume a paused graph.
+- Keep legacy routes stable during migration; new actual-HITL behavior belongs
+  to disabled-by-default V2 routes.
+- `needs_more_evidence` never promotes knowledge. In V2 it resumes only to
+  close the current candidate attempt without downstream RAG or promotion; a
+  later evidence run creates a new linked candidate version.
+- Checkpoint state must contain opaque ids/hashes only. Runtime DB sessions,
+  questions, source URLs/snippets, model output, and provider errors stay out.
+- Use thread-bound database uniqueness and reconciliation for ReviewItem and
+  AgentRun idempotency; the existing cache key is not sufficient.
+- Do not use LangGraph `checkpoint_ns` as the application graph version. Keep
+  the root namespace, use a server-issued checkpoint thread id, select the
+  immutable builder from `AgentWorkflowThread.graph_version`, invoke with sync
+  durability, and confirm the saver tuple before exposing a durable pause.
+- Review V2 accepts canonical source/version references rather than raw
+  questions. Model work runs outside row locks under a short claim lease, then
+  persistence revalidates lease, evidence signature, permission, and state.
+- Add unique `source_review_item_id` provenance to DecisionRecord,
+  HistoryEvent, TimelineEvent, and Todo. Approval locks the ReviewItem and
+  insert-or-returns existing promoted rows, including generated Timeline rows.
+- A reused client idempotency key is valid only for the exact same canonical
+  input/evidence/graph parameters; mismatch returns
+  `idempotency_key_reused`.
+- RAG V2 must validate structured answer blocks against server-issued evidence
+  slots and project only selected canonical citations. Keep it in shadow mode
+  until faithfulness does not regress.
 - No production code has been changed for this decision yet.
 
 ## 2026-05-16 Dashboard calendar sync and Review bulk actions
