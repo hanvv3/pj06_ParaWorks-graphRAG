@@ -20,6 +20,12 @@ ALLOWED_REVIEW_ERROR_CODES = frozenset({
     'concurrent_resume',
     'invalid_state_transition',
 })
+ALLOWED_REVIEW_STATUSES = frozenset({
+    'pending_review',
+    'approved',
+    'rejected',
+    'needs_more_evidence',
+})
 
 _CHECKPOINT_STATE_KEYS = frozenset({
     'workflow_thread_id',
@@ -85,10 +91,72 @@ def _validate_json_value(value: object) -> None:
     raise ValueError('checkpoint state must contain JSON-safe primitives')
 
 
+def _validate_string_field(state: Mapping[str, object], field: str) -> None:
+    if type(state[field]) is not str:
+        raise ValueError(f'checkpoint state field {field} must be a string')
+
+
+def _validate_hash_field(state: Mapping[str, object], field: str) -> None:
+    value = state[field]
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in '0123456789abcdef' for character in value)
+    ):
+        raise ValueError(f'checkpoint state field {field} must be a keyed HMAC')
+
+
+def _validate_review_item_ids(value: object) -> None:
+    if type(value) is not list or any(type(item) is not int for item in value):
+        raise ValueError('checkpoint review_item_ids must be a list of integers')
+
+
+def _validate_review_status_counts(value: object) -> None:
+    if type(value) is not dict:
+        raise ValueError('checkpoint review_status_counts must be a dictionary')
+    for status, count in value.items():
+        if type(status) is not str or status not in ALLOWED_REVIEW_STATUSES:
+            raise ValueError('checkpoint review status is unsupported')
+        if type(count) is not int or count < 0:
+            raise ValueError('checkpoint review status count must be non-negative')
+
+
+def _validate_completed_nodes(value: object) -> None:
+    if type(value) is not list or any(type(item) is not str for item in value):
+        raise ValueError('checkpoint completed_nodes must be a list of strings')
+    if len(value) > MAX_COMPLETED_NODES or len(set(value)) != len(value):
+        raise ValueError('checkpoint completed_nodes violates reducer bounds')
+
+
+def _validate_error_codes(value: object) -> None:
+    if type(value) is not list or any(type(item) is not str for item in value):
+        raise ValueError('checkpoint error_codes must be a list of strings')
+    if len(value) > MAX_ERROR_CODES or len(set(value)) != len(value):
+        raise ValueError('checkpoint error_codes violates reducer bounds')
+    for value_item in value:
+        if value_item not in ALLOWED_REVIEW_ERROR_CODES:
+            raise ValueError(f'unsupported checkpoint error code: {value_item}')
+
+
 def validate_checkpoint_state(state: Mapping[str, object]) -> None:
     if set(state) != _CHECKPOINT_STATE_KEYS:
         raise ValueError('checkpoint state keys do not match ReviewGraphState')
-    _validate_json_value(dict(state))
+    try:
+        _validate_json_value(dict(state))
+    except RecursionError:
+        raise ValueError(
+            'checkpoint state nesting is too deep or cyclic'
+        ) from None
+
+    _validate_string_field(state, 'workflow_thread_id')
+    _validate_string_field(state, 'graph_version')
+    _validate_hash_field(state, 'input_hash')
+    _validate_hash_field(state, 'evidence_version_hash')
+    _validate_review_item_ids(state['review_item_ids'])
+    _validate_review_status_counts(state['review_status_counts'])
+    _validate_string_field(state, 'phase')
+    _validate_completed_nodes(state['completed_nodes'])
+    _validate_error_codes(state['error_codes'])
 
 
 class ReviewGraphInput(TypedDict):

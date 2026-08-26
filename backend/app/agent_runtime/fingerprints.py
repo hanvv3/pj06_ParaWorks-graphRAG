@@ -30,14 +30,19 @@ def _normalize_json_value(value: object) -> object:
 
 
 def canonical_json_bytes(value: object) -> bytes:
-    normalized = _normalize_json_value(value)
-    return json.dumps(
-        normalized,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(',', ':'),
-        sort_keys=True,
-    ).encode('utf-8')
+    try:
+        normalized = _normalize_json_value(value)
+        return json.dumps(
+            normalized,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(',', ':'),
+            sort_keys=True,
+        ).encode('utf-8')
+    except RecursionError:
+        raise ValueError(
+            'fingerprint payload nesting is too deep or cyclic'
+        ) from None
 
 
 def keyed_fingerprint(
@@ -49,11 +54,10 @@ def keyed_fingerprint(
 ) -> str:
     if not secret or not schema_version.strip() or not policy_version.strip():
         raise ValueError('fingerprint secret and versions are required')
-    payload = b'\n'.join(
-        [
-            schema_version.encode('utf-8'),
-            policy_version.encode('utf-8'),
-            canonical_json_bytes(value),
-        ]
-    )
+    payload = canonical_json_bytes({
+        'domain': 'paraworks:keyed-fingerprint:v1',
+        'policy_version': policy_version,
+        'schema_version': schema_version,
+        'value': value,
+    })
     return hmac.new(secret, payload, hashlib.sha256).hexdigest()
