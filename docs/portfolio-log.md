@@ -24,8 +24,12 @@ demo story changes.
   best-effort cleanup of the generated thread and every database resource.
 - Locked the Review graph contract at `company-memory-review-v2.0` and the
   application migration at `2f6a8b9c0d1e`.
+- Hardened saver confirmation to compare the exact ordered returned and
+  persisted interrupt ids/JSON-safe values, while translating resume saver
+  connection or deserialization failures to the bounded
+  `checkpoint_unavailable` category.
 - Verification recorded zero new non-Slack backend failures. The focused suite
-  passed 219 tests, the non-Slack gate passed 712 tests with one existing
+  passed 222 tests, the non-Slack gate passed 715 tests with one existing
   optional pgvector skip, and the full suite retained exactly the ten visible
   user-deferred Slack failures.
 - Deliverable C remains a separate, unimplemented Review Queue HITL V2 slice
