@@ -1,7 +1,10 @@
 import math
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Literal
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -145,3 +148,103 @@ def checkpoint_tables_ready(pool: ConnectionPool) -> bool:
         )
         row = cursor.fetchone()
     return bool(row) and all(bool(row[key]) for key in row)
+
+
+class CheckpointRuntime:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        pool_factory: Callable[[str], ConnectionPool] = build_postgres_pool,
+        saver_factory: Callable[
+            [object, SerializerProtocol], BaseCheckpointSaver
+        ] = build_postgres_saver,
+        table_probe: Callable[[object], bool] = checkpoint_tables_ready,
+    ) -> None:
+        self._settings = settings
+        self._mode = resolve_checkpoint_mode(settings)
+        self._pool_factory = pool_factory
+        self._saver_factory = saver_factory
+        self._table_probe = table_probe
+        self._pool: object | None = None
+        self._saver: BaseCheckpointSaver | None = None
+        self._started = False
+        self._readiness = CheckpointReadiness(
+            enabled=self._mode != 'disabled',
+            mode=self._mode,
+            ready=False,
+            durable=False,
+            checkpoint_store='none',
+        )
+
+    @property
+    def saver(self) -> BaseCheckpointSaver | None:
+        return self._saver
+
+    @property
+    def readiness(self) -> CheckpointReadiness:
+        return self._readiness
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        serializer = build_strict_checkpoint_serializer()
+        if self._mode == 'disabled':
+            return
+        if self._mode == 'memory':
+            self._saver = InMemorySaver(serde=serializer)
+            self._readiness = CheckpointReadiness(
+                enabled=True,
+                mode='memory',
+                ready=True,
+                durable=False,
+                checkpoint_store='memory',
+            )
+            return
+        if not self._settings.langgraph_strict_msgpack:
+            self._readiness = replace(
+                self._readiness,
+                error_code='strict_serializer_required',
+            )
+            return
+        try:
+            dsn = sqlalchemy_url_to_psycopg_dsn(
+                self._settings.resolved_database_url()
+            )
+            self._pool = self._pool_factory(dsn)
+            self._pool.open(wait=True)
+            self._pool.check()
+            if not self._table_probe(self._pool):
+                raise CheckpointUnavailableError
+            self._saver = self._saver_factory(self._pool, serializer)
+            self._readiness = CheckpointReadiness(
+                enabled=True,
+                mode='postgres',
+                ready=True,
+                durable=True,
+                checkpoint_store='postgres',
+            )
+        except Exception:
+            if self._pool is not None:
+                self._pool.close()
+            self._pool = None
+            self._saver = None
+            self._readiness = CheckpointReadiness(
+                enabled=True,
+                mode='postgres',
+                ready=False,
+                durable=False,
+                checkpoint_store='postgres',
+                error_code='checkpoint_unavailable',
+            )
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.close()
+        self._pool = None
+        self._saver = None
+
+
+def build_checkpoint_runtime(settings: Settings) -> CheckpointRuntime:
+    return CheckpointRuntime(settings)

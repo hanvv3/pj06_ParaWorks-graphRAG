@@ -5,6 +5,8 @@ from psycopg.rows import dict_row
 from pydantic import BaseModel, ValidationError
 
 from backend.app.agent_runtime.checkpointing import (
+    CheckpointReadiness,
+    CheckpointRuntime,
     build_postgres_pool,
     build_postgres_saver,
     build_strict_checkpoint_serializer,
@@ -24,6 +26,83 @@ class _UnsafeDataclass:
 
 class _UnsafePydanticModel(BaseModel):
     value: str
+
+
+class _FakePool:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def open(self, *, wait: bool) -> None:
+        self.events.append('open')
+        if wait:
+            self.events.append('wait')
+
+    def check(self) -> None:
+        self.events.append('check')
+
+    def connection(self) -> object:
+        self.events.append('connection')
+        return object()
+
+    def close(self) -> None:
+        self.events.append('close')
+
+
+class _FakeSaver:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.setup_calls = 0
+
+    def setup(self) -> None:
+        self.events.append('setup')
+        self.setup_calls += 1
+
+
+def _postgres_checkpoint_settings(*, strict: bool = True) -> Settings:
+    return Settings(
+        _env_file=None,
+        paraworks_demo_mode=False,
+        paraworks_database_url=None,
+        paraworks_demo_database_url=None,
+        database_url='postgresql+psycopg://runtime:secret@db/checkpoints',
+        langgraph_review_v2_enabled=True,
+        langgraph_strict_msgpack=strict,
+    )
+
+
+def _checkpoint_runtime(
+    *,
+    events: list[str],
+    tables_ready: bool = True,
+    strict: bool = True,
+) -> tuple[CheckpointRuntime, _FakeSaver]:
+    pool = _FakePool(events)
+    saver = _FakeSaver(events)
+
+    def pool_factory(dsn: str) -> _FakePool:
+        assert dsn == 'postgresql://runtime:secret@db/checkpoints'
+        return pool
+
+    def saver_factory(pool_arg: object, serializer: object) -> _FakeSaver:
+        assert pool_arg is pool
+        assert serializer.pickle_fallback is False
+        events.append('saver')
+        return saver
+
+    def table_probe(pool_arg: object) -> bool:
+        assert pool_arg is pool
+        pool.connection()
+        return tables_ready
+
+    return (
+        CheckpointRuntime(
+            _postgres_checkpoint_settings(strict=strict),
+            pool_factory=pool_factory,  # type: ignore[arg-type]
+            saver_factory=saver_factory,  # type: ignore[arg-type]
+            table_probe=table_probe,  # type: ignore[arg-type]
+        ),
+        saver,
+    )
 
 
 def _valid_checkpoint_state() -> ReviewGraphState:
@@ -71,6 +150,141 @@ def test_checkpoint_mode_matrix_preserves_disabled_smoke_and_postgres_modes(
             langgraph_review_v2_enabled=True,
         )
     ) == 'postgres'
+
+
+def test_disabled_runtime_has_no_saver_pool_or_error() -> None:
+    events: list[str] = []
+    settings = Settings(
+        _env_file=None,
+        langgraph_review_v2_enabled=False,
+    )
+    runtime = CheckpointRuntime(
+        settings,
+        pool_factory=lambda _dsn: events.append('pool'),  # type: ignore[arg-type]
+    )
+
+    runtime.start()
+    runtime.start()
+    runtime.close()
+
+    assert runtime.saver is None
+    assert runtime.readiness == CheckpointReadiness(
+        enabled=False,
+        mode='disabled',
+        ready=False,
+        durable=False,
+        checkpoint_store='none',
+    )
+    assert events == []
+
+
+@pytest.mark.parametrize(
+    ('demo_mode', 'database_url'),
+    [
+        (True, 'postgresql+psycopg://runtime:secret@db/checkpoints'),
+        (False, 'sqlite:///runtime.db'),
+    ],
+)
+def test_memory_runtime_owns_one_strict_saver_per_runtime(
+    demo_mode: bool,
+    database_url: str,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        paraworks_demo_mode=demo_mode,
+        paraworks_database_url=None,
+        paraworks_demo_database_url=None,
+        database_url=database_url,
+        langgraph_review_v2_enabled=True,
+    )
+    first = CheckpointRuntime(settings)
+    second = CheckpointRuntime(settings)
+
+    first.start()
+    first.start()
+    second.start()
+
+    assert first.saver is not None
+    assert second.saver is not None
+    assert first.saver is not second.saver
+    assert first.saver.serde.pickle_fallback is False
+    assert first.readiness == CheckpointReadiness(
+        enabled=True,
+        mode='memory',
+        ready=True,
+        durable=False,
+        checkpoint_store='memory',
+    )
+
+
+def test_postgres_runtime_opens_checks_and_builds_saver_without_setup() -> None:
+    events: list[str] = []
+    runtime, saver = _checkpoint_runtime(events=events)
+
+    runtime.start()
+    runtime.start()
+
+    assert runtime.saver is saver
+    assert runtime.readiness == CheckpointReadiness(
+        enabled=True,
+        mode='postgres',
+        ready=True,
+        durable=True,
+        checkpoint_store='postgres',
+    )
+    assert saver.setup_calls == 0
+    assert events == ['open', 'wait', 'check', 'connection', 'saver']
+
+
+def test_postgres_runtime_missing_tables_fails_closed_without_memory_fallback() -> None:
+    events: list[str] = []
+    runtime, saver = _checkpoint_runtime(events=events, tables_ready=False)
+
+    runtime.start()
+
+    assert runtime.saver is None
+    assert runtime.readiness == CheckpointReadiness(
+        enabled=True,
+        mode='postgres',
+        ready=False,
+        durable=False,
+        checkpoint_store='postgres',
+        error_code='checkpoint_unavailable',
+    )
+    assert saver.setup_calls == 0
+    assert events == ['open', 'wait', 'check', 'connection', 'close']
+
+
+def test_postgres_runtime_requires_strict_serializer_before_pool_access() -> None:
+    events: list[str] = []
+    runtime, saver = _checkpoint_runtime(events=events, strict=False)
+
+    runtime.start()
+
+    assert runtime.saver is None
+    assert runtime.readiness == CheckpointReadiness(
+        enabled=True,
+        mode='postgres',
+        ready=False,
+        durable=False,
+        checkpoint_store='none',
+        error_code='strict_serializer_required',
+    )
+    assert saver.setup_calls == 0
+    assert events == []
+
+
+def test_postgres_runtime_close_is_idempotent_and_closes_pool_once() -> None:
+    events: list[str] = []
+    runtime, saver = _checkpoint_runtime(events=events)
+    runtime.start()
+
+    runtime.close()
+    runtime.close()
+
+    assert saver.setup_calls == 0
+    assert runtime.saver is None
+    assert events == ['open', 'wait', 'check', 'connection', 'saver', 'close']
 
 
 def test_sqlalchemy_url_is_converted_to_psycopg_dsn_without_decoding_password() -> None:
@@ -239,6 +453,10 @@ def test_checkpoint_readiness_uses_the_resolved_writes_relation(
     assert len(statements) == 1
     normalized_sql = ' '.join(statements[0].split())
     assert 'FROM pg_catalog.pg_attribute' in normalized_sql
+    assert "to_regclass('checkpoint_migrations')" in normalized_sql
+    assert "to_regclass('checkpoints')" in normalized_sql
+    assert "to_regclass('checkpoint_blobs')" in normalized_sql
+    assert "to_regclass('checkpoint_writes')" in normalized_sql
     assert "attrelid = to_regclass('checkpoint_writes')" in normalized_sql
     assert "attname = 'task_path'" in normalized_sql
     assert 'NOT attisdropped' in normalized_sql
