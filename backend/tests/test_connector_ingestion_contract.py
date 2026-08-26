@@ -9,6 +9,7 @@ from backend.app.connectors.registry import (
     get_connector_manifest,
     list_connector_manifests,
 )
+from backend.app.ingestion.source_versions import SourceVersionRef
 from backend.app.ingestion.sync import sync_connector_events
 from backend.app.models import DocumentChunk, DocumentParserRun, Source, SyncJob
 
@@ -190,6 +191,24 @@ def test_sync_connector_events_records_job_and_changed_source_ids(db_session: Se
     assert parser_run.content_signature == 'contract-event-1:v1'
     assert parser_run.chunk_count == 1
     assert parser_run.metadata_['source_id'] == 'contract-event-1'
+
+
+def test_sync_returns_canonical_refs_after_ingestion_commit(db_session: Session) -> None:
+    result = sync_connector_events(
+        db=db_session,
+        connector=DriveContentSignatureConnector([drive_source_event()]),
+    )
+
+    source = db_session.query(Source).one()
+    assert source.id is not None
+    assert result.changed_source_ids == ['drive:file-1']
+    assert result.changed_source_refs == [
+        SourceVersionRef(
+            source_type='drive',
+            source_id='drive:file-1',
+            version_or_signature='drive:file-1:42:rev-42',
+        )
+    ]
 
 
 def test_sync_connector_events_reports_skipped_duplicates(db_session: Session) -> None:

@@ -19,6 +19,7 @@ from backend.app.core.demo_auth import DemoUser
 from backend.app.ingestion.source_versions import (
     SourceVersionRef,
     normalize_source_version_refs,
+    review_batch_marker_is_v2,
 )
 from backend.app.models.agent_workflows import (
     AgentWorkflowEvidenceRef,
@@ -216,6 +217,9 @@ def create_or_reuse_review_thread(
                     shared_reuse=True,
                 )
 
+            if settings.langgraph_review_v2_enabled:
+                _ensure_v2_waterline(db, prepared=prepared)
+
             thread = _create_thread_rows(
                 db,
                 prepared=prepared,
@@ -339,6 +343,22 @@ def _find_shared_thread(
     )
 
 
+def find_matching_review_thread(
+    db: Session,
+    *,
+    prepared: PreparedReviewRequest,
+    actor: DemoUser,
+    settings: Settings,
+) -> AgentWorkflowThread | None:
+    _ensure_prepared_is_current(
+        db,
+        prepared=prepared,
+        actor=actor,
+        settings=settings,
+    )
+    return _find_shared_thread(db, prepared=prepared, settings=settings)
+
+
 def _thread_matches(
     db: Session,
     *,
@@ -415,6 +435,28 @@ def _ensure_prepared_is_current(
         settings=settings,
     )
     if current != prepared.source_refs:
+        raise ReviewWorkflowPreflightError(
+            'evidence_changed',
+            'source evidence changed; synchronize again',
+        )
+
+
+def _ensure_v2_waterline(
+    db: Session,
+    *,
+    prepared: PreparedReviewRequest,
+) -> None:
+    source_ids = [ref.canonical_row_id for ref in prepared.source_refs]
+    sources = db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
+    by_id = {source.id: source for source in sources}
+    if len(by_id) != len(source_ids) or any(
+        not review_batch_marker_is_v2(
+            by_id[ref.canonical_row_id],
+            signature=ref.content_signature,
+        )
+        for ref in prepared.source_refs
+        if ref.canonical_row_id in by_id
+    ):
         raise ReviewWorkflowPreflightError(
             'evidence_changed',
             'source evidence changed; synchronize again',

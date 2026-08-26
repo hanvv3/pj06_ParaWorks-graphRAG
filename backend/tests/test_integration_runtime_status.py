@@ -138,6 +138,105 @@ def test_google_runtime_status_reports_account_readiness_and_latest_sync(client,
     }
 
 
+def test_async_status_recovers_only_refs_marked_by_latest_job(client, db_session) -> None:
+    db_session.add_all(
+        [
+            Source(
+                source_type='gmail',
+                source_id='gmail:latest',
+                source_url='https://gmail.test/latest',
+                title='Latest source',
+                permission_level='internal',
+                raw_metadata={
+                    'content_signature': 'gmail:latest:v2',
+                    'last_changed_sync_job_id': 'gmail-latest-job',
+                },
+            ),
+            Source(
+                source_type='gmail',
+                source_id='gmail:older',
+                source_url='https://gmail.test/older',
+                title='Older source',
+                permission_level='internal',
+                raw_metadata={
+                    'content_signature': 'gmail:older:v1',
+                    'last_changed_sync_job_id': 'gmail-older-job',
+                },
+            ),
+            SyncJob(
+                job_id='gmail-latest-job',
+                connector_type='gmail',
+                status='complete',
+                message='fetched=1 created_review_items=0 skipped_events=0',
+                progress_pct=100,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    response = client.get('/api/v1/integrations/gmail/runtime-status')
+
+    assert response.status_code == 200
+    assert response.json()['latest_sync']['changed_source_refs'] == [
+        {
+            'source_type': 'gmail',
+            'source_id': 'gmail:latest',
+            'version_or_signature': 'gmail:latest:v2',
+        }
+    ]
+
+
+def test_async_status_omits_refs_hidden_from_current_actor(client, db_session) -> None:
+    db_session.add_all(
+        [
+            Source(
+                source_type='drive',
+                source_id='drive:internal',
+                source_url='https://drive.test/internal',
+                title='Internal source',
+                permission_level='internal',
+                raw_metadata={
+                    'content_signature': 'drive:internal:v1',
+                    'last_changed_sync_job_id': 'drive-latest-job',
+                },
+            ),
+            Source(
+                source_type='drive',
+                source_id='drive:restricted',
+                source_url='https://drive.test/restricted',
+                title='Restricted source',
+                permission_level='restricted',
+                raw_metadata={
+                    'content_signature': 'drive:restricted:v1',
+                    'last_changed_sync_job_id': 'drive-latest-job',
+                },
+            ),
+            SyncJob(
+                job_id='drive-latest-job',
+                connector_type='drive',
+                status='complete',
+                message='fetched=2 created_review_items=0 skipped_events=0',
+                progress_pct=100,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    response = client.get(
+        '/api/v1/integrations/drive/runtime-status',
+        headers={'X-Demo-User': 'viewer'},
+    )
+
+    assert response.status_code == 200
+    assert response.json()['latest_sync']['changed_source_refs'] == [
+        {
+            'source_type': 'drive',
+            'source_id': 'drive:internal',
+            'version_or_signature': 'drive:internal:v1',
+        }
+    ]
+
+
 def test_google_runtime_status_rejects_unknown_connector(client) -> None:
     response = client.get('/api/v1/integrations/not-google/runtime-status')
 

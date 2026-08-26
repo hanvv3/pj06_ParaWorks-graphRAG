@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.connectors.base import Connector
 from backend.app.ingestion.service import ingest_events_with_result
+from backend.app.ingestion.source_versions import SourceVersionRef
 from backend.app.models import Source, SyncJob
 
 
@@ -20,6 +21,7 @@ class ConnectorSyncResult:
     created_review_items: int
     skipped_events: int
     changed_source_ids: list[str] = field(default_factory=list)
+    changed_source_refs: list[SourceVersionRef] = field(default_factory=list)
     parser_status_counts: dict[str, int] = field(default_factory=dict)
 
 
@@ -76,6 +78,11 @@ def sync_connector_events(
     )
     job.progress_pct = 100
     job.updated_at = datetime.now(UTC)
+    _mark_changed_sources_for_job(
+        db,
+        changed_source_ids=ingestion_result.changed_source_ids,
+        job_id=job.job_id,
+    )
     db.commit()
 
     return ConnectorSyncResult(
@@ -86,8 +93,27 @@ def sync_connector_events(
         created_review_items=ingestion_result.created_review_items,
         skipped_events=skipped_events,
         changed_source_ids=ingestion_result.changed_source_ids,
+        changed_source_refs=ingestion_result.changed_source_refs,
         parser_status_counts=parser_status_counts,
     )
+
+
+def _mark_changed_sources_for_job(
+    db: Session,
+    *,
+    changed_source_ids: list[str],
+    job_id: str,
+) -> None:
+    if not changed_source_ids:
+        return
+    sources = db.scalars(
+        select(Source).where(Source.source_id.in_(changed_source_ids))
+    ).all()
+    for source in sources:
+        source.raw_metadata = {
+            **(source.raw_metadata or {}),
+            'last_changed_sync_job_id': job_id,
+        }
 
 
 def _latest_cursors_by_partition(db: Session, source_type: str) -> dict[str, str]:

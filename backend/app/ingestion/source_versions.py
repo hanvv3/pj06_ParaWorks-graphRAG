@@ -1,8 +1,9 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 CanonicalSourceType = Literal['gmail', 'gmail_attachment', 'drive', 'calendar']
+ReviewBatchMode = Literal['v2_explicit', 'legacy_inline']
 
 
 class SourceRefLike(Protocol):
@@ -11,11 +12,73 @@ class SourceRefLike(Protocol):
     version_or_signature: str
 
 
+class CanonicalSourceLike(Protocol):
+    source_type: str
+    source_id: str
+    raw_metadata: dict
+
+
 @dataclass(frozen=True)
 class SourceVersionRef:
     source_type: CanonicalSourceType
     source_id: str
     version_or_signature: str
+
+
+def current_content_signature(source: CanonicalSourceLike) -> str | None:
+    value = (source.raw_metadata or {}).get('content_signature')
+    return value if isinstance(value, str) and value else None
+
+
+def source_version_ref(source: CanonicalSourceLike) -> SourceVersionRef | None:
+    if source.source_type not in {'gmail', 'gmail_attachment', 'drive', 'calendar'}:
+        return None
+    signature = current_content_signature(source)
+    if signature is None or not source.source_id.startswith(f'{source.source_type}:'):
+        return None
+    return SourceVersionRef(
+        source_type=cast(CanonicalSourceType, source.source_type),
+        source_id=source.source_id,
+        version_or_signature=signature,
+    )
+
+
+def source_version_refs(
+    sources: Iterable[CanonicalSourceLike],
+) -> list[SourceVersionRef]:
+    refs = [ref for source in sources if (ref := source_version_ref(source)) is not None]
+    return list(normalize_source_version_refs(refs))
+
+
+def review_batch_marker_is_v2(
+    source: CanonicalSourceLike,
+    *,
+    signature: str,
+) -> bool:
+    metadata = source.raw_metadata or {}
+    return (
+        metadata.get('review_batch_mode') == 'v2_explicit'
+        and metadata.get('review_batch_signature') == signature
+    )
+
+
+def with_review_batch_marker(
+    source: CanonicalSourceLike,
+    *,
+    mode: ReviewBatchMode,
+    sync_job_id: str | None = None,
+) -> dict:
+    signature = current_content_signature(source)
+    if signature is None:
+        raise ValueError('source has no current content signature')
+    metadata = {
+        **(source.raw_metadata or {}),
+        'review_batch_mode': mode,
+        'review_batch_signature': signature,
+    }
+    if sync_job_id is not None:
+        metadata['last_changed_sync_job_id'] = sync_job_id
+    return metadata
 
 
 def normalize_source_version_refs(

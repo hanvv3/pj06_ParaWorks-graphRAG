@@ -1,4 +1,5 @@
 import re
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import uuid4
@@ -8,8 +9,14 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from backend.app.agent_runtime import EvidencePacket, PermissionContext
+from backend.app.agent_runtime import AgentRegistry, EvidencePacket, PermissionContext
+from backend.app.agent_runtime.canonical_sources import ReviewWorkflowPreflightError
+from backend.app.agent_runtime.review_v2_preflight import (
+    find_matching_review_thread,
+    prepare_review_request,
+)
 from backend.app.agents.mail_document_agent import (
+    MAIL_DOCUMENT_AGENT_MANIFEST,
     MAIL_DOCUMENT_SOURCE_TYPES,
     DeterministicMailDocumentAgentModel,
     MailDocumentAgent,
@@ -21,6 +28,10 @@ from backend.app.agents.mail_document_agent import (
     create_mail_document_agent_review_items_for_changed_sources,
 )
 from backend.app.agents.memory_extraction_agent import (
+    DECISION_RECORD_AGENT_MANIFEST,
+    HISTORY_AGENT_MANIFEST,
+    TIMELINE_AGENT_MANIFEST,
+    TODO_AGENT_MANIFEST,
     build_memory_extraction_agent_preflight,
 )
 from backend.app.agents.slack_agent import (
@@ -60,6 +71,12 @@ from backend.app.core.config import Settings, get_settings
 from backend.app.core.demo_auth import DemoUser, get_demo_user
 from backend.app.core.redaction import redact_secret_text
 from backend.app.db.session import get_db
+from backend.app.ingestion.source_versions import (
+    ReviewBatchMode,
+    SourceVersionRef,
+    source_version_refs,
+    with_review_batch_marker,
+)
 from backend.app.ingestion.sync import sync_connector_events
 from backend.app.models import (
     DocumentChunk,
@@ -69,6 +86,10 @@ from backend.app.models import (
     SyncJob,
 )
 from backend.app.projects.classifier import create_project_assignment_review_items
+from backend.app.schemas.review_workflow import (
+    DEFAULT_REVIEW_AGENT_NAMES,
+    ReviewWorkflowRunRequest,
+)
 from backend.app.services.audit import record_audit_log
 
 router = APIRouter(prefix='/integrations', tags=['integrations'])
@@ -132,7 +153,11 @@ def list_integration_connections(db: DbSession) -> list[dict[str, object]]:
 
 
 @router.get('/slack/runtime-status')
-def get_slack_runtime_status(db: DbSession, settings: AppSettings) -> dict[str, object]:
+def get_slack_runtime_status(
+    db: DbSession,
+    settings: AppSettings,
+    user: CurrentUser,
+) -> dict[str, object]:
     connection = db.scalar(
         select(IntegrationConnection)
         .where(IntegrationConnection.connector_type == 'slack')
@@ -157,7 +182,7 @@ def get_slack_runtime_status(db: DbSession, settings: AppSettings) -> dict[str, 
         'channel_options': _slack_channel_options(settings.slack_channel_ids),
         'connection_status': connection.status if connection else 'disconnected',
         'credential_status': credential_status,
-        'latest_sync': _sync_job_response(latest_sync),
+        'latest_sync': _sync_job_response(db=db, user=user, job=latest_sync),
         'latest_sync_summary': _sync_job_summary(latest_sync),
         'last_error': _sync_error_response(latest_sync),
         'agent_bridge': _slack_agent_bridge(db),
@@ -174,6 +199,7 @@ def get_google_runtime_status(
     connector_type: str,
     db: DbSession,
     settings: AppSettings,
+    user: CurrentUser,
 ) -> dict[str, object]:
     if connector_type not in GOOGLE_OAUTH_CONNECTOR_TYPES:
         raise HTTPException(status_code=404, detail='Connector not found')
@@ -200,7 +226,7 @@ def get_google_runtime_status(
         'connection_status': connection.status if connection else 'disconnected',
         'credential_status': credential_status,
         'account_name': connection.workspace_name if connection else None,
-        'latest_sync': _sync_job_response(latest_sync),
+        'latest_sync': _sync_job_response(db=db, user=user, job=latest_sync),
         'cost_policy': {
             'status_lookup_triggers_sync': False,
             'status_lookup_triggers_llm': False,
@@ -249,6 +275,7 @@ def sync_connector(
             'skipped_events': 0,
             'parser_status_counts': {},
             'changed_source_ids': [],
+            'changed_source_refs': [],
             'agent_generated_items': 0,
             'project_assignment_items': 0,
             'pending_review_count': pending_review_count,
@@ -289,22 +316,51 @@ def _perform_connector_sync(
     )
     result = sync_connector_events(db=db, connector=connector, job_id=job_id)
     changed_source_ids = getattr(result, 'changed_source_ids', [])
-    if result.status == 'complete':
+    changed_source_refs = _visible_source_refs(
+        db=db,
+        user=user,
+        refs=getattr(result, 'changed_source_refs', []),
+    )
+    v2_mode = _uses_explicit_review_mode(
+        connector_type=connector_type,
+        settings=settings,
+    )
+    if result.status == 'complete' and v2_mode:
+        _mark_review_batch_sources(
+            db=db,
+            source_ids=changed_source_ids,
+            mode='v2_explicit',
+            job_id=result.job_id,
+        )
+        db.commit()
+    if result.status == 'complete' and not v2_mode:
         _mark_sync_job_agent_review_running(
             db=db,
             job_id=result.job_id,
             fetched_events=result.fetched_events,
             skipped_events=result.skipped_events,
         )
-    if result.status == 'complete' and not changed_source_ids:
+    legacy_generation_succeeded = False
+    if result.status == 'complete' and not v2_mode and not changed_source_ids:
         recovery_source_ids = _connector_source_ids_for_review(
             db=db,
             connector_type=connector_type,
             user=user,
         )
-        if recovery_source_ids and not _has_connector_agent_review_items(
+        suppress_legacy = _legacy_batch_owned_by_v2(
             db=db,
+            user=user,
+            settings=settings,
             connector_type=connector_type,
+            source_ids=recovery_source_ids,
+        )
+        if (
+            not suppress_legacy
+            and recovery_source_ids
+            and not _has_connector_agent_review_items(
+                db=db,
+                connector_type=connector_type,
+            )
         ):
             agent_review_items = _run_connector_agent_review(
                 db=db,
@@ -313,27 +369,49 @@ def _perform_connector_sync(
                 connector_type=connector_type,
                 source_ids=recovery_source_ids,
             )
-        if not _skip_project_assignment_after_agent_review(
+            legacy_generation_succeeded = True
+        if not suppress_legacy and not _skip_project_assignment_after_agent_review(
             connector_type=connector_type,
             settings=settings,
             agent_review_items=agent_review_items,
         ):
             project_assignment_items = len(create_project_assignment_review_items(db))
+            legacy_generation_succeeded = True
+        if legacy_generation_succeeded and connector_type in GOOGLE_OAUTH_CONNECTOR_TYPES:
+            _mark_review_batch_sources(
+                db=db,
+                source_ids=recovery_source_ids,
+                mode='legacy_inline',
+            )
 
-    if result.status == 'complete' and changed_source_ids:
-        agent_review_items = _run_connector_agent_review(
+    if result.status == 'complete' and not v2_mode and changed_source_ids:
+        suppress_legacy = _legacy_batch_owned_by_v2(
             db=db,
             user=user,
             settings=settings,
             connector_type=connector_type,
             source_ids=changed_source_ids,
         )
-        if not _skip_project_assignment_after_agent_review(
-            connector_type=connector_type,
-            settings=settings,
-            agent_review_items=agent_review_items,
-        ):
-            project_assignment_items = len(create_project_assignment_review_items(db))
+        if not suppress_legacy:
+            agent_review_items = _run_connector_agent_review(
+                db=db,
+                user=user,
+                settings=settings,
+                connector_type=connector_type,
+                source_ids=changed_source_ids,
+            )
+            if not _skip_project_assignment_after_agent_review(
+                connector_type=connector_type,
+                settings=settings,
+                agent_review_items=agent_review_items,
+            ):
+                project_assignment_items = len(create_project_assignment_review_items(db))
+            if connector_type in GOOGLE_OAUTH_CONNECTOR_TYPES:
+                _mark_review_batch_sources(
+                    db=db,
+                    source_ids=changed_source_ids,
+                    mode='legacy_inline',
+                )
     parser_status_counts = getattr(result, 'parser_status_counts', {})
 
     total_review_items = (
@@ -352,24 +430,36 @@ def _perform_connector_sync(
             f'pending_review_items={pending_review_count}'
         )
 
+    audit_metadata = {
+        'job_id': result.job_id,
+        'fetched_events': result.fetched_events,
+        'created_review_items': total_review_items,
+        'skipped_events': result.skipped_events,
+        'parser_status_counts': parser_status_counts,
+        'selected_channel_ids': selected_channel_ids,
+        'agent_generated_items': agent_review_items,
+        'project_assignment_items': project_assignment_items,
+        'pending_review_count': pending_review_count,
+    }
+    if v2_mode:
+        audit_metadata.update(
+            changed_source_count=len(changed_source_refs),
+            review_batch_hmac=_review_batch_hmac(
+                db=db,
+                user=user,
+                settings=settings,
+                refs=changed_source_refs,
+            ),
+        )
+    else:
+        audit_metadata['changed_source_ids'] = changed_source_ids
     record_audit_log(
         db=db,
         actor=user,
         action='integration.sync',
         target_type='connector',
         target_id=connector_type,
-        metadata={
-            'job_id': result.job_id,
-            'fetched_events': result.fetched_events,
-            'created_review_items': total_review_items,
-            'skipped_events': result.skipped_events,
-            'parser_status_counts': parser_status_counts,
-            'selected_channel_ids': selected_channel_ids,
-            'agent_generated_items': agent_review_items,
-            'project_assignment_items': project_assignment_items,
-            'changed_source_ids': changed_source_ids,
-            'pending_review_count': pending_review_count,
-        },
+        metadata=audit_metadata,
     )
     db.commit()
 
@@ -382,6 +472,7 @@ def _perform_connector_sync(
         'skipped_events': result.skipped_events,
         'parser_status_counts': parser_status_counts,
         'changed_source_ids': changed_source_ids,
+        'changed_source_refs': [asdict(ref) for ref in changed_source_refs],
         'agent_generated_items': agent_review_items,
         'project_assignment_items': project_assignment_items,
         'pending_review_count': pending_review_count,
@@ -436,6 +527,157 @@ def _run_connector_sync_background(
             },
         )
         db.commit()
+
+
+def _uses_explicit_review_mode(
+    *,
+    connector_type: str,
+    settings: Settings,
+) -> bool:
+    return (
+        connector_type in GOOGLE_OAUTH_CONNECTOR_TYPES
+        and settings.langgraph_review_v2_enabled
+    )
+
+
+def _visible_source_refs(
+    *,
+    db: Session,
+    user: DemoUser,
+    refs: list[SourceVersionRef],
+) -> list[SourceVersionRef]:
+    if not refs:
+        return []
+    requested = set(refs)
+    sources = db.scalars(
+        select(Source).where(
+            Source.source_id.in_([ref.source_id for ref in refs]),
+            Source.permission_level.in_(tuple(user.permission_levels)),
+        )
+    ).all()
+    return [ref for ref in source_version_refs(sources) if ref in requested]
+
+
+def _source_refs_for_ids(
+    *,
+    db: Session,
+    user: DemoUser,
+    source_ids: list[str],
+) -> list[SourceVersionRef]:
+    if not source_ids:
+        return []
+    sources = db.scalars(
+        select(Source).where(
+            Source.source_id.in_(source_ids),
+            Source.permission_level.in_(tuple(user.permission_levels)),
+        )
+    ).all()
+    return source_version_refs(sources)
+
+
+def _mark_review_batch_sources(
+    *,
+    db: Session,
+    source_ids: list[str],
+    mode: ReviewBatchMode,
+    job_id: str | None = None,
+) -> None:
+    if not source_ids:
+        return
+    sources = db.scalars(
+        select(Source).where(Source.source_id.in_(source_ids))
+    ).all()
+    for source in sources:
+        source.raw_metadata = with_review_batch_marker(
+            source,
+            mode=mode,
+            sync_job_id=job_id,
+        )
+
+
+def _default_review_registry() -> AgentRegistry:
+    registry = AgentRegistry()
+    for manifest in (
+        MAIL_DOCUMENT_AGENT_MANIFEST,
+        TIMELINE_AGENT_MANIFEST,
+        HISTORY_AGENT_MANIFEST,
+        DECISION_RECORD_AGENT_MANIFEST,
+        TODO_AGENT_MANIFEST,
+    ):
+        registry.register(manifest)
+    return registry
+
+
+def _prepare_default_review_batch(
+    *,
+    db: Session,
+    user: DemoUser,
+    settings: Settings,
+    refs: list[SourceVersionRef],
+):
+    request = ReviewWorkflowRunRequest(
+        source_refs=[asdict(ref) for ref in refs],
+        agent_names=list(DEFAULT_REVIEW_AGENT_NAMES),
+    )
+    prepared = prepare_review_request(
+        db,
+        request=request,
+        actor=user,
+        registry=_default_review_registry(),
+        settings=settings,
+    )
+    return request, prepared
+
+
+def _legacy_batch_owned_by_v2(
+    *,
+    db: Session,
+    user: DemoUser,
+    settings: Settings,
+    connector_type: str,
+    source_ids: list[str],
+) -> bool:
+    if connector_type not in GOOGLE_OAUTH_CONNECTOR_TYPES:
+        return False
+    refs = _source_refs_for_ids(db=db, user=user, source_ids=source_ids)
+    if not refs:
+        return False
+    try:
+        _, prepared = _prepare_default_review_batch(
+            db=db,
+            user=user,
+            settings=settings,
+            refs=refs,
+        )
+        return (
+            find_matching_review_thread(
+                db,
+                prepared=prepared,
+                actor=user,
+                settings=settings,
+            )
+            is not None
+        )
+    except ReviewWorkflowPreflightError:
+        return False
+
+
+def _review_batch_hmac(
+    *,
+    db: Session,
+    user: DemoUser,
+    settings: Settings,
+    refs: list[SourceVersionRef],
+) -> str | None:
+    if not refs:
+        return None
+    _, prepared = _prepare_default_review_batch(
+        db=db,
+        user=user,
+        settings=settings,
+        refs=refs,
+    )
+    return prepared.input_hash
 
 
 def _connector_uses_slack_llm_project_routing(
@@ -1178,9 +1420,24 @@ def _slack_channel_options(raw_channel_ids: str) -> list[dict[str, object]]:
     ]
 
 
-def _sync_job_response(job: SyncJob | None) -> dict[str, object] | None:
+def _sync_job_response(
+    *,
+    db: Session,
+    user: DemoUser,
+    job: SyncJob | None,
+) -> dict[str, object] | None:
     if job is None:
         return None
+    refs: list[SourceVersionRef] = []
+    if job.status == 'complete':
+        sources = db.scalars(
+            select(Source).where(
+                Source.raw_metadata['last_changed_sync_job_id'].as_string()
+                == job.job_id,
+                Source.permission_level.in_(tuple(user.permission_levels)),
+            )
+        ).all()
+        refs = source_version_refs(sources)
     return {
         'job_id': job.job_id,
         'status': job.status,
@@ -1188,6 +1445,7 @@ def _sync_job_response(job: SyncJob | None) -> dict[str, object] | None:
         'progress_pct': job.progress_pct,
         'created_at': job.created_at.isoformat() if job.created_at else None,
         'updated_at': job.updated_at.isoformat() if job.updated_at else None,
+        'changed_source_refs': [asdict(ref) for ref in refs],
     }
 
 

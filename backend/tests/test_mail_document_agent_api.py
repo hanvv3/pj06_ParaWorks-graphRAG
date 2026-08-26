@@ -216,6 +216,17 @@ def test_gmail_sync_runs_agent_only_for_changed_gmail_sources(client, db_session
     payload = response.json()
     assert payload['connector_type'] == 'gmail'
     assert payload['created_review_items'] == 1
+    assert payload['changed_source_ids'] == [
+        'gmail-project-alpha-redis-summary',
+        'gmail_attachment:gmail-project-alpha-redis-summary:att-budget-pdf',
+    ]
+    assert payload['changed_source_refs'] == [
+        {
+            'source_type': 'gmail_attachment',
+            'source_id': 'gmail_attachment:gmail-project-alpha-redis-summary:att-budget-pdf',
+            'version_or_signature': 'gmail_attachment:gmail-project-alpha-redis-summary:att-budget-pdf:2048',
+        }
+    ]
     review_item = db_session.query(ReviewItem).one()
     assert review_item.payload['agent_name'] == 'mail_document_agent'
     assert all('.mock/project-alpha/redis-summary' in link for link in review_item.source_links)

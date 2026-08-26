@@ -8,6 +8,7 @@ from backend.app.documents.service import (
     parsed_document_from_source_event,
     persist_parsed_document,
 )
+from backend.app.ingestion.source_versions import SourceVersionRef, source_version_refs
 from backend.app.models import (
     DocumentChunk,
     Source,
@@ -18,6 +19,7 @@ from backend.app.models import (
 class IngestionResult:
     created_review_items: int
     changed_source_ids: list[str]
+    changed_source_refs: list[SourceVersionRef]
 
 
 def ingest_events(db: Session, events: list[SourceEvent]) -> int:
@@ -55,6 +57,10 @@ def ingest_events_with_result(db: Session, events: list[SourceEvent]) -> Ingesti
             source.raw_metadata = {**event.raw_metadata, 'participants': list(event.participants)}
 
         parsed_document = parsed_document_from_source_event(event)
+        source.raw_metadata = {
+            **(source.raw_metadata or {}),
+            'content_signature': parsed_document.content_signature,
+        }
         created_chunks.extend(
             persist_parsed_document(
                 db,
@@ -74,9 +80,19 @@ def ingest_events_with_result(db: Session, events: list[SourceEvent]) -> Ingesti
         )
 
     db.commit()
+    db.expire_all()
+    changed_sources = (
+        db.scalars(select(Source).where(Source.source_id.in_(changed_source_ids))).all()
+        if changed_source_ids
+        else []
+    )
     # 룰 기반 추출기를 제거하였으므로 생성된 ReviewItem 개수는 0으로 반환합니다. 
     # 실제 리뷰 아이템은 AI Agent를 통해 별도로 생성됩니다.
-    return IngestionResult(created_review_items=0, changed_source_ids=changed_source_ids)
+    return IngestionResult(
+        created_review_items=0,
+        changed_source_ids=changed_source_ids,
+        changed_source_refs=source_version_refs(changed_sources),
+    )
 
 
 def _same_content_signature(source: Source, event: SourceEvent) -> bool:
