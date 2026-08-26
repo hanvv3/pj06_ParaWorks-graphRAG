@@ -1,6 +1,22 @@
 # ParaWorks Harness Session Handoff
 
-Updated: 2026-05-16
+Updated: 2026-08-26
+
+## 2026-08-26 LangChain·LangGraph runtime foundation decision
+
+- The user approved a focused runtime refactor before Neo4j GraphRAG work.
+- Current code imports and invokes real LangChain/LangGraph libraries, but the
+  graph is a linear callable wrapper without conditional routing, durable
+  checkpointing, or actual `interrupt()` / `Command(resume=...)` behavior.
+- The existing `hitl_checkpoint` response is descriptive Review Queue metadata,
+  not a LangGraph checkpoint.
+- Follow
+  `docs/superpowers/specs/2026-08-26-langchain-langgraph-runtime-foundation-design.md`
+  before starting Neo4j foundation work.
+- Preserve `EvidencePacket`, `PermissionContext`, Review Queue promotion,
+  permission filtering, citations, cache, cost, and SQLite smoke contracts.
+- `needs_more_evidence` remains unresolved and must not resume a paused graph.
+- No production code has been changed for this decision yet.
 
 ## 2026-05-16 Dashboard calendar sync and Review bulk actions
 

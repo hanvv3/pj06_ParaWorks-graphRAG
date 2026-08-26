@@ -206,7 +206,8 @@ Default production direction:
 - Queue: Celery + Redis
 - Frontend: Next.js App Router, TypeScript, Tailwind
 - Agent: LangChain >= 1.2 and current LangGraph
-- Human review: Review Queue first, LangGraph checkpoint later
+- Human review: Review Queue first, then real LangGraph interrupt/resume with
+  PostgreSQL checkpoint persistence before GraphRAG retrieval expansion
 
 SQLite smoke mode must continue working for local demo and tests.
 
@@ -350,8 +351,9 @@ Tasks:
 
 ### Milestone 4. LangGraph HITL Checkpoint Strategy
 
-Goal: Make the human review interrupt/resume boundary explicit before adding
-full checkpoint persistence.
+Goal: Replace the descriptive checkpoint harness with real LangGraph
+interrupt/resume and durable production checkpoint persistence before adding
+Neo4j GraphRAG retrieval.
 
 Tasks:
 
@@ -359,8 +361,14 @@ Tasks:
 - Include target ReviewItem ids, required statuses, resume node, and resume
   policy. Done.
 - Expose checkpoint policy through orchestration status APIs. Done.
-- Next: add persisted checkpoint/resume records when the product needs
-  long-running graph continuation beyond the current harness run.
+- Current priority: implement
+  `docs/superpowers/specs/2026-08-26-langchain-langgraph-runtime-foundation-design.md`.
+- Upgrade the verified LangChain/LangGraph minor lines and lock them.
+- Replace the linear callable wrapper with typed state and conditional routing.
+- Add real `interrupt()` / `Command(resume=...)` behavior and production
+  PostgreSQL checkpoint persistence.
+- Put keyword and pgvector behind a common retriever port before adding the
+  Neo4j retriever branch.
 
 ### Milestone 5. Connector Quality Hardening
 

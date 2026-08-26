@@ -1,10 +1,25 @@
 # ParaWorks Portfolio Log
 
-Last updated: 2026-05-16
+Last updated: 2026-08-26
 
 This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
+
+## 2026-08-26 LangChain·LangGraph runtime foundation design
+
+- Audited the installed architecture and confirmed that ParaWorks calls real
+  LangChain and LangGraph APIs, while identifying that its current graph is
+  still a linear wrapper without durable checkpointing or true HITL resume.
+- Chose a focused runtime refactor before Neo4j GraphRAG so keyword, pgvector,
+  and the future Neo4j retriever share typed LangGraph routing and the same
+  permission/evidence contracts.
+- Defined real Review Queue interruption with `interrupt()`, PostgreSQL-backed
+  checkpoints, `Command(resume=...)`, and fail-closed permission/citation
+  validation.
+- Kept Neo4j, graph projection, and `neo4j-graphrag` implementation out of this
+  first slice so the runtime foundation remains independently testable and
+  reversible.
 
 ## 2026-05-16 Docker Postgres port fallback
 
