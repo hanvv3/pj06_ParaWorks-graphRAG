@@ -1,4 +1,3 @@
-import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
@@ -9,6 +8,7 @@ from backend.app.agent_runtime.contracts import (
     AgentManifest,
     AgentRunResult,
     EvidencePacket,
+    LangChainInvocationPayload,
     TokenUsage,
 )
 from backend.app.agent_runtime.cost_policy import (
@@ -25,7 +25,9 @@ from backend.app.agents.mail_document_agent import (
     MAIL_DOCUMENT_AGENT_MANIFEST,
     MailDocumentAgent,
 )
-from backend.app.agents.mail_document_agent.llm import render_mail_docs_llm_prompt
+from backend.app.agents.mail_document_agent.llm import (
+    render_mail_document_langchain_invocation,
+)
 from backend.app.agents.memory_extraction_agent import (
     DECISION_RECORD_AGENT_MANIFEST,
     HISTORY_AGENT_MANIFEST,
@@ -40,7 +42,7 @@ from backend.app.agents.memory_extraction_agent import (
     LangChainMemoryExtractionModel,
     TimelineAgent,
     TodoAgent,
-    render_memory_extraction_prompt,
+    render_memory_extraction_langchain_invocation,
 )
 from backend.app.core.config import Settings
 from backend.app.schemas.review_workflow import DEFAULT_REVIEW_AGENT_NAMES
@@ -87,25 +89,11 @@ class _ReviewAgentAdapter:
     output_cost_per_1m: float
     max_cost_usd: float | None
     deterministic: bool
-    prompt_renderer: Callable[[EvidencePacket], str]
+    invocation_renderer: Callable[[EvidencePacket], LangChainInvocationPayload]
     preserve_result_model_name: bool = False
 
     def render_estimation_input(self, packet: EvidencePacket) -> str:
-        evidence_context = json.dumps(
-            [
-                {
-                    'source_url': message.source_url,
-                    'source_snippet': message.source_snippet,
-                    'metadata': message.metadata,
-                }
-                for message in packet.messages
-            ],
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(',', ':'),
-            default=str,
-        )
-        return f'{self.prompt_renderer(packet)}\n{evidence_context}'
+        return self.invocation_renderer(packet).canonical_description()
 
     def preflight(self, packet: EvidencePacket) -> AgentCostBudgetDecision:
         if not packet.messages:
@@ -225,9 +213,13 @@ def build_review_agent_catalog(
             model_name=mail_route.model_name,
             model_route_version=mail_route.route_version,
             deterministic=mail_route.deterministic,
-            prompt_renderer=partial(
-                render_mail_docs_llm_prompt,
-                max_input_chars=settings.agent_llm_max_input_chars,
+            invocation_renderer=partial(
+                render_mail_document_langchain_invocation,
+                max_input_chars=getattr(
+                    mail_route.model,
+                    'max_input_chars',
+                    settings.agent_llm_max_input_chars,
+                ),
             ),
             preserve_result_model_name=True,
             **common,
@@ -297,8 +289,8 @@ def _memory_adapters(
                 model_name=route.model_name,
                 model_route_version=route.route_version,
                 deterministic=route.deterministic,
-                prompt_renderer=partial(
-                    render_memory_extraction_prompt,
+                invocation_renderer=partial(
+                    render_memory_extraction_langchain_invocation,
                     expected_item_type=item_type,
                     task_name=task_name,
                     max_input_chars=settings.agent_llm_max_input_chars,

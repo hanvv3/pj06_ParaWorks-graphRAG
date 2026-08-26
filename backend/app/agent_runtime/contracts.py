@@ -1,4 +1,6 @@
+import json
 from dataclasses import dataclass, field
+from typing import Any
 
 _PERMISSION_RANK = {
     'public': 0,
@@ -58,6 +60,39 @@ class EvidencePacket:
     @property
     def source_snippets(self) -> list[str]:
         return [message.source_snippet for message in self.messages]
+
+
+@dataclass(frozen=True)
+class LangChainInvocationPayload:
+    """In-process description shared by estimation and LangChain invocation."""
+
+    messages: tuple[tuple[str, str], ...]
+    structured_output_schema: type[Any] | None = None
+
+    def canonical_description(self) -> str:
+        schema_description = None
+        if self.structured_output_schema is not None:
+            schema_renderer = getattr(
+                self.structured_output_schema,
+                'model_json_schema',
+                None,
+            )
+            if not callable(schema_renderer):
+                raise TypeError('structured output schema must expose model_json_schema')
+            schema_description = schema_renderer()
+        return json.dumps(
+            {
+                'messages': [
+                    {'role': role, 'content': content}
+                    for role, content in self.messages
+                ],
+                'structured_output_schema': schema_description,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+            default=str,
+        )
 
 
 @dataclass(frozen=True)

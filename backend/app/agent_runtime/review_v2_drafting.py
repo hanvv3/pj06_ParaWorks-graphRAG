@@ -132,6 +132,18 @@ class _Lease:
     cached_review_item_ids: tuple[int, ...]
 
 
+@dataclass
+class _LeaseRenewalClaims:
+    prior: _Lease
+    prospective: _Lease | None = None
+
+    @property
+    def cleanup_order(self) -> tuple[_Lease, ...]:
+        if self.prospective is None:
+            return (self.prior,)
+        return (self.prospective, self.prior)
+
+
 class ReviewDraftService:
     def __init__(
         self,
@@ -284,10 +296,18 @@ class ReviewDraftService:
                 ) from None
             results.append((plan, result))
             if index + 1 < len(lease.plans):
+                renewal_claims = _LeaseRenewalClaims(prior=lease)
                 try:
-                    lease = self._renew_lease(workflow_thread_id, lease)
+                    lease = self._renew_lease(
+                        workflow_thread_id,
+                        lease,
+                        claims=renewal_claims,
+                    )
                 except Exception:
-                    self._release_lease_after_failure(workflow_thread_id, lease)
+                    self._release_lease_claims_after_failure(
+                        workflow_thread_id,
+                        renewal_claims.cleanup_order,
+                    )
                     raise
 
         try:
@@ -561,7 +581,13 @@ class ReviewDraftService:
             db.commit()
             return result_value
 
-    def _renew_lease(self, workflow_thread_id: str, lease: _Lease) -> _Lease:
+    def _renew_lease(
+        self,
+        workflow_thread_id: str,
+        lease: _Lease,
+        *,
+        claims: _LeaseRenewalClaims,
+    ) -> _Lease:
         with self._session_factory() as db:
             thread = _locked_thread(db, workflow_thread_id)
             now = self._now()
@@ -581,27 +607,36 @@ class ReviewDraftService:
                     'workflow is cancelled',
                 )
             expires_at = now + self._lease_ttl
-            thread.lease_expires_at = expires_at
-            thread.state_version += 1
-            state_version = thread.state_version
-            db.commit()
-            return replace(
+            prospective = replace(
                 lease,
                 expires_at=expires_at,
-                state_version=state_version,
+                state_version=thread.state_version + 1,
             )
+            claims.prospective = prospective
+            thread.lease_expires_at = expires_at
+            thread.state_version += 1
+            db.commit()
+            return prospective
 
     def _release_lease_after_failure(
         self,
         workflow_thread_id: str,
         lease: _Lease,
     ) -> None:
-        try:
-            self._release_lease(workflow_thread_id, lease)
-        except Exception:
-            # Failure cleanup must never replace the original provider,
-            # validation, serialization, or persistence exception.
-            return
+        self._release_lease_claims_after_failure(workflow_thread_id, (lease,))
+
+    def _release_lease_claims_after_failure(
+        self,
+        workflow_thread_id: str,
+        leases: Sequence[_Lease],
+    ) -> None:
+        for lease in leases:
+            try:
+                self._release_lease(workflow_thread_id, lease)
+            except Exception:
+                # Cleanup must never replace the original provider,
+                # renewal, validation, serialization, or persistence error.
+                continue
 
     def _release_lease(self, workflow_thread_id: str, lease: _Lease) -> None:
         with self._session_factory() as db:

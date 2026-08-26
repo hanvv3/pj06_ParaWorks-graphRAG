@@ -4,6 +4,7 @@ from typing import Any
 
 from backend.app.agent_runtime import (
     EvidencePacket,
+    LangChainInvocationPayload,
     TokenUsage,
     evaluate_agent_cost_budget,
 )
@@ -17,6 +18,25 @@ DEFAULT_MAX_OUTPUT_TOKENS = 512
 DEFAULT_MAX_INPUT_CHARS = 12_000
 DEFAULT_PROMPT_OVERHEAD_CHARS = 3_200
 OPENAI_COMPATIBLE_PROVIDERS = {'openai', 'azure_openai'}
+MAIL_DOCUMENT_SYSTEM_PROMPT = (
+    'You extract one reviewable company history candidate, timeline event, decision, or todo from Gmail, '
+    'Drive, Calendar, or internal document evidence. Think like a Korean business operator: '
+    'the review queue must show what happened, what needs a decision, or what the user should '
+    'do next. The title and summary must be written in Korean. Do not copy raw email headers '
+    'or long body excerpts into the summary. If action is required, use item_type=todo and '
+    'populate structured_data with action_required, task_summary, recommended_next_step, '
+    'assignee, due_date, counterparty, source_subject, business_context, evidence_sentence, '
+    'summary_quality, and reviewability_decision where available. Determine if the evidence is '
+    'For Calendar evidence, use item_type=timeline_event for confirmed meetings, milestones, '
+    'and schedule confirmations; use item_type=todo for preparation, deadline, or follow-up work; '
+    'copy calendar_id, calendar_name, calendar_start, calendar_end, calendar_location, '
+    'calendar_organizer, calendar_attendee_summary, and event_context_key into structured_data. '
+    'reviewable business evidence. If it is purely personal, private, promotional, a newsletter, '
+    'or a low-signal notification without a concrete company work object, set '
+    'is_business_related=false. Return ONLY JSON with fields: '
+    'title, summary, item_type, confidence_score, is_business_related, project_tag, '
+    'structured_data, and optional uncertainty_reason.'
+)
 
 
 class MailDocumentLlmProviderError(RuntimeError):
@@ -56,29 +76,11 @@ class LangChainMailDocumentAgentModel:
         self.max_input_chars = max_input_chars
 
     def extract(self, packet: EvidencePacket) -> MailDocumentAgentModelResponse:
-        messages = [
-            (
-                'system',
-                'You extract one reviewable company history candidate, timeline event, decision, or todo from Gmail, '
-                'Drive, Calendar, or internal document evidence. Think like a Korean business operator: '
-                'the review queue must show what happened, what needs a decision, or what the user should '
-                'do next. The title and summary must be written in Korean. Do not copy raw email headers '
-                'or long body excerpts into the summary. If action is required, use item_type=todo and '
-                'populate structured_data with action_required, task_summary, recommended_next_step, '
-                'assignee, due_date, counterparty, source_subject, business_context, evidence_sentence, '
-                'summary_quality, and reviewability_decision where available. Determine if the evidence is '
-                'For Calendar evidence, use item_type=timeline_event for confirmed meetings, milestones, '
-                'and schedule confirmations; use item_type=todo for preparation, deadline, or follow-up work; '
-                'copy calendar_id, calendar_name, calendar_start, calendar_end, calendar_location, '
-                'calendar_organizer, calendar_attendee_summary, and event_context_key into structured_data. '
-                'reviewable business evidence. If it is purely personal, private, promotional, a newsletter, '
-                'or a low-signal notification without a concrete company work object, set '
-                'is_business_related=false. Return ONLY JSON with fields: '
-                'title, summary, item_type, confidence_score, is_business_related, project_tag, '
-                'structured_data, and optional uncertainty_reason.',
-            ),
-            ('user', render_mail_docs_llm_prompt(packet, max_input_chars=self.max_input_chars)),
-        ]
+        invocation = render_mail_document_langchain_invocation(
+            packet,
+            max_input_chars=self.max_input_chars,
+        )
+        messages = list(invocation.messages)
         try:
             response = self.chat_model.invoke(messages)
         except Exception as exc:  # pragma: no cover - provider-specific branch
@@ -105,6 +107,9 @@ class LangChainMailDocumentAgentModel:
 class FallbackMailDocumentAgentModel:
     def __init__(self, providers: list[Any]) -> None:
         self.providers = providers
+        self.max_input_chars = (
+            providers[0].max_input_chars if providers else DEFAULT_MAX_INPUT_CHARS
+        )
 
     def extract(self, packet: EvidencePacket) -> MailDocumentAgentModelResponse:
         errors: list[str] = []
@@ -204,6 +209,10 @@ def render_mail_docs_llm_prompt(
     evidence_rows = []
     remaining_chars = max_input_chars
     for message in packet.messages:
+        source_snippet = message.source_snippet[
+            : max(0, min(len(message.source_snippet), remaining_chars))
+        ]
+        remaining_chars -= len(source_snippet)
         text = message.text[: max(0, min(len(message.text), remaining_chars))]
         remaining_chars -= len(text)
         evidence_rows.append(
@@ -211,9 +220,11 @@ def render_mail_docs_llm_prompt(
                 'source_type': message.metadata.get('source_type', 'unknown'),
                 'source_id': message.source_id,
                 'source_url': message.source_url,
+                'source_snippet': source_snippet,
                 'timestamp': message.timestamp,
                 'author': message.author,
                 'permission_level': message.permission_level,
+                'metadata': message.metadata,
                 'parser_status': message.metadata.get('parser_status'),
                 'section_path': message.metadata.get('section_path'),
                 'calendar_id': message.metadata.get('calendar_id'),
@@ -254,6 +265,26 @@ def render_mail_docs_llm_prompt(
             'evidence': evidence_rows,
         },
         ensure_ascii=False,
+        default=str,
+    )
+
+
+def render_mail_document_langchain_invocation(
+    packet: EvidencePacket,
+    *,
+    max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
+) -> LangChainInvocationPayload:
+    return LangChainInvocationPayload(
+        messages=(
+            ('system', MAIL_DOCUMENT_SYSTEM_PROMPT),
+            (
+                'user',
+                render_mail_docs_llm_prompt(
+                    packet,
+                    max_input_chars=max_input_chars,
+                ),
+            ),
+        ),
     )
 
 
@@ -332,16 +363,22 @@ def _preflight_response(
 
 def _estimated_token_usage(packet: EvidencePacket, settings: MailDocumentLlmSettings) -> TokenUsage:
     max_input_chars = _effective_max_input_chars(settings)
-    prompt = render_mail_docs_llm_prompt(packet, max_input_chars=max_input_chars)
+    prompt = render_mail_document_langchain_invocation(
+        packet,
+        max_input_chars=max_input_chars,
+    ).canonical_description()
     affordable_prompt_chars = _affordable_prompt_chars(settings)
     for _ in range(4):
         if affordable_prompt_chars is None or len(prompt) <= affordable_prompt_chars or max_input_chars <= 0:
             break
         overage = len(prompt) - affordable_prompt_chars
         max_input_chars = max(0, max_input_chars - overage - 128)
-        prompt = render_mail_docs_llm_prompt(packet, max_input_chars=max_input_chars)
+        prompt = render_mail_document_langchain_invocation(
+            packet,
+            max_input_chars=max_input_chars,
+        ).canonical_description()
     return TokenUsage(
-        input_tokens=max(1, len(prompt)),
+        input_tokens=max(1, len(prompt) // 4),
         output_tokens=settings.max_output_tokens,
     )
 
@@ -362,7 +399,8 @@ def _affordable_prompt_chars(settings: MailDocumentLlmSettings) -> int | None:
     remaining_input_units = total_budget_units - reserved_output_units
     if remaining_input_units <= 0:
         return 0
-    return int(remaining_input_units // settings.input_cost_per_1m)
+    affordable_input_tokens = remaining_input_units // settings.input_cost_per_1m
+    return int(affordable_input_tokens * 4)
 
 
 def _available_providers(

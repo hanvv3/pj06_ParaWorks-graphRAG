@@ -3,7 +3,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from backend.app.agent_runtime import EvidencePacket
+from backend.app.agent_runtime import EvidencePacket, LangChainInvocationPayload
 from backend.app.agents.memory_extraction_agent.agent import (
     MemoryExtractionModelResponse,
 )
@@ -37,29 +37,25 @@ class LangChainMemoryExtractionModel:
         self.max_input_chars = max_input_chars
 
     def extract(self, packet: EvidencePacket) -> MemoryExtractionModelResponse:
-        system_prompt = (
-            f'You are performing {self.task_name} for ParaWorks. '
-            'The title and summary must be written in Korean. '
-            'Use only the provided evidence. '
-            'Return one reviewable candidate through the structured schema. '
-            f'The item_type must be {self.expected_item_type}.'
-        )
-        user_prompt = render_memory_extraction_prompt(
+        invocation = render_memory_extraction_langchain_invocation(
             packet,
             expected_item_type=self.expected_item_type,
             task_name=self.task_name,
             max_input_chars=self.max_input_chars,
         )
-        messages = [('system', system_prompt), ('user', user_prompt)]
-        structured_model = self.chat_model.with_structured_output(StructuredMemoryExtractionOutput)
-        output = _coerce_structured_output(structured_model.invoke(messages))
+        structured_model = self.chat_model.with_structured_output(
+            invocation.structured_output_schema
+        )
+        output = _coerce_structured_output(
+            structured_model.invoke(list(invocation.messages))
+        )
         summary = output.summary
         return MemoryExtractionModelResponse(
             title=output.title,
             summary=summary,
             item_type=output.item_type or self.expected_item_type,
             confidence_score=output.confidence_score,
-            input_tokens=max(1, (len(system_prompt) + len(user_prompt)) // 4),
+            input_tokens=max(1, len(invocation.canonical_description()) // 4),
             output_tokens=max(1, (len(output.title) + len(summary)) // 4),
             payload_fields=output.payload_fields,
             uncertainty_reason=output.uncertainty_reason,
@@ -76,15 +72,21 @@ def render_memory_extraction_prompt(
     evidence_rows = []
     remaining_chars = max_input_chars
     for message in packet.messages:
+        source_snippet = message.source_snippet[
+            : max(0, min(len(message.source_snippet), remaining_chars))
+        ]
+        remaining_chars -= len(source_snippet)
         text = message.text[: max(0, min(len(message.text), remaining_chars))]
         remaining_chars -= len(text)
         evidence_rows.append(
             {
                 'source_id': message.source_id,
                 'source_url': message.source_url,
+                'source_snippet': source_snippet,
                 'timestamp': message.timestamp,
                 'author': message.author,
                 'permission_level': message.permission_level,
+                'metadata': message.metadata,
                 'text': text,
             }
         )
@@ -105,6 +107,38 @@ def render_memory_extraction_prompt(
             'evidence': evidence_rows,
         },
         ensure_ascii=False,
+        default=str,
+    )
+
+
+def render_memory_extraction_langchain_invocation(
+    packet: EvidencePacket,
+    *,
+    expected_item_type: str,
+    task_name: str,
+    max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
+) -> LangChainInvocationPayload:
+    system_prompt = (
+        f'You are performing {task_name} for ParaWorks. '
+        'The title and summary must be written in Korean. '
+        'Use only the provided evidence. '
+        'Return one reviewable candidate through the structured schema. '
+        f'The item_type must be {expected_item_type}.'
+    )
+    return LangChainInvocationPayload(
+        messages=(
+            ('system', system_prompt),
+            (
+                'user',
+                render_memory_extraction_prompt(
+                    packet,
+                    expected_item_type=expected_item_type,
+                    task_name=task_name,
+                    max_input_chars=max_input_chars,
+                ),
+            ),
+        ),
+        structured_output_schema=StructuredMemoryExtractionOutput,
     )
 
 

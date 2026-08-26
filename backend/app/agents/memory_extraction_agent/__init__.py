@@ -25,6 +25,7 @@ from backend.app.agents.memory_extraction_agent.agent import (
 from backend.app.agents.memory_extraction_agent.langchain_adapter import (
     LangChainMemoryExtractionModel,
     StructuredMemoryExtractionOutput,
+    render_memory_extraction_langchain_invocation,
     render_memory_extraction_prompt,
 )
 from backend.app.agents.memory_extraction_agent.service import (
@@ -66,4 +67,5 @@ __all__ = [
     'build_memory_extraction_evidence_packet',
     'create_memory_extraction_review_items',
     'render_memory_extraction_prompt',
+    'render_memory_extraction_langchain_invocation',
 ]

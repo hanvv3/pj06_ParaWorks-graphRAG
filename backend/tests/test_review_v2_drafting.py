@@ -966,6 +966,111 @@ def test_lease_renewal_requires_exact_owned_token_and_state_cas(db_session) -> N
         assert thread.state_version == 2
 
 
+@pytest.mark.parametrize('lease_stolen_after_commit', [False, True])
+def test_ambiguous_renewal_commit_cleanup_checks_old_and_prospective_claims(
+    db_session,
+    lease_stolen_after_commit: bool,
+) -> None:
+    class InjectedRenewalCommitError(RuntimeError):
+        pass
+
+    settings = _settings()
+    source = _seed_source(db_session)
+    db_session.commit()
+    first = _FakeAdapter(_manifest('mail_document_agent'))
+    second = _FakeAdapter(_manifest('history_agent'))
+    adapters = [
+        first
+        if name == 'mail_document_agent'
+        else second
+        if name == 'history_agent'
+        else _FakeAdapter(_manifest(name))
+        for name in DEFAULT_REVIEW_AGENT_NAMES
+    ]
+    catalog = ReviewAgentCatalog(adapters)
+    _, thread_id = _create_workflow(
+        db_session,
+        source=source,
+        catalog=catalog,
+        settings=settings,
+        agent_names=('mail_document_agent', 'history_agent'),
+    )
+
+    normal_factory = _session_factory(db_session)
+    injected = False
+
+    class AmbiguousRenewalSession(Session):
+        def commit(self) -> None:
+            nonlocal injected
+            renewal = next(
+                (
+                    value
+                    for value in self.dirty
+                    if isinstance(value, AgentWorkflowThread)
+                    and value.lease_token is not None
+                    and value.state_version == 2
+                ),
+                None,
+            )
+            super().commit()
+            if renewal is None or injected:
+                return
+            injected = True
+            if lease_stolen_after_commit:
+                with normal_factory() as thief_db:
+                    stolen = thief_db.get(AgentWorkflowThread, thread_id)
+                    assert stolen is not None
+                    stolen.lease_token = 'foreign-owner-token'
+                    stolen.lease_expires_at = datetime(2026, 8, 27, 10, 0, tzinfo=UTC)
+                    stolen.state_version += 1
+                    thief_db.commit()
+            raise InjectedRenewalCommitError('renewal commit outcome is ambiguous')
+
+    ambiguous_local = sessionmaker(
+        bind=db_session.get_bind(),
+        class_=AmbiguousRenewalSession,
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+    )
+
+    with pytest.raises(
+        InjectedRenewalCommitError,
+        match='renewal commit outcome is ambiguous',
+    ):
+        ReviewDraftService(
+            session_factory=ambiguous_local,
+            catalog=catalog,
+            settings=settings,
+        ).draft(
+            workflow_thread_id=thread_id,
+            actor_subject_id='actor-1',
+            allowed_permission_levels=('public', 'internal'),
+        )
+
+    assert injected is True
+    assert first.run_calls == 1
+    assert second.run_calls == 0
+    assert _row_counts(normal_factory) == (1, 0, 0)
+    with normal_factory() as db:
+        thread = db.get(AgentWorkflowThread, thread_id)
+        assert thread is not None
+        if lease_stolen_after_commit:
+            assert thread.status == 'drafting'
+            assert thread.lease_token == 'foreign-owner-token'
+            assert thread.lease_expires_at is not None
+            foreign_expiry = thread.lease_expires_at
+            if foreign_expiry.tzinfo is None:
+                foreign_expiry = foreign_expiry.replace(tzinfo=UTC)
+            assert foreign_expiry == datetime(2026, 8, 27, 10, 0, tzinfo=UTC)
+            assert thread.state_version == 3
+        else:
+            assert thread.status == 'created'
+            assert thread.lease_token is None
+            assert thread.lease_expires_at is None
+            assert thread.state_version == 3
+
+
 def test_persistence_failure_rolls_back_and_releases_only_owned_lease(
     db_session,
     monkeypatch,

@@ -22,6 +22,7 @@ from backend.app.agent_runtime.review_v2_agents import (
     build_review_agent_catalog,
 )
 from backend.app.agents.mail_document_agent import (
+    LangChainMailDocumentAgentModel,
     MailDocumentAgentModelResponse,
     MailDocumentLlmSettings,
     build_langchain_mail_document_agent_model,
@@ -69,6 +70,7 @@ class _FakeStructuredInvoker:
 
     def invoke(self, messages):
         self.owner.invoke_count += 1
+        self.owner.invoked_messages = tuple(messages)
         prompt = json.loads(messages[1][1])
         item_type = prompt['expected_item_type']
         payload_key = {
@@ -94,11 +96,53 @@ class _FakeStructuredChatModel:
     def __init__(self) -> None:
         self.structured_schema_count = 0
         self.invoke_count = 0
+        self.structured_schema = None
+        self.invoked_messages = None
 
     def with_structured_output(self, schema):
         assert schema.__name__ == 'StructuredMemoryExtractionOutput'
         self.structured_schema_count += 1
+        self.structured_schema = schema
         return _FakeStructuredInvoker(self)
+
+
+class _FakeMailChatModel:
+    def __init__(self) -> None:
+        self.invoked_messages = None
+
+    def invoke(self, messages):
+        self.invoked_messages = tuple(messages)
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    'title': '메일 후보',
+                    'summary': '메일 근거에서 검토 후보를 만들었습니다.',
+                    'item_type': 'history_event',
+                    'confidence_score': 0.9,
+                    'is_business_related': True,
+                    'structured_data': {'reason': 'captured invocation'},
+                },
+                ensure_ascii=False,
+            ),
+            usage_metadata={'input_tokens': 12, 'output_tokens': 5},
+        )
+
+
+def _captured_invocation_description(messages, schema) -> str:
+    return json.dumps(
+        {
+            'messages': [
+                {'role': role, 'content': content}
+                for role, content in messages
+            ],
+            'structured_output_schema': (
+                schema.model_json_schema() if schema is not None else None
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+    )
 
 
 def _packet() -> EvidencePacket:
@@ -211,12 +255,84 @@ def test_preflight_counts_rendered_prompt_urls_snippets_and_metadata(
     adapter = catalog.get(agent_name)
     rendered_input = adapter.render_estimation_input(packet)
     decision = adapter.preflight(packet)
+    rendered_payload = json.loads(rendered_input)
 
-    assert expected_prompt(packet) in rendered_input
+    assert rendered_payload['messages'][0]['role'] == 'system'
+    assert rendered_payload['messages'][1] == {
+        'role': 'user',
+        'content': expected_prompt(packet),
+    }
     assert packet.messages[0].source_url in rendered_input
     assert packet.messages[0].source_snippet in rendered_input
     assert 'metadata-is-counted' in rendered_input
     assert decision.token_usage.input_tokens == max(1, len(rendered_input) // 4)
+
+
+def test_mail_preflight_estimation_exactly_matches_langchain_invocation_payload() -> None:
+    chat_model = _FakeMailChatModel()
+
+    def mail_builder(_settings: MailDocumentLlmSettings):
+        return LangChainMailDocumentAgentModel(
+            provider='fake',
+            model_name='fake-mail-model',
+            chat_model=chat_model,
+            # Deliberately differs from Settings so the adapter must consume
+            # the actual model's shared renderer configuration.
+            max_input_chars=32,
+        )
+
+    catalog = build_review_agent_catalog(
+        _configured_settings(),
+        mail_model_builder=mail_builder,
+        chat_model_builder=lambda _settings, **_kwargs: _FakeStructuredChatModel(),
+    )
+    packet = _packet()
+    packet.messages[0].metadata['review_marker'] = 'actual-mail-metadata'
+    adapter = catalog.get('mail_document_agent')
+
+    adapter.run(packet)
+
+    assert chat_model.invoked_messages is not None
+    captured = _captured_invocation_description(
+        chat_model.invoked_messages,
+        schema=None,
+    )
+    assert 'actual-mail-metadata' in captured
+    assert packet.messages[0].source_snippet in captured
+    assert adapter.render_estimation_input(packet) == captured
+    assert adapter.preflight(packet).token_usage.input_tokens == max(
+        1,
+        len(captured) // 4,
+    )
+
+
+def test_memory_preflight_estimation_exactly_matches_messages_and_schema_payload() -> None:
+    chat_model = _FakeStructuredChatModel()
+    catalog = build_review_agent_catalog(
+        _configured_settings(),
+        mail_model_builder=lambda _settings: _FakeMailModel(),
+        chat_model_builder=lambda _settings, **_kwargs: chat_model,
+    )
+    packet = _packet()
+    packet.messages[0].metadata['review_marker'] = 'actual-memory-metadata'
+    adapter = catalog.get('history_agent')
+
+    result = adapter.run(packet)
+
+    assert chat_model.invoked_messages is not None
+    assert chat_model.structured_schema is not None
+    captured = _captured_invocation_description(
+        chat_model.invoked_messages,
+        schema=chat_model.structured_schema,
+    )
+    assert 'actual-memory-metadata' in captured
+    assert packet.messages[0].source_snippet in captured
+    assert adapter.render_estimation_input(packet) == captured
+    assert adapter.preflight(packet).token_usage.input_tokens == max(
+        1,
+        len(captured) // 4,
+    )
+    assert result.cost.token_usage.input_tokens == max(1, len(captured) // 4)
 
 
 def test_catalog_passes_each_adapter_output_cap_to_its_model_builder() -> None:
