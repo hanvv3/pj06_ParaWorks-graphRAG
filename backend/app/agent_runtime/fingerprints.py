@@ -4,6 +4,20 @@ import json
 import math
 import unicodedata
 
+from backend.app.core.config import Settings
+
+LOCAL_FINGERPRINT_SECRET = 'local-development-agent-runtime-fingerprint-secret'
+
+
+def fingerprint_secret_bytes(settings: Settings) -> tuple[bytes, str]:
+    secret = settings.agent_runtime_fingerprint_secret
+    key_version = settings.agent_runtime_fingerprint_key_version.strip()
+    if not secret or not key_version:
+        raise ValueError('agent runtime fingerprint configuration is incomplete')
+    if settings.paraworks_env == 'production' and secret == LOCAL_FINGERPRINT_SECRET:
+        raise ValueError('production requires a dedicated fingerprint secret')
+    return secret.encode('utf-8'), key_version
+
 
 def _normalize_json_value(value: object) -> object:
     if value is None or type(value) in {bool, int}:

@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +12,14 @@ class Settings(BaseSettings):
     paraworks_seed_demo_data: bool = False
     paraworks_database_url: str | None = None
     paraworks_demo_database_url: str | None = None
+    langgraph_review_v2_enabled: bool = False
+    langgraph_rag_v2_enabled: bool = False
+    langgraph_strict_msgpack: bool = False
+    langgraph_checkpoint_retention_days: int = Field(default=30, ge=1, le=3650)
+    agent_runtime_fingerprint_secret: str = (
+        'local-development-agent-runtime-fingerprint-secret'
+    )
+    agent_runtime_fingerprint_key_version: str = 'v1'
     auth_session_cookie_name: str = 'paraworks_session'
     auth_refresh_cookie_name: str = 'paraworks_refresh'
     auth_session_secret: str = 'local-development-session-secret'
