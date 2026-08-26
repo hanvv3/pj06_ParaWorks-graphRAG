@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -219,6 +220,19 @@ def test_agent_runtime_migration_upgrades_fresh_schema(
     engine = create_engine(database_url)
     _assert_revision(engine, REVISION)
     _assert_runtime_schema(engine)
+
+
+def test_agent_runtime_migration_preserves_application_loggers(
+    migration_database: tuple[Config, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _database_url = migration_database
+    application_logger = logging.getLogger('AssistantTool')
+    monkeypatch.setattr(application_logger, 'disabled', False)
+
+    _run_alembic(command.upgrade, config, 'head')
+
+    assert application_logger.disabled is False
 
 
 def test_agent_runtime_migration_upgrades_existing_schema_idempotently(
