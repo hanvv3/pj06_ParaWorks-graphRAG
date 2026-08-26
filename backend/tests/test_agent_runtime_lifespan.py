@@ -1,5 +1,10 @@
+import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.agent_runtime.checkpointing import (
+    CheckpointRuntime,
+    CheckpointUnavailableError,
+)
 from backend.app.core.config import Settings
 from backend.app.main import create_app
 
@@ -46,3 +51,30 @@ def test_app_lifespan_starts_exposes_and_closes_checkpoint_runtime_once() -> Non
         assert client.get('/health').status_code == 200
 
     assert events == ['factory', 'start', 'close']
+
+
+def test_same_app_lifespan_reentry_rejects_closed_checkpoint_runtime() -> None:
+    runtime = CheckpointRuntime(
+        Settings(
+            _env_file=None,
+            paraworks_demo_mode=True,
+            langgraph_review_v2_enabled=True,
+        )
+    )
+    app = create_app(
+        checkpoint_runtime_factory=lambda _settings: runtime,
+    )
+
+    with TestClient(app):
+        assert runtime.readiness.ready is True
+
+    assert runtime.readiness.ready is False
+    assert runtime.readiness.durable is False
+    with pytest.raises(
+        CheckpointUnavailableError,
+        match='^checkpoint runtime is closed$',
+    ), TestClient(app):
+        pass
+
+    assert runtime.saver is None
+    assert runtime.readiness.error_code == 'checkpoint_unavailable'

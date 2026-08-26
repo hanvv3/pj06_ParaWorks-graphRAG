@@ -1,5 +1,6 @@
 import math
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -18,6 +19,7 @@ from backend.app.core.config import Settings
 
 CheckpointMode = Literal['disabled', 'memory', 'postgres']
 _CHECKPOINT_JSON_ERROR = 'checkpoint value must be JSON-safe'
+_CHECKPOINT_RUNTIME_CLOSED_ERROR = 'checkpoint runtime is closed'
 
 
 class CheckpointUnavailableError(RuntimeError):
@@ -169,6 +171,7 @@ class CheckpointRuntime:
         self._pool: object | None = None
         self._saver: BaseCheckpointSaver | None = None
         self._started = False
+        self._closed = False
         self._readiness = CheckpointReadiness(
             enabled=self._mode != 'disabled',
             mode=self._mode,
@@ -186,6 +189,8 @@ class CheckpointRuntime:
         return self._readiness
 
     def start(self) -> None:
+        if self._closed:
+            raise CheckpointUnavailableError(_CHECKPOINT_RUNTIME_CLOSED_ERROR)
         if self._started:
             return
         self._started = True
@@ -226,10 +231,6 @@ class CheckpointRuntime:
                 checkpoint_store='postgres',
             )
         except Exception:
-            if self._pool is not None:
-                self._pool.close()
-            self._pool = None
-            self._saver = None
             self._readiness = CheckpointReadiness(
                 enabled=True,
                 mode='postgres',
@@ -238,12 +239,31 @@ class CheckpointRuntime:
                 checkpoint_store='postgres',
                 error_code='checkpoint_unavailable',
             )
+            self._clear_resources()
 
     def close(self) -> None:
-        if self._pool is not None:
-            self._pool.close()
+        if self._closed:
+            return
+        self._closed = True
+        self._started = False
+        error_code = self._readiness.error_code
+        if self._readiness.enabled and error_code is None:
+            error_code = 'checkpoint_unavailable'
+        self._readiness = replace(
+            self._readiness,
+            ready=False,
+            durable=False,
+            error_code=error_code,
+        )
+        self._clear_resources()
+
+    def _clear_resources(self) -> None:
+        pool = self._pool
         self._pool = None
         self._saver = None
+        if pool is not None:
+            with suppress(Exception):
+                pool.close()
 
 
 def build_checkpoint_runtime(settings: Settings) -> CheckpointRuntime:

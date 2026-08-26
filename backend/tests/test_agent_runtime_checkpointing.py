@@ -7,6 +7,7 @@ from pydantic import BaseModel, ValidationError
 from backend.app.agent_runtime.checkpointing import (
     CheckpointReadiness,
     CheckpointRuntime,
+    CheckpointUnavailableError,
     build_postgres_pool,
     build_postgres_saver,
     build_strict_checkpoint_serializer,
@@ -29,8 +30,14 @@ class _UnsafePydanticModel(BaseModel):
 
 
 class _FakePool:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        close_error: Exception | None = None,
+    ) -> None:
         self.events = events
+        self.close_error = close_error
 
     def open(self, *, wait: bool) -> None:
         self.events.append('open')
@@ -46,6 +53,8 @@ class _FakePool:
 
     def close(self) -> None:
         self.events.append('close')
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class _FakeSaver:
@@ -75,8 +84,9 @@ def _checkpoint_runtime(
     events: list[str],
     tables_ready: bool = True,
     strict: bool = True,
+    close_error: Exception | None = None,
 ) -> tuple[CheckpointRuntime, _FakeSaver]:
-    pool = _FakePool(events)
+    pool = _FakePool(events, close_error=close_error)
     saver = _FakeSaver(events)
 
     def pool_factory(dsn: str) -> _FakePool:
@@ -285,6 +295,78 @@ def test_postgres_runtime_close_is_idempotent_and_closes_pool_once() -> None:
     assert saver.setup_calls == 0
     assert runtime.saver is None
     assert events == ['open', 'wait', 'check', 'connection', 'saver', 'close']
+
+
+def test_startup_cleanup_close_error_stays_sanitized_and_clears_runtime() -> None:
+    events: list[str] = []
+    runtime, saver = _checkpoint_runtime(
+        events=events,
+        tables_ready=False,
+        close_error=RuntimeError('credential-marker'),
+    )
+
+    runtime.start()
+    runtime.close()
+
+    assert runtime.saver is None
+    assert runtime.readiness.ready is False
+    assert runtime.readiness.durable is False
+    assert runtime.readiness.error_code == 'checkpoint_unavailable'
+    assert 'credential-marker' not in repr(runtime.readiness)
+    assert saver.setup_calls == 0
+    assert events == ['open', 'wait', 'check', 'connection', 'close']
+
+
+def test_close_error_is_sanitized_and_runtime_becomes_closed() -> None:
+    events: list[str] = []
+    runtime, saver = _checkpoint_runtime(
+        events=events,
+        close_error=RuntimeError('credential-marker'),
+    )
+    runtime.start()
+
+    runtime.close()
+    runtime.close()
+
+    assert runtime.saver is None
+    assert runtime.readiness == CheckpointReadiness(
+        enabled=True,
+        mode='postgres',
+        ready=False,
+        durable=False,
+        checkpoint_store='postgres',
+        error_code='checkpoint_unavailable',
+    )
+    assert 'credential-marker' not in repr(runtime.readiness)
+    assert saver.setup_calls == 0
+    assert events == ['open', 'wait', 'check', 'connection', 'saver', 'close']
+
+
+def test_closed_runtime_rejects_restart_with_bounded_error() -> None:
+    settings = Settings(
+        _env_file=None,
+        paraworks_demo_mode=True,
+        langgraph_review_v2_enabled=True,
+    )
+    runtime = CheckpointRuntime(settings)
+    runtime.start()
+    runtime.close()
+
+    with pytest.raises(
+        CheckpointUnavailableError,
+        match='^checkpoint runtime is closed$',
+    ):
+        runtime.start()
+
+    assert runtime.saver is None
+    assert runtime.readiness == CheckpointReadiness(
+        enabled=True,
+        mode='memory',
+        ready=False,
+        durable=False,
+        checkpoint_store='memory',
+        error_code='checkpoint_unavailable',
+    )
 
 
 def test_sqlalchemy_url_is_converted_to_psycopg_dsn_without_decoding_password() -> None:
