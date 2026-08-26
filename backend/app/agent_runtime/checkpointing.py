@@ -1,9 +1,11 @@
+import math
 from dataclasses import dataclass
 from typing import Literal
 
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.types import Interrupt
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from sqlalchemy.engine import make_url
@@ -12,6 +14,7 @@ from sqlalchemy.exc import ArgumentError
 from backend.app.core.config import Settings
 
 CheckpointMode = Literal['disabled', 'memory', 'postgres']
+_CHECKPOINT_JSON_ERROR = 'checkpoint value must be JSON-safe'
 
 
 class CheckpointUnavailableError(RuntimeError):
@@ -26,6 +29,49 @@ class CheckpointReadiness:
     durable: bool
     checkpoint_store: str
     error_code: str | None = None
+
+
+def _validate_json_checkpoint_value(value: object) -> None:
+    if value is None or type(value) in {bool, int, str}:
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(_CHECKPOINT_JSON_ERROR)
+        return
+    if type(value) is list:
+        for item in value:
+            _validate_json_checkpoint_value(item)
+        return
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError(_CHECKPOINT_JSON_ERROR)
+            _validate_json_checkpoint_value(item)
+        return
+    raise ValueError(_CHECKPOINT_JSON_ERROR)
+
+
+def _validate_checkpoint_serialization_input(value: object) -> None:
+    # LangGraph 1.2.11 persists pending interrupts as tuple[Interrupt, ...].
+    # This is the sole non-JSON transport envelope; its application value stays JSON-only.
+    if type(value) is tuple:
+        if not value or any(type(item) is not Interrupt for item in value):
+            raise ValueError(_CHECKPOINT_JSON_ERROR)
+        for item in value:
+            if type(item.id) is not str:
+                raise ValueError(_CHECKPOINT_JSON_ERROR)
+            _validate_json_checkpoint_value(item.value)
+        return
+    _validate_json_checkpoint_value(value)
+
+
+class _StrictCheckpointSerializer(JsonPlusSerializer):
+    def dumps_typed(self, obj: object) -> tuple[str, bytes]:
+        try:
+            _validate_checkpoint_serialization_input(obj)
+        except RecursionError:
+            raise ValueError(_CHECKPOINT_JSON_ERROR) from None
+        return super().dumps_typed(obj)
 
 
 def resolve_checkpoint_mode(settings: Settings) -> CheckpointMode:
@@ -55,7 +101,7 @@ def sqlalchemy_url_to_psycopg_dsn(database_url: str) -> str:
 
 
 def build_strict_checkpoint_serializer() -> JsonPlusSerializer:
-    return JsonPlusSerializer(
+    return _StrictCheckpointSerializer(
         pickle_fallback=False,
         allowed_json_modules=None,
         allowed_msgpack_modules=None,
@@ -90,9 +136,10 @@ def checkpoint_tables_ready(pool: ConnectionPool) -> bool:
                     to_regclass('checkpoint_writes') IS NOT NULL AS writes,
                     EXISTS (
                         SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_name = 'checkpoint_writes'
-                          AND column_name = 'task_path'
+                        FROM pg_catalog.pg_attribute
+                        WHERE attrelid = to_regclass('checkpoint_writes')
+                          AND attname = 'task_path'
+                          AND NOT attisdropped
                     ) AS task_path
                 """
         )

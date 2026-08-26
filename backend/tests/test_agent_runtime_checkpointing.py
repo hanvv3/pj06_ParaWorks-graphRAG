@@ -1,15 +1,29 @@
+from dataclasses import dataclass
+
 import pytest
 from psycopg.rows import dict_row
+from pydantic import BaseModel, ValidationError
 
 from backend.app.agent_runtime.checkpointing import (
     build_postgres_pool,
+    build_postgres_saver,
     build_strict_checkpoint_serializer,
+    checkpoint_tables_ready,
     resolve_checkpoint_mode,
     sqlalchemy_url_to_psycopg_dsn,
 )
 from backend.app.agent_runtime.fingerprints import fingerprint_secret_bytes
 from backend.app.agent_runtime.state import ReviewGraphState
 from backend.app.core.config import Settings
+
+
+@dataclass
+class _UnsafeDataclass:
+    value: str
+
+
+class _UnsafePydanticModel(BaseModel):
+    value: str
 
 
 def _valid_checkpoint_state() -> ReviewGraphState:
@@ -30,6 +44,8 @@ def test_checkpoint_mode_matrix_preserves_disabled_smoke_and_postgres_modes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv('PARAWORKS_DEMO_MODE', raising=False)
+    monkeypatch.delenv('PARAWORKS_DATABASE_URL', raising=False)
+    monkeypatch.delenv('PARAWORKS_DEMO_DATABASE_URL', raising=False)
 
     assert resolve_checkpoint_mode(
         Settings(_env_file=None, langgraph_review_v2_enabled=False)
@@ -75,6 +91,36 @@ def test_sqlite_url_rejection_does_not_echo_credentials_or_input_url() -> None:
     assert database_url not in error
 
 
+def test_malformed_database_url_rejection_does_not_echo_parser_input() -> None:
+    database_url = 'postgresql+psycopg://user:credential-marker@db:bad/runtime'
+
+    with pytest.raises(ValueError) as exc_info:
+        sqlalchemy_url_to_psycopg_dsn(database_url)
+
+    error = str(exc_info.value)
+    assert error == 'unsupported checkpoint database URL'
+    assert 'credential-marker' not in error
+    assert database_url not in error
+
+
+def test_enabled_checkpoint_mode_rejects_unsupported_backend_without_secret() -> None:
+    database_url = 'mysql://user:credential-marker@db/runtime'
+    settings = Settings(
+        _env_file=None,
+        paraworks_demo_mode=False,
+        database_url=database_url,
+        langgraph_review_v2_enabled=True,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        resolve_checkpoint_mode(settings)
+
+    error = str(exc_info.value)
+    assert error == 'unsupported checkpoint database URL'
+    assert 'credential-marker' not in error
+    assert database_url not in error
+
+
 def test_postgres_pool_uses_checkpoint_safe_connection_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -103,6 +149,113 @@ def test_postgres_pool_uses_checkpoint_safe_connection_options(
     ]
 
 
+def test_postgres_saver_factory_does_not_open_or_setup_the_saver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.agent_runtime import checkpointing
+
+    calls: list[tuple[object, object]] = []
+
+    class FakePostgresSaver:
+        setup_calls = 0
+
+        def __init__(self, pool: object, *, serde: object) -> None:
+            calls.append((pool, serde))
+
+        def setup(self) -> None:
+            self.setup_calls += 1
+
+    monkeypatch.setattr(checkpointing, 'PostgresSaver', FakePostgresSaver)
+    pool = object()
+    serializer = build_strict_checkpoint_serializer()
+
+    saver = build_postgres_saver(pool, serializer)  # type: ignore[arg-type]
+
+    assert isinstance(saver, FakePostgresSaver)
+    assert calls == [(pool, serializer)]
+    assert saver.setup_calls == 0
+
+
+@pytest.mark.parametrize(
+    ('row', 'expected'),
+    [
+        (
+            {
+                'migrations': True,
+                'checkpoints': True,
+                'blobs': True,
+                'writes': True,
+                'task_path': True,
+            },
+            True,
+        ),
+        (
+            {
+                'migrations': True,
+                'checkpoints': True,
+                'blobs': True,
+                'writes': True,
+                'task_path': False,
+            },
+            False,
+        ),
+        (None, False),
+    ],
+)
+def test_checkpoint_readiness_uses_the_resolved_writes_relation(
+    row: dict[str, bool] | None,
+    expected: bool,
+) -> None:
+    statements: list[str] = []
+
+    class FakeCursor:
+        def __enter__(self) -> 'FakeCursor':
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def execute(self, statement: str) -> None:
+            statements.append(statement)
+
+        def fetchone(self) -> dict[str, bool] | None:
+            return row
+
+    class FakeConnection:
+        def __enter__(self) -> 'FakeConnection':
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+    class FakePool:
+        def connection(self) -> FakeConnection:
+            return FakeConnection()
+
+    assert checkpoint_tables_ready(FakePool()) is expected  # type: ignore[arg-type]
+    assert len(statements) == 1
+    normalized_sql = ' '.join(statements[0].split())
+    assert 'FROM pg_catalog.pg_attribute' in normalized_sql
+    assert "attrelid = to_regclass('checkpoint_writes')" in normalized_sql
+    assert "attname = 'task_path'" in normalized_sql
+    assert 'NOT attisdropped' in normalized_sql
+    assert 'information_schema.columns' not in normalized_sql
+
+
+@pytest.mark.parametrize('retention_days', [0, 3651])
+def test_checkpoint_retention_days_stay_within_operator_bounds(
+    retention_days: int,
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            langgraph_checkpoint_retention_days=retention_days,
+        )
+
+
 def test_strict_serializer_round_trips_only_json_safe_checkpoint_state() -> None:
     serializer = build_strict_checkpoint_serializer()
     state = _valid_checkpoint_state()
@@ -116,8 +269,94 @@ def test_strict_serializer_round_trips_only_json_safe_checkpoint_state() -> None
 def test_strict_serializer_rejects_arbitrary_python_objects() -> None:
     serializer = build_strict_checkpoint_serializer()
 
-    with pytest.raises(TypeError, match='not msgpack serializable'):
+    with pytest.raises(ValueError) as exc_info:
         serializer.dumps_typed(object())
+
+    assert str(exc_info.value) == 'checkpoint value must be JSON-safe'
+
+
+@pytest.mark.parametrize(
+    'unsafe_value',
+    [
+        b'credential-marker',
+        bytearray(b'credential-marker'),
+        RuntimeError('credential-marker'),
+        _UnsafeDataclass(value='credential-marker'),
+        _UnsafePydanticModel(value='credential-marker'),
+        (1, 2),
+        float('inf'),
+        {'nested': [RuntimeError('credential-marker')]},
+        {1: 'credential-marker'},
+    ],
+)
+def test_strict_serializer_rejects_non_json_values_without_echoing_secrets(
+    unsafe_value: object,
+) -> None:
+    serializer = build_strict_checkpoint_serializer()
+
+    with pytest.raises(ValueError) as exc_info:
+        serializer.dumps_typed(unsafe_value)
+
+    error = str(exc_info.value)
+    assert error == 'checkpoint value must be JSON-safe'
+    assert 'credential-marker' not in error
+
+
+def test_strict_serializer_rejects_cyclic_or_excessively_nested_values() -> None:
+    serializer = build_strict_checkpoint_serializer()
+    recursive: list[object] = []
+    recursive.append(recursive)
+    nested: object = None
+    for _ in range(2_000):
+        nested = [nested]
+
+    for unsafe_value in (recursive, nested):
+        with pytest.raises(
+            ValueError,
+            match='^checkpoint value must be JSON-safe$',
+        ):
+            serializer.dumps_typed(unsafe_value)
+
+
+def test_strict_serializer_preserves_the_langgraph_interrupt_transport() -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command, interrupt
+    from typing_extensions import TypedDict
+
+    class InterruptState(TypedDict):
+        resolution: str | None
+
+    def await_review(_state: InterruptState) -> dict[str, str]:
+        return {'resolution': interrupt({'kind': 'review_resolution'})}
+
+    builder = StateGraph(InterruptState)
+    builder.add_node('await_review', await_review)
+    builder.add_edge(START, 'await_review')
+    builder.add_edge('await_review', END)
+    serializer = build_strict_checkpoint_serializer()
+    graph = builder.compile(checkpointer=InMemorySaver(serde=serializer))
+    config = {'configurable': {'thread_id': 'strict-serializer-interrupt'}}
+
+    paused = graph.invoke({'resolution': None}, config, durability='sync')
+    resumed = graph.invoke(Command(resume='approved'), config, durability='sync')
+
+    assert paused['__interrupt__'][0].value == {'kind': 'review_resolution'}
+    assert resumed['resolution'] == 'approved'
+
+
+def test_strict_serializer_validates_nested_interrupt_values() -> None:
+    from langgraph.types import Interrupt
+
+    serializer = build_strict_checkpoint_serializer()
+    envelope = (Interrupt(value=RuntimeError('credential-marker'), id='interrupt-1'),)
+
+    with pytest.raises(ValueError) as exc_info:
+        serializer.dumps_typed(envelope)
+
+    error = str(exc_info.value)
+    assert error == 'checkpoint value must be JSON-safe'
+    assert 'credential-marker' not in error
 
 
 def test_production_rejects_the_local_default_fingerprint_secret() -> None:
