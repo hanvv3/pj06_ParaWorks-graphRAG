@@ -12,8 +12,14 @@ from backend.app.models import (
 PROMOTABLE_REVIEW_TYPES = {'decision_record', 'history_event', 'timeline_event', 'todo'}
 
 
+class IncompleteReviewPromotionError(ValueError):
+    pass
+
+
 def find_review_item_promotion(db: Session, item: ReviewItem) -> dict | None:
     if item.item_type not in PROMOTABLE_REVIEW_TYPES:
+        if item.workflow_thread_id is None:
+            return None
         return {
             'target_type': None,
             'created_record_ids': [],
@@ -45,6 +51,9 @@ def find_review_item_promotion(db: Session, item: ReviewItem) -> dict | None:
     )
     if not record_ids and not timeline_ids:
         return None
+    expected_record_count = 0 if item.item_type == 'timeline_event' else 1
+    if len(record_ids) != expected_record_count or len(timeline_ids) != 1:
+        raise IncompleteReviewPromotionError('Review promotion provenance is incomplete')
     return {
         'target_type': item.item_type,
         'created_record_ids': record_ids,

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from backend.app.core.demo_auth import DemoUser
 from backend.app.core.rbac import ensure_can_review_permission
 from backend.app.knowledge.promotion import (
+    IncompleteReviewPromotionError,
     find_review_item_promotion,
     promote_review_item,
     validate_review_item_for_approval,
@@ -97,15 +98,15 @@ class ReviewTransitionService:
             if item is None:
                 continue
             try:
-                results.append(
-                    self._transition_item(
+                with db.begin_nested():
+                    result = self._transition_item(
                         db=db,
                         item=item,
                         action=action,
                         actor=actor,
                         note=note,
                     )
-                )
+                results.append(result)
             except InvalidReviewTransition as exc:
                 failed_items.append(
                     {
@@ -118,6 +119,13 @@ class ReviewTransitionService:
                 failed_items.append({'id': item.id, 'detail': exc.detail})
             except ValueError as exc:
                 failed_items.append({'id': item.id, 'detail': str(exc)})
+            except IntegrityError:
+                failed_items.append(
+                    {
+                        'id': item_id,
+                        'detail': 'Review promotion provenance is incomplete',
+                    }
+                )
 
         return ReviewBatchTransitionResult(
             results=tuple(results),
@@ -133,6 +141,7 @@ class ReviewTransitionService:
             select(ReviewItem)
             .where(ReviewItem.id.in_(item_ids))
             .order_by(ReviewItem.id)
+            .execution_options(populate_existing=True)
         )
         if db.get_bind().dialect.name == 'postgresql':
             statement = statement.with_for_update()
@@ -206,9 +215,12 @@ class ReviewTransitionService:
         try:
             with db.begin_nested():
                 raw_result = promote_review_item(db, item)
-        except IntegrityError:
+        except IntegrityError as integrity_error:
             db.refresh(item)
-            raw_result = find_review_item_promotion(db, item)
+            try:
+                raw_result = find_review_item_promotion(db, item)
+            except IncompleteReviewPromotionError:
+                raise integrity_error from None
             if raw_result is None:
                 raise
         result = _to_promotion_result(raw_result)

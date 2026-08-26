@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+from collections.abc import Generator
+from pathlib import Path
+
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session, sessionmaker
 
+from backend.app.api.v1.review import (
+    approve_review_item,
+    reject_review_item,
+    request_more_evidence_for_review_item,
+)
+from backend.app.core.config import get_settings
 from backend.app.core.demo_auth import USERS, DemoUser
+from backend.app.db.base import Base
 from backend.app.models import (
+    AuditLog,
     DecisionRecord,
     HistoryEvent,
     ReviewItem,
@@ -17,6 +28,21 @@ from backend.app.review.transitions import (
     InvalidReviewTransition,
     ReviewTransitionService,
 )
+from backend.app.schemas.review import ReviewEvidenceRequest
+
+
+@pytest.fixture
+def two_session_factory(tmp_path: Path) -> Generator[sessionmaker[Session], None, None]:
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'review-transitions.sqlite3'}",
+        connect_args={'check_same_thread': False},
+    )
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    Base.metadata.create_all(bind=engine)
+    try:
+        yield factory
+    finally:
+        engine.dispose()
 
 
 def _service() -> ReviewTransitionService:
@@ -332,3 +358,194 @@ def test_transition_many_reports_typed_terminal_failures(db_session: Session) ->
         },
     )
     assert result.skipped_items == ()
+
+
+def test_locked_approve_refreshes_stale_identity_and_replays_without_duplicate_audit(
+    two_session_factory: sessionmaker[Session],
+) -> None:
+    with two_session_factory() as seed_db:
+        item = _seed_item(seed_db, workflow_thread_id='workflow-stale-approve')
+        item_id = item.id
+
+    winner = two_session_factory()
+    loser = two_session_factory()
+    try:
+        stale_item = loser.get(ReviewItem, item_id)
+        assert stale_item is not None
+        assert stale_item.status == 'pending_review'
+        loser.commit()
+
+        first = approve_review_item(
+            item_id=item_id,
+            db=winner,
+            user=USERS['admin'],
+            settings=get_settings(),
+        )
+        winner_reviewed_at = winner.get(ReviewItem, item_id).reviewed_at
+        replay = approve_review_item(
+            item_id=item_id,
+            db=loser,
+            user=USERS['viewer'],
+            settings=get_settings(),
+        )
+
+        with two_session_factory() as verify_db:
+            persisted = verify_db.get(ReviewItem, item_id)
+            audits = verify_db.scalars(
+                select(AuditLog).where(AuditLog.target_id == 'workflow-stale-approve')
+            ).all()
+        assert first['replayed'] is False
+        assert replay['replayed'] is True
+        assert replay['promotion'] == first['promotion']
+        assert persisted.reviewer_id == USERS['admin'].id
+        assert persisted.reviewed_at == winner_reviewed_at
+        assert len(audits) == 1
+    finally:
+        winner.close()
+        loser.close()
+
+
+@pytest.mark.parametrize(
+    ('winner_action', 'loser_action', 'terminal_status'),
+    [
+        ('reject', 'needs_more_evidence', 'rejected'),
+        ('needs_more_evidence', 'reject', 'needs_more_evidence'),
+    ],
+)
+def test_locked_terminal_transition_refreshes_stale_identity_and_preserves_winner(
+    two_session_factory: sessionmaker[Session],
+    winner_action: str,
+    loser_action: str,
+    terminal_status: str,
+) -> None:
+    workflow_thread_id = f'workflow-stale-{winner_action}'
+    with two_session_factory() as seed_db:
+        item = _seed_item(seed_db, workflow_thread_id=workflow_thread_id)
+        item_id = item.id
+
+    winner = two_session_factory()
+    loser = two_session_factory()
+    try:
+        stale_item = loser.get(ReviewItem, item_id)
+        assert stale_item is not None
+        assert stale_item.status == 'pending_review'
+        loser.commit()
+
+        if winner_action == 'reject':
+            reject_review_item(item_id=item_id, db=winner, user=USERS['admin'], settings=get_settings())
+        else:
+            request_more_evidence_for_review_item(
+                item_id=item_id,
+                db=winner,
+                user=USERS['admin'],
+                settings=get_settings(),
+                request=ReviewEvidenceRequest(note='Winner requested evidence.'),
+            )
+        winner_reviewed_at = winner.get(ReviewItem, item_id).reviewed_at
+
+        with pytest.raises(HTTPException) as exc_info:
+            if loser_action == 'reject':
+                reject_review_item(item_id=item_id, db=loser, user=USERS['viewer'], settings=get_settings())
+            else:
+                request_more_evidence_for_review_item(
+                    item_id=item_id,
+                    db=loser,
+                    user=USERS['viewer'],
+                    settings=get_settings(),
+                    request=ReviewEvidenceRequest(note='Loser note must not persist.'),
+                )
+
+        with two_session_factory() as verify_db:
+            persisted = verify_db.get(ReviewItem, item_id)
+            audits = verify_db.scalars(
+                select(AuditLog).where(AuditLog.target_id == workflow_thread_id)
+            ).all()
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == {'code': 'invalid_state_transition'}
+        assert persisted.status == terminal_status
+        assert persisted.reviewer_id == USERS['admin'].id
+        assert persisted.reviewed_at == winner_reviewed_at
+        assert len(audits) == 1
+    finally:
+        loser.rollback()
+        winner.close()
+        loser.close()
+
+
+@pytest.mark.parametrize('partial_effect', ['main', 'timeline'])
+def test_partial_provenance_conflict_rolls_back_only_failed_bulk_item(
+    db_session: Session,
+    partial_effect: str,
+) -> None:
+    successful = _seed_item(db_session, item_type='timeline_event')
+    incomplete = _seed_item(db_session, item_type='decision_record')
+    base_fields = {
+        'project_key': None,
+        'source_links': incomplete.source_links,
+        'source_snippets': incomplete.source_snippets,
+        'confidence_score': incomplete.confidence_score,
+        'permission_level': incomplete.permission_level,
+        'review_status': 'approved',
+        'source_review_item_id': incomplete.id,
+    }
+    if partial_effect == 'main':
+        db_session.add(
+            DecisionRecord(
+                title='Incomplete winner main',
+                decision_summary='The companion Timeline is missing.',
+                **base_fields,
+            )
+        )
+    else:
+        db_session.add(
+            TimelineEvent(
+                title='Incomplete winner companion',
+                result_summary='The main DecisionRecord is missing.',
+                **base_fields,
+            )
+        )
+    db_session.commit()
+
+    result = _service().transition_many(
+        db=db_session,
+        item_ids=[successful.id, incomplete.id],
+        action='approve',
+        actor=USERS['admin'],
+    )
+
+    assert [row.item_id for row in result.results] == [successful.id]
+    assert [row['id'] for row in result.failed_items] == [incomplete.id]
+    assert db_session.get(ReviewItem, successful.id).status == 'approved'
+    assert db_session.get(ReviewItem, incomplete.id).status == 'pending_review'
+    assert db_session.scalars(
+        select(TimelineEvent).where(TimelineEvent.source_review_item_id == successful.id)
+    ).one()
+    assert len(
+        db_session.scalars(
+            select(DecisionRecord).where(DecisionRecord.source_review_item_id == incomplete.id)
+        ).all()
+    ) == (1 if partial_effect == 'main' else 0)
+    assert len(
+        db_session.scalars(
+            select(TimelineEvent).where(TimelineEvent.source_review_item_id == incomplete.id)
+        ).all()
+    ) == (1 if partial_effect == 'timeline' else 0)
+
+
+@pytest.mark.parametrize('item_type', ['project_assignment', 'legacy_unknown'])
+def test_legacy_approved_no_effect_item_replays_without_promotion(
+    db_session: Session,
+    item_type: str,
+) -> None:
+    payload = _valid_payload('project_assignment') if item_type == 'project_assignment' else {'title': 'Legacy row'}
+    item = _seed_item(db_session, item_type=item_type, payload=payload, status='approved')
+
+    result = _service().transition(
+        db=db_session,
+        item_id=item.id,
+        action='approve',
+        actor=USERS['admin'],
+    )
+
+    assert result.replayed is True
+    assert result.promotion is None
