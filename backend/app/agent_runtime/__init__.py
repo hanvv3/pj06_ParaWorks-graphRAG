@@ -43,6 +43,10 @@ from backend.app.agent_runtime.project_routing import (
     score_project_aliases,
 )
 from backend.app.agent_runtime.registry import AgentRegistry
+from backend.app.agent_runtime.retention import (
+    CheckpointPruneResult,
+    prune_expired_checkpoints,
+)
 from backend.app.agent_runtime.state import (
     ReviewGraphInput,
     ReviewGraphOutput,
@@ -60,6 +64,7 @@ __all__ = [
     'AgentRunResult',
     'BootstrapResult',
     'CheckpointBootstrapError',
+    'CheckpointPruneResult',
     'EvidenceMessage',
     'EvidencePacket',
     'PermissionContext',
@@ -86,6 +91,7 @@ __all__ = [
     'evaluate_agent_cost_budget',
     'estimate_agent_run_cost',
     'keyed_fingerprint',
+    'prune_expired_checkpoints',
     'route_projects_for_candidates',
     'score_project_aliases',
 ]
