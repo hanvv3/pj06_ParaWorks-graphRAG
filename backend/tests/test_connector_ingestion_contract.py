@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import inspect
 from sqlalchemy.orm import Session
 
 from backend.app.connectors.base import ConnectorManifest, SourceEvent
@@ -9,6 +10,8 @@ from backend.app.connectors.registry import (
     get_connector_manifest,
     list_connector_manifests,
 )
+from backend.app.ingestion import service as ingestion_service
+from backend.app.ingestion import sync as ingestion_sync
 from backend.app.ingestion.source_versions import SourceVersionRef
 from backend.app.ingestion.sync import sync_connector_events
 from backend.app.models import DocumentChunk, DocumentParserRun, Source, SyncJob
@@ -193,7 +196,49 @@ def test_sync_connector_events_records_job_and_changed_source_ids(db_session: Se
     assert parser_run.metadata_['source_id'] == 'contract-event-1'
 
 
-def test_sync_returns_canonical_refs_after_ingestion_commit(db_session: Session) -> None:
+def test_sync_returns_canonical_refs_after_ingestion_commit(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ordering: list[str] = []
+    real_commit = db_session.commit
+    real_expire_all = db_session.expire_all
+    real_scalars = db_session.scalars
+    real_source_version_refs = ingestion_service.source_version_refs
+    expired = False
+
+    def tracked_commit() -> None:
+        real_commit()
+        ordering.append('commit')
+
+    def tracked_expire_all() -> None:
+        nonlocal expired
+        real_expire_all()
+        expired = True
+        ordering.append('expire_all')
+
+    def tracked_scalars(statement, *args, **kwargs):
+        result = real_scalars(statement, *args, **kwargs)
+        if expired and 'FROM sources' in str(statement):
+            ordering.append('source_reload')
+        return result
+
+    def tracked_source_version_refs(sources):
+        rows = list(sources)
+        assert ordering[-2:] == ['expire_all', 'source_reload']
+        assert all(inspect(source).persistent for source in rows)
+        ordering.append('canonical_refs')
+        return real_source_version_refs(rows)
+
+    monkeypatch.setattr(db_session, 'commit', tracked_commit)
+    monkeypatch.setattr(db_session, 'expire_all', tracked_expire_all)
+    monkeypatch.setattr(db_session, 'scalars', tracked_scalars)
+    monkeypatch.setattr(
+        ingestion_service,
+        'source_version_refs',
+        tracked_source_version_refs,
+    )
+
     result = sync_connector_events(
         db=db_session,
         connector=DriveContentSignatureConnector([drive_source_event()]),
@@ -209,6 +254,36 @@ def test_sync_returns_canonical_refs_after_ingestion_commit(db_session: Session)
             version_or_signature='drive:file-1:42:rev-42',
         )
     ]
+    assert ordering.index('commit') < ordering.index('expire_all')
+    assert ordering.index('source_reload') < ordering.index('canonical_refs')
+
+
+def test_v2_sync_completion_rolls_back_job_identity_and_waterline_together(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ingestion_sync,
+        'with_review_batch_marker',
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('marker failed')),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match='marker failed'):
+        sync_connector_events(
+            db=db_session,
+            connector=DriveContentSignatureConnector([drive_source_event()]),
+            review_batch_mode='v2_explicit',
+        )
+
+    db_session.expire_all()
+    job = db_session.query(SyncJob).one()
+    source = db_session.query(Source).one()
+    assert job.status == 'failed'
+    assert job.progress_pct == 100
+    assert source.raw_metadata.get('last_changed_sync_job_id') is None
+    assert source.raw_metadata.get('review_batch_mode') is None
+    assert source.raw_metadata.get('review_batch_signature') is None
 
 
 def test_sync_connector_events_reports_skipped_duplicates(db_session: Session) -> None:

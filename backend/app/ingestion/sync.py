@@ -8,7 +8,11 @@ from sqlalchemy.orm import Session
 
 from backend.app.connectors.base import Connector
 from backend.app.ingestion.service import ingest_events_with_result
-from backend.app.ingestion.source_versions import SourceVersionRef
+from backend.app.ingestion.source_versions import (
+    ReviewBatchMode,
+    SourceVersionRef,
+    with_review_batch_marker,
+)
 from backend.app.models import Source, SyncJob
 
 
@@ -29,6 +33,7 @@ def sync_connector_events(
     db: Session,
     connector: Connector,
     job_id: str | None = None,
+    review_batch_mode: ReviewBatchMode | None = None,
 ) -> ConnectorSyncResult:
     job = (
         db.scalar(select(SyncJob).where(SyncJob.job_id == job_id))
@@ -62,28 +67,31 @@ def sync_connector_events(
         skipped_events = len(events) - len(changed_events)
         parser_status_counts = _parser_status_counts(events)
         ingestion_result = ingest_events_with_result(db, changed_events)
-    except Exception as exc:
-        job.status = 'failed'
-        job.message = f'failed: {exc}'
+        job.status = 'complete'
+        job.message = (
+            f'fetched={len(events)} '
+            f'created_review_items={ingestion_result.created_review_items} '
+            f'skipped_events={skipped_events}'
+        )
         job.progress_pct = 100
         job.updated_at = datetime.now(UTC)
+        _mark_changed_sources_for_job(
+            db,
+            changed_source_ids=ingestion_result.changed_source_ids,
+            job_id=job.job_id,
+            review_batch_mode=review_batch_mode,
+        )
         db.commit()
+    except Exception as exc:
+        db.rollback()
+        failed_job = db.scalar(select(SyncJob).where(SyncJob.job_id == job.job_id))
+        if failed_job is not None:
+            failed_job.status = 'failed'
+            failed_job.message = f'failed: {exc}'
+            failed_job.progress_pct = 100
+            failed_job.updated_at = datetime.now(UTC)
+            db.commit()
         raise
-
-    job.status = 'complete'
-    job.message = (
-        f'fetched={len(events)} '
-        f'created_review_items={ingestion_result.created_review_items} '
-        f'skipped_events={skipped_events}'
-    )
-    job.progress_pct = 100
-    job.updated_at = datetime.now(UTC)
-    _mark_changed_sources_for_job(
-        db,
-        changed_source_ids=ingestion_result.changed_source_ids,
-        job_id=job.job_id,
-    )
-    db.commit()
 
     return ConnectorSyncResult(
         job_id=job.job_id,
@@ -103,6 +111,7 @@ def _mark_changed_sources_for_job(
     *,
     changed_source_ids: list[str],
     job_id: str,
+    review_batch_mode: ReviewBatchMode | None,
 ) -> None:
     if not changed_source_ids:
         return
@@ -110,10 +119,17 @@ def _mark_changed_sources_for_job(
         select(Source).where(Source.source_id.in_(changed_source_ids))
     ).all()
     for source in sources:
-        source.raw_metadata = {
-            **(source.raw_metadata or {}),
-            'last_changed_sync_job_id': job_id,
-        }
+        if review_batch_mode is None:
+            source.raw_metadata = {
+                **(source.raw_metadata or {}),
+                'last_changed_sync_job_id': job_id,
+            }
+        else:
+            source.raw_metadata = with_review_batch_marker(
+                source,
+                mode=review_batch_mode,
+                sync_job_id=job_id,
+            )
 
 
 def _latest_cursors_by_partition(db: Session, source_type: str) -> dict[str, str]:

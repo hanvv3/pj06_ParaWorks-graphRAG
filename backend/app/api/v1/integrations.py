@@ -314,25 +314,25 @@ def _perform_connector_sync(
         db=db,
         slack_channel_ids_override=selected_channel_ids,
     )
-    result = sync_connector_events(db=db, connector=connector, job_id=job_id)
+    v2_mode = _uses_explicit_review_mode(
+        connector_type=connector_type,
+        settings=settings,
+    )
+    if v2_mode:
+        result = sync_connector_events(
+            db=db,
+            connector=connector,
+            job_id=job_id,
+            review_batch_mode='v2_explicit',
+        )
+    else:
+        result = sync_connector_events(db=db, connector=connector, job_id=job_id)
     changed_source_ids = getattr(result, 'changed_source_ids', [])
     changed_source_refs = _visible_source_refs(
         db=db,
         user=user,
         refs=getattr(result, 'changed_source_refs', []),
     )
-    v2_mode = _uses_explicit_review_mode(
-        connector_type=connector_type,
-        settings=settings,
-    )
-    if result.status == 'complete' and v2_mode:
-        _mark_review_batch_sources(
-            db=db,
-            source_ids=changed_source_ids,
-            mode='v2_explicit',
-            job_id=result.job_id,
-        )
-        db.commit()
     if result.status == 'complete' and not v2_mode:
         _mark_sync_job_agent_review_running(
             db=db,
@@ -441,18 +441,24 @@ def _perform_connector_sync(
         'project_assignment_items': project_assignment_items,
         'pending_review_count': pending_review_count,
     }
-    if v2_mode:
-        audit_metadata.update(
-            changed_source_count=len(changed_source_refs),
-            review_batch_hmac=_review_batch_hmac(
+    audit_refs = _complete_visible_source_refs_for_ids(
+        db=db,
+        user=user,
+        source_ids=changed_source_ids,
+    )
+    audit_metadata.update(
+        changed_source_count=len(set(changed_source_ids)),
+        review_batch_hmac=(
+            _review_batch_hmac(
                 db=db,
                 user=user,
                 settings=settings,
-                refs=changed_source_refs,
-            ),
-        )
-    else:
-        audit_metadata['changed_source_ids'] = changed_source_ids
+                refs=audit_refs,
+            )
+            if audit_refs
+            else None
+        ),
+    )
     record_audit_log(
         db=db,
         actor=user,
@@ -558,12 +564,12 @@ def _visible_source_refs(
     return [ref for ref in source_version_refs(sources) if ref in requested]
 
 
-def _source_refs_for_ids(
+def _complete_visible_source_refs_for_ids(
     *,
     db: Session,
     user: DemoUser,
     source_ids: list[str],
-) -> list[SourceVersionRef]:
+) -> list[SourceVersionRef] | None:
     if not source_ids:
         return []
     sources = db.scalars(
@@ -572,7 +578,11 @@ def _source_refs_for_ids(
             Source.permission_level.in_(tuple(user.permission_levels)),
         )
     ).all()
-    return source_version_refs(sources)
+    visible_source_ids = {source.source_id for source in sources}
+    refs = source_version_refs(sources)
+    if not visible_source_ids or {ref.source_id for ref in refs} != visible_source_ids:
+        return None
+    return refs
 
 
 def _mark_review_batch_sources(
@@ -580,7 +590,6 @@ def _mark_review_batch_sources(
     db: Session,
     source_ids: list[str],
     mode: ReviewBatchMode,
-    job_id: str | None = None,
 ) -> None:
     if not source_ids:
         return
@@ -591,7 +600,6 @@ def _mark_review_batch_sources(
         source.raw_metadata = with_review_batch_marker(
             source,
             mode=mode,
-            sync_job_id=job_id,
         )
 
 
@@ -639,7 +647,11 @@ def _legacy_batch_owned_by_v2(
 ) -> bool:
     if connector_type not in GOOGLE_OAUTH_CONNECTOR_TYPES:
         return False
-    refs = _source_refs_for_ids(db=db, user=user, source_ids=source_ids)
+    refs = _complete_visible_source_refs_for_ids(
+        db=db,
+        user=user,
+        source_ids=source_ids,
+    )
     if not refs:
         return False
     try:

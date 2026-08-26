@@ -195,6 +195,46 @@ def test_legacy_success_marks_current_signature_legacy_inline(
     assert source.raw_metadata['review_batch_mode'] == 'legacy_inline'
     assert source.raw_metadata['review_batch_signature'] == 'gmail:waterline-1:v1'
     assert db_session.query(ReviewItem).count() == response.json()['created_review_items']
+    audit = db_session.scalar(select(AuditLog).order_by(AuditLog.id.desc()))
+    assert audit is not None
+    assert audit.metadata_['changed_source_count'] == 1
+    assert len(audit.metadata_['review_batch_hmac']) == 64
+    assert 'changed_source_ids' not in audit.metadata_
+
+
+@pytest.mark.parametrize('failure_stage', ['review', 'project'])
+def test_failed_legacy_generation_does_not_advance_waterline(
+    client,
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    settings = _settings(v2_enabled=False)
+    client.app.dependency_overrides[get_settings] = lambda: settings
+    connector = FakeConnector('gmail', [_event()])
+    monkeypatch.setattr(integrations, 'get_sync_connector', lambda *args, **kwargs: connector)
+    if failure_stage == 'review':
+        monkeypatch.setattr(
+            integrations,
+            '_run_connector_agent_review',
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError('review failed')),
+        )
+    else:
+        monkeypatch.setattr(integrations, '_run_connector_agent_review', lambda **kwargs: 0)
+        monkeypatch.setattr(
+            integrations,
+            'create_project_assignment_review_items',
+            lambda db: (_ for _ in ()).throw(RuntimeError('project failed')),
+        )
+
+    with pytest.raises(RuntimeError, match=f'{failure_stage} failed'):
+        client.post('/api/v1/integrations/gmail/sync')
+
+    db_session.expire_all()
+    source = db_session.scalar(select(Source).where(Source.source_id == 'gmail:waterline-1'))
+    assert source is not None
+    assert source.raw_metadata.get('review_batch_mode') is None
+    assert source.raw_metadata.get('review_batch_signature') is None
 
 
 @pytest.mark.parametrize('marker_mode', [None, 'legacy_inline'])
@@ -296,6 +336,66 @@ def test_rollback_v1_does_not_process_batch_with_existing_v2_thread(
     source = db_session.scalar(select(Source).where(Source.source_id == 'gmail:waterline-1'))
     assert source is not None
     assert source.raw_metadata['review_batch_mode'] == 'v2_explicit'
+
+
+def test_rollback_v1_does_not_suppress_mixed_canonical_and_legacy_ids(
+    client,
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    v2_settings = _settings(v2_enabled=True)
+    client.app.dependency_overrides[get_settings] = lambda: v2_settings
+    connector = FakeConnector(
+        'gmail',
+        [
+            _event(
+                source_id='gmail-legacy-message',
+                signature='gmail-legacy-message:v1',
+            ),
+            _event(
+                source_type='gmail_attachment',
+                source_id='gmail_attachment:legacy-message:file-1',
+                signature='gmail_attachment:legacy-message:file-1:v1',
+            ),
+        ],
+    )
+    monkeypatch.setattr(integrations, 'get_sync_connector', lambda *args, **kwargs: connector)
+    sync_response = client.post('/api/v1/integrations/gmail/sync')
+    refs = sync_response.json()['changed_source_refs']
+    assert [ref['source_id'] for ref in refs] == ['gmail_attachment:legacy-message:file-1']
+    request = _request(refs, 'mixed-owned-v2-batch')
+    prepared = prepare_review_request(
+        db_session,
+        request=request,
+        actor=USERS['admin'],
+        registry=_registry(),
+        settings=v2_settings,
+    )
+    create_or_reuse_review_thread(
+        db_session,
+        prepared=prepared,
+        request=request,
+        actor=USERS['admin'],
+        settings=v2_settings,
+    )
+    calls: list[list[str]] = []
+    client.app.dependency_overrides[get_settings] = lambda: _settings(v2_enabled=False)
+    monkeypatch.setattr(
+        integrations,
+        '_run_connector_agent_review',
+        lambda **kwargs: calls.append(kwargs['source_ids']) or 0,
+    )
+    monkeypatch.setattr(integrations, 'create_project_assignment_review_items', lambda db: [])
+
+    rollback_response = client.post('/api/v1/integrations/gmail/sync')
+
+    assert rollback_response.status_code == 200
+    assert calls == [
+        [
+            'gmail-legacy-message',
+            'gmail_attachment:legacy-message:file-1',
+        ]
+    ]
 
 
 def test_slack_sync_behavior_is_unchanged_when_v2_flag_changes(
