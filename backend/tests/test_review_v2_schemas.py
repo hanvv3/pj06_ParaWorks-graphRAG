@@ -27,6 +27,26 @@ def test_review_workflow_request_rejects_raw_prompt_and_group_alias() -> None:
         _workflow_request({**payload, 'prompt': 'summarize this email'})
     with pytest.raises(ValidationError):
         _workflow_request({**payload, 'agent_names': ['memory_extraction_agent']})
+    with pytest.raises(ValidationError):
+        _workflow_request(
+            {
+                **payload,
+                'agent_names': ['mail_document_agent', ' mail_document_agent '],
+            }
+        )
+    with pytest.raises(ValidationError):
+        _workflow_request(
+            {
+                **payload,
+                'source_refs': [
+                    {
+                        'source_type': 'slack',
+                        'source_id': 'slack-message-123',
+                        'version_or_signature': 'signature-123',
+                    }
+                ],
+            }
+        )
 
 
 def test_review_workflow_request_accepts_all_four_canonical_source_types() -> None:
