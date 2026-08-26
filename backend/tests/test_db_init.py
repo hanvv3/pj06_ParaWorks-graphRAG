@@ -13,7 +13,17 @@ def test_init_db_creates_expected_tables_on_fresh_engine() -> None:
     init_db(engine_override=engine)
 
     tables = set(inspect(engine).get_table_names())
-    assert {'sources', 'review_items', 'sync_jobs', 'agent_runs', 'vector_index_states'} <= tables
+    assert {
+        'sources',
+        'review_items',
+        'sync_jobs',
+        'agent_runs',
+        'vector_index_states',
+        'agent_workflow_threads',
+        'agent_workflow_requests',
+        'agent_workflow_evidence_refs',
+        'agent_runtime_schema_versions',
+    } <= tables
 
 
 def test_init_db_seeds_local_docker_users_without_demo_data_by_default(monkeypatch) -> None:
