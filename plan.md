@@ -394,11 +394,16 @@ Tasks:
     non-Slack backend `717 passed, 1 skipped, 10 deselected`, and full backend
     `10 failed, 717 passed, 1 skipped` with only the deferred Slack ids.
   - Deliverable C still has no implementation authorization. Its design is
-    approved, but the separate implementation plan must be written and reviewed
-    first.
-- Deliverable C Review Queue HITL V2 design: Approved, planning only.
+    approved and its separate implementation plan is ready for review, but an
+    execution mode must be explicitly authorized before product code changes.
+- Deliverable C Review Queue HITL V2: Design approved, implementation plan ready.
   - The approved spec is
     `docs/superpowers/specs/2026-08-27-review-queue-hitl-v2-design.md`.
+  - The implementation plan is
+    `docs/superpowers/plans/2026-08-27-review-queue-hitl-v2.md` and divides work
+    into eleven independently reviewable TDD commits from public contracts and
+    canonical sync refs through Review transitions, actual LangGraph HITL,
+    two-screen frontend UX, and PostgreSQL release evidence.
   - The primary UX remains two screens:
     `Integrations -> 검토 후보 만들기 -> Review -> 검토 완료`; no Agent Runs
     navigation or automatic resume is added.
@@ -415,8 +420,9 @@ Tasks:
   - CDC, transactional outbox, brokers, and streaming projections are deferred
     until measured ingestion backlog, freshness, fan-out, or polling/worker
     bottlenecks justify a separate design.
-  - Next: write and review the separate Deliverable C implementation plan. Do
-    not change product code before explicit implementation authorization.
+  - Next: review the Deliverable C implementation plan and choose subagent-driven
+    or inline execution. Do not change product code before explicit implementation
+    authorization.
 - User-directed execution order for the remaining program:
   1. Deliverable C Review Queue HITL V2, only after its separate plan is
      reviewed and implementation is explicitly authorized.

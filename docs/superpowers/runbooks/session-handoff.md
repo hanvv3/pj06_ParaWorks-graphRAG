@@ -2,6 +2,36 @@
 
 Updated: 2026-08-27
 
+## 2026-08-27 Review Queue HITL V2 implementation plan ready
+
+- The implementation plan is
+  `docs/superpowers/plans/2026-08-27-review-queue-hitl-v2.md`; its source design
+  remains `docs/superpowers/specs/2026-08-27-review-queue-hitl-v2-design.md`.
+- The plan has eleven ordered TDD/commit checkpoints: public/V1 contracts,
+  canonical preflight, connector waterline, locked Review promotion, Registry
+  and LangChain drafting, real LangGraph interrupt, lifecycle/API/filtering,
+  typed frontend client, Integrations launch UX, Review completion UX, and
+  PostgreSQL/release gates.
+- Approving the plan will freeze its exact diagnostic, dry-run, status, error-code,
+  source-reference, and Review replay/promotion shapes. A discovered need for a
+  new public/schema field, permission change, token-budget change, Review trust
+  change, or duplicate-resolution rule requires another human gate.
+- No new Alembic revision, batch/outbox table, CDC/streaming component, Slack
+  change, RAG/Neo4j/Knowledge Map change, or Agent Runs navigation is planned.
+  Existing `AgentWorkflow*` rows, HMACs, PostgreSQL advisory locks, provenance
+  indexes, and `Source.raw_metadata` are the approved persistence path.
+- Configured production extraction must use the existing real LangChain
+  adapters. The V2 workflow must compile real LangGraph `StateGraph`, pause with
+  `interrupt()`, and resume the exact checkpoint mode/thread with
+  `Command(resume=...)`; metadata emulation is not acceptable.
+- V1 run output as well as status metadata must be made truthful
+  (`metadata_only`, non-resumable). Review approval replay for a pre-V2 approved
+  row without provenance returns no new effect instead of heuristic backfill.
+- Product implementation has not started and is not yet authorized. The next
+  user decision is execution mode: subagent-driven development (recommended) or
+  inline plan execution. Do not push, merge, enable V2, or modify product code
+  before that choice.
+
 ## 2026-08-27 Review Queue HITL V2 design approved
 
 - The approved Deliverable C spec is

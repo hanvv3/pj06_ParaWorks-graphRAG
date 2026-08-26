@@ -6,6 +6,29 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-27 Review Queue HITL V2 implementation plan
+
+- Converted the approved Deliverable C design into eleven independently
+  reviewable TDD commits covering truthful V1 metadata, canonical source refs,
+  V1/V2 waterlines, locked Review transitions, real LangChain adapters, actual
+  LangGraph interrupt/resume, lifecycle APIs, the two-screen UX, and PostgreSQL
+  recovery/concurrency evidence.
+- Proposed exact additive diagnostic, dry-run, lifecycle-status, error-code,
+  source-ref, and Review replay/promotion contracts for human approval so later
+  implementation cannot silently change a gated output or trust boundary.
+- Kept the no-migration decision: scoped batch ownership uses the existing
+  workflow/request/evidence tables plus a PostgreSQL advisory transaction lock,
+  while async sync recovery and cutover waterlines use `Source.raw_metadata`.
+- Required configured production model paths to use the existing LangChain
+  structured-output adapters and the workflow to use LangGraph 1.2
+  `interrupt()` / same-thread `Command(resume=...)`; deterministic models remain
+  limited to dry-run, local/demo, and tests.
+- Added explicit verification gates for exact-once Review promotion, checkpoint
+  mode matching, restart/resume, frontend desktop/mobile behavior, the full
+  non-Slack suite, and an unchanged visible ten-test Slack deferral baseline.
+- No product code was changed. The next step is human review of the plan and an
+  explicit choice between subagent-driven or inline implementation.
+
 ## 2026-08-27 Review Queue HITL V2 product design
 
 - Approved a focused Deliverable C design that connects the completed
