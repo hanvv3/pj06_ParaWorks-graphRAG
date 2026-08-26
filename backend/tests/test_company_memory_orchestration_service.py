@@ -148,7 +148,7 @@ def test_company_memory_orchestration_marks_missing_evidence_as_cost_skips(db_se
     assert result.outputs['mail_document_review_items_created'] == 0
     assert result.outputs['memory_review_items_created'] == 0
     assert result.outputs['rag_agent_run_created'] is False
-    assert result.outputs['hitl_checkpoint']['status'] == 'no_review_items'
+    assert result.outputs['hitl_checkpoint']['status'] == 'metadata_only'
     assert result.outputs['hitl_checkpoint']['review_item_ids'] == []
     assert result.outputs['cost_plan']['slack_agent']['action'] == 'skip'
     assert result.outputs['cost_plan']['slack_agent']['reason'] == 'no_slack_evidence'
