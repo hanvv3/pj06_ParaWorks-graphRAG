@@ -393,8 +393,30 @@ Tasks:
     dedicated PostgreSQL `30 passed`, focused Deliverable B `224 passed`,
     non-Slack backend `717 passed, 1 skipped, 10 deselected`, and full backend
     `10 failed, 717 passed, 1 skipped` with only the deferred Slack ids.
-  - Deliverable C still has no implementation authorization. Review Queue HITL
-    V2 requires its separate implementation plan to be reviewed first.
+  - Deliverable C still has no implementation authorization. Its design is
+    approved, but the separate implementation plan must be written and reviewed
+    first.
+- Deliverable C Review Queue HITL V2 design: Approved, planning only.
+  - The approved spec is
+    `docs/superpowers/specs/2026-08-27-review-queue-hitl-v2-design.md`.
+  - The primary UX remains two screens:
+    `Integrations -> 검토 후보 만들기 -> Review -> 검토 완료`; no Agent Runs
+    navigation or automatic resume is added.
+  - V2 uses an actual LangGraph `interrupt()` and same-thread
+    `Command(resume=...)`; current PostgreSQL ReviewItem state remains the
+    approval authority.
+  - Single, bulk, and agent-candidate Review actions share one locked state
+    transition and exactly-once promotion boundary.
+  - Exact source-version batches are owned at the company/workspace security
+    scope, so authorized users reuse one workflow and cannot create duplicate
+    ReviewItem, knowledge, or Timeline effects for the same batch and policy.
+  - V2 processes only source versions marked by a post-cutover V2-mode sync;
+    legacy-processed historical versions are not regenerated through V2.
+  - CDC, transactional outbox, brokers, and streaming projections are deferred
+    until measured ingestion backlog, freshness, fan-out, or polling/worker
+    bottlenecks justify a separate design.
+  - Next: write and review the separate Deliverable C implementation plan. Do
+    not change product code before explicit implementation authorization.
 - User-directed execution order for the remaining program:
   1. Deliverable C Review Queue HITL V2, only after its separate plan is
      reviewed and implementation is explicitly authorized.

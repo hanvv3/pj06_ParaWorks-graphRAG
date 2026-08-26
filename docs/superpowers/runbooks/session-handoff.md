@@ -2,6 +2,54 @@
 
 Updated: 2026-08-27
 
+## 2026-08-27 Review Queue HITL V2 design approved
+
+- The approved Deliverable C spec is
+  `docs/superpowers/specs/2026-08-27-review-queue-hitl-v2-design.md`.
+- The UX is fixed at
+  `Integrations -> 검토 후보 만들기 -> Review -> 검토 완료`. Do not add a
+  primary Agent Runs workflow page or automatic resume.
+- The graph is review-only and must use actual `interrupt()` plus the same
+  checkpoint thread's `Command(resume=...)`. It must not run RAG before or
+  after the review boundary in Deliverable C.
+- Resume payload is acknowledgement only. Current PostgreSQL ReviewItem state
+  and current actor permission determine resolution.
+- All Review action entry points must share the locked state-transition and
+  exactly-once promotion service. Every promoted record, including companion
+  Timeline rows, must use `source_review_item_id` provenance.
+- New V2 routes remain disabled by default. Legacy routes remain for migration
+  and rollback but must report `review_boundary=metadata_only`,
+  `hitl_checkpointing=false`, and `checkpoint_store=none`.
+- In V2 mode, Gmail/Drive/Calendar sync stores canonical sources and returns
+  refs but must not run the legacy inline candidate bridge. Async ref recovery
+  uses `Source.raw_metadata.last_changed_sync_job_id`; the evidence HMAC is the
+  server-enforced V1/V2 batch-ownership key. No new batch/outbox table is
+  introduced, and Slack is excluded from this switch.
+- The user chose company/workspace scope ownership for an exact source-version
+  batch. The batch HMAC excludes `owner_subject_id`; authorized users reuse one
+  thread, unauthorized users receive 404, and different security scopes remain
+  isolated. Cancelled/failed attempts also remain stable owners; there is no
+  replacement exception that could bypass the existing client-request unique
+  constraint. They are terminal and expose no user retry action; only
+  `checkpoint_failed` uses same-thread repair/retry.
+- `client_request_id` is an optional transport-retry key bound only when the
+  requesting actor actually creates the thread. Cross-owner shared reuse does
+  not persist caller aliases or reserve the key across actors; changing that
+  creator-only meaning requires separate persistence and a human gate.
+- V2 may create a new thread only for source versions marked by a V2-mode sync.
+  Legacy-processed or pre-waterline source versions are rejected with the
+  existing `evidence_changed` category, and rollback V1 processing changes the
+  marker back to `legacy_inline`.
+- Public `agent_names` are exact Registry manifest names only:
+  `mail_document_agent`, `timeline_agent`, `history_agent`,
+  `decision_record_agent`, and `todo_agent`.
+- Slack, RAG cutover, Neo4j, Knowledge Map changes, CDC, outbox, broker, and
+  streaming consumers are outside Deliverable C. CDC is reconsidered only
+  after measured backlog, freshness, fan-out, or polling/worker bottlenecks.
+- No product code is authorized yet. The next worker must use the writing-plans
+  workflow to create and obtain review of the separate Deliverable C
+  implementation plan before starting TDD implementation.
+
 ## 2026-08-26 Runtime Deliverable B complete
 
 - Deliverable B runtime/checkpoint primitives are complete through

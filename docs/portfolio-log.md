@@ -6,6 +6,31 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-27 Review Queue HITL V2 product design
+
+- Approved a focused Deliverable C design that connects the completed
+  LangGraph checkpoint primitives to the real Review Queue without adding RAG,
+  Neo4j, or Slack work.
+- Kept the user journey within the existing Integrations and Review screens:
+  sync evidence, explicitly create review candidates, inspect/resolve them in
+  Review, then explicitly complete the review workflow.
+- Defined a real `interrupt()` / same-thread `Command(resume=...)` graph whose
+  resume acknowledgement never carries approval data; current PostgreSQL
+  ReviewItem state and permission checks remain authoritative.
+- Defined one locked Review transition service for single, bulk, and
+  agent-candidate actions, with `source_review_item_id` provenance preventing
+  duplicate knowledge and companion Timeline records after retries or races.
+- Chose company/workspace-level ownership for an exact canonical source-version
+  batch, so authorized users converge on one workflow instead of creating
+  owner-specific duplicate candidates and knowledge effects.
+- Added a V2-mode sync waterline so historical source versions already handled
+  by the legacy path are not regenerated during the V1/V2 transition.
+- Preserved disabled-by-default V2 routes and legacy rollback compatibility,
+  while requiring legacy status to identify its checkpoint as metadata-only.
+- Deferred CDC, transactional outbox, brokers, and streaming projection until
+  measured scale or latency bottlenecks justify a separate design. The next
+  step is an implementation plan and review, not product-code implementation.
+
 ## 2026-08-26 LangGraph runtime and checkpoint primitives
 
 - Added JSON-safe, HMAC-keyed runtime contracts and application-owned workflow
