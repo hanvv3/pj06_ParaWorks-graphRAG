@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from backend.app.agent_runtime.registry import AgentRegistry
+    from backend.app.agent_runtime.review_v2_drafting import ReviewDraftResult
 
 MAX_COMPLETED_NODES = 64
 MAX_ERROR_CODES = 16
@@ -24,6 +25,7 @@ ALLOWED_REVIEW_ERROR_CODES = frozenset({
     'review_unresolved',
     'runtime_version_unavailable',
     'model_unavailable',
+    'budget_exceeded',
     'concurrent_resume',
     'invalid_state_transition',
 })
@@ -196,7 +198,13 @@ class PermissionResolver(Protocol):
 
 
 class ReviewDraftService(Protocol):
-    def draft(self, *, workflow_thread_id: str) -> None:
+    def draft(
+        self,
+        *,
+        workflow_thread_id: str,
+        actor_subject_id: str,
+        allowed_permission_levels: Sequence[str],
+    ) -> ReviewDraftResult:
         raise NotImplementedError
 
 
