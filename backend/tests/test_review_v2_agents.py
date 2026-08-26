@@ -1,6 +1,8 @@
 import json
 import subprocess
 import sys
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,9 +12,22 @@ from backend.app.agent_runtime.contracts import (
     EvidencePacket,
     PermissionContext,
 )
-from backend.app.agent_runtime.model_router import ReviewModelUnavailableError
-from backend.app.agent_runtime.review_v2_agents import build_review_agent_catalog
-from backend.app.agents.mail_document_agent import MailDocumentAgentModelResponse
+from backend.app.agent_runtime.model_router import (
+    ReviewModelUnavailableError,
+    build_langchain_review_chat_model,
+)
+from backend.app.agent_runtime.review_v2_agents import (
+    MEMORY_ESTIMATED_OUTPUT_TOKENS,
+    ReviewAgentCatalog,
+    build_review_agent_catalog,
+)
+from backend.app.agents.mail_document_agent import (
+    MailDocumentAgentModelResponse,
+    MailDocumentLlmSettings,
+    build_langchain_mail_document_agent_model,
+)
+from backend.app.agents.mail_document_agent.llm import render_mail_docs_llm_prompt
+from backend.app.agents.memory_extraction_agent import render_memory_extraction_prompt
 from backend.app.core.config import Settings
 from backend.app.schemas.review_workflow import DEFAULT_REVIEW_AGENT_NAMES
 
@@ -148,6 +163,172 @@ def test_catalog_registers_only_exact_public_manifest_names() -> None:
     assert catalog.registry.names == DEFAULT_REVIEW_AGENT_NAMES
 
 
+def test_catalog_rejects_same_named_manifest_with_mutated_contract() -> None:
+    catalog = build_review_agent_catalog(
+        Settings(_env_file=None, paraworks_demo_mode=True)
+    )
+    adapters = [catalog.get(name) for name in DEFAULT_REVIEW_AGENT_NAMES]
+    adapters[0] = replace(
+        adapters[0],
+        manifest=replace(adapters[0].manifest, owner='Impostor Owner'),
+    )
+
+    with pytest.raises(ValueError, match='exact public manifests'):
+        ReviewAgentCatalog(adapters)
+
+
+@pytest.mark.parametrize(
+    ('agent_name', 'expected_prompt'),
+    [
+        (
+            'mail_document_agent',
+            lambda packet: render_mail_docs_llm_prompt(
+                packet,
+                max_input_chars=12_000,
+            ),
+        ),
+        (
+            'history_agent',
+            lambda packet: render_memory_extraction_prompt(
+                packet,
+                expected_item_type='history_event',
+                task_name='history extraction',
+                max_input_chars=12_000,
+            ),
+        ),
+    ],
+)
+def test_preflight_counts_rendered_prompt_urls_snippets_and_metadata(
+    agent_name: str,
+    expected_prompt,
+) -> None:
+    catalog = build_review_agent_catalog(
+        Settings(_env_file=None, paraworks_demo_mode=True)
+    )
+    packet = _packet()
+    packet.messages[0].metadata['review_marker'] = 'metadata-is-counted'
+
+    adapter = catalog.get(agent_name)
+    rendered_input = adapter.render_estimation_input(packet)
+    decision = adapter.preflight(packet)
+
+    assert expected_prompt(packet) in rendered_input
+    assert packet.messages[0].source_url in rendered_input
+    assert packet.messages[0].source_snippet in rendered_input
+    assert 'metadata-is-counted' in rendered_input
+    assert decision.token_usage.input_tokens == max(1, len(rendered_input) // 4)
+
+
+def test_catalog_passes_each_adapter_output_cap_to_its_model_builder() -> None:
+    mail_caps: list[int] = []
+    memory_caps: list[int] = []
+
+    def fake_mail_builder(settings: MailDocumentLlmSettings):
+        mail_caps.append(settings.max_output_tokens)
+        return _FakeMailModel()
+
+    def fake_chat_builder(_settings: Settings, *, max_output_tokens: int):
+        memory_caps.append(max_output_tokens)
+        return _FakeStructuredChatModel()
+
+    catalog = build_review_agent_catalog(
+        Settings(
+            _env_file=None,
+            paraworks_demo_mode=False,
+            agent_llm_enabled=True,
+            openai_api_key='test-only-key',
+            agent_llm_provider_order='openai',
+            agent_llm_max_output_tokens=77,
+        ),
+        mail_model_builder=fake_mail_builder,
+        chat_model_builder=fake_chat_builder,
+    )
+
+    assert mail_caps == [catalog.get('mail_document_agent').estimated_output_tokens]
+    assert memory_caps == [MEMORY_ESTIMATED_OUTPUT_TOKENS]
+    assert all(
+        catalog.get(name).estimated_output_tokens == MEMORY_ESTIMATED_OUTPUT_TOKENS
+        for name in DEFAULT_REVIEW_AGENT_NAMES[1:]
+    )
+
+
+@pytest.mark.parametrize(
+    ('provider', 'module_name', 'class_name', 'cap_key'),
+    [
+        ('openai', 'langchain_openai', 'ChatOpenAI', 'max_completion_tokens'),
+        ('gemini', 'langchain_google_genai', 'ChatGoogleGenerativeAI', 'max_tokens'),
+    ],
+)
+def test_memory_langchain_provider_enforces_requested_output_cap(
+    monkeypatch,
+    provider: str,
+    module_name: str,
+    class_name: str,
+    cap_key: str,
+) -> None:
+    captured: list[dict] = []
+
+    class CapturingChatModel:
+        def __init__(self, **kwargs) -> None:
+            captured.append(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        module_name,
+        SimpleNamespace(**{class_name: CapturingChatModel}),
+    )
+    settings = Settings(
+        _env_file=None,
+        paraworks_demo_mode=False,
+        agent_llm_enabled=True,
+        openai_api_key='test-only-key' if provider == 'openai' else None,
+        gemini_api_key='test-only-key' if provider == 'gemini' else None,
+        agent_llm_provider_order=provider,
+    )
+
+    build_langchain_review_chat_model(settings, max_output_tokens=73)
+
+    assert captured[0][cap_key] == 73
+
+
+@pytest.mark.parametrize(
+    ('provider', 'module_name', 'class_name', 'cap_key'),
+    [
+        ('openai', 'langchain_openai', 'ChatOpenAI', 'max_completion_tokens'),
+        ('gemini', 'langchain_google_genai', 'ChatGoogleGenerativeAI', 'max_tokens'),
+    ],
+)
+def test_mail_langchain_provider_enforces_adapter_output_cap(
+    monkeypatch,
+    provider: str,
+    module_name: str,
+    class_name: str,
+    cap_key: str,
+) -> None:
+    captured: list[dict] = []
+
+    class CapturingChatModel:
+        def __init__(self, **kwargs) -> None:
+            captured.append(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        module_name,
+        SimpleNamespace(**{class_name: CapturingChatModel}),
+    )
+    build_langchain_mail_document_agent_model(
+        MailDocumentLlmSettings(
+            enabled=True,
+            provider_order=(provider,),
+            openai_api_key='test-only-key' if provider == 'openai' else None,
+            gemini_api_key='test-only-key' if provider == 'gemini' else None,
+            max_output_tokens=83,
+        )
+    )
+
+    assert captured[0][cap_key] == 83
+
+
 def test_configured_mail_adapter_uses_existing_langchain_builder(monkeypatch) -> None:
     calls = []
 
@@ -162,7 +343,7 @@ def test_configured_mail_adapter_uses_existing_langchain_builder(monkeypatch) ->
     )
     monkeypatch.setattr(
         'backend.app.agent_runtime.model_router.build_langchain_review_chat_model',
-        lambda _settings: fake_chat,
+        lambda _settings, **_kwargs: fake_chat,
     )
 
     catalog = build_review_agent_catalog(_configured_settings())
@@ -185,7 +366,7 @@ def test_configured_memory_adapters_use_langchain_structured_output(
     )
     monkeypatch.setattr(
         'backend.app.agent_runtime.model_router.build_langchain_review_chat_model',
-        lambda _settings: fake_chat,
+        lambda _settings, **_kwargs: fake_chat,
     )
     catalog = build_review_agent_catalog(_configured_settings())
 

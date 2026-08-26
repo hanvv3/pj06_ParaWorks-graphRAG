@@ -62,6 +62,40 @@ class WorkflowPreflightResult:
     shared_reuse: bool
 
 
+def build_prepared_review_identity(
+    *,
+    source_refs: tuple[ResolvedSourceVersion, ...],
+    agent_names: tuple[str, ...],
+    settings: Settings,
+) -> PreparedReviewRequest:
+    evidence_version_hash = build_keyed_fingerprint(
+        [asdict(ref) for ref in source_refs],
+        settings=settings,
+        schema_version=EVIDENCE_VERSION_HASH_SCHEMA,
+        policy_version=COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+    )
+    input_hash = build_keyed_fingerprint(
+        {
+            'security_scope_id': settings.agent_runtime_security_scope_id,
+            'workflow_name': COMPANY_MEMORY_REVIEW_WORKFLOW,
+            'graph_version': COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+            'evidence_version_hash': evidence_version_hash,
+            'agent_names': list(agent_names),
+            'selection_policy_version': COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+        },
+        settings=settings,
+        schema_version=COMPANY_MEMORY_INPUT_SCHEMA_VERSION,
+        policy_version=INPUT_HASH_POLICY,
+    )
+    return PreparedReviewRequest(
+        source_refs=source_refs,
+        agent_names=agent_names,
+        input_hash=input_hash,
+        evidence_version_hash=evidence_version_hash,
+        selection_policy_version=COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+    )
+
+
 def prepare_review_request(
     db: Session,
     *,
@@ -100,31 +134,10 @@ def prepare_review_request(
         actor=actor,
         settings=settings,
     )
-    evidence_version_hash = build_keyed_fingerprint(
-        [asdict(ref) for ref in resolved_refs],
-        settings=settings,
-        schema_version=EVIDENCE_VERSION_HASH_SCHEMA,
-        policy_version=COMPANY_MEMORY_SELECTION_POLICY_VERSION,
-    )
-    input_hash = build_keyed_fingerprint(
-        {
-            'security_scope_id': settings.agent_runtime_security_scope_id,
-            'workflow_name': COMPANY_MEMORY_REVIEW_WORKFLOW,
-            'graph_version': COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
-            'evidence_version_hash': evidence_version_hash,
-            'agent_names': list(agent_names),
-            'selection_policy_version': COMPANY_MEMORY_SELECTION_POLICY_VERSION,
-        },
-        settings=settings,
-        schema_version=COMPANY_MEMORY_INPUT_SCHEMA_VERSION,
-        policy_version=INPUT_HASH_POLICY,
-    )
-    return PreparedReviewRequest(
+    return build_prepared_review_identity(
         source_refs=resolved_refs,
         agent_names=agent_names,
-        input_hash=input_hash,
-        evidence_version_hash=evidence_version_hash,
-        selection_policy_version=COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+        settings=settings,
     )
 
 
@@ -291,7 +304,12 @@ def _creator_replay_or_conflict(
     actor: DemoUser,
     settings: Settings,
 ) -> WorkflowPreflightResult:
-    if not _thread_matches(db, thread=thread, prepared=prepared, settings=settings):
+    if not review_thread_matches_prepared(
+        db,
+        thread=thread,
+        prepared=prepared,
+        settings=settings,
+    ):
         raise ReviewWorkflowPreflightError(
             'idempotency_key_reused',
             'client request key was already used for a different request',
@@ -332,7 +350,7 @@ def _find_shared_thread(
         (
             thread
             for thread in candidates
-            if _thread_matches(
+            if review_thread_matches_prepared(
                 db,
                 thread=thread,
                 prepared=prepared,
@@ -359,7 +377,7 @@ def find_matching_review_thread(
     return _find_shared_thread(db, prepared=prepared, settings=settings)
 
 
-def _thread_matches(
+def review_thread_matches_prepared(
     db: Session,
     *,
     thread: AgentWorkflowThread,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from math import ceil
 from typing import Any, cast
 from uuid import uuid4
 
@@ -29,7 +30,9 @@ from backend.app.agent_runtime.review_v2_agents import (
 )
 from backend.app.agent_runtime.review_v2_preflight import (
     PreparedReviewRequest,
+    build_prepared_review_identity,
     find_matching_review_thread,
+    review_thread_matches_prepared,
 )
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
@@ -41,13 +44,19 @@ from backend.app.models.agent_workflows import (
     AgentWorkflowThread,
 )
 from backend.app.models.review import ReviewItem
-from backend.app.models.source import DocumentChunk, DocumentVersion, Source
+from backend.app.models.source import (
+    DocumentChunk,
+    DocumentParserRun,
+    DocumentVersion,
+    Source,
+)
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
     COMPANY_MEMORY_REVIEW_WORKFLOW,
     COMPANY_MEMORY_SELECTION_POLICY_VERSION,
     ReviewItemResolutionStatus,
     ReviewWorkflowDryRunResponse,
+    normalize_agent_names,
 )
 
 EFFECT_KEY_SCHEMA = 'review-agent-effect:v1'
@@ -59,6 +68,9 @@ PACKET_FINGERPRINT_POLICY = 'review-evidence-selection:v1'
 CANDIDATE_KEY_SCHEMA = 'review-agent-candidate:v1'
 CANDIDATE_KEY_POLICY = 'review-agent-candidate-key:v1'
 DEFAULT_LEASE_TTL_SECONDS = 120
+MAX_PROVIDER_ROUTES = 3
+MAX_ATTEMPTS_PER_PROVIDER = 2
+LEASE_GRACE_SECONDS = 30
 REVIEW_STATUSES: tuple[ReviewItemResolutionStatus, ...] = (
     'pending_review',
     'approved',
@@ -94,6 +106,7 @@ class _DraftInputs:
     selection_policy_version: str
     agent_names: tuple[str, ...]
     refs: tuple[ResolvedSourceVersion, ...]
+    prepared: PreparedReviewRequest
 
 
 @dataclass(frozen=True)
@@ -114,6 +127,7 @@ class _Lease:
     permission_fingerprint: str
     selection_policy_version: str
     agent_names: tuple[str, ...]
+    prior_status: str
     plans: tuple[_AdapterPlan, ...]
     cached_review_item_ids: tuple[int, ...]
 
@@ -125,9 +139,19 @@ class ReviewDraftService:
         session_factory: Callable[[], Session],
         catalog: ReviewAgentCatalog,
         settings: Settings,
-        lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
+        lease_ttl_seconds: int | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
+        if lease_ttl_seconds is None:
+            lease_ttl_seconds = max(
+                DEFAULT_LEASE_TTL_SECONDS,
+                ceil(
+                    settings.agent_llm_timeout_seconds
+                    * MAX_PROVIDER_ROUTES
+                    * MAX_ATTEMPTS_PER_PROVIDER
+                )
+                + LEASE_GRACE_SECONDS,
+            )
         if lease_ttl_seconds <= 0:
             raise ValueError('lease ttl must be positive')
         self._session_factory = session_factory
@@ -213,7 +237,12 @@ class ReviewDraftService:
 
         try:
             with self._session_factory() as db:
-                inputs = _load_draft_inputs(db, workflow_thread_id, lock=False)
+                inputs = _load_draft_inputs(
+                    db,
+                    workflow_thread_id,
+                    lock=False,
+                    settings=self._settings,
+                )
                 _ensure_thread_scope(inputs, self._settings)
                 packet = _build_exact_packet(
                     db,
@@ -230,20 +259,36 @@ class ReviewDraftService:
             if current_packet_hash != lease.packet_hash:
                 raise ReviewDraftError('evidence_changed', 'source evidence changed')
         except ReviewDraftError:
-            self._release_lease(workflow_thread_id, lease)
-            raise
-
-        try:
-            results = tuple(
-                (plan, _validated_result(plan.adapter.run(packet), plan=plan, packet=packet))
-                for plan in lease.plans
-            )
-        except ReviewDraftError:
-            self._release_lease(workflow_thread_id, lease)
+            self._release_lease_after_failure(workflow_thread_id, lease)
             raise
         except Exception:
-            self._release_lease(workflow_thread_id, lease)
-            raise ReviewDraftError('model_unavailable', 'review model is unavailable') from None
+            self._release_lease_after_failure(workflow_thread_id, lease)
+            raise
+
+        results: list[tuple[_AdapterPlan, AgentRunResult]] = []
+        for index, plan in enumerate(lease.plans):
+            try:
+                result = _validated_result(
+                    plan.adapter.run(packet),
+                    plan=plan,
+                    packet=packet,
+                )
+            except ReviewDraftError:
+                self._release_lease_after_failure(workflow_thread_id, lease)
+                raise
+            except Exception:
+                self._release_lease_after_failure(workflow_thread_id, lease)
+                raise ReviewDraftError(
+                    'model_unavailable',
+                    'review model is unavailable',
+                ) from None
+            results.append((plan, result))
+            if index + 1 < len(lease.plans):
+                try:
+                    lease = self._renew_lease(workflow_thread_id, lease)
+                except Exception:
+                    self._release_lease_after_failure(workflow_thread_id, lease)
+                    raise
 
         try:
             return self._persist_results(
@@ -251,10 +296,13 @@ class ReviewDraftService:
                 actor_subject_id=actor_subject_id,
                 permission_levels=permission_levels,
                 lease=lease,
-                results=results,
+                results=tuple(results),
             )
         except ReviewDraftError:
-            self._release_lease(workflow_thread_id, lease)
+            self._release_lease_after_failure(workflow_thread_id, lease)
+            raise
+        except Exception:
+            self._release_lease_after_failure(workflow_thread_id, lease)
             raise
 
     def _preview_thread(
@@ -265,7 +313,12 @@ class ReviewDraftService:
         permission_levels: tuple[str, ...],
     ) -> tuple[ReviewWorkflowDryRunResponse, tuple[int, ...]]:
         with self._session_factory() as db:
-            inputs = _load_draft_inputs(db, workflow_thread_id, lock=False)
+            inputs = _load_draft_inputs(
+                db,
+                workflow_thread_id,
+                lock=False,
+                settings=self._settings,
+            )
             _ensure_thread_scope(inputs, self._settings)
             _ensure_thread_state(inputs.status)
             packet = _build_exact_packet(
@@ -290,20 +343,13 @@ class ReviewDraftService:
                 packet=packet,
                 settings=self._settings,
             )
-            prepared = PreparedReviewRequest(
-                source_refs=inputs.refs,
-                agent_names=inputs.agent_names,
-                input_hash='0' * 64,
-                evidence_version_hash=inputs.evidence_version_hash,
-                selection_policy_version=inputs.selection_policy_version,
-            )
             response = _aggregate_preview(
-                prepared=prepared,
+                prepared=inputs.prepared,
                 plans=plans,
                 source_count=len(inputs.refs),
                 budget_limit_usd=self._settings.agent_llm_max_estimated_cost_usd,
             )
-            cached_ids = _cached_review_item_ids(db, plans)
+            cached_ids = _cached_review_item_ids(db, plans, inputs.thread_id)
             db.rollback()
             return response, cached_ids
 
@@ -316,7 +362,7 @@ class ReviewDraftService:
     ) -> _Lease:
         with self._session_factory() as db:
             thread = _locked_thread(db, workflow_thread_id)
-            inputs = _draft_inputs_for_thread(db, thread)
+            inputs = _draft_inputs_for_thread(db, thread, settings=self._settings)
             _ensure_thread_scope(inputs, self._settings)
             _ensure_thread_state(inputs.status)
             now = self._now()
@@ -328,6 +374,7 @@ class ReviewDraftService:
                 and not _lease_expired(thread.lease_expires_at, now)
             ):
                 raise ReviewDraftError('concurrent_resume', 'workflow is already drafting')
+            prior_status = _lease_restore_status(thread.status)
 
             packet = _build_exact_packet(
                 db,
@@ -353,13 +400,7 @@ class ReviewDraftService:
                 settings=self._settings,
             )
             preview = _aggregate_preview(
-                prepared=PreparedReviewRequest(
-                    source_refs=inputs.refs,
-                    agent_names=inputs.agent_names,
-                    input_hash=thread.input_hash,
-                    evidence_version_hash=inputs.evidence_version_hash,
-                    selection_policy_version=inputs.selection_policy_version,
-                ),
+                prepared=inputs.prepared,
                 plans=plans,
                 source_count=len(inputs.refs),
                 budget_limit_usd=self._settings.agent_llm_max_estimated_cost_usd,
@@ -367,7 +408,7 @@ class ReviewDraftService:
             if preview.budget_status == 'over_budget':
                 db.rollback()
                 raise ReviewDraftError('budget_exceeded', 'review budget exceeded')
-            cached_ids = _cached_review_item_ids(db, plans)
+            cached_ids = _cached_review_item_ids(db, plans, inputs.thread_id)
             pending_plans = tuple(
                 plan
                 for plan in plans
@@ -384,6 +425,7 @@ class ReviewDraftService:
                     permission_fingerprint=permission_fingerprint,
                     selection_policy_version=inputs.selection_policy_version,
                     agent_names=inputs.agent_names,
+                    prior_status=prior_status,
                     plans=(),
                     cached_review_item_ids=cached_ids,
                 )
@@ -405,6 +447,7 @@ class ReviewDraftService:
                 permission_fingerprint=permission_fingerprint,
                 selection_policy_version=inputs.selection_policy_version,
                 agent_names=inputs.agent_names,
+                prior_status=prior_status,
                 plans=pending_plans,
                 cached_review_item_ids=cached_ids,
             )
@@ -435,7 +478,7 @@ class ReviewDraftService:
                 db.rollback()
                 raise ReviewDraftError('invalid_state_transition', 'workflow is cancelled')
 
-            inputs = _draft_inputs_for_thread(db, thread)
+            inputs = _draft_inputs_for_thread(db, thread, settings=self._settings)
             _ensure_thread_scope(inputs, self._settings)
             if inputs.evidence_version_hash != lease.evidence_version_hash:
                 db.rollback()
@@ -472,7 +515,9 @@ class ReviewDraftService:
             for plan, result in results:
                 existing = _find_agent_run(db, workflow_thread_id, plan.effect_key)
                 if existing is not None:
-                    item_ids.extend(_review_item_ids_for_run(db, existing.id))
+                    item_ids.extend(
+                        _review_item_ids_for_run(db, existing.id, workflow_thread_id)
+                    )
                     continue
                 agent_run, created = _insert_or_get_agent_run(
                     db,
@@ -486,7 +531,9 @@ class ReviewDraftService:
                     now=now,
                 )
                 if not created:
-                    item_ids.extend(_review_item_ids_for_run(db, agent_run.id))
+                    item_ids.extend(
+                        _review_item_ids_for_run(db, agent_run.id, workflow_thread_id)
+                    )
                     continue
                 for candidate in result.candidates:
                     item_ids.append(
@@ -514,15 +561,57 @@ class ReviewDraftService:
             db.commit()
             return result_value
 
+    def _renew_lease(self, workflow_thread_id: str, lease: _Lease) -> _Lease:
+        with self._session_factory() as db:
+            thread = _locked_thread(db, workflow_thread_id)
+            now = self._now()
+            if not _thread_has_exact_lease(thread, lease) or _lease_expired(
+                lease.expires_at,
+                now,
+            ):
+                db.rollback()
+                raise ReviewDraftError(
+                    'concurrent_resume',
+                    'draft lease is no longer valid',
+                )
+            if thread.cancelled_at is not None:
+                db.rollback()
+                raise ReviewDraftError(
+                    'invalid_state_transition',
+                    'workflow is cancelled',
+                )
+            expires_at = now + self._lease_ttl
+            thread.lease_expires_at = expires_at
+            thread.state_version += 1
+            state_version = thread.state_version
+            db.commit()
+            return replace(
+                lease,
+                expires_at=expires_at,
+                state_version=state_version,
+            )
+
+    def _release_lease_after_failure(
+        self,
+        workflow_thread_id: str,
+        lease: _Lease,
+    ) -> None:
+        try:
+            self._release_lease(workflow_thread_id, lease)
+        except Exception:
+            # Failure cleanup must never replace the original provider,
+            # validation, serialization, or persistence exception.
+            return
+
     def _release_lease(self, workflow_thread_id: str, lease: _Lease) -> None:
         with self._session_factory() as db:
             thread = _locked_thread(db, workflow_thread_id)
-            if thread.lease_token != lease.token or thread.state_version != lease.state_version:
+            if not _thread_has_exact_lease(thread, lease):
                 db.rollback()
                 return
             thread.lease_token = None
             thread.lease_expires_at = None
-            thread.status = 'created'
+            thread.status = lease.prior_status
             thread.state_version += 1
             db.commit()
 
@@ -666,17 +755,30 @@ def _aggregate_preview(
     )
 
 
-def _load_draft_inputs(db: Session, thread_id: str, *, lock: bool) -> _DraftInputs:
+def _load_draft_inputs(
+    db: Session,
+    thread_id: str,
+    *,
+    lock: bool,
+    settings: Settings,
+) -> _DraftInputs:
     query = select(AgentWorkflowThread).where(AgentWorkflowThread.thread_id == thread_id)
     if lock:
         query = query.with_for_update()
     thread = db.scalar(query)
     if thread is None:
         raise ReviewDraftError('not_found', 'workflow was not found')
-    return _draft_inputs_for_thread(db, thread)
+    return _draft_inputs_for_thread(db, thread, settings=settings)
 
 
-def _draft_inputs_for_thread(db: Session, thread: AgentWorkflowThread) -> _DraftInputs:
+def _draft_inputs_for_thread(
+    db: Session,
+    thread: AgentWorkflowThread,
+    *,
+    settings: Settings,
+) -> _DraftInputs:
+    if thread.security_scope_id != settings.agent_runtime_security_scope_id:
+        raise ReviewDraftError('not_found', 'workflow was not found')
     request = db.scalar(
         select(AgentWorkflowRequest).where(
             AgentWorkflowRequest.workflow_thread_id == thread.thread_id
@@ -702,15 +804,46 @@ def _draft_inputs_for_thread(db: Session, thread: AgentWorkflowThread) -> _Draft
         )
         for row in rows
     )
+    raw_agent_names = tuple(request.agent_names)
+    try:
+        agent_names = normalize_agent_names(raw_agent_names)
+    except (TypeError, ValueError):
+        raise ReviewDraftError(
+            'invalid_state_transition',
+            'workflow identity changed',
+        ) from None
+    if agent_names != raw_agent_names:
+        raise ReviewDraftError(
+            'invalid_state_transition',
+            'workflow identity changed',
+        )
+    prepared = build_prepared_review_identity(
+        source_refs=refs,
+        agent_names=agent_names,
+        settings=settings,
+    )
+    if thread.evidence_version_hash != prepared.evidence_version_hash:
+        raise ReviewDraftError('evidence_changed', 'source evidence changed')
+    if not review_thread_matches_prepared(
+        db,
+        thread=thread,
+        prepared=prepared,
+        settings=settings,
+    ):
+        raise ReviewDraftError(
+            'invalid_state_transition',
+            'workflow identity changed',
+        )
     return _DraftInputs(
         thread_id=thread.thread_id,
         security_scope_id=thread.security_scope_id,
         status=thread.status,
         state_version=thread.state_version,
-        evidence_version_hash=thread.evidence_version_hash,
-        selection_policy_version=request.selection_policy_version,
-        agent_names=tuple(request.agent_names),
+        evidence_version_hash=prepared.evidence_version_hash,
+        selection_policy_version=prepared.selection_policy_version,
+        agent_names=prepared.agent_names,
         refs=refs,
+        prepared=prepared,
     )
 
 
@@ -756,16 +889,25 @@ def _build_exact_packet(
     ranked: list[tuple[int, float, int, str, int, EvidenceMessage]] = []
     for ref in current_refs:
         source = sources[ref.canonical_row_id]
+        parser_metadata = _authoritative_parser_metadata(
+            db,
+            source_id=source.id,
+            document_version_id=ref.document_version_id,
+        )
         chunk_query = select(DocumentChunk).where(DocumentChunk.source_id == source.id)
         if ref.document_version_id is not None:
             chunk_query = chunk_query.where(
                 DocumentChunk.version_id == ref.document_version_id
             )
         chunks = db.scalars(chunk_query.order_by(DocumentChunk.chunk_index)).all()
+        has_non_empty_chunk = False
         for chunk in chunks:
             if chunk.permission_level not in allowed_permission_levels:
                 raise ReviewDraftError('permission_denied', 'evidence permission changed')
-            message = _message_from_chunk(source, chunk)
+            if not chunk.text.strip():
+                continue
+            has_non_empty_chunk = True
+            message = _message_from_chunk(source, chunk, parser_metadata=parser_metadata)
             ranked.append(
                 (
                     _importance_score(message.text, source.source_type),
@@ -776,9 +918,14 @@ def _build_exact_packet(
                     message,
                 )
             )
-        if chunks:
+        if has_non_empty_chunk:
             continue
-        fallback = _fallback_message(db, source=source, ref=ref)
+        fallback = _fallback_message(
+            db,
+            source=source,
+            ref=ref,
+            parser_metadata=parser_metadata,
+        )
         if fallback is not None:
             ranked.append(
                 (
@@ -880,7 +1027,42 @@ def _revalidate_refs(
     return current, sources
 
 
-def _message_from_chunk(source: Source, chunk: DocumentChunk) -> EvidenceMessage:
+def _authoritative_parser_metadata(
+    db: Session,
+    *,
+    source_id: int,
+    document_version_id: int | None,
+) -> dict[str, object]:
+    if document_version_id is None:
+        return {}
+    parser_run = db.scalar(
+        select(DocumentParserRun)
+        .where(
+            DocumentParserRun.source_id == source_id,
+            DocumentParserRun.document_version_id == document_version_id,
+        )
+        .order_by(DocumentParserRun.finished_at.desc(), DocumentParserRun.id.desc())
+    )
+    if parser_run is None:
+        return {}
+    return {
+        'parser_run_id': parser_run.id,
+        'parser_name': parser_run.parser_name,
+        'parser_status': parser_run.parser_status,
+        'parser_status_reason': parser_run.parser_status_reason,
+        'mime_type': parser_run.mime_type,
+        'document_version_label': parser_run.document_version_label,
+        'revision_id': parser_run.revision_id,
+        'content_signature': parser_run.content_signature,
+    }
+
+
+def _message_from_chunk(
+    source: Source,
+    chunk: DocumentChunk,
+    *,
+    parser_metadata: dict[str, object],
+) -> EvidenceMessage:
     metadata = source.raw_metadata or {}
     quality_keys = (
         'parser_name',
@@ -919,6 +1101,7 @@ def _message_from_chunk(source: Source, chunk: DocumentChunk) -> EvidenceMessage
                 for key in quality_keys
                 if chunk.metadata_.get(key) is not None
             },
+            **parser_metadata,
         },
         source_snippet_override=chunk.source_snippet,
     )
@@ -929,6 +1112,7 @@ def _fallback_message(
     *,
     source: Source,
     ref: ResolvedSourceVersion,
+    parser_metadata: dict[str, object],
 ) -> EvidenceMessage | None:
     text = ''
     if ref.document_version_id is not None:
@@ -949,7 +1133,11 @@ def _fallback_message(
             (source.raw_metadata or {}).get('ts') or source.created_at.isoformat()
         ),
         permission_level=source.permission_level,
-        metadata={'source_type': source.source_type, 'fallback_body': True},
+        metadata={
+            'source_type': source.source_type,
+            'fallback_body': True,
+            **parser_metadata,
+        },
         source_snippet_override=text[:240],
     )
 
@@ -995,6 +1183,11 @@ def _validated_result(
     packet_snippets = set(packet.source_snippets)
     candidates: list[ReviewCandidate] = []
     for candidate in result.candidates:
+        if candidate.item_type not in plan.adapter.allowed_item_types:
+            raise ReviewDraftError(
+                'invalid_input',
+                'agent result item type is not allowed',
+            )
         try:
             candidate.validate_evidence()
         except ValueError:
@@ -1243,13 +1436,20 @@ def _find_agent_run(
         select(AgentRun).where(
             AgentRun.workflow_thread_id == thread_id,
             AgentRun.effect_key == effect_key,
+            AgentRun.status == 'complete',
         )
     )
 
 
-def _review_item_ids_for_run(db: Session, agent_run_id: int) -> tuple[int, ...]:
+def _review_item_ids_for_run(
+    db: Session,
+    agent_run_id: int,
+    workflow_thread_id: str,
+) -> tuple[int, ...]:
     items = db.scalars(
-        select(ReviewItem).where(ReviewItem.workflow_thread_id.is_not(None))
+        select(ReviewItem).where(
+            ReviewItem.workflow_thread_id == workflow_thread_id,
+        )
     ).all()
     return tuple(
         sorted(
@@ -1263,13 +1463,18 @@ def _review_item_ids_for_run(db: Session, agent_run_id: int) -> tuple[int, ...]:
 def _cached_review_item_ids(
     db: Session,
     plans: tuple[_AdapterPlan, ...],
+    workflow_thread_id: str,
 ) -> tuple[int, ...]:
     return tuple(
         sorted({
             item_id
             for plan in plans
             if plan.cached_run_id is not None
-            for item_id in _review_item_ids_for_run(db, plan.cached_run_id)
+            for item_id in _review_item_ids_for_run(
+                db,
+                plan.cached_run_id,
+                workflow_thread_id,
+            )
         })
     )
 
@@ -1370,6 +1575,32 @@ def _lease_expired(expires_at: datetime, now: datetime) -> bool:
     if now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
     return expires_at <= now
+
+
+def _thread_has_exact_lease(
+    thread: AgentWorkflowThread,
+    lease: _Lease,
+) -> bool:
+    return bool(lease.token) and (
+        thread.lease_token == lease.token
+        and thread.state_version == lease.state_version
+        and thread.status == 'drafting'
+        and thread.lease_expires_at is not None
+        and _same_datetime(thread.lease_expires_at, lease.expires_at)
+    )
+
+
+def _lease_restore_status(status: str) -> str:
+    if status == 'drafting':
+        # Taking over an expired drafting lease is the one approved cleanup
+        # transition that cannot restore its prior transient state.
+        return 'created'
+    if status in _DRAFTABLE_STATUSES:
+        return status
+    raise ReviewDraftError(
+        'invalid_state_transition',
+        'workflow cannot draft in its current state',
+    )
 
 
 def _same_datetime(left: datetime, right: datetime) -> bool:

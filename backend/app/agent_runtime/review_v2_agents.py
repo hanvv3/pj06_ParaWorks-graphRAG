@@ -1,5 +1,7 @@
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Protocol
 
 from backend.app.agent_runtime.contracts import (
@@ -23,6 +25,7 @@ from backend.app.agents.mail_document_agent import (
     MAIL_DOCUMENT_AGENT_MANIFEST,
     MailDocumentAgent,
 )
+from backend.app.agents.mail_document_agent.llm import render_mail_docs_llm_prompt
 from backend.app.agents.memory_extraction_agent import (
     DECISION_RECORD_AGENT_MANIFEST,
     HISTORY_AGENT_MANIFEST,
@@ -37,18 +40,33 @@ from backend.app.agents.memory_extraction_agent import (
     LangChainMemoryExtractionModel,
     TimelineAgent,
     TodoAgent,
+    render_memory_extraction_prompt,
 )
 from backend.app.core.config import Settings
 from backend.app.schemas.review_workflow import DEFAULT_REVIEW_AGENT_NAMES
 
 MEMORY_ESTIMATED_OUTPUT_TOKENS = 128
+APPROVED_REVIEW_AGENT_MANIFESTS = {
+    manifest.name: manifest
+    for manifest in (
+        MAIL_DOCUMENT_AGENT_MANIFEST,
+        TIMELINE_AGENT_MANIFEST,
+        HISTORY_AGENT_MANIFEST,
+        DECISION_RECORD_AGENT_MANIFEST,
+        TODO_AGENT_MANIFEST,
+    )
+}
 
 
 class ReviewAgentAdapter(Protocol):
     manifest: AgentManifest
+    allowed_item_types: frozenset[str]
     estimated_output_tokens: int
     model_name: str
     model_route_version: str
+
+    def render_estimation_input(self, packet: EvidencePacket) -> str:
+        raise NotImplementedError
 
     def preflight(self, packet: EvidencePacket) -> AgentCostBudgetDecision:
         raise NotImplementedError
@@ -60,6 +78,7 @@ class ReviewAgentAdapter(Protocol):
 @dataclass(frozen=True)
 class _ReviewAgentAdapter:
     manifest: AgentManifest
+    allowed_item_types: frozenset[str]
     agent: object
     estimated_output_tokens: int
     model_name: str
@@ -68,7 +87,25 @@ class _ReviewAgentAdapter:
     output_cost_per_1m: float
     max_cost_usd: float | None
     deterministic: bool
+    prompt_renderer: Callable[[EvidencePacket], str]
     preserve_result_model_name: bool = False
+
+    def render_estimation_input(self, packet: EvidencePacket) -> str:
+        evidence_context = json.dumps(
+            [
+                {
+                    'source_url': message.source_url,
+                    'source_snippet': message.source_snippet,
+                    'metadata': message.metadata,
+                }
+                for message in packet.messages
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+            default=str,
+        )
+        return f'{self.prompt_renderer(packet)}\n{evidence_context}'
 
     def preflight(self, packet: EvidencePacket) -> AgentCostBudgetDecision:
         if not packet.messages:
@@ -83,11 +120,7 @@ class _ReviewAgentAdapter:
                 cache_hit=False,
             )
         token_usage = TokenUsage(
-            input_tokens=sum(
-                max(1, len(message.text.strip()) // 4)
-                for message in packet.messages
-                if message.text.strip()
-            ),
+            input_tokens=max(1, len(self.render_estimation_input(packet)) // 4),
             output_tokens=self.estimated_output_tokens,
         )
         return evaluate_agent_cost_budget(
@@ -118,14 +151,18 @@ class _ReviewAgentAdapter:
 class ReviewAgentCatalog:
     def __init__(self, adapters: Sequence[ReviewAgentAdapter]) -> None:
         by_name = {adapter.manifest.name: adapter for adapter in adapters}
-        if len(by_name) != len(adapters) or set(by_name) != set(DEFAULT_REVIEW_AGENT_NAMES):
+        if (
+            len(by_name) != len(adapters)
+            or set(by_name) != set(DEFAULT_REVIEW_AGENT_NAMES)
+            or tuple(APPROVED_REVIEW_AGENT_MANIFESTS) != DEFAULT_REVIEW_AGENT_NAMES
+        ):
             raise ValueError('review agent catalog must contain the exact public manifests')
         self._registry = _FixedAgentRegistry()
         self._adapters: dict[str, ReviewAgentAdapter] = {}
         for name in DEFAULT_REVIEW_AGENT_NAMES:
             adapter = by_name[name]
-            if adapter.manifest.name != name:
-                raise ValueError('review agent manifest does not match its catalog key')
+            if adapter.manifest != APPROVED_REVIEW_AGENT_MANIFESTS[name]:
+                raise ValueError('review agent catalog must contain the exact public manifests')
             self._registry.register(adapter.manifest)
             self._adapters[name] = adapter
         self._registry.seal()
@@ -165,6 +202,7 @@ def build_review_agent_catalog(
     )
     memory_route = build_memory_model_route(
         settings,
+        max_output_tokens=MEMORY_ESTIMATED_OUTPUT_TOKENS,
         chat_model_builder=chat_model_builder,
     )
     common = {
@@ -175,6 +213,9 @@ def build_review_agent_catalog(
     adapters: list[ReviewAgentAdapter] = [
         _ReviewAgentAdapter(
             manifest=MAIL_DOCUMENT_AGENT_MANIFEST,
+            allowed_item_types=frozenset(
+                {'timeline_event', 'history_event', 'decision_record', 'todo'}
+            ),
             agent=MailDocumentAgent(
                 model=mail_route.model,
                 input_cost_per_1m=settings.agent_llm_input_cost_per_1m_tokens,
@@ -184,6 +225,10 @@ def build_review_agent_catalog(
             model_name=mail_route.model_name,
             model_route_version=mail_route.route_version,
             deterministic=mail_route.deterministic,
+            prompt_renderer=partial(
+                render_mail_docs_llm_prompt,
+                max_input_chars=settings.agent_llm_max_input_chars,
+            ),
             preserve_result_model_name=True,
             **common,
         ),
@@ -246,11 +291,18 @@ def _memory_adapters(
         adapters.append(
             _ReviewAgentAdapter(
                 manifest=manifest,
+                allowed_item_types=frozenset({item_type}),
                 agent=agent_type(model=model),
                 estimated_output_tokens=MEMORY_ESTIMATED_OUTPUT_TOKENS,
                 model_name=route.model_name,
                 model_route_version=route.route_version,
                 deterministic=route.deterministic,
+                prompt_renderer=partial(
+                    render_memory_extraction_prompt,
+                    expected_item_type=item_type,
+                    task_name=task_name,
+                    max_input_chars=settings.agent_llm_max_input_chars,
+                ),
                 **common,
             )
         )

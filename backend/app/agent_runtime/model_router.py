@@ -59,7 +59,8 @@ def build_mail_document_model_route(
 def build_memory_model_route(
     settings: Settings,
     *,
-    chat_model_builder: Callable[[Settings], Any] | None = None,
+    max_output_tokens: int,
+    chat_model_builder: Callable[..., Any] | None = None,
 ) -> RoutedReviewModel:
     if settings.paraworks_demo_mode:
         return RoutedReviewModel(
@@ -74,7 +75,7 @@ def build_memory_model_route(
         raise ReviewModelUnavailableError('review model is unavailable')
     builder = chat_model_builder or build_langchain_review_chat_model
     try:
-        model = builder(settings)
+        model = builder(settings, max_output_tokens=max_output_tokens)
     except (ImportError, ValueError, TypeError):
         raise ReviewModelUnavailableError('review model is unavailable') from None
     return RoutedReviewModel(
@@ -104,7 +105,13 @@ def build_mail_document_llm_settings(settings: Settings) -> MailDocumentLlmSetti
     )
 
 
-def build_langchain_review_chat_model(settings: Settings) -> Any:
+def build_langchain_review_chat_model(
+    settings: Settings,
+    *,
+    max_output_tokens: int,
+) -> Any:
+    if max_output_tokens <= 0:
+        raise ValueError('max output tokens must be positive')
     available = _available_provider_routes(settings)
     if not settings.agent_llm_enabled or not available:
         raise ReviewModelUnavailableError('review model is unavailable')
@@ -119,6 +126,7 @@ def build_langchain_review_chat_model(settings: Settings) -> Any:
                 temperature=settings.agent_llm_temperature,
                 timeout=settings.agent_llm_timeout_seconds,
                 max_retries=1,
+                max_completion_tokens=max_output_tokens,
             )
 
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -129,6 +137,7 @@ def build_langchain_review_chat_model(settings: Settings) -> Any:
             temperature=settings.agent_llm_temperature,
             timeout=settings.agent_llm_timeout_seconds,
             max_retries=1,
+            max_tokens=max_output_tokens,
         )
     except Exception:
         raise ReviewModelUnavailableError('review model is unavailable') from None

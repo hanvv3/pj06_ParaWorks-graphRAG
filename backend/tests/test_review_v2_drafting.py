@@ -1,5 +1,5 @@
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -16,7 +16,10 @@ from backend.app.agent_runtime.contracts import (
     ReviewCandidate,
     TokenUsage,
 )
-from backend.app.agent_runtime.review_v2_agents import ReviewAgentCatalog
+from backend.app.agent_runtime.review_v2_agents import (
+    ReviewAgentCatalog,
+    build_review_agent_catalog,
+)
 from backend.app.agent_runtime.review_v2_drafting import (
     ReviewDraftError,
     ReviewDraftService,
@@ -28,24 +31,55 @@ from backend.app.agent_runtime.review_v2_preflight import (
     create_or_reuse_review_thread,
     prepare_review_request,
 )
+from backend.app.agents.mail_document_agent import (
+    MAIL_DOCUMENT_AGENT_MANIFEST,
+)
+from backend.app.agents.memory_extraction_agent import (
+    DECISION_RECORD_AGENT_MANIFEST,
+    HISTORY_AGENT_MANIFEST,
+    TIMELINE_AGENT_MANIFEST,
+    TODO_AGENT_MANIFEST,
+)
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
 from backend.app.models.agent_runs import AgentRun
-from backend.app.models.agent_workflows import AgentWorkflowThread
+from backend.app.models.agent_workflows import (
+    AgentWorkflowEvidenceRef,
+    AgentWorkflowRequest,
+    AgentWorkflowThread,
+)
 from backend.app.models.review import ReviewItem
-from backend.app.models.source import Document, DocumentChunk, DocumentVersion, Source
+from backend.app.models.source import (
+    Document,
+    DocumentChunk,
+    DocumentParserRun,
+    DocumentVersion,
+    Source,
+)
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_SELECTION_POLICY_VERSION,
     DEFAULT_REVIEW_AGENT_NAMES,
     ReviewWorkflowRunRequest,
 )
 
-PROMPT_VERSIONS = {
-    'mail_document_agent': 'mail-document-history:v1',
-    'timeline_agent': 'timeline-extraction:v1',
-    'history_agent': 'history-extraction:v1',
-    'decision_record_agent': 'decision-record-extraction:v1',
-    'todo_agent': 'todo-extraction:v1',
+APPROVED_MANIFESTS = {
+    manifest.name: manifest
+    for manifest in (
+        MAIL_DOCUMENT_AGENT_MANIFEST,
+        TIMELINE_AGENT_MANIFEST,
+        HISTORY_AGENT_MANIFEST,
+        DECISION_RECORD_AGENT_MANIFEST,
+        TODO_AGENT_MANIFEST,
+    )
+}
+ALLOWED_ITEM_TYPES = {
+    'mail_document_agent': frozenset(
+        {'timeline_event', 'history_event', 'decision_record', 'todo'}
+    ),
+    'timeline_agent': frozenset({'timeline_event'}),
+    'history_agent': frozenset({'history_event'}),
+    'decision_record_agent': frozenset({'decision_record'}),
+    'todo_agent': frozenset({'todo'}),
 }
 
 
@@ -143,6 +177,10 @@ class _FakeAdapter:
     run_calls: int = 0
     preflight_calls: int = 0
 
+    @property
+    def allowed_item_types(self) -> frozenset[str]:
+        return ALLOWED_ITEM_TYPES[self.manifest.name]
+
     def preflight(self, packet: EvidencePacket) -> AgentCostBudgetDecision:
         self.preflight_calls += 1
         input_tokens = sum(max(1, len(message.text) // 4) for message in packet.messages)
@@ -193,7 +231,12 @@ class _FakeAdapter:
         candidates = (
             self.candidate_factory(packet)
             if self.candidate_factory is not None
-            else [_candidate_from_packet(packet)]
+            else [
+                _candidate_from_packet(
+                    packet,
+                    item_type=next(iter(self.allowed_item_types)),
+                )
+            ]
         )
         return AgentRunResult(
             agent_name=self.manifest.name,
@@ -209,9 +252,13 @@ class _FakeAdapter:
         )
 
 
-def _candidate_from_packet(packet: EvidencePacket) -> ReviewCandidate:
+def _candidate_from_packet(
+    packet: EvidencePacket,
+    *,
+    item_type: str = 'history_event',
+) -> ReviewCandidate:
     return ReviewCandidate(
-        item_type='history_event',
+        item_type=item_type,
         title='회사 히스토리 후보',
         summary='고객 데모 일정으로 QA 및 배포 계획이 변경되었습니다.',
         source_links=list(packet.source_links),
@@ -223,16 +270,8 @@ def _candidate_from_packet(packet: EvidencePacket) -> ReviewCandidate:
     )
 
 
-def _manifest(name: str, *, prompt_version: str | None = None) -> AgentManifest:
-    return AgentManifest(
-        name=name,
-        owner='Test Owner',
-        input_contract='EvidencePacket',
-        output_contract='AgentRunResult',
-        prompt_versions=(prompt_version or PROMPT_VERSIONS[name],),
-        supported_permissions=('public', 'internal', 'restricted'),
-        capabilities=('review_draft',),
-    )
+def _manifest(name: str) -> AgentManifest:
+    return APPROVED_MANIFESTS[name]
 
 
 def _catalog(
@@ -265,7 +304,11 @@ def _session_factory(db_session: Session, *, tracked: list[Session] | None = Non
     return create_session
 
 
-def _request(source: Source, agent_name: str = 'history_agent') -> ReviewWorkflowRunRequest:
+def _request(
+    source: Source,
+    agent_names: str | Sequence[str] = 'history_agent',
+) -> ReviewWorkflowRunRequest:
+    requested_agents = [agent_names] if isinstance(agent_names, str) else list(agent_names)
     return ReviewWorkflowRunRequest(
         source_refs=[
             {
@@ -274,7 +317,7 @@ def _request(source: Source, agent_name: str = 'history_agent') -> ReviewWorkflo
                 'version_or_signature': source.raw_metadata['content_signature'],
             }
         ],
-        agent_names=[agent_name],
+        agent_names=requested_agents,
         client_request_id=f'test-{uuid4().hex}',
     )
 
@@ -305,9 +348,11 @@ def _create_workflow(
     catalog: ReviewAgentCatalog,
     settings: Settings,
     actor: DemoUser | None = None,
+    agent_name: str = 'history_agent',
+    agent_names: Sequence[str] | None = None,
 ) -> tuple[PreparedReviewRequest, str]:
     workflow_actor = actor or _actor()
-    request = _request(source)
+    request = _request(source, agent_names or agent_name)
     prepared = prepare_review_request(
         db,
         request=request,
@@ -537,6 +582,218 @@ def test_effect_replay_skips_model_and_reuses_agent_run_and_candidates(
     assert _row_counts(factory) == (1, 1, 1)
 
 
+def test_failed_exact_version_parser_metadata_and_body_fallback_reach_mail_adapter(
+    db_session,
+) -> None:
+    settings = _settings()
+    source = _seed_source(db_session, source_type='drive')
+    version = db_session.scalar(
+        select(DocumentVersion)
+        .join(Document, Document.id == DocumentVersion.document_id)
+        .where(Document.source_id == source.id, DocumentVersion.version == 'v1')
+    )
+    chunk = db_session.scalar(
+        select(DocumentChunk).where(DocumentChunk.version_id == version.id)
+    )
+    assert version is not None
+    assert chunk is not None
+    chunk.text = '   '
+    chunk.source_snippet = ''
+    version.body = '문서 본문에서 고객 데모 QA 완료와 배포 결정을 확인했습니다.'
+    later_version = DocumentVersion(
+        document_id=version.document_id,
+        version='v2',
+        body='현재 선택되지 않은 다른 버전입니다.',
+    )
+    db_session.add(later_version)
+    db_session.flush()
+    db_session.add_all(
+        [
+            DocumentParserRun(
+                document_id=version.document_id,
+                document_version_id=version.id,
+                source_id=source.id,
+                parser_name='older-parser',
+                parser_status='parsed',
+                parser_status_reason=None,
+                mime_type='application/pdf',
+                document_version_label='v1',
+                revision_id='older-revision',
+                content_signature='older-signature',
+                chunk_count=1,
+                finished_at=datetime(2026, 8, 26, tzinfo=UTC),
+            ),
+            DocumentParserRun(
+                document_id=version.document_id,
+                document_version_id=version.id,
+                source_id=source.id,
+                parser_name='authoritative-parser',
+                parser_status='failed',
+                parser_status_reason='encrypted_body',
+                mime_type='application/pdf',
+                document_version_label='v1',
+                revision_id='selected-revision',
+                content_signature='selected-signature',
+                chunk_count=0,
+                finished_at=datetime(2026, 8, 27, tzinfo=UTC),
+            ),
+            DocumentParserRun(
+                document_id=version.document_id,
+                document_version_id=later_version.id,
+                source_id=source.id,
+                parser_name='foreign-version-parser',
+                parser_status='unsupported',
+                parser_status_reason='wrong_version',
+                mime_type='application/octet-stream',
+                document_version_label='v2',
+                revision_id='foreign-revision',
+                content_signature='foreign-signature',
+                chunk_count=0,
+                finished_at=datetime(2026, 8, 28, tzinfo=UTC),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    captured: list[EvidencePacket] = []
+    base_catalog = build_review_agent_catalog(settings)
+    mail_adapter = base_catalog.get('mail_document_agent')
+    delegate_model = mail_adapter.agent.model
+
+    class CapturingMailModel:
+        def extract(self, packet: EvidencePacket):
+            captured.append(packet)
+            return delegate_model.extract(packet)
+
+    adapters = [base_catalog.get(name) for name in DEFAULT_REVIEW_AGENT_NAMES]
+    adapters[0] = replace(
+        mail_adapter,
+        agent=replace(
+            mail_adapter.agent,
+            model=CapturingMailModel(),
+        ),
+    )
+    catalog = ReviewAgentCatalog(adapters)
+    _, thread_id = _create_workflow(
+        db_session,
+        source=source,
+        catalog=catalog,
+        settings=settings,
+        agent_name='mail_document_agent',
+    )
+    factory = _session_factory(db_session)
+
+    result = ReviewDraftService(
+        session_factory=factory,
+        catalog=catalog,
+        settings=settings,
+    ).draft(
+        workflow_thread_id=thread_id,
+        actor_subject_id='actor-1',
+        allowed_permission_levels=('public', 'internal'),
+    )
+
+    assert len(captured) == 1
+    message = captured[0].messages[0]
+    assert message.text == version.body
+    assert message.metadata['fallback_body'] is True
+    assert message.metadata['parser_name'] == 'authoritative-parser'
+    assert message.metadata['parser_status'] == 'failed'
+    assert message.metadata['parser_status_reason'] == 'encrypted_body'
+    assert message.metadata['document_version_label'] == 'v1'
+    assert message.metadata['revision_id'] == 'selected-revision'
+    assert message.metadata['content_signature'] == 'selected-signature'
+    with factory() as db:
+        review_item = db.get(ReviewItem, result.review_item_ids[0])
+        assert review_item is not None
+        assert 'failed(encrypted_body)' in review_item.payload['uncertainty_reason']
+
+
+def test_failed_agent_run_is_not_replayed_as_cached_effect(db_session) -> None:
+    settings = _settings()
+    catalog, adapter = _catalog()
+    source = _seed_source(db_session)
+    db_session.commit()
+    _, thread_id = _create_workflow(
+        db_session,
+        source=source,
+        catalog=catalog,
+        settings=settings,
+    )
+    factory = _session_factory(db_session)
+    service = ReviewDraftService(
+        session_factory=factory,
+        catalog=catalog,
+        settings=settings,
+    )
+    service.draft(
+        workflow_thread_id=thread_id,
+        actor_subject_id='actor-1',
+        allowed_permission_levels=('public', 'internal'),
+    )
+    with factory() as db:
+        run = db.scalar(select(AgentRun))
+        assert run is not None
+        run.status = 'failed'
+        db.commit()
+
+    with pytest.raises(ReviewDraftError) as exc_info:
+        service.draft(
+            workflow_thread_id=thread_id,
+            actor_subject_id='actor-1',
+            allowed_permission_levels=('public', 'internal'),
+        )
+
+    assert exc_info.value.code == 'concurrent_resume'
+    assert adapter.run_calls == 2
+    assert _row_counts(factory) == (1, 1, 1)
+
+
+def test_cache_replay_excludes_candidate_associated_with_foreign_thread(
+    db_session,
+) -> None:
+    settings = _settings()
+    catalog, adapter = _catalog()
+    source = _seed_source(db_session)
+    db_session.commit()
+    _, thread_id = _create_workflow(
+        db_session,
+        source=source,
+        catalog=catalog,
+        settings=settings,
+    )
+    factory = _session_factory(db_session)
+    service = ReviewDraftService(
+        session_factory=factory,
+        catalog=catalog,
+        settings=settings,
+    )
+    first = service.draft(
+        workflow_thread_id=thread_id,
+        actor_subject_id='actor-1',
+        allowed_permission_levels=('public', 'internal'),
+    )
+    with factory() as db:
+        run = db.scalar(select(AgentRun))
+        assert run is not None
+        foreign = _seed_predecessor(
+            db,
+            source_ids=['gmail:message-1'],
+            created_at=datetime(2026, 8, 27, tzinfo=UTC),
+        )
+        foreign.payload['agent_run_id'] = run.id
+        db.commit()
+
+    replay = service.draft(
+        workflow_thread_id=thread_id,
+        actor_subject_id='actor-1',
+        allowed_permission_levels=('public', 'internal'),
+    )
+
+    assert replay.review_item_ids == first.review_item_ids
+    assert adapter.run_calls == 1
+
+
 def test_prompt_or_evidence_change_invalidates_effect_key(db_session) -> None:
     del db_session
     settings = _settings()
@@ -594,6 +851,211 @@ class _Clock:
 
     def __call__(self) -> datetime:
         return self.value
+
+
+def test_five_adapter_draft_renews_owned_lease_between_slow_provider_calls(
+    db_session,
+) -> None:
+    settings = _settings()
+    clock = _Clock()
+    tracked_sessions: list[Session] = []
+    factory = _session_factory(db_session, tracked=tracked_sessions)
+
+    def advance_provider_clock(_packet: EvidencePacket) -> None:
+        assert all(not session.in_transaction() for session in tracked_sessions)
+        clock.value += timedelta(seconds=30)
+
+    adapters = [
+        _FakeAdapter(_manifest(name), on_run=advance_provider_clock)
+        for name in DEFAULT_REVIEW_AGENT_NAMES
+    ]
+    catalog = ReviewAgentCatalog(adapters)
+    source = _seed_source(db_session)
+    db_session.commit()
+    _, thread_id = _create_workflow(
+        db_session,
+        source=source,
+        catalog=catalog,
+        settings=settings,
+        agent_names=DEFAULT_REVIEW_AGENT_NAMES,
+    )
+    service = ReviewDraftService(
+        session_factory=factory,
+        catalog=catalog,
+        settings=settings,
+        lease_ttl_seconds=45,
+        now=clock,
+    )
+
+    result = service.draft(
+        workflow_thread_id=thread_id,
+        actor_subject_id='actor-1',
+        allowed_permission_levels=('public', 'internal'),
+    )
+
+    assert len(result.review_item_ids) == 5
+    assert [adapter.run_calls for adapter in adapters] == [1, 1, 1, 1, 1]
+    assert clock.value == datetime(2026, 8, 27, 9, 2, 30, tzinfo=UTC)
+    with factory() as db:
+        thread = db.get(AgentWorkflowThread, thread_id)
+        assert thread is not None
+        assert thread.state_version == 6
+        assert thread.status == 'checkpoint_pending'
+        assert thread.lease_token is None
+
+
+def test_lease_renewal_requires_exact_owned_token_and_state_cas(db_session) -> None:
+    settings = _settings()
+    clock = _Clock()
+    factory = _session_factory(db_session)
+    thread_ids: list[str] = []
+
+    def steal_lease(_packet: EvidencePacket) -> None:
+        with factory() as db:
+            thread = db.get(AgentWorkflowThread, thread_ids[0])
+            assert thread is not None
+            thread.lease_token = 'foreign-owner-token'
+            thread.state_version += 1
+            db.commit()
+        clock.value += timedelta(seconds=30)
+
+    first = _FakeAdapter(_manifest('mail_document_agent'), on_run=steal_lease)
+    second = _FakeAdapter(_manifest('history_agent'))
+    adapters = [
+        first
+        if name == 'mail_document_agent'
+        else second
+        if name == 'history_agent'
+        else _FakeAdapter(_manifest(name))
+        for name in DEFAULT_REVIEW_AGENT_NAMES
+    ]
+    catalog = ReviewAgentCatalog(adapters)
+    source = _seed_source(db_session)
+    db_session.commit()
+    _, thread_id = _create_workflow(
+        db_session,
+        source=source,
+        catalog=catalog,
+        settings=settings,
+        agent_names=('mail_document_agent', 'history_agent'),
+    )
+    thread_ids.append(thread_id)
+
+    with pytest.raises(ReviewDraftError) as exc_info:
+        ReviewDraftService(
+            session_factory=factory,
+            catalog=catalog,
+            settings=settings,
+            lease_ttl_seconds=45,
+            now=clock,
+        ).draft(
+            workflow_thread_id=thread_id,
+            actor_subject_id='actor-1',
+            allowed_permission_levels=('public', 'internal'),
+        )
+
+    assert exc_info.value.code == 'concurrent_resume'
+    assert first.run_calls == 1
+    assert second.run_calls == 0
+    assert _row_counts(factory) == (1, 0, 0)
+    with factory() as db:
+        thread = db.get(AgentWorkflowThread, thread_id)
+        assert thread is not None
+        assert thread.status == 'drafting'
+        assert thread.lease_token == 'foreign-owner-token'
+        assert thread.state_version == 2
+
+
+def test_persistence_failure_rolls_back_and_releases_only_owned_lease(
+    db_session,
+    monkeypatch,
+) -> None:
+    class InjectedPersistenceError(RuntimeError):
+        pass
+
+    settings = _settings()
+    catalog, adapter = _catalog()
+    source = _seed_source(db_session)
+    db_session.commit()
+    _, thread_id = _create_workflow(
+        db_session,
+        source=source,
+        catalog=catalog,
+        settings=settings,
+    )
+    factory = _session_factory(db_session)
+
+    def fail_persistence(*_args, **_kwargs):
+        raise InjectedPersistenceError('injected serialization failure')
+
+    monkeypatch.setattr(
+        'backend.app.agent_runtime.review_v2_drafting._insert_or_get_review_item',
+        fail_persistence,
+    )
+
+    with pytest.raises(InjectedPersistenceError, match='serialization failure'):
+        ReviewDraftService(
+            session_factory=factory,
+            catalog=catalog,
+            settings=settings,
+        ).draft(
+            workflow_thread_id=thread_id,
+            actor_subject_id='actor-1',
+            allowed_permission_levels=('public', 'internal'),
+        )
+
+    assert adapter.run_calls == 1
+    assert _row_counts(factory) == (1, 0, 0)
+    with factory() as db:
+        thread = db.get(AgentWorkflowThread, thread_id)
+        assert thread is not None
+        assert thread.status == 'created'
+        assert thread.lease_token is None
+
+
+@pytest.mark.parametrize('prior_status', ['checkpoint_pending', 'checkpoint_failed'])
+def test_provider_failure_restores_captured_prior_allowed_status(
+    db_session,
+    prior_status: str,
+) -> None:
+    settings = _settings()
+
+    def fail_provider(_packet: EvidencePacket) -> None:
+        raise TimeoutError('provider timed out')
+
+    adapter = _FakeAdapter(_manifest('history_agent'), on_run=fail_provider)
+    catalog, _ = _catalog(selected_adapter=adapter)
+    source = _seed_source(db_session)
+    db_session.commit()
+    _, thread_id = _create_workflow(
+        db_session,
+        source=source,
+        catalog=catalog,
+        settings=settings,
+    )
+    thread = db_session.get(AgentWorkflowThread, thread_id)
+    assert thread is not None
+    thread.status = prior_status
+    db_session.commit()
+    factory = _session_factory(db_session)
+
+    with pytest.raises(ReviewDraftError) as exc_info:
+        ReviewDraftService(
+            session_factory=factory,
+            catalog=catalog,
+            settings=settings,
+        ).draft(
+            workflow_thread_id=thread_id,
+            actor_subject_id='actor-1',
+            allowed_permission_levels=('public', 'internal'),
+        )
+
+    assert exc_info.value.code == 'model_unavailable'
+    with factory() as db:
+        restored = db.get(AgentWorkflowThread, thread_id)
+        assert restored is not None
+        assert restored.status == prior_status
+        assert restored.lease_token is None
 
 
 def test_lease_expiry_discards_model_result_before_candidate_write(
@@ -781,6 +1243,83 @@ def test_permission_or_signature_change_discards_model_result(
         assert thread.lease_token is None
 
 
+@pytest.mark.parametrize(
+    'mutation',
+    [
+        'workflow_name',
+        'graph_version',
+        'request_schema',
+        'request_kind',
+        'request_hash',
+        'fingerprint_key_version',
+        'agent_names',
+        'selection_policy',
+        'evidence_ordinal',
+    ],
+)
+def test_draft_rejects_mutated_frozen_workflow_identity_before_model(
+    db_session,
+    mutation: str,
+) -> None:
+    settings = _settings()
+    catalog, adapter = _catalog()
+    source = _seed_source(db_session)
+    db_session.commit()
+    _, thread_id = _create_workflow(
+        db_session,
+        source=source,
+        catalog=catalog,
+        settings=settings,
+    )
+    thread = db_session.get(AgentWorkflowThread, thread_id)
+    request = db_session.get(AgentWorkflowRequest, thread_id)
+    evidence = db_session.scalar(
+        select(AgentWorkflowEvidenceRef).where(
+            AgentWorkflowEvidenceRef.workflow_thread_id == thread_id
+        )
+    )
+    assert thread is not None
+    assert request is not None
+    assert evidence is not None
+    if mutation == 'workflow_name':
+        thread.workflow_name = 'mutated-workflow'
+    elif mutation == 'graph_version':
+        thread.graph_version = 'mutated-graph'
+    elif mutation == 'request_schema':
+        request.input_schema_version = 'mutated-schema'
+    elif mutation == 'request_kind':
+        request.request_kind = 'mutated-kind'
+    elif mutation == 'request_hash':
+        request.input_hash = 'f' * 64
+    elif mutation == 'fingerprint_key_version':
+        request.fingerprint_key_version = 'mutated-key'
+    elif mutation == 'agent_names':
+        request.agent_names = ['history_agent', 'history_agent']
+    elif mutation == 'selection_policy':
+        request.selection_policy_version = 'mutated-policy'
+    elif mutation == 'evidence_ordinal':
+        evidence.ordinal = 4
+    else:  # pragma: no cover - parameter list is exhaustive
+        raise AssertionError(mutation)
+    db_session.commit()
+    factory = _session_factory(db_session)
+
+    with pytest.raises(ReviewDraftError) as exc_info:
+        ReviewDraftService(
+            session_factory=factory,
+            catalog=catalog,
+            settings=settings,
+        ).draft(
+            workflow_thread_id=thread_id,
+            actor_subject_id='actor-1',
+            allowed_permission_levels=('public', 'internal'),
+        )
+
+    assert exc_info.value.code == 'invalid_state_transition'
+    assert adapter.run_calls == 0
+    assert _row_counts(factory) == (1, 0, 0)
+
+
 def test_candidate_without_evidence_is_rejected(db_session) -> None:
     settings = _settings()
 
@@ -810,6 +1349,60 @@ def test_candidate_without_evidence_is_rejected(db_session) -> None:
         source=source,
         catalog=catalog,
         settings=settings,
+    )
+    factory = _session_factory(db_session)
+    service = ReviewDraftService(
+        session_factory=factory,
+        catalog=catalog,
+        settings=settings,
+    )
+
+    with pytest.raises(ReviewDraftError) as exc_info:
+        service.draft(
+            workflow_thread_id=thread_id,
+            actor_subject_id='actor-1',
+            allowed_permission_levels=('public', 'internal'),
+        )
+
+    assert exc_info.value.code == 'invalid_input'
+    assert _row_counts(factory) == (1, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ('agent_name', 'wrong_item_type'),
+    [
+        ('timeline_agent', 'history_event'),
+        ('history_agent', 'timeline_event'),
+        ('decision_record_agent', 'todo'),
+        ('todo_agent', 'decision_record'),
+    ],
+)
+def test_memory_adapter_rejects_wrong_item_type_without_writes(
+    db_session,
+    agent_name: str,
+    wrong_item_type: str,
+) -> None:
+    settings = _settings()
+
+    def wrong_output(packet: EvidencePacket) -> list[ReviewCandidate]:
+        return [_candidate_from_packet(packet, item_type=wrong_item_type)]
+
+    adapter = _FakeAdapter(
+        _manifest(agent_name),
+        candidate_factory=wrong_output,
+    )
+    catalog, _ = _catalog(
+        selected_name=agent_name,
+        selected_adapter=adapter,
+    )
+    source = _seed_source(db_session)
+    db_session.commit()
+    _, thread_id = _create_workflow(
+        db_session,
+        source=source,
+        catalog=catalog,
+        settings=settings,
+        agent_name=agent_name,
     )
     factory = _session_factory(db_session)
     service = ReviewDraftService(

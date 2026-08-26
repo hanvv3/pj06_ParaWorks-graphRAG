@@ -276,6 +276,7 @@ def _build_openai_model(
             temperature=settings.temperature,
             timeout=settings.timeout_seconds,
             max_retries=1,
+            max_completion_tokens=settings.max_output_tokens,
         ),
     )
 
@@ -295,6 +296,7 @@ def _build_gemini_model(settings: MailDocumentLlmSettings) -> LangChainMailDocum
             temperature=settings.temperature,
             timeout=settings.timeout_seconds,
             max_retries=1,
+            max_tokens=settings.max_output_tokens,
         ),
     )
 
