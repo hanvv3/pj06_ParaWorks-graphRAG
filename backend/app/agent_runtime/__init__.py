@@ -1,3 +1,8 @@
+from backend.app.agent_runtime.bootstrap import (
+    BootstrapResult,
+    CheckpointBootstrapError,
+    bootstrap_langgraph_checkpointer,
+)
 from backend.app.agent_runtime.contracts import (
     AgentCostBudgetDecision,
     AgentManifest,
@@ -53,6 +58,8 @@ __all__ = [
     'AgentWorkflowState',
     'AgentRunCost',
     'AgentRunResult',
+    'BootstrapResult',
+    'CheckpointBootstrapError',
     'EvidenceMessage',
     'EvidencePacket',
     'PermissionContext',
@@ -74,6 +81,7 @@ __all__ = [
     'build_evidence_summary',
     'build_agent_workflow',
     'build_company_memory_workflow',
+    'bootstrap_langgraph_checkpointer',
     'canonical_json_bytes',
     'evaluate_agent_cost_budget',
     'estimate_agent_run_cost',
