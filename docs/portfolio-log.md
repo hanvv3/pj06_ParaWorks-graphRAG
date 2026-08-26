@@ -18,10 +18,14 @@ demo story changes.
 - Verified a real PostgreSQL interrupt, pool shutdown, independent pool
   restart, and same-thread `Command(resume=...)` at root checkpoint namespace
   on an isolated disposable test database.
+- Hardened the proof with a fail-before-mutation test database identity guard,
+  direct inspection of every stored/decoded checkpoint payload shape for
+  relationship paths, LLM prompts, and raw connector payloads, and independent
+  best-effort cleanup of the generated thread and every database resource.
 - Locked the Review graph contract at `company-memory-review-v2.0` and the
   application migration at `2f6a8b9c0d1e`.
 - Verification recorded zero new non-Slack backend failures. The focused suite
-  passed 190 tests, the non-Slack gate passed 683 tests with one existing
+  passed 219 tests, the non-Slack gate passed 712 tests with one existing
   optional pgvector skip, and the full suite retained exactly the ten visible
   user-deferred Slack failures.
 - Deliverable C remains a separate, unimplemented Review Queue HITL V2 slice

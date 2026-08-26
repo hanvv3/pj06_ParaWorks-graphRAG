@@ -5,8 +5,9 @@ Updated: 2026-08-26
 ## 2026-08-26 Runtime Deliverable B complete
 
 - Deliverable B runtime/checkpoint primitives are complete through
-  implementation rollback point `403600b` (including the narrow Alembic
-  logging correction in `e847608`).
+  implementation rollback point `e0570ca` (including the narrow Alembic
+  logging correction in `e847608`, the original restart test in `403600b`,
+  and the no-fix Ruff import correction in `e44dc4f`).
 - The locked Review workflow version is `company-memory-review-v2.0`.
   Application graph version selection is separate from LangGraph's root
   `checkpoint_ns == ''`.
@@ -24,19 +25,20 @@ Updated: 2026-08-26
   uv run --locked pytest backend/tests/test_agent_runtime_postgres_checkpoint.py -q
   ```
 
-  Result: `1 passed, 1 warning in 0.67s`, with no skip. It proved a real
-  interrupt, pool A shutdown, independent pool/saver B restart, same-thread
-  resume, checkpoint-id progression, root namespace, sensitive-record
-  exclusion, and exact generated-thread cleanup.
-- Complete focused result: `190 passed, 9 warnings`. Non-Slack gate:
-  `683 passed, 1 skipped, 10 deselected, 9 warnings`; the one skip is the
+  Result after review hardening: `30 passed, 1 warning in 0.43s`, with no
+  skip. It proved a real interrupt, pool A shutdown, independent pool/saver B
+  restart, same-thread resume, checkpoint-id progression, root namespace,
+  fail-before-mutation database/user identity checks, every stored/decoded
+  payload shape excluding relationship paths, LLM prompts, and raw connector
+  payloads, and exact generated-thread cleanup even when cleanup stages fail.
+- Complete focused result: `219 passed, 9 warnings`. Non-Slack gate:
+  `712 passed, 1 skipped, 10 deselected, 9 warnings`; the one skip is the
   existing optional pgvector integration test. Full backend result:
-  `10 failed, 683 passed, 1 skipped, 9 warnings`; the failures are exactly the
+  `10 failed, 712 passed, 1 skipped, 9 warnings`; the failures are exactly the
   ten user-deferred Slack ids and symptoms recorded in the Deliverable B plan.
-- The exact lock check resolved 99 packages. The exact planned Ruff gate
-  exited successfully; its configured auto-fix touched one unrelated existing
-  import ordering issue, which was removed from this deliverable. All changed
-  Python files pass Ruff, and `git diff --check` is clean.
+- The exact lock check resolved 99 packages. The exact planned Ruff gate and
+  an independent `ruff check --no-fix` run both report `All checks passed!`
+  from a clean worktree, and `git diff --check` is clean.
 - No public V2 route, Review Queue state transition, RAG cutover, Slack change,
   live connector/model/provider call, or Deliverable C implementation was
   made.

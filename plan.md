@@ -387,11 +387,11 @@ Tasks:
   - Deliverable C still has no implementation authorization. Review Queue HITL
     V2 requires its separate implementation plan to be reviewed first.
 - User-directed execution order for the remaining program:
-  1. Deliverable B runtime/checkpoint primitives.
-  2. Deliverable C Review Queue HITL V2.
-  3. Deliverable D and GraphRAG using Gmail, Drive, Calendar, approved
+  1. Deliverable C Review Queue HITL V2, only after its separate plan is
+     reviewed and implementation is explicitly authorized.
+  2. Deliverable D and GraphRAG using Gmail, Drive, Calendar, approved
      knowledge, and deterministic fixtures as the primary evidence path.
-  4. Slack data recovery and Slack-related regressions last, after choosing
+  3. Slack data recovery and Slack-related regressions last, after choosing
      between deterministic local reconstruction, a newly seeded Slack
      workspace, or an alternate chat connector.
 - Do not skip or hide Slack regressions while they are deferred. Keep the ten
