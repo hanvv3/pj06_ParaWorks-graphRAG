@@ -2,6 +2,48 @@
 
 Updated: 2026-08-26
 
+## 2026-08-26 Runtime Deliverable B complete
+
+- Deliverable B runtime/checkpoint primitives are complete through
+  implementation rollback point `403600b` (including the narrow Alembic
+  logging correction in `e847608`).
+- The locked Review workflow version is `company-memory-review-v2.0`.
+  Application graph version selection is separate from LangGraph's root
+  `checkpoint_ns == ''`.
+- Checkpoint modes are `disabled`, process-local SQLite/demo `memory`, and
+  durable production PostgreSQL `postgres`. PostgreSQL unavailability fails
+  closed and never falls back to memory.
+- Application migration head is `2f6a8b9c0d1e`. LangGraph checkpointer schema
+  setup remains an explicit operator bootstrap with backup confirmation; app
+  startup performs readiness checks only and never calls `setup()`.
+- The dedicated target was an isolated disposable local PostgreSQL database on
+  port 55432. With `PARAWORKS_TEST_POSTGRES_URL` already set to that target,
+  the exact command was:
+
+  ```powershell
+  uv run --locked pytest backend/tests/test_agent_runtime_postgres_checkpoint.py -q
+  ```
+
+  Result: `1 passed, 1 warning in 0.67s`, with no skip. It proved a real
+  interrupt, pool A shutdown, independent pool/saver B restart, same-thread
+  resume, checkpoint-id progression, root namespace, sensitive-record
+  exclusion, and exact generated-thread cleanup.
+- Complete focused result: `190 passed, 9 warnings`. Non-Slack gate:
+  `683 passed, 1 skipped, 10 deselected, 9 warnings`; the one skip is the
+  existing optional pgvector integration test. Full backend result:
+  `10 failed, 683 passed, 1 skipped, 9 warnings`; the failures are exactly the
+  ten user-deferred Slack ids and symptoms recorded in the Deliverable B plan.
+- The exact lock check resolved 99 packages. The exact planned Ruff gate
+  exited successfully; its configured auto-fix touched one unrelated existing
+  import ordering issue, which was removed from this deliverable. All changed
+  Python files pass Ruff, and `git diff --check` is clean.
+- No public V2 route, Review Queue state transition, RAG cutover, Slack change,
+  live connector/model/provider call, or Deliverable C implementation was
+  made.
+- Deliverable C still has no implementation authorization. The next worker
+  must prepare and obtain review of its separate Review Queue HITL V2 plan
+  rather than coding it directly.
+
 ## 2026-08-26 Runtime Deliverable B plan and Slack deferral
 
 - The user directed all Slack-related remediation to the final phase because

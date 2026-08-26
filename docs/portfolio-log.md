@@ -6,6 +6,27 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-26 LangGraph runtime and checkpoint primitives
+
+- Added JSON-safe, HMAC-keyed runtime contracts and application-owned workflow
+  schema without exposing a new public workflow route.
+- Separated explicit PostgreSQL checkpoint bootstrap from startup readiness;
+  application startup never calls checkpointer setup.
+- Defined SQLite/demo checkpoints as process-local memory mode and PostgreSQL
+  checkpoints as durable mode, with fail-closed production behavior instead
+  of memory fallback.
+- Verified a real PostgreSQL interrupt, pool shutdown, independent pool
+  restart, and same-thread `Command(resume=...)` at root checkpoint namespace
+  on an isolated disposable test database.
+- Locked the Review graph contract at `company-memory-review-v2.0` and the
+  application migration at `2f6a8b9c0d1e`.
+- Verification recorded zero new non-Slack backend failures. The focused suite
+  passed 190 tests, the non-Slack gate passed 683 tests with one existing
+  optional pgvector skip, and the full suite retained exactly the ten visible
+  user-deferred Slack failures.
+- Deliverable C remains a separate, unimplemented Review Queue HITL V2 slice
+  that requires review of its own plan before coding begins.
+
 ## 2026-08-26 LangChain·LangGraph dependency compatibility
 
 - Upgraded and locked the approved dependency lines: LangChain 1.3.17,

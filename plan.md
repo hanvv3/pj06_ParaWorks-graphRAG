@@ -371,13 +371,21 @@ Tasks:
     1 skipped`; accepted lock `518 passed, 11 failed, 1 skipped`. The same 11
     failures are pre-existing, so this deliverable introduced zero new backend
     failures.
-- Deliverable B runtime/checkpoint primitives plan: Ready for review.
-  - Execute `docs/superpowers/plans/2026-08-26-langgraph-runtime-checkpoint-primitives.md`
-    only after explicit implementation approval.
-  - First repair the one stale non-Slack preflight permission fixture, then
-    build JSON-safe state/fingerprint contracts, workflow persistence schema,
-    checkpointer lifecycle/bootstrap, and graph-version confirmation
-    primitives without adding public V2 routes.
+- Deliverable B runtime/checkpoint primitives: Done.
+  - Added JSON-safe, HMAC-keyed runtime contracts, application-owned workflow
+    schema, explicit checkpointer bootstrap/readiness, retention, immutable
+    graph registry, and synchronous saved-tuple confirmation.
+  - Locked the Review workflow graph version at
+    `company-memory-review-v2.0` with root `checkpoint_ns == ''`.
+  - Checkpoint modes are `disabled`, process-local SQLite/demo `memory`, and
+    durable production PostgreSQL `postgres`; production never falls back to
+    memory when PostgreSQL is unavailable.
+  - Verified real PostgreSQL pause, pool restart, and same-thread resume on an
+    isolated disposable database at migration revision `2f6a8b9c0d1e`.
+  - The non-Slack backend gate is green and the same ten deferred Slack
+    failures remain visible in the complete backend suite.
+  - Deliverable C still has no implementation authorization. Review Queue HITL
+    V2 requires its separate implementation plan to be reviewed first.
 - User-directed execution order for the remaining program:
   1. Deliverable B runtime/checkpoint primitives.
   2. Deliverable C Review Queue HITL V2.
