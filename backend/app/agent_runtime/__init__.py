@@ -15,6 +15,10 @@ from backend.app.agent_runtime.cost_policy import (
     evaluate_agent_cost_budget,
 )
 from backend.app.agent_runtime.evidence_summary import build_evidence_summary
+from backend.app.agent_runtime.fingerprints import (
+    canonical_json_bytes,
+    keyed_fingerprint,
+)
 from backend.app.agent_runtime.orchestration import (
     AgentWorkflow,
     AgentWorkflowState,
@@ -34,6 +38,12 @@ from backend.app.agent_runtime.project_routing import (
     score_project_aliases,
 )
 from backend.app.agent_runtime.registry import AgentRegistry
+from backend.app.agent_runtime.state import (
+    ReviewGraphInput,
+    ReviewGraphOutput,
+    ReviewGraphState,
+    ReviewRuntimeContext,
+)
 
 __all__ = [
     'AgentManifest',
@@ -53,6 +63,10 @@ __all__ = [
     'ProjectRoutingDecision',
     'ProjectRoutingResult',
     'ReviewCandidate',
+    'ReviewGraphInput',
+    'ReviewGraphOutput',
+    'ReviewGraphState',
+    'ReviewRuntimeContext',
     'TokenUsage',
     'apply_project_routing_to_payload',
     'build_project_tools',
@@ -60,8 +74,10 @@ __all__ = [
     'build_evidence_summary',
     'build_agent_workflow',
     'build_company_memory_workflow',
+    'canonical_json_bytes',
     'evaluate_agent_cost_budget',
     'estimate_agent_run_cost',
+    'keyed_fingerprint',
     'route_projects_for_candidates',
     'score_project_aliases',
 ]
