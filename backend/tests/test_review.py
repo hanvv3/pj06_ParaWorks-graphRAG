@@ -98,6 +98,46 @@ def test_patch_review_item_updates_payload(client) -> None:
     assert body['status'] == 'pending_review'
 
 
+def test_terminal_workflow_bound_review_item_cannot_be_patched(client, db_session) -> None:
+    item = ReviewItem(
+        item_type='history_event',
+        payload={'title': 'Bound candidate', 'reason': 'The workflow owns its terminal resolution.'},
+        source_links=['https://mail.mock/thread/bound'],
+        source_snippets=['The candidate has already been resolved.'],
+        confidence_score=0.88,
+        permission_level='internal',
+        status='approved',
+        workflow_thread_id='workflow-bound-patch',
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    response = client.patch(f'/api/v1/review/{item.id}', json={'payload': {'title': 'Rewritten'}})
+
+    assert response.status_code == 409
+    assert response.json()['detail'] == {'code': 'invalid_state_transition'}
+    assert db_session.get(ReviewItem, item.id).payload['title'] == 'Bound candidate'
+
+
+def test_terminal_legacy_unbound_review_item_remains_patch_compatible(client, db_session) -> None:
+    item = ReviewItem(
+        item_type='history_event',
+        payload={'title': 'Legacy candidate', 'reason': 'Legacy editing remains supported.'},
+        source_links=['https://mail.mock/thread/legacy'],
+        source_snippets=['The old row is not workflow-bound.'],
+        confidence_score=0.88,
+        permission_level='internal',
+        status='approved',
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    response = client.patch(f'/api/v1/review/{item.id}', json={'payload': {'title': 'Corrected legacy title'}})
+
+    assert response.status_code == 200
+    assert response.json()['payload']['title'] == 'Corrected legacy title'
+
+
 def test_patch_review_item_requires_registered_project_key(client, db_session) -> None:
     db_session.add(
         Project(
@@ -425,6 +465,96 @@ def test_bulk_approve_reports_items_that_cannot_be_promoted(client, db_session) 
     assert body['failed_items'] == [{'id': invalid.id, 'detail': 'Review item is missing required fields'}]
     assert db_session.get(ReviewItem, valid.id).status == 'approved'
     assert db_session.get(ReviewItem, invalid.id).status == 'pending_review'
+
+
+def test_bulk_approve_replays_single_approval_without_duplicate_effects(client, db_session) -> None:
+    item = ReviewItem(
+        item_type='timeline_event',
+        payload={
+            'title': 'Promotion replay verified',
+            'result_summary': 'Single and bulk approval return the same canonical effect.',
+        },
+        source_links=['https://drive.mock/replay'],
+        source_snippets=['The exact timeline event is supported by Drive evidence.'],
+        confidence_score=0.9,
+        permission_level='internal',
+        status='pending_review',
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    single = client.post(f'/api/v1/review/{item.id}/approve')
+    bulk = client.post('/api/v1/review/bulk', json={'action': 'approve', 'item_ids': [item.id]})
+
+    assert single.status_code == 200
+    assert bulk.status_code == 200
+    assert bulk.json()['approved_count'] == 1
+    assert bulk.json()['approved_item_ids'] == [item.id]
+    assert bulk.json()['replayed_items'] == [
+        {
+            'item_id': item.id,
+            'status': 'approved',
+            'replayed': True,
+            'promotion': single.json()['promotion'],
+        }
+    ]
+    assert len(db_session.scalars(select(TimelineEvent)).all()) == 1
+
+
+def test_terminal_route_action_returns_typed_conflict(client, db_session) -> None:
+    item = ReviewItem(
+        item_type='timeline_event',
+        payload={'title': 'Resolved item', 'result_summary': 'Already rejected.'},
+        source_links=['https://drive.mock/resolved'],
+        source_snippets=['The prior review was terminal.'],
+        confidence_score=0.8,
+        permission_level='internal',
+        status='rejected',
+        workflow_thread_id='workflow-terminal-route',
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    response = client.post(f'/api/v1/review/{item.id}/request-more-evidence')
+
+    assert response.status_code == 409
+    assert response.json()['detail'] == {'code': 'invalid_state_transition'}
+
+
+def test_workflow_bound_review_audit_is_bounded_and_contains_no_item_or_source_ids(client, db_session) -> None:
+    item = ReviewItem(
+        item_type='history_event',
+        payload={
+            'title': 'Sensitive workflow candidate',
+            'reason': 'Bound audit data is minimized.',
+            'source_ids': ['gmail:secret-message-id'],
+        },
+        source_links=['https://mail.google.com/mail/u/0/#inbox/secret-message-id'],
+        source_snippets=['Sensitive source content must not enter AuditLog.'],
+        confidence_score=0.84,
+        permission_level='internal',
+        status='pending_review',
+        workflow_thread_id='workflow-audit-safe',
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    response = client.post(f'/api/v1/review/{item.id}/reject')
+
+    assert response.status_code == 200
+    audit = db_session.scalar(select(AuditLog).where(AuditLog.action == 'review.reject'))
+    assert audit.target_type == 'review_workflow'
+    assert audit.target_id == 'workflow-audit-safe'
+    assert audit.metadata_ == {
+        'action': 'reject',
+        'result_code': 'rejected',
+        'replayed': False,
+        'effect_count': 0,
+    }
+    serialized = str(audit.metadata_)
+    assert str(item.id) not in serialized
+    assert 'secret-message-id' not in serialized
+    assert 'Sensitive source content' not in serialized
 
 
 def test_request_more_evidence_preserves_reviewer_note(client, db_session) -> None:

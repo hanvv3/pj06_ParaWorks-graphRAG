@@ -201,3 +201,62 @@ def test_bulk_approve_agent_candidates_promotes_only_agent_items(client, db_sess
 
     assert db_session.scalars(select(HistoryEvent)).one().title == 'Redis queue decision captured'
     assert db_session.scalars(select(DecisionRecord)).one().title == 'PostgreSQL remains durable store'
+
+
+def test_single_approve_replay_returns_canonical_promotion_ids(client, db_session) -> None:
+    item = seed_review_item(
+        db_session,
+        item_type='decision_record',
+        payload={
+            'title': 'Use one transition boundary',
+            'decision_summary': 'Every approval shares exactly-once promotion.',
+        },
+    )
+
+    first = client.post(f'/api/v1/review/{item.id}/approve')
+    replay = client.post(f'/api/v1/review/{item.id}/approve')
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert first.json()['replayed'] is False
+    assert replay.json()['replayed'] is True
+    assert replay.json()['promotion'] == first.json()['promotion']
+    assert replay.json()['promotion_result'] == first.json()['promotion_result']
+    assert len(db_session.scalars(select(DecisionRecord)).all()) == 1
+    assert len(db_session.scalars(select(TimelineEvent)).all()) == 1
+
+
+def test_approve_agent_candidates_replays_canonical_effects(client, db_session) -> None:
+    item = seed_review_item(
+        db_session,
+        item_type='history_event',
+        payload={
+            'title': 'Candidate replay is idempotent',
+            'reason': 'Response loss must not duplicate company memory.',
+            'agent_name': 'mail_document_agent',
+        },
+    )
+
+    first = client.post('/api/v1/review/approve-agent-candidates')
+    replay = client.post('/api/v1/review/approve-agent-candidates')
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json()['approved_count'] == 1
+    assert replay.json()['approved_item_ids'] == [item.id]
+    history = db_session.scalars(select(HistoryEvent)).one()
+    timeline = db_session.scalars(select(TimelineEvent)).one()
+    assert replay.json()['replayed_items'] == [
+        {
+            'item_id': item.id,
+            'status': 'approved',
+            'replayed': True,
+            'promotion': {
+                'target_type': 'history_event',
+                'created_record_ids': [history.id],
+                'created_timeline_event_ids': [timeline.id],
+            },
+        }
+    ]
+    assert len(db_session.scalars(select(HistoryEvent)).all()) == 1
+    assert len(db_session.scalars(select(TimelineEvent)).all()) == 1

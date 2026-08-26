@@ -1,3 +1,4 @@
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.models import (
@@ -9,6 +10,62 @@ from backend.app.models import (
 )
 
 PROMOTABLE_REVIEW_TYPES = {'decision_record', 'history_event', 'timeline_event', 'todo'}
+
+
+def find_review_item_promotion(db: Session, item: ReviewItem) -> dict | None:
+    if item.item_type not in PROMOTABLE_REVIEW_TYPES:
+        return {
+            'target_type': None,
+            'created_record_ids': [],
+            'created_timeline_event_ids': [],
+        }
+
+    record_model = {
+        'decision_record': DecisionRecord,
+        'history_event': HistoryEvent,
+        'todo': Todo,
+    }.get(item.item_type)
+    record_ids = (
+        list(
+            db.scalars(
+                select(record_model.id)
+                .where(record_model.source_review_item_id == item.id)
+                .order_by(record_model.id)
+            ).all()
+        )
+        if record_model is not None
+        else []
+    )
+    timeline_ids = list(
+        db.scalars(
+            select(TimelineEvent.id)
+            .where(TimelineEvent.source_review_item_id == item.id)
+            .order_by(TimelineEvent.id)
+        ).all()
+    )
+    if not record_ids and not timeline_ids:
+        return None
+    return {
+        'target_type': item.item_type,
+        'created_record_ids': record_ids,
+        'created_timeline_event_ids': timeline_ids,
+    }
+
+
+def build_promotion_response(
+    item: ReviewItem,
+    *,
+    target_type: str | None,
+    created_record_ids: list[int],
+    created_timeline_event_ids: list[int],
+) -> dict:
+    return {
+        'target_type': target_type or 'review_item',
+        'created_record_ids': created_record_ids,
+        'created_timeline_event_ids': created_timeline_event_ids,
+        'project_key': item.payload.get('project_key'),
+        'next_routes': _next_routes_for_item(item.item_type),
+    }
 
 
 def build_promotion_preview(item: ReviewItem) -> dict:
@@ -55,9 +112,10 @@ def promote_review_item(db: Session, item: ReviewItem) -> dict:
         'confidence_score': item.confidence_score,
         'permission_level': item.permission_level,
         'review_status': 'approved',
+        'source_review_item_id': item.id,
     }
     result = {
-        'target_type': item.item_type if item.item_type in PROMOTABLE_REVIEW_TYPES else 'review_item',
+        'target_type': item.item_type if item.item_type in PROMOTABLE_REVIEW_TYPES else None,
         'created_record_ids': [],
         'created_timeline_event_ids': [],
         'project_key': item.payload.get('project_key'),

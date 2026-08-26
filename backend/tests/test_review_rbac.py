@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 
+from backend.app.core.demo_auth import DemoUser, get_demo_user
 from backend.app.models import ReviewItem
 
 
@@ -39,6 +40,25 @@ def test_admin_can_approve_restricted_review_item(client, db_session: Session) -
     assert response.status_code == 200
     assert response.json()['status'] == 'approved'
     assert response.json()['reviewer_id'] == 'google-hanvv-admin'
+
+
+def test_approve_route_rechecks_exact_actor_permission_membership(client, db_session: Session) -> None:
+    item = _add_review_item(db_session, permission_level='restricted')
+    actor = DemoUser(
+        id='admin-without-restricted',
+        email='limited-admin@example.com',
+        role='admin',
+        permission_levels={'public', 'internal'},
+        name='Limited Admin',
+        title='Administrator',
+        department='Platform',
+    )
+    client.app.dependency_overrides[get_demo_user] = lambda: actor
+
+    response = client.post(f'/api/v1/review/{item.id}/approve')
+
+    assert response.status_code == 403
+    assert db_session.get(ReviewItem, item.id).status == 'pending_review'
 
 
 def test_review_list_hides_items_above_user_permission(client, db_session: Session) -> None:
