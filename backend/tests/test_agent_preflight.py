@@ -17,7 +17,11 @@ def test_mail_document_agent_preflight_reports_cost_without_running_llm(db_sessi
 
     preflight = build_mail_document_agent_preflight(
         db=db_session,
-        permission_context=PermissionContext(user_id='demo-admin', role='admin'),
+        permission_context=PermissionContext(
+            user_id='demo-admin',
+            role='admin',
+            allowed_permission_levels=('public', 'internal', 'restricted'),
+        ),
         source_window='mail-docs:preflight',
     )
 
