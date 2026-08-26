@@ -195,25 +195,16 @@ def _assert_bounded_private_evidence(
 ) -> None:
     user_payload = json.loads(messages[1][1])
     evidence_rows = user_payload['evidence']
-    value_chars = sum(
-        len(value)
-        if isinstance(value, str)
-        else len(
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(',', ':'),
-                default=str,
-            )
+    evidence_chars = len(
+        json.dumps(
+            evidence_rows,
+            ensure_ascii=False,
+            default=str,
         )
-        for row in evidence_rows
-        for value in row.values()
-        if value is not None
     )
     provider_payload = messages[1][1]
 
-    assert value_chars <= max_input_chars
+    assert evidence_chars <= max_input_chars
     assert approved_marker in provider_payload
     assert sensitive_marker not in provider_payload
     assert 'raw_body' not in provider_payload
@@ -309,7 +300,7 @@ def test_preflight_counts_rendered_prompt_urls_snippets_and_metadata(
 
 
 def test_mail_payload_bounds_allowlisted_metadata_and_drops_sensitive_values() -> None:
-    max_input_chars = 256
+    max_input_chars = 512
     chat_model = _FakeMailChatModel()
 
     def mail_builder(_settings: MailDocumentLlmSettings):
@@ -364,7 +355,7 @@ def test_mail_payload_bounds_allowlisted_metadata_and_drops_sensitive_values() -
 
 
 def test_memory_payload_bounds_allowlisted_metadata_and_drops_sensitive_values() -> None:
-    max_input_chars = 256
+    max_input_chars = 512
     chat_model = _FakeStructuredChatModel()
     catalog = build_review_agent_catalog(
         _configured_settings(agent_llm_max_input_chars=max_input_chars),
@@ -407,6 +398,135 @@ def test_memory_payload_bounds_allowlisted_metadata_and_drops_sensitive_values()
         sensitive_marker=sensitive_marker,
     )
     assert packet.messages[0].metadata['parser_status_reason'] not in captured
+
+
+def _atomic_envelope_packet() -> EvidencePacket:
+    return EvidencePacket(
+        source_type='company_memory',
+        source_window='company-memory-review-selection:v1:ranked:3',
+        messages=[
+            EvidenceMessage(
+                source_id='oversized-source-' + ('x' * 500),
+                source_url='https://oversized.example.test/' + ('y' * 500),
+                text='This ranked row cannot fit its mandatory envelope.',
+                author=None,
+                timestamp='2026-08-27T08:00:00+00:00',
+                permission_level='restricted',
+            ),
+            EvidenceMessage(
+                source_id='gmail:' + ('i' * 72),
+                source_url='https://mail.example.test/messages/' + ('u' * 120),
+                text='Usable ranked evidence with a long identity and URL.' + ('T' * 500),
+                author='owner@example.test',
+                timestamp='2026-08-27T09:00:00+00:00',
+                permission_level='restricted',
+                source_snippet_override='usable-snippet-' + ('S' * 500),
+            ),
+            EvidenceMessage(
+                source_id='drive:third-ranked-row',
+                source_url='https://drive.example.test/third-ranked-row',
+                text='This row must be omitted once the shared budget is exhausted.',
+                author='owner@example.test',
+                timestamp='2026-08-27T10:00:00+00:00',
+                permission_level='internal',
+            ),
+        ],
+        permission_context=PermissionContext(
+            user_id='actor-1',
+            role='workflow_actor',
+            allowed_permission_levels=('internal', 'restricted'),
+        ),
+    )
+
+
+def _assert_atomic_captured_evidence(
+    messages,
+    *,
+    max_input_chars: int,
+) -> None:
+    evidence_rows = json.loads(messages[1][1])['evidence']
+    expected_source_id = 'gmail:' + ('i' * 72)
+    expected_source_url = 'https://mail.example.test/messages/' + ('u' * 120)
+
+    assert len(evidence_rows) == 1
+    assert evidence_rows[0]['source_id'] == expected_source_id
+    assert evidence_rows[0]['source_url'] == expected_source_url
+    assert evidence_rows[0]['permission_level'] == 'restricted'
+    assert len(
+        json.dumps(
+            evidence_rows,
+            ensure_ascii=False,
+            default=str,
+        )
+    ) <= max_input_chars
+    assert 'oversized-source-' not in messages[1][1]
+    assert 'drive:third-ranked-row' not in messages[1][1]
+
+
+def test_mail_provider_keeps_mandatory_evidence_row_atomic_with_shared_budget() -> None:
+    max_input_chars = 360
+    chat_model = _FakeMailChatModel()
+
+    catalog = build_review_agent_catalog(
+        _configured_settings(),
+        mail_model_builder=lambda _settings: LangChainMailDocumentAgentModel(
+            provider='fake',
+            model_name='fake-mail-model',
+            chat_model=chat_model,
+            max_input_chars=max_input_chars,
+        ),
+        chat_model_builder=lambda _settings, **_kwargs: _FakeStructuredChatModel(),
+    )
+    adapter = catalog.get('mail_document_agent')
+    packet = _atomic_envelope_packet()
+
+    adapter.run(packet)
+
+    assert chat_model.invoked_messages is not None
+    captured = _captured_invocation_description(
+        chat_model.invoked_messages,
+        schema=None,
+    )
+    _assert_atomic_captured_evidence(
+        chat_model.invoked_messages,
+        max_input_chars=max_input_chars,
+    )
+    assert adapter.render_estimation_input(packet) == captured
+    assert adapter.preflight(packet).token_usage.input_tokens == max(
+        1,
+        len(captured) // 4,
+    )
+
+
+def test_memory_provider_keeps_mandatory_evidence_row_atomic_with_shared_budget() -> None:
+    max_input_chars = 360
+    chat_model = _FakeStructuredChatModel()
+    catalog = build_review_agent_catalog(
+        _configured_settings(agent_llm_max_input_chars=max_input_chars),
+        mail_model_builder=lambda _settings: _FakeMailModel(),
+        chat_model_builder=lambda _settings, **_kwargs: chat_model,
+    )
+    adapter = catalog.get('history_agent')
+    packet = _atomic_envelope_packet()
+
+    result = adapter.run(packet)
+
+    assert chat_model.invoked_messages is not None
+    assert chat_model.structured_schema is not None
+    captured = _captured_invocation_description(
+        chat_model.invoked_messages,
+        schema=chat_model.structured_schema,
+    )
+    _assert_atomic_captured_evidence(
+        chat_model.invoked_messages,
+        max_input_chars=max_input_chars,
+    )
+    assert adapter.render_estimation_input(packet) == captured
+    assert adapter.preflight(packet).token_usage.input_tokens == max(
+        1,
+        len(captured) // 4,
+    )
+    assert result.cost.token_usage.input_tokens == max(1, len(captured) // 4)
 
 
 @pytest.mark.parametrize(

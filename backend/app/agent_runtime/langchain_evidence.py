@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 from backend.app.agent_runtime.contracts import EvidencePacket
@@ -29,19 +30,37 @@ _APPROVED_METADATA_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ('event_status', ('event_status',)),
 )
 
+_MANDATORY_ROW_FIELDS = (
+    'source_id',
+    'source_url',
+    'permission_level',
+)
+
 
 def render_bounded_evidence_rows(
     packet: EvidencePacket,
     *,
     max_input_chars: int,
 ) -> list[dict[str, str]]:
-    """Render only approved evidence values inside one shared character window."""
+    """Render approved evidence inside one shared serialized character window."""
 
     rows: list[dict[str, str]] = []
-    remaining_chars = max(0, max_input_chars)
+    max_serialized_chars = max(0, max_input_chars)
     for message in packet.messages:
-        if remaining_chars <= 0:
-            break
+        mandatory_row = {
+            'source_id': _canonical_value(message.source_id),
+            'source_url': _canonical_value(message.source_url),
+            'permission_level': _canonical_value(message.permission_level),
+        }
+        if any(not mandatory_row[field] for field in _MANDATORY_ROW_FIELDS):
+            continue
+        if not _fits_serialized_budget(
+            [*rows, mandatory_row],
+            max_serialized_chars=max_serialized_chars,
+        ):
+            continue
+
+        rows.append(mandatory_row)
         metadata_values: list[tuple[str, Any]] = []
         for output_name, source_names in _APPROVED_METADATA_FIELDS:
             raw_value = _first_metadata_value(message.metadata, source_names)
@@ -49,29 +68,73 @@ def render_bounded_evidence_rows(
                 raw_value = packet.source_type
             metadata_values.append((output_name, raw_value))
         values: list[tuple[str, Any]] = [
-            ('source_id', message.source_id),
-            ('source_url', message.source_url),
-            ('permission_level', message.permission_level),
             ('timestamp', message.timestamp),
             ('author', message.author),
             ('source_snippet', message.source_snippet),
             *metadata_values,
             ('text', message.text),
         ]
-        row: dict[str, str] = {}
         for field_name, raw_value in values:
             canonical_value = _canonical_value(raw_value)
             if not canonical_value:
                 continue
-            bounded_value = canonical_value[:remaining_chars]
+            bounded_value = _longest_fitting_prefix(
+                rows,
+                field_name=field_name,
+                value=canonical_value,
+                max_serialized_chars=max_serialized_chars,
+            )
             if bounded_value:
-                row[field_name] = bounded_value
-                remaining_chars -= len(bounded_value)
-            if remaining_chars <= 0:
-                break
-        if row:
-            rows.append(row)
+                mandatory_row[field_name] = bounded_value
     return rows
+
+
+def _longest_fitting_prefix(
+    rows: list[dict[str, str]],
+    *,
+    field_name: str,
+    value: str,
+    max_serialized_chars: int,
+) -> str:
+    current_row = rows[-1]
+    if _fits_serialized_budget(
+        [*rows[:-1], {**current_row, field_name: value}],
+        max_serialized_chars=max_serialized_chars,
+    ):
+        return value
+
+    best_length = 0
+    low = 1
+    high = len(value)
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate_rows = [
+            *rows[:-1],
+            {**current_row, field_name: value[:midpoint]},
+        ]
+        if _fits_serialized_budget(
+            candidate_rows,
+            max_serialized_chars=max_serialized_chars,
+        ):
+            best_length = midpoint
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return value[:best_length]
+
+
+def _fits_serialized_budget(
+    rows: list[dict[str, str]],
+    *,
+    max_serialized_chars: int,
+) -> bool:
+    return len(
+        json.dumps(
+            rows,
+            ensure_ascii=False,
+            default=str,
+        )
+    ) <= max_serialized_chars
 
 
 def _first_metadata_value(

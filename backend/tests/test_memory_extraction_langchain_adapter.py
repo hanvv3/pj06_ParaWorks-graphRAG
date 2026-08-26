@@ -57,7 +57,7 @@ def test_langchain_memory_adapter_uses_structured_output_contract() -> None:
     assert 'Use only the provided evidence' in chat_model.structured_model.messages[0][1]
 
 
-def test_render_memory_extraction_prompt_bounds_entire_evidence_envelope() -> None:
+def test_render_memory_extraction_prompt_omits_non_atomic_mandatory_envelope() -> None:
     packet = build_packet(text='A' * 120)
 
     prompt = render_memory_extraction_prompt(
@@ -70,17 +70,7 @@ def test_render_memory_extraction_prompt_bounds_entire_evidence_envelope() -> No
     payload = json.loads(prompt)
 
     assert payload['expected_item_type'] == 'timeline_event'
-    assert payload['evidence'] == [
-        {
-            'source_id': 'source-1',
-            'source_url': 'https://example.test/sou',
-        }
-    ]
-    assert sum(
-        len(value)
-        for row in payload['evidence']
-        for value in row.values()
-    ) == 32
+    assert payload['evidence'] == []
 
 
 def build_packet(text: str = 'Decision: Redis queue progress moves into company memory.') -> EvidencePacket:
