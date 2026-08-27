@@ -377,6 +377,7 @@ class _SnapshotMutatingGraph:
                 'swapped_equal_total_counts',
                 'missing_count_status',
                 'extra_count_status',
+                'pending_approved_terminal_counts',
             }:
                 counts = dict(values['review_status_counts'])
                 if corruption == 'swapped_equal_total_counts':
@@ -384,6 +385,13 @@ class _SnapshotMutatingGraph:
                     counts['approved'] = 1
                 elif corruption == 'missing_count_status':
                     counts.pop('rejected')
+                elif corruption == 'pending_approved_terminal_counts':
+                    counts = {
+                        'pending_review': 1,
+                        'approved': 1,
+                        'rejected': 0,
+                        'needs_more_evidence': 0,
+                    }
                 else:
                     counts['unknown_status'] = 0
                 values['review_status_counts'] = counts
@@ -1523,6 +1531,202 @@ def test_checkpoint_terminal_requires_exact_node_status_and_count_shape(
         'rejected': 0,
         'needs_more_evidence': 0,
     }
+
+
+@pytest.mark.parametrize(
+    ('statuses', 'expected_counts'),
+    [
+        (
+            ['pending_review', 'needs_more_evidence'],
+            {
+                'pending_review': 1,
+                'approved': 0,
+                'rejected': 0,
+                'needs_more_evidence': 1,
+            },
+        ),
+        (
+            ['needs_more_evidence'],
+            {
+                'pending_review': 0,
+                'approved': 0,
+                'rejected': 0,
+                'needs_more_evidence': 1,
+            },
+        ),
+    ],
+)
+def test_needs_more_terminal_reconciles_with_task6_precedence(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+    statuses: list[str],
+    expected_counts: dict[str, int],
+) -> None:
+    draft = _FakeDraftService(
+        application_session_factory,
+        candidate_count=len(statuses),
+    )
+    service = _service(application_session_factory, service_parts, draft=draft)
+    _, started = _start(db_session, service)
+    _set_item_statuses(
+        application_session_factory,
+        started.thread_id,
+        statuses,
+    )
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    checkpoint_thread_id = thread.checkpoint_thread_id
+    saver = service_parts[1].saver
+    assert saver is not None
+    graph = service_parts[2].resolve(
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+    )(saver)
+    invoke_and_confirm_checkpoint(
+        graph=graph,
+        saver=saver,
+        command_or_input=Command(resume={
+            'event': 'review_resolution_checked',
+            'state_version': thread.state_version,
+        }),
+        checkpoint_thread_id=checkpoint_thread_id,
+        runtime_context=service._runtime_context(_actor()),
+        expect_interrupt=False,
+    )
+    thread.status = 'checkpoint_failed'
+    thread.state_version += 1
+    db_session.commit()
+
+    reconciled = service.status(actor=_actor(), thread_id=started.thread_id)
+
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert current is not None
+    assert reconciled.status == 'needs_more_evidence'
+    assert current.checkpoint_thread_id == checkpoint_thread_id
+    snapshot = graph.get_state(checkpoint_config(checkpoint_thread_id))
+    assert set(snapshot.values) == {
+        'workflow_thread_id',
+        'graph_version',
+        'input_hash',
+        'evidence_version_hash',
+        'review_item_ids',
+        'review_status_counts',
+        'phase',
+        'completed_nodes',
+        'error_codes',
+        'status',
+        'review_item_count',
+    }
+    assert snapshot.values['review_item_ids'] == []
+    assert snapshot.values['review_status_counts'] == expected_counts
+    assert snapshot.values['status'] == 'needs_more_evidence'
+    assert snapshot.values['phase'] == 'needs_more_evidence'
+    assert snapshot.values['completed_nodes'] == [
+        'validate_input',
+        'collect_evidence_refs',
+        'plan_agent_runs',
+        'draft_review_candidates_transaction',
+        'route_review_boundary',
+        'await_human_review',
+        'verify_review_resolution_from_postgres',
+        'finalize_needs_more_evidence',
+    ]
+
+
+def test_pending_approved_terminal_is_corrupt_and_rotates(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    draft = _FakeDraftService(application_session_factory, candidate_count=2)
+    service = _service(application_session_factory, service_parts, draft=draft)
+    _, started = _start(db_session, service)
+    _set_item_statuses(
+        application_session_factory,
+        started.thread_id,
+        ['approved', 'approved'],
+    )
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    old_checkpoint_thread_id = thread.checkpoint_thread_id
+    saver = service_parts[1].saver
+    assert saver is not None
+    real_builder = service_parts[2].resolve(
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+    )
+    invoke_and_confirm_checkpoint(
+        graph=real_builder(saver),
+        saver=saver,
+        command_or_input=Command(resume={
+            'event': 'review_resolution_checked',
+            'state_version': thread.state_version,
+        }),
+        checkpoint_thread_id=old_checkpoint_thread_id,
+        runtime_context=service._runtime_context(_actor()),
+        expect_interrupt=False,
+    )
+    _set_item_statuses(
+        application_session_factory,
+        started.thread_id,
+        ['pending_review', 'approved'],
+    )
+    thread.status = 'checkpoint_failed'
+    thread.state_version += 1
+    db_session.commit()
+
+    def terminal_builder(checkpointer: object) -> _SnapshotMutatingGraph:
+        return _SnapshotMutatingGraph(
+            real_builder(checkpointer),
+            checkpoint_thread_id=old_checkpoint_thread_id,
+            shape_corruption='pending_approved_terminal_counts',
+        )
+
+    monkeypatch.setattr(
+        service,
+        '_resolve_builder',
+        lambda _projection: terminal_builder,
+    )
+
+    repaired = service.resume(actor=_actor(), thread_id=started.thread_id)
+
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert current is not None
+    assert repaired.status == 'awaiting_human_review'
+    assert current.checkpoint_thread_id != old_checkpoint_thread_id
+    snapshot = real_builder(saver).get_state(
+        checkpoint_config(current.checkpoint_thread_id)
+    )
+    assert set(snapshot.values) == {
+        'workflow_thread_id',
+        'graph_version',
+        'input_hash',
+        'evidence_version_hash',
+        'review_item_ids',
+        'review_status_counts',
+        'phase',
+        'completed_nodes',
+        'error_codes',
+    }
+    assert snapshot.values['review_item_ids'] == []
+    assert snapshot.values['review_status_counts'] == {
+        'pending_review': 1,
+        'approved': 1,
+        'rejected': 0,
+        'needs_more_evidence': 0,
+    }
+    assert snapshot.values['phase'] == 'review_boundary_routed'
+    assert snapshot.values['completed_nodes'] == [
+        'validate_input',
+        'collect_evidence_refs',
+        'plan_agent_runs',
+        'draft_review_candidates_transaction',
+        'route_review_boundary',
+    ]
 
 
 @pytest.mark.parametrize(

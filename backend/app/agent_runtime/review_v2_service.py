@@ -1083,8 +1083,6 @@ class ReviewWorkflowService:
                     *_INITIAL_COMPLETED_NODES,
                     'finalize_no_candidates',
                 )
-            elif live_counts['pending_review']:
-                raise _CorruptCheckpointError
             elif live_counts['needs_more_evidence']:
                 expected_terminal_status = 'needs_more_evidence'
                 expected_phase = 'needs_more_evidence'
@@ -1092,6 +1090,8 @@ class ReviewWorkflowService:
                     *_RESOLUTION_COMPLETED_NODES,
                     'finalize_needs_more_evidence',
                 )
+            elif live_counts['pending_review']:
+                raise _CorruptCheckpointError
             else:
                 if (
                     live_counts['approved'] + live_counts['rejected']
