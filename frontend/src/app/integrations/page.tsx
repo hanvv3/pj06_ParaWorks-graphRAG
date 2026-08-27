@@ -45,6 +45,11 @@ const SYNC_RUNNING_STAGES = [
   "프로젝트 분류와 검토 후보를 정리하고 있습니다.",
   "검토 항목을 저장하고 화면에 반영하고 있습니다.",
 ] as const;
+const V2_SYNC_RUNNING_STAGES = [
+  "원본을 수집하고 있습니다.",
+  "변경 근거를 확인하고 있습니다.",
+  "검토 후보 미리보기를 준비하고 있습니다.",
+] as const;
 const SYNC_STATUS_POLL_INTERVAL_MS = 1500;
 const SYNC_STATUS_MAX_POLLS = 90;
 const LOST_RESPONSE_RECOVERY_POLLS = 60;
@@ -64,6 +69,7 @@ type SyncProgressState = {
   lastMessage?: string;
   result?: IntegrationSyncResponse;
   errorMessage?: string;
+  completionCopyMode: "legacy" | "v2_pending" | "v2_ready";
   reviewWorkflow?: {
     diagnostic: ReviewWorkflowDiagnostic;
     sourceRefs: ReviewWorkflowSourceRef[];
@@ -221,6 +227,16 @@ function reviewBatchKey(jobId: string, sourceRefs: ReviewWorkflowSourceRef[]) {
   return `${jobId}:${sourceRefs
     .map((source) => `${source.source_type}:${source.source_id}:${source.version_or_signature}`)
     .join("|")}`;
+}
+
+function reviewCompletionCopyMode(
+  connectorType: string,
+  diagnostic?: ReviewWorkflowDiagnostic,
+): SyncProgressState["completionCopyMode"] {
+  if (connectorType === "slack" || (diagnostic && (!diagnostic.enabled || !diagnostic.available))) {
+    return "legacy";
+  }
+  return diagnostic ? "v2_ready" : "v2_pending";
 }
 
 function syncResponseFromRuntimeStatus(
@@ -423,6 +439,24 @@ export default function IntegrationsPage() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!reviewWorkflowDiagnostic) {
+      return;
+    }
+    setSyncProgress((current) => {
+      if (!current || current.connectorType === "slack") {
+        return current;
+      }
+      const completionCopyMode = reviewCompletionCopyMode(
+        current.connectorType,
+        reviewWorkflowDiagnostic,
+      );
+      return current.completionCopyMode === completionCopyMode
+        ? current
+        : { ...current, completionCopyMode };
+    });
+  }, [reviewWorkflowDiagnostic]);
 
   useEffect(() => {
     if (syncProgress?.status !== "running") {
@@ -683,6 +717,11 @@ export default function IntegrationsPage() {
           return nextDiagnostic;
         })
         .catch(() => undefined));
+    setSyncProgress((current) =>
+      current?.connectorType === type && current.jobId === result.job_id
+        ? { ...current, completionCopyMode: reviewCompletionCopyMode(type, diagnostic) }
+        : current,
+    );
     if (
       activeSyncJobRef.current !== result.job_id ||
       type === "slack" ||
@@ -857,6 +896,7 @@ export default function IntegrationsPage() {
       progressPct: 0,
       targetProgressPct: 10,
       backgrounded: false,
+      completionCopyMode: reviewCompletionCopyMode(type, reviewWorkflowDiagnostic),
     });
     setSyncModalOpen(true);
     const backgroundNoticeTimer = window.setTimeout(() => {
@@ -1334,6 +1374,9 @@ function SyncProgressModal({
   const result = progress.result;
   const createdReviewItems = result?.created_review_items ?? 0;
   const pendingReviewCount = result?.pending_review_count ?? 0;
+  const usesV2TruthfulCopy = progress.completionCopyMode !== "legacy";
+  const runningStages = usesV2TruthfulCopy ? V2_SYNC_RUNNING_STAGES : SYNC_RUNNING_STAGES;
+  const changedSourceCount = result?.changed_source_refs?.length ?? 0;
 
   return (
     <div
@@ -1366,12 +1409,14 @@ function SyncProgressModal({
               </h2>
               <p data-testid="sync-modal-step" className="mt-1 text-sm leading-6 text-[var(--ink-muted)]">
                 {isComplete
-                  ? `${progress.displayName} 데이터를 검토 큐에 반영했습니다.`
+                  ? usesV2TruthfulCopy
+                    ? `${progress.displayName} 변경 근거를 준비했습니다. 검토 후보는 아래에서 명시적으로 만듭니다.`
+                    : `${progress.displayName} 데이터를 검토 큐에 반영했습니다.`
                   : isError
                     ? (progress.errorMessage ?? "동기화 중 오류가 발생했습니다.")
                     : progress.backgrounded
                       ? (progress.errorMessage ?? BACKGROUND_SYNC_CONTINUES_MESSAGE)
-                      : SYNC_RUNNING_STAGES[progress.stageIndex]}
+                      : runningStages[progress.stageIndex]}
               </p>
             </div>
           </div>
@@ -1390,8 +1435,16 @@ function SyncProgressModal({
 
         <div className="mt-4 grid gap-2 text-sm">
           <SyncStep label="원본 수집" active={isRunning && progress.stageIndex === 0} done={progress.stageIndex > 0 || isComplete} />
-          <SyncStep label="AI 분석" active={isRunning && progress.stageIndex === 1} done={progress.stageIndex > 1 || isComplete} />
-          <SyncStep label="검토 항목 저장" active={isRunning && progress.stageIndex === 2} done={isComplete} />
+          <SyncStep
+            label={usesV2TruthfulCopy ? "변경 근거 준비" : "AI 분석"}
+            active={isRunning && progress.stageIndex === 1}
+            done={progress.stageIndex > 1 || isComplete}
+          />
+          <SyncStep
+            label={usesV2TruthfulCopy ? "미리보기 준비" : "검토 항목 저장"}
+            active={isRunning && progress.stageIndex === 2}
+            done={isComplete}
+          />
         </div>
 
         <ProgressBar progressPct={progress.progressPct} />
@@ -1400,7 +1453,18 @@ function SyncProgressModal({
         ) : null}
 
         {result ? (
-          <>
+          usesV2TruthfulCopy ? (
+            <>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                <ResultMetric label="수집된 원본" value={`${result.fetched_events.toLocaleString()}개`} />
+                <ResultMetric label="변경 근거" value={`${changedSourceCount.toLocaleString()}개`} />
+              </div>
+              <p className="mt-3 text-sm font-medium text-[var(--ink-strong)]">
+                변경 근거 {changedSourceCount.toLocaleString()}개를 준비했습니다. 검토 후보는 아래에서 만듭니다.
+              </p>
+            </>
+          ) : (
+            <>
             <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
               <ResultMetric label="새 검토 항목" value={`${createdReviewItems.toLocaleString()}개`} />
               <ResultMetric label="검토 대기" value={`${pendingReviewCount.toLocaleString()}개`} />
@@ -1409,7 +1473,8 @@ function SyncProgressModal({
               새 검토 항목 {createdReviewItems.toLocaleString()}개, 검토 대기{" "}
               {pendingReviewCount.toLocaleString()}개입니다.
             </p>
-          </>
+            </>
+          )
         ) : null}
 
         {progress.reviewWorkflow ? (

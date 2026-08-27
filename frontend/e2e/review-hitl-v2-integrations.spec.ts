@@ -253,10 +253,15 @@ test("shows cost and launches the exact completed source batch", async ({ page }
   await completeGmailSync(page);
 
   const panel = page.getByTestId("review-candidate-launch-panel");
+  const modal = page.getByTestId("sync-progress-modal");
   await expect(panel).toContainText("예상 비용");
   await expect(panel).toContainText("예산 이내");
   await expect(panel).toContainText("120");
   await expect(panel).toContainText("메모리 모드");
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("변경 근거를 준비했습니다");
+  await expect(modal).not.toContainText("검토 큐에 반영했습니다");
+  await expect(modal).not.toContainText("AI 분석");
+  await expect(modal).not.toContainText("검토 항목 저장");
   expect(dryRunBody).toEqual({ source_refs: sourceRefs, agent_names: diagnostic.default_agent_names });
 
   await panel.getByRole("button", { name: "검토 후보 만들기" }).click();
@@ -318,6 +323,28 @@ test("hides launch when readiness is disabled or unavailable", async ({ page }) 
   await completeGmailSync(page);
 
   await expect(page.getByTestId("review-candidate-launch-panel")).toHaveCount(0);
+  await expect(page.getByTestId("sync-modal-step")).toContainText("검토 큐에 반영했습니다");
+  await expect(page.getByTestId("sync-progress-modal")).toContainText("AI 분석");
+  await expect(page.getByTestId("sync-progress-modal")).toContainText("검토 항목 저장");
+});
+
+test("keeps completion copy truthful while the V2 diagnostic is still resolving", async ({ page }) => {
+  let resolveDiagnostic: (() => void) | undefined;
+  const diagnosticGate = new Promise<void>((resolve) => {
+    resolveDiagnostic = resolve;
+  });
+  await installIntegrationsRoutes(page);
+  await page.route("**/api/v1/orchestration/v2/company-memory", async (route) => {
+    await diagnosticGate;
+    await route.fulfill({ contentType: "application/json", json: diagnostic });
+  });
+
+  await completeGmailSync(page);
+  const modal = page.getByTestId("sync-progress-modal");
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("변경 근거를 준비했습니다");
+  await expect(modal).not.toContainText("검토 큐에 반영했습니다");
+  resolveDiagnostic?.();
+  await expect(page.getByTestId("review-candidate-launch-panel")).toBeVisible();
 });
 
 test("does not offer V2 launch for Slack sync", async ({ page }) => {
@@ -448,6 +475,7 @@ test("preserves failed terminal status and blocks its stable-id replay", async (
   const panel = page.getByTestId("review-candidate-launch-panel");
   await expect(panel).not.toContainText("새 검토 후보 없음");
   await expect(panel).toContainText("작업 실패");
+  await expect(panel).toContainText("데이터 변경 후 다시 동기화");
   await expect(button).toBeDisabled();
 });
 
@@ -463,5 +491,6 @@ test("preserves cancelled terminal status and blocks its stable-id replay", asyn
   const panel = page.getByTestId("review-candidate-launch-panel");
   await expect(panel).not.toContainText("새 검토 후보 없음");
   await expect(panel).toContainText("작업 취소됨");
+  await expect(panel).toContainText("데이터 변경 후 다시 동기화");
   await expect(button).toBeDisabled();
 });

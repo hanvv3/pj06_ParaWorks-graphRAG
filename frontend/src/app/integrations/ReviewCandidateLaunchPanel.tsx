@@ -90,9 +90,9 @@ export function ReviewCandidateLaunchPanel({
       {launchState === "terminal" ? (
         <p className="mt-3 text-sm font-medium text-[var(--ink-strong)]">
           {terminalStatus === "cancelled"
-            ? "작업 취소됨 — 이 동기화 배치의 검토 후보 만들기는 다시 실행할 수 없습니다."
+            ? "작업 취소됨 — 이 동기화 배치의 검토 후보 만들기는 다시 실행할 수 없습니다. 데이터 변경 후 다시 동기화해 주세요."
             : terminalStatus === "failed"
-              ? "작업 실패 — 이 동기화 배치의 검토 후보 만들기는 다시 실행할 수 없습니다."
+              ? "작업 실패 — 이 동기화 배치의 검토 후보 만들기는 다시 실행할 수 없습니다. 데이터 변경 후 다시 동기화해 주세요."
               : "검토 후보 만들기가 완료되지 않았습니다. 잠시 후 새 동기화를 시작해 주세요."}
         </p>
       ) : null}
