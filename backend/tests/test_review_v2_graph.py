@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from uuid import uuid4
 
 import pytest
@@ -95,6 +95,7 @@ class _UnusedLeaseService:
 class _FakeDraftService:
     session_factory: Callable[[], Session]
     candidate_count: int
+    review_item_id_base: int | None = None
     draft_calls: int = 0
     call_arguments: list[dict[str, object]] = field(default_factory=list)
 
@@ -123,6 +124,11 @@ class _FakeDraftService:
                 for index in range(self.candidate_count):
                     db.add(
                         ReviewItem(
+                            id=(
+                                None
+                                if self.review_item_id_base is None
+                                else self.review_item_id_base + index
+                            ),
                             item_type='history_event',
                             payload={
                                 'title': f'검토 후보 {index + 1}',
@@ -274,11 +280,13 @@ def _pause_candidate_run(
     saver: InMemorySaver,
     session_factory: Callable[[], Session],
     candidate_count: int = 1,
+    review_item_id_base: int | None = None,
 ) -> tuple[object, _WorkflowFixture, _FakeDraftService, dict[str, object]]:
     workflow = _seed_workflow(session_factory)
     draft_service = _FakeDraftService(
         session_factory=session_factory,
         candidate_count=candidate_count,
+        review_item_id_base=review_item_id_base,
     )
     runtime_context, _ = _runtime_context(session_factory, draft_service)
     graph = build_company_memory_review_v2_graph(saver)
@@ -321,6 +329,22 @@ def _set_review_statuses(
         return ids
 
 
+def _review_item_statuses(
+    session_factory: Callable[[], Session],
+    workflow_thread_id: str,
+) -> tuple[str, ...]:
+    with session_factory() as db:
+        statuses = tuple(
+            db.scalars(
+                select(ReviewItem.status)
+                .where(ReviewItem.workflow_thread_id == workflow_thread_id)
+                .order_by(ReviewItem.id)
+            ).all()
+        )
+        db.rollback()
+    return statuses
+
+
 def _resume_acknowledgement() -> dict[str, object]:
     return {
         'event': 'review_resolution_checked',
@@ -334,6 +358,12 @@ def _walk_values(value: object) -> Iterator[object]:
         for key, item in value.items():
             yield from _walk_values(key)
             yield from _walk_values(item)
+    elif is_dataclass(value) and not isinstance(value, type):
+        for field_info in fields(value):
+            yield from _walk_values(getattr(value, field_info.name))
+    elif isinstance(value, tuple) and hasattr(value, '_fields'):
+        for field_name in value._fields:
+            yield from _walk_values(getattr(value, field_name))
     elif isinstance(value, (list, tuple)):
         for item in value:
             yield from _walk_values(item)
@@ -429,6 +459,108 @@ def test_resume_uses_same_thread_and_acknowledgement_only(
     assert draft_service.draft_calls == 1
 
 
+@pytest.mark.parametrize(
+    'acknowledgement',
+    [
+        {'event': 'review_resolution_checked'},
+        {
+            'event': 'review_resolution_checked',
+            'state_version': _STATE_VERSION - 1,
+        },
+        {
+            'event': 'review_resolution_checked',
+            'state_version': True,
+        },
+        {
+            'event': 'review_resolution_claimed',
+            'state_version': _STATE_VERSION,
+        },
+    ],
+)
+def test_resume_rejects_invalid_acknowledgement_without_redraft_or_db_mutation(
+    in_memory_saver: InMemorySaver,
+    application_session_factory: sessionmaker[Session],
+    acknowledgement: object,
+) -> None:
+    graph, workflow, draft_service, runtime_context = _pause_candidate_run(
+        saver=in_memory_saver,
+        session_factory=application_session_factory,
+    )
+    _set_review_statuses(
+        application_session_factory,
+        workflow.workflow_thread_id,
+        ['approved'],
+    )
+    statuses_before = _review_item_statuses(
+        application_session_factory,
+        workflow.workflow_thread_id,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        invoke_and_confirm_checkpoint(
+            graph=graph,
+            saver=in_memory_saver,
+            command_or_input=Command(resume=acknowledgement),
+            checkpoint_thread_id=workflow.checkpoint_thread_id,
+            runtime_context=runtime_context,
+            expect_interrupt=False,
+        )
+
+    assert exc_info.value.args == ('invalid_state_transition',)
+    error_text = str(exc_info.value)
+    assert workflow.workflow_thread_id not in error_text
+    assert not any(marker in error_text for marker in _SENSITIVE_MARKERS)
+    assert draft_service.draft_calls == 1
+    assert _review_item_statuses(
+        application_session_factory,
+        workflow.workflow_thread_id,
+    ) == statuses_before
+
+
+def test_resume_rejects_an_acknowledgement_stale_to_current_thread_version(
+    in_memory_saver: InMemorySaver,
+    application_session_factory: sessionmaker[Session],
+) -> None:
+    graph, workflow, draft_service, runtime_context = _pause_candidate_run(
+        saver=in_memory_saver,
+        session_factory=application_session_factory,
+    )
+    _set_review_statuses(
+        application_session_factory,
+        workflow.workflow_thread_id,
+        ['approved'],
+    )
+    with application_session_factory() as db:
+        thread = db.get(AgentWorkflowThread, workflow.workflow_thread_id)
+        assert thread is not None
+        thread.state_version += 1
+        db.commit()
+    statuses_before = _review_item_statuses(
+        application_session_factory,
+        workflow.workflow_thread_id,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        invoke_and_confirm_checkpoint(
+            graph=graph,
+            saver=in_memory_saver,
+            command_or_input=Command(resume=_resume_acknowledgement()),
+            checkpoint_thread_id=workflow.checkpoint_thread_id,
+            runtime_context=runtime_context,
+            expect_interrupt=False,
+        )
+
+    assert exc_info.value.args == ('invalid_state_transition',)
+    error_text = str(exc_info.value)
+    assert workflow.workflow_thread_id not in error_text
+    assert not any(marker in error_text for marker in _SENSITIVE_MARKERS)
+    assert draft_service.draft_calls == 1
+    assert _review_item_statuses(
+        application_session_factory,
+        workflow.workflow_thread_id,
+    ) == statuses_before
+
+
 def test_pending_database_items_reinterrupt_defensively(
     in_memory_saver: InMemorySaver,
     application_session_factory: sessionmaker[Session],
@@ -488,6 +620,98 @@ def test_needs_more_evidence_finishes_in_terminal_branch(
         },
         'error_codes': [],
     }
+
+
+def test_mixed_approved_and_needs_more_evidence_finishes_terminal_branch(
+    in_memory_saver: InMemorySaver,
+    application_session_factory: sessionmaker[Session],
+) -> None:
+    graph, workflow, _, runtime_context = _pause_candidate_run(
+        saver=in_memory_saver,
+        session_factory=application_session_factory,
+        candidate_count=2,
+    )
+    _set_review_statuses(
+        application_session_factory,
+        workflow.workflow_thread_id,
+        ['approved', 'needs_more_evidence'],
+    )
+
+    resumed = invoke_and_confirm_checkpoint(
+        graph=graph,
+        saver=in_memory_saver,
+        command_or_input=Command(resume=_resume_acknowledgement()),
+        checkpoint_thread_id=workflow.checkpoint_thread_id,
+        runtime_context=runtime_context,
+        expect_interrupt=False,
+    )
+
+    assert resumed.result['status'] == 'needs_more_evidence'
+    assert resumed.result['review_status_counts'] == {
+        'pending_review': 0,
+        'approved': 1,
+        'rejected': 0,
+        'needs_more_evidence': 1,
+    }
+
+
+def test_needs_more_evidence_takes_terminal_precedence_over_pending_items(
+    in_memory_saver: InMemorySaver,
+    application_session_factory: sessionmaker[Session],
+) -> None:
+    graph, workflow, draft_service, runtime_context = _pause_candidate_run(
+        saver=in_memory_saver,
+        session_factory=application_session_factory,
+        candidate_count=2,
+    )
+    _set_review_statuses(
+        application_session_factory,
+        workflow.workflow_thread_id,
+        ['needs_more_evidence', 'pending_review'],
+    )
+
+    resumed = invoke_and_confirm_checkpoint(
+        graph=graph,
+        saver=in_memory_saver,
+        command_or_input=Command(resume=_resume_acknowledgement()),
+        checkpoint_thread_id=workflow.checkpoint_thread_id,
+        runtime_context=runtime_context,
+        expect_interrupt=False,
+    )
+
+    assert resumed.result['status'] == 'needs_more_evidence'
+    assert draft_service.draft_calls == 1
+
+
+def test_pending_item_reinterrupts_when_mixed_with_an_approved_item(
+    in_memory_saver: InMemorySaver,
+    application_session_factory: sessionmaker[Session],
+) -> None:
+    graph, workflow, draft_service, runtime_context = _pause_candidate_run(
+        saver=in_memory_saver,
+        session_factory=application_session_factory,
+        candidate_count=2,
+    )
+    _set_review_statuses(
+        application_session_factory,
+        workflow.workflow_thread_id,
+        ['approved', 'pending_review'],
+    )
+
+    resumed = invoke_and_confirm_checkpoint(
+        graph=graph,
+        saver=in_memory_saver,
+        command_or_input=Command(resume=_resume_acknowledgement()),
+        checkpoint_thread_id=workflow.checkpoint_thread_id,
+        runtime_context=runtime_context,
+        expect_interrupt=True,
+    )
+
+    assert tuple(resumed.result['__interrupt__'])[0].value == {
+        'event': 'review_resolution_required',
+        'state_version': _STATE_VERSION,
+    }
+    assert draft_service.draft_calls == 1
 
 
 def test_approved_and_rejected_items_finish_completed(
@@ -575,21 +799,77 @@ def test_database_resolution_ignores_resume_payload_claims(
     assert len(resolver.calls) > permission_reads_before_resume
 
 
+def test_permission_revocation_after_pause_fails_closed_without_leaks(
+    in_memory_saver: InMemorySaver,
+    application_session_factory: sessionmaker[Session],
+) -> None:
+    resolver = _PermissionResolver()
+    workflow = _seed_workflow(application_session_factory)
+    draft_service = _FakeDraftService(
+        session_factory=application_session_factory,
+        candidate_count=1,
+    )
+    runtime_context, _ = _runtime_context(
+        application_session_factory,
+        draft_service,
+        permission_resolver=resolver,
+    )
+    graph = build_company_memory_review_v2_graph(in_memory_saver)
+    invoke_and_confirm_checkpoint(
+        graph=graph,
+        saver=in_memory_saver,
+        command_or_input={
+            'workflow_thread_id': workflow.workflow_thread_id,
+        },
+        checkpoint_thread_id=workflow.checkpoint_thread_id,
+        runtime_context=runtime_context,
+        expect_interrupt=True,
+    )
+    resolver.levels = ('public',)
+    statuses_before = _review_item_statuses(
+        application_session_factory,
+        workflow.workflow_thread_id,
+    )
+
+    with pytest.raises(PermissionError) as exc_info:
+        invoke_and_confirm_checkpoint(
+            graph=graph,
+            saver=in_memory_saver,
+            command_or_input=Command(resume=_resume_acknowledgement()),
+            checkpoint_thread_id=workflow.checkpoint_thread_id,
+            runtime_context=runtime_context,
+            expect_interrupt=False,
+        )
+
+    assert exc_info.value.args == ('permission_denied',)
+    error_text = str(exc_info.value)
+    assert workflow.workflow_thread_id not in error_text
+    assert not any(marker in error_text for marker in _SENSITIVE_MARKERS)
+    assert draft_service.draft_calls == 1
+    assert _review_item_statuses(
+        application_session_factory,
+        workflow.workflow_thread_id,
+    ) == statuses_before
+
+
 def test_checkpoint_contains_no_evidence_prompt_or_model_output(
     in_memory_saver: InMemorySaver,
     application_session_factory: sessionmaker[Session],
 ) -> None:
+    review_item_id = 987654321
     _, workflow, _, _ = _pause_candidate_run(
         saver=in_memory_saver,
         session_factory=application_session_factory,
+        review_item_id_base=review_item_id,
     )
 
     saved = in_memory_saver.get_tuple(
         checkpoint_config(workflow.checkpoint_thread_id)
     )
     assert saved is not None
-    values = tuple(_walk_values((saved.checkpoint, saved.pending_writes)))
+    values = tuple(_walk_values(saved))
     checkpoint_strings = {value for value in values if isinstance(value, str)}
+    checkpoint_integers = {value for value in values if type(value) is int}
     assert checkpoint_strings.isdisjoint(_SENSITIVE_MARKERS)
     assert checkpoint_strings.isdisjoint({
         'source_id',
@@ -603,6 +883,9 @@ def test_checkpoint_contains_no_evidence_prompt_or_model_output(
         'provider_error',
         'raw_error',
     })
+    assert review_item_id not in checkpoint_integers
+    assert saved.config['configurable']['checkpoint_id']
+    assert saved.config['configurable'].get('checkpoint_ns', '') == ''
     assert saved.checkpoint['channel_values']['review_item_ids'] == []
 
 

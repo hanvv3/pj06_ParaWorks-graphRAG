@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import cast
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -199,6 +200,22 @@ def _output(
     }
 
 
+def _validate_review_resolution_acknowledgement(
+    acknowledgement: object,
+    *,
+    state_version: int,
+) -> None:
+    if not isinstance(acknowledgement, Mapping):
+        raise ValueError('invalid_state_transition')
+    acknowledgement_state_version = acknowledgement.get('state_version')
+    if (
+        acknowledgement.get('event') != 'review_resolution_checked'
+        or type(acknowledgement_state_version) is not int
+        or acknowledgement_state_version != state_version
+    ):
+        raise ValueError('invalid_state_transition')
+
+
 def _finalize_no_candidates(
     state: ReviewGraphState,
 ) -> dict[str, object]:
@@ -219,10 +236,14 @@ def _await_human_review(
             state['workflow_thread_id'],
         ).state_version
         db.rollback()
-    interrupt({
+    acknowledgement = interrupt({
         'event': 'review_resolution_required',
         'state_version': state_version,
     })
+    _validate_review_resolution_acknowledgement(
+        acknowledgement,
+        state_version=state_version,
+    )
     return {
         'phase': 'review_resolution_acknowledged',
         'completed_nodes': ['await_human_review'],
@@ -268,10 +289,10 @@ def _verify_review_resolution_from_postgres(
 
 def _review_resolution_branch(state: ReviewGraphState) -> str:
     counts = state['review_status_counts']
-    if counts['pending_review']:
-        return _UNRESOLVED
     if counts['needs_more_evidence']:
         return _NEEDS_MORE_EVIDENCE
+    if counts['pending_review']:
+        return _UNRESOLVED
     if counts['approved'] + counts['rejected'] == sum(counts.values()):
         return _APPROVED_OR_REJECTED
     raise ValueError('invalid_state_transition')
