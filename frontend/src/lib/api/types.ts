@@ -435,6 +435,14 @@ export type ReviewPromotionResult = {
 
 export type ReviewApprovalResponse = ReviewItem & {
   promotion_result?: ReviewPromotionResult;
+  replayed: boolean;
+  promotion: ReviewTransitionPromotion | null;
+};
+
+export type ReviewTransitionPromotion = {
+  target_type: string;
+  created_record_ids: number[];
+  created_timeline_event_ids: number[];
 };
 
 export type ReviewPromotionPreview = {
@@ -473,6 +481,101 @@ export type ReviewBulkActionResponse = {
   skipped_items: { id: number; detail: string }[];
   approved_item_ids: number[];
   rejected_item_ids: number[];
+  replayed_items: ReviewTransitionItem[];
+};
+
+export type ReviewTransitionItem = {
+  item_id: number;
+  status: ReviewStatus;
+  replayed: boolean;
+  promotion: ReviewTransitionPromotion | null;
+};
+
+export type ReviewWorkflowSourceRef = {
+  source_type: "gmail" | "gmail_attachment" | "drive" | "calendar";
+  source_id: string;
+  version_or_signature: string;
+};
+
+export type ReviewWorkflowRunRequest = {
+  source_refs: ReviewWorkflowSourceRef[];
+  agent_names: string[];
+  client_request_id?: string;
+};
+
+export type ReviewWorkflowErrorCode =
+  | "invalid_input"
+  | "not_found"
+  | "idempotency_key_reused"
+  | "evidence_changed"
+  | "permission_denied"
+  | "checkpoint_unavailable"
+  | "checkpoint_failed"
+  | "review_unresolved"
+  | "runtime_version_unavailable"
+  | "model_unavailable"
+  | "budget_exceeded"
+  | "concurrent_resume"
+  | "invalid_state_transition";
+
+export type ReviewWorkflowCheckpointMode = "disabled" | "memory" | "postgres";
+
+export type ReviewWorkflowDiagnostic = {
+  enabled: boolean;
+  available: boolean;
+  checkpoint_mode: ReviewWorkflowCheckpointMode;
+  durable: boolean;
+  graph_version: string;
+  default_agent_names: string[];
+  error_code: ReviewWorkflowErrorCode | null;
+};
+
+export type ReviewWorkflowBudgetStatus = "within_budget" | "cached" | "no_input" | "over_budget";
+
+export type ReviewWorkflowDryRun = {
+  workflow_name: "company-memory-review";
+  graph_version: "company-memory-review-v2.0";
+  source_count: number;
+  agent_names: string[];
+  selection_policy_version: "company-memory-review-selection:v1";
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  estimated_cost_usd: number;
+  budget_limit_usd: number | null;
+  budget_status: ReviewWorkflowBudgetStatus;
+  cache_hit: boolean;
+  requires_explicit_run: true;
+};
+
+export type ReviewWorkflowLifecycleStatus =
+  | "created"
+  | "drafting"
+  | "checkpoint_pending"
+  | "awaiting_human_review"
+  | "resuming"
+  | "completed"
+  | "needs_more_evidence"
+  | "checkpoint_failed"
+  | "failed"
+  | "cancelled";
+
+export type ReviewWorkflowStatusCounts = Partial<Record<ReviewStatus, number>>;
+
+export type ReviewWorkflowStatus = {
+  thread_id: string;
+  status: ReviewWorkflowLifecycleStatus;
+  review_item_count: number;
+  review_status_counts: ReviewWorkflowStatusCounts;
+  durable: boolean;
+  graph_version: string;
+  review_resolution_ready: boolean;
+  checkpoint_resumable: boolean;
+  resume_allowed: boolean;
+  retry_allowed: boolean;
+  created_at: string;
+  updated_at: string;
+  error_code: ReviewWorkflowErrorCode | null;
+  resume_error_code: ReviewWorkflowErrorCode | null;
 };
 
 export type SearchResult = {
@@ -670,6 +773,7 @@ export type IntegrationSyncResponse = {
   skipped_events: number;
   parser_status_counts?: Record<string, number>;
   changed_source_ids?: string[];
+  changed_source_refs?: ReviewWorkflowSourceRef[];
   agent_generated_items?: number;
   project_assignment_items?: number;
 };
