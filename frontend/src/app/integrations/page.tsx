@@ -17,6 +17,12 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { apiGet, apiPost, apiDelete } from "@/lib/api/client";
+import {
+  dryRunReviewWorkflow,
+  getReviewWorkflowDiagnostic,
+  launchReviewWorkflow,
+  readReviewWorkflowError,
+} from "@/lib/api/reviewWorkflow";
 import { notifyReviewQueueUpdated } from "@/lib/reviewQueueEvents";
 import type {
   GoogleRuntimeStatus,
@@ -26,7 +32,11 @@ import type {
   OAuthInstallUrlResponse,
   SlackRuntimeStatus,
   DashboardResponse,
+  ReviewWorkflowDiagnostic,
+  ReviewWorkflowDryRun,
+  ReviewWorkflowSourceRef,
 } from "@/lib/api/types";
+import { ReviewCandidateLaunchPanel } from "./ReviewCandidateLaunchPanel";
 
 const GOOGLE_CONNECTOR_TYPES = ["gmail", "drive", "calendar"] as const;
 const SYNC_RUNNING_STAGES = [
@@ -53,6 +63,13 @@ type SyncProgressState = {
   lastMessage?: string;
   result?: IntegrationSyncResponse;
   errorMessage?: string;
+  reviewWorkflow?: {
+    diagnostic: ReviewWorkflowDiagnostic;
+    sourceRefs: ReviewWorkflowSourceRef[];
+    dryRun?: ReviewWorkflowDryRun;
+    launchState: "loading_preview" | "ready" | "launching" | "error" | "no_candidates" | "terminal";
+    errorMessage?: string;
+  };
 };
 
 type IntegrationRuntimeStatus = SlackRuntimeStatus | GoogleRuntimeStatus;
@@ -254,6 +271,7 @@ export default function IntegrationsPage() {
   const [pendingType, setPendingType] = useState<string>();
   const [syncProgress, setSyncProgress] = useState<SyncProgressState>();
   const [syncModalOpen, setSyncModalOpen] = useState(false);
+  const [reviewWorkflowDiagnostic, setReviewWorkflowDiagnostic] = useState<ReviewWorkflowDiagnostic>();
 
   // 초기 로드 시 다양한 연동 정보 및 상태 조회
   useEffect(() => {
@@ -295,6 +313,18 @@ export default function IntegrationsPage() {
       .catch(() => {
         if (active) {
           setDashboardSummary(undefined);
+        }
+      });
+
+    getReviewWorkflowDiagnostic()
+      .then((diagnostic) => {
+        if (active) {
+          setReviewWorkflowDiagnostic(diagnostic);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setReviewWorkflowDiagnostic(undefined);
         }
       });
 
@@ -556,6 +586,73 @@ export default function IntegrationsPage() {
     return undefined;
   }
 
+  async function prepareReviewCandidateLaunch(type: string, result: IntegrationSyncResponse) {
+    const sourceRefs = result.changed_source_refs ?? [];
+    const diagnostic =
+      reviewWorkflowDiagnostic ??
+      (await getReviewWorkflowDiagnostic()
+        .then((nextDiagnostic) => {
+          setReviewWorkflowDiagnostic(nextDiagnostic);
+          return nextDiagnostic;
+        })
+        .catch(() => undefined));
+    if (
+      type === "slack" ||
+      sourceRefs.length === 0 ||
+      !diagnostic?.enabled ||
+      !diagnostic.available
+    ) {
+      return;
+    }
+
+    setSyncProgress((current) =>
+      current?.connectorType === type && current.jobId === result.job_id && current.status === "complete"
+        ? {
+            ...current,
+            reviewWorkflow: {
+              diagnostic,
+              sourceRefs,
+              launchState: "loading_preview",
+            },
+          }
+        : current,
+    );
+
+    try {
+      const dryRun = await dryRunReviewWorkflow({
+        source_refs: sourceRefs,
+        agent_names: diagnostic.default_agent_names,
+      });
+      setSyncProgress((current) =>
+        current?.connectorType === type && current.jobId === result.job_id && current.status === "complete"
+          ? {
+              ...current,
+              reviewWorkflow: {
+                diagnostic,
+                sourceRefs,
+                dryRun,
+                launchState: "ready",
+              },
+            }
+          : current,
+      );
+    } catch {
+      setSyncProgress((current) =>
+        current?.connectorType === type && current.jobId === result.job_id && current.status === "complete"
+          ? {
+              ...current,
+              reviewWorkflow: {
+                diagnostic,
+                sourceRefs,
+                launchState: "error",
+                errorMessage: "비용을 확인하지 못했습니다.",
+              },
+            }
+          : current,
+      );
+    }
+  }
+
   async function markSyncComplete(type: string, result: IntegrationSyncResponse) {
     setSyncProgress((current) =>
       current?.connectorType === type
@@ -571,6 +668,65 @@ export default function IntegrationsPage() {
         : current,
     );
     await refreshRuntimeAfterMutation(type);
+    await prepareReviewCandidateLaunch(type, result);
+  }
+
+  async function launchReviewCandidates() {
+    const reviewWorkflow = syncProgress?.reviewWorkflow;
+    const jobId = syncProgress?.jobId;
+    if (!syncProgress || !reviewWorkflow || !jobId || !reviewWorkflow.dryRun || reviewWorkflow.launchState === "launching") {
+      return;
+    }
+
+    const clientRequestId = `review:${jobId}:${reviewWorkflow.dryRun.selection_policy_version}`;
+    setSyncProgress((current) =>
+      current?.jobId === jobId && current.reviewWorkflow
+        ? {
+            ...current,
+            reviewWorkflow: { ...current.reviewWorkflow, launchState: "launching", errorMessage: undefined },
+          }
+        : current,
+    );
+
+    try {
+      const status = await launchReviewWorkflow({
+        source_refs: reviewWorkflow.sourceRefs,
+        agent_names: reviewWorkflow.diagnostic.default_agent_names,
+        client_request_id: clientRequestId,
+      });
+      if (status.status === "awaiting_human_review") {
+        window.location.assign(`/review?workflow_thread_id=${encodeURIComponent(status.thread_id)}`);
+        return;
+      }
+      setSyncProgress((current) =>
+        current?.jobId === jobId && current.reviewWorkflow
+          ? {
+              ...current,
+              reviewWorkflow: {
+                ...current.reviewWorkflow,
+                launchState:
+                  status.status === "completed" && status.review_item_count === 0
+                    ? "no_candidates"
+                    : "terminal",
+              },
+            }
+          : current,
+      );
+    } catch (error) {
+      const safeError = readReviewWorkflowError(error);
+      setSyncProgress((current) =>
+        current?.jobId === jobId && current.reviewWorkflow
+          ? {
+              ...current,
+              reviewWorkflow: {
+                ...current.reviewWorkflow,
+                launchState: "error",
+                errorMessage: safeError.message,
+              },
+            }
+          : current,
+      );
+    }
   }
 
   const visibleManifests = useMemo(
@@ -819,6 +975,7 @@ export default function IntegrationsPage() {
             setSyncModalOpen(false);
           }}
           onClose={() => setSyncModalOpen(false)}
+          onLaunchReviewCandidates={() => void launchReviewCandidates()}
         />
       ) : null}
 
@@ -1051,10 +1208,12 @@ function SyncProgressModal({
   progress,
   onBackground,
   onClose,
+  onLaunchReviewCandidates,
 }: {
   progress: SyncProgressState;
   onBackground: () => void;
   onClose: () => void;
+  onLaunchReviewCandidates: () => void;
 }) {
   const isRunning = progress.status === "running";
   const isComplete = progress.status === "complete";
@@ -1140,6 +1299,16 @@ function SyncProgressModal({
           </>
         ) : null}
 
+        {progress.reviewWorkflow ? (
+          <ReviewCandidateLaunchPanel
+            diagnostic={progress.reviewWorkflow.diagnostic}
+            dryRun={progress.reviewWorkflow.dryRun}
+            launchState={progress.reviewWorkflow.launchState}
+            errorMessage={progress.reviewWorkflow.errorMessage}
+            onLaunch={onLaunchReviewCandidates}
+          />
+        ) : null}
+
         <div className="mt-5 grid gap-2 sm:flex sm:flex-wrap sm:justify-end">
           {isRunning ? (
             <button
@@ -1150,7 +1319,7 @@ function SyncProgressModal({
               백그라운드에서 계속 진행
             </button>
           ) : null}
-          {isComplete ? (
+          {isComplete && !progress.reviewWorkflow ? (
             <a
               href="/review"
               className="liquid-primary inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg px-3 text-sm font-semibold sm:w-auto"
