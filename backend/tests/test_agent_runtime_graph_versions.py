@@ -6,6 +6,12 @@ from backend.app.agent_runtime import (
     GraphVersionRegistry,
     RuntimeVersionUnavailable,
 )
+from backend.app.agent_runtime.graph_versions import (
+    register_company_memory_review_v2,
+)
+from backend.app.agent_runtime.review_v2_graph import (
+    build_company_memory_review_v2_graph,
+)
 
 
 def _builder_v1(_saver: object) -> object:
@@ -14,6 +20,22 @@ def _builder_v1(_saver: object) -> object:
 
 def _builder_v2(_saver: object) -> object:
     return object()
+
+
+def test_review_graph_registers_immutable_workflow_version() -> None:
+    registry = GraphVersionRegistry()
+
+    register_company_memory_review_v2(registry)
+
+    assert registry.resolve(
+        'company-memory-review',
+        'company-memory-review-v2.0',
+    ) is build_company_memory_review_v2_graph
+    with pytest.raises(
+        ValueError,
+        match='^graph version is already registered$',
+    ):
+        register_company_memory_review_v2(registry)
 
 
 def test_registry_resolves_the_registered_workflow_version() -> None:

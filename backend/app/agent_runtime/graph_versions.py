@@ -40,3 +40,21 @@ class GraphVersionRegistry:
             return self._builders[key]
         except KeyError:
             raise RuntimeVersionUnavailable(graph_version) from None
+
+
+def register_company_memory_review_v2(
+    registry: GraphVersionRegistry,
+) -> None:
+    from backend.app.agent_runtime.review_v2_graph import (
+        build_company_memory_review_v2_graph,
+    )
+    from backend.app.schemas.review_workflow import (
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+    )
+
+    registry.register(
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+        build_company_memory_review_v2_graph,
+    )

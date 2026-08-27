@@ -29,12 +29,13 @@ ALLOWED_REVIEW_ERROR_CODES = frozenset({
     'concurrent_resume',
     'invalid_state_transition',
 })
-ALLOWED_REVIEW_STATUSES = frozenset({
+REVIEW_STATUS_ORDER = (
     'pending_review',
     'approved',
     'rejected',
     'needs_more_evidence',
-})
+)
+ALLOWED_REVIEW_STATUSES = frozenset(REVIEW_STATUS_ORDER)
 
 _CHECKPOINT_STATE_KEYS = frozenset({
     'workflow_thread_id',

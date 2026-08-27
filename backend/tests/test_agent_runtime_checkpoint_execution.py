@@ -600,7 +600,10 @@ def test_resume_confirmation_requires_checkpoint_progression() -> None:
     resumed = invoke_and_confirm_checkpoint(
         graph=graph,
         saver=saver,
-        command_or_input=Command(resume='approved'),
+        command_or_input=Command(resume={
+            'event': 'review_resolution_checked',
+            'state_version': 73,
+        }),
         checkpoint_thread_id='checkpoint-thread-1',
         runtime_context={'pause': True},
         expect_interrupt=False,
