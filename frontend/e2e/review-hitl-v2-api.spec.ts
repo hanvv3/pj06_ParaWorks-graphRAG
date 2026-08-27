@@ -10,6 +10,8 @@ import {
 } from "../src/lib/api/reviewWorkflow";
 import type { ReviewTransitionPromotion, ReviewWorkflowRunRequest } from "../src/lib/api/types";
 
+const serverIssuedWorkflowThreadId = "76543210fedcba9876543210fedcba98";
+
 const request = {
   source_refs: [
     {
@@ -23,7 +25,7 @@ const request = {
 };
 
 const status = {
-  thread_id: "thread id/with ? punctuation",
+  thread_id: serverIssuedWorkflowThreadId,
   status: "awaiting_human_review" as const,
   review_item_count: 1,
   review_status_counts: { pending_review: 1 },
@@ -107,15 +109,15 @@ test("review workflow wrappers use the approved methods, paths, and bounded run 
       },
     },
     {
-      path: "/api/v1/orchestration/v2/company-memory/runs/thread%20id%2Fwith%20%3F%20punctuation",
+      path: `/api/v1/orchestration/v2/company-memory/runs/${serverIssuedWorkflowThreadId}`,
       method: "GET",
     },
     {
-      path: "/api/v1/orchestration/v2/company-memory/runs/thread%20id%2Fwith%20%3F%20punctuation/resume",
+      path: `/api/v1/orchestration/v2/company-memory/runs/${serverIssuedWorkflowThreadId}/resume`,
       method: "POST",
     },
     {
-      path: "/api/v1/orchestration/v2/company-memory/runs/thread%20id%2Fwith%20%3F%20punctuation/cancel",
+      path: `/api/v1/orchestration/v2/company-memory/runs/${serverIssuedWorkflowThreadId}/cancel`,
       method: "POST",
     },
   ]);
