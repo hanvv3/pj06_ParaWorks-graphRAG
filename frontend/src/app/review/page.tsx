@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Suspense, type MouseEvent, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, type MouseEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ReviewWorkflowContextPanel } from "@/app/review/ReviewWorkflowContextPanel";
 import { SourceEvidenceDrawer } from "@/components/shared/SourceEvidenceDrawer";
@@ -322,6 +322,11 @@ type ReviewContextMenu = {
   item: ReviewItem;
 };
 
+type ReviewQueryContext = {
+  generation: number;
+  key: string;
+};
+
 export default function ReviewPage() {
   return (
     <Suspense fallback={<ReviewPageFallback />}>
@@ -373,15 +378,33 @@ function ReviewPageContent() {
   const itemId = Number(searchParams.get("itemId") ?? searchParams.get("item_id"));
   const deepLinkItemId = Number.isInteger(itemId) && itemId > 0 ? itemId : undefined;
   const queryKey = `${workflowThreadId ?? ""}:${deepLinkItemId ?? ""}`;
+  const [renderedContextKey, setRenderedContextKey] = useState(queryKey);
   const contextGeneration = useRef(0);
   const listRequestGeneration = useRef(0);
   const statusRequestGeneration = useRef(0);
+  const currentQueryKey = useRef(queryKey);
+
+  // A layout effect updates the async-action guard before the browser can paint
+  // the next query context, without mutating a ref while React is rendering.
+  useLayoutEffect(() => {
+    currentQueryKey.current = queryKey;
+  }, [queryKey]);
+
+  function captureQueryContext(): ReviewQueryContext {
+    return { generation: contextGeneration.current, key: queryKey };
+  }
+
+  function isCurrentQueryContext(context: ReviewQueryContext) {
+    return context.generation === contextGeneration.current && context.key === currentQueryKey.current;
+  }
 
   const loadItems = useCallback(async (
     nextOffset = 0,
     append = false,
     requestContext = contextGeneration.current,
+    requestKey = queryKey,
   ) => {
+    if (requestContext !== contextGeneration.current || requestKey !== currentQueryKey.current) return;
     const request = ++listRequestGeneration.current;
     if (requestContext === contextGeneration.current) {
       setLoading(true);
@@ -395,28 +418,59 @@ function ReviewPageContent() {
         include_previews: "false",
       });
       if (workflowThreadId) params.set("workflow_thread_id", workflowThreadId);
-      const [review, projectsRes] = await Promise.all([
-        apiGet<ReviewResponse>(`/api/v1/review?${params.toString()}`),
-        apiGet<{projects: Array<{project_key: string, name: string}>}>("/api/v1/projects/defined"),
-      ]);
-      if (requestContext !== contextGeneration.current || request !== listRequestGeneration.current) return;
+      void apiGet<{projects: Array<{project_key: string, name: string}>}>("/api/v1/projects/defined")
+        .then((projectsRes) => {
+          if (
+            requestContext === contextGeneration.current
+            && requestKey === currentQueryKey.current
+            && request === listRequestGeneration.current
+          ) {
+            setDefinedProjects(projectsRes.projects || []);
+          }
+        })
+        .catch(() => {
+          if (
+            requestContext === contextGeneration.current
+            && requestKey === currentQueryKey.current
+            && request === listRequestGeneration.current
+          ) {
+            setDefinedProjects([]);
+          }
+        });
+      const review = await apiGet<ReviewResponse>(`/api/v1/review?${params.toString()}`);
+      if (
+        requestContext !== contextGeneration.current
+        || requestKey !== currentQueryKey.current
+        || request !== listRequestGeneration.current
+      ) return;
       setGroups((current) => (append ? mergeReviewGroups(current, review.groups || []) : review.groups || []));
       setTotalCount(review.total_count ?? review.items.length);
       setLoadedOffset(nextOffset);
       setHasMore(Boolean(review.has_more));
-      setDefinedProjects(projectsRes.projects || []);
     } catch (caught) {
-      if (requestContext !== contextGeneration.current || request !== listRequestGeneration.current) return;
+      if (
+        requestContext !== contextGeneration.current
+        || requestKey !== currentQueryKey.current
+        || request !== listRequestGeneration.current
+      ) return;
       setError(caught instanceof Error ? caught.message : "검토 항목을 불러오지 못했습니다.");
     } finally {
-      if (requestContext === contextGeneration.current && request === listRequestGeneration.current) {
+      if (
+        requestContext === contextGeneration.current
+        && requestKey === currentQueryKey.current
+        && request === listRequestGeneration.current
+      ) {
         setLoading(false);
       }
     }
-  }, [workflowThreadId]);
+  }, [queryKey, workflowThreadId]);
 
-  const loadWorkflowStatus = useCallback(async (requestContext = contextGeneration.current) => {
+  const loadWorkflowStatus = useCallback(async (
+    requestContext = contextGeneration.current,
+    requestKey = queryKey,
+  ) => {
     if (!workflowThreadId) return;
+    if (requestContext !== contextGeneration.current || requestKey !== currentQueryKey.current) return;
     const request = ++statusRequestGeneration.current;
     if (requestContext === contextGeneration.current) {
       setWorkflowLoading(true);
@@ -424,18 +478,30 @@ function ReviewPageContent() {
     }
     try {
       const status = await getReviewWorkflowStatus(workflowThreadId);
-      if (requestContext !== contextGeneration.current || request !== statusRequestGeneration.current) return;
+      if (
+        requestContext !== contextGeneration.current
+        || requestKey !== currentQueryKey.current
+        || request !== statusRequestGeneration.current
+      ) return;
       setWorkflowStatus(status);
     } catch {
-      if (requestContext !== contextGeneration.current || request !== statusRequestGeneration.current) return;
+      if (
+        requestContext !== contextGeneration.current
+        || requestKey !== currentQueryKey.current
+        || request !== statusRequestGeneration.current
+      ) return;
       setWorkflowStatus(undefined);
       setWorkflowUnavailable(true);
     } finally {
-      if (requestContext === contextGeneration.current && request === statusRequestGeneration.current) {
+      if (
+        requestContext === contextGeneration.current
+        && requestKey === currentQueryKey.current
+        && request === statusRequestGeneration.current
+      ) {
         setWorkflowLoading(false);
       }
     }
-  }, [workflowThreadId]);
+  }, [queryKey, workflowThreadId]);
 
   useEffect(() => {
     const requestContext = ++contextGeneration.current;
@@ -467,17 +533,21 @@ function ReviewPageContent() {
     setWorkflowUnavailable(false);
     setWorkflowLoading(Boolean(workflowThreadId));
     setWorkflowActionPending(false);
-    void loadItems(0, false, requestContext);
-    if (workflowThreadId) void loadWorkflowStatus(requestContext);
+    setRenderedContextKey(queryKey);
+    void loadItems(0, false, requestContext, queryKey);
+    if (workflowThreadId) void loadWorkflowStatus(requestContext, queryKey);
   }, [deepLinkItemId, loadItems, loadWorkflowStatus, queryKey, workflowThreadId]);
 
-  const refreshReviewData = useCallback(async () => {
-    const requestContext = contextGeneration.current;
-    await Promise.all([loadItems(0, false, requestContext), loadWorkflowStatus(requestContext)]);
+  const refreshReviewData = useCallback(async (context: ReviewQueryContext) => {
+    if (!isCurrentQueryContext(context)) return;
+    await Promise.all([
+      loadItems(0, false, context.generation, context.key),
+      loadWorkflowStatus(context.generation, context.key),
+    ]);
   }, [loadItems, loadWorkflowStatus]);
 
   useEffect(() => {
-    if (!deepLinkedItemId || groups.length === 0) return;
+    if (renderedContextKey !== queryKey || !deepLinkedItemId || groups.length === 0) return;
     const targetGroup = groups.find((group) => group.items.some((item) => item.id === deepLinkedItemId));
     if (!targetGroup) return;
     setExpandedGroups((current) => ({ ...current, [targetGroup.group_id]: true }));
@@ -485,7 +555,7 @@ function ReviewPageContent() {
       document.getElementById(`review-item-${deepLinkedItemId}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
     }, 50);
     return () => window.clearTimeout(timer);
-  }, [deepLinkedItemId, groups]);
+  }, [deepLinkItemId, deepLinkedItemId, groups, queryKey, renderedContextKey]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -536,11 +606,13 @@ function ReviewPageContent() {
     body?: ReviewEvidenceRequest,
   ) {
     const actionKey = `${item.id}:${action}`;
+    const actionContext = captureQueryContext();
     setPendingAction(actionKey);
     setError(undefined);
 
     try {
       const result = await apiPost<ReviewApprovalResponse | ReviewItem>(`/api/v1/review/${item.id}/${action}`, body);
+      if (!isCurrentQueryContext(actionContext)) return;
       if (action === "approve" && "promotion_result" in result && result.promotion_result) {
         setPromotionNotice({
           itemTitle: itemTitle(item),
@@ -554,10 +626,14 @@ function ReviewPageContent() {
         setEvidenceRequestNote("");
       }
     } catch (caught) {
-      setError(safeMutationError(caught, "검토 상태를 변경하지 못했습니다. 현재 상태를 다시 확인해 주세요."));
+      if (isCurrentQueryContext(actionContext)) {
+        setError(safeMutationError(caught, "검토 상태를 변경하지 못했습니다. 현재 상태를 다시 확인해 주세요."));
+      }
     } finally {
-      await refreshReviewData();
-      setPendingAction(undefined);
+      if (isCurrentQueryContext(actionContext)) {
+        await refreshReviewData(actionContext);
+        if (isCurrentQueryContext(actionContext)) setPendingAction(undefined);
+      }
     }
   }
 
@@ -568,10 +644,12 @@ function ReviewPageContent() {
         project_needs_user_selection: false,
       },
     };
+    const actionContext = captureQueryContext();
     setPendingAction(`${item.id}:project`);
     setError(undefined);
     try {
       await apiPatch<ReviewItem>(`/api/v1/review/${item.id}`, update);
+      if (!isCurrentQueryContext(actionContext)) return;
       setPreviews((current) => {
         const next = { ...current };
         delete next[item.id];
@@ -579,10 +657,14 @@ function ReviewPageContent() {
       });
       notifyReviewQueueUpdated();
     } catch (caught) {
-      setError(safeMutationError(caught, "프로젝트를 저장하지 못했습니다. 현재 상태를 다시 확인해 주세요."));
+      if (isCurrentQueryContext(actionContext)) {
+        setError(safeMutationError(caught, "프로젝트를 저장하지 못했습니다. 현재 상태를 다시 확인해 주세요."));
+      }
     } finally {
-      await refreshReviewData();
-      setPendingAction(undefined);
+      if (isCurrentQueryContext(actionContext)) {
+        await refreshReviewData(actionContext);
+        if (isCurrentQueryContext(actionContext)) setPendingAction(undefined);
+      }
     }
   }
 
@@ -594,6 +676,7 @@ function ReviewPageContent() {
   async function executeBulkAction(confirmState: BulkConfirmState) {
     const { action, itemIds } = confirmState;
     const label = action === "approve" ? "승인" : "반려";
+    const actionContext = captureQueryContext();
     setPendingAction(`bulk:${action}`);
     setError(undefined);
     try {
@@ -613,6 +696,7 @@ function ReviewPageContent() {
         action,
         item_ids: itemIds,
       });
+      if (!isCurrentQueryContext(actionContext)) return;
       notifyReviewQueueUpdated();
       setSelectedItemIds((current) => {
         const next = new Set(current);
@@ -624,10 +708,14 @@ function ReviewPageContent() {
         setError(`${label} 처리 중 ${result.failed_items.length}개 항목은 건너뛰었습니다. 필수 정보와 근거를 확인해 주세요.`);
       }
     } catch (caught) {
-      setError(safeMutationError(caught, `선택한 항목을 ${label} 처리하지 못했습니다. 현재 상태를 다시 확인해 주세요.`));
+      if (isCurrentQueryContext(actionContext)) {
+        setError(safeMutationError(caught, `선택한 항목을 ${label} 처리하지 못했습니다. 현재 상태를 다시 확인해 주세요.`));
+      }
     } finally {
-      await refreshReviewData();
-      setPendingAction(undefined);
+      if (isCurrentQueryContext(actionContext)) {
+        await refreshReviewData(actionContext);
+        if (isCurrentQueryContext(actionContext)) setPendingAction(undefined);
+      }
     }
   }
 
@@ -638,6 +726,7 @@ function ReviewPageContent() {
     const label = action === "approve" ? "승인" : "반려";
     if (!window.confirm(`현재 로드된 검토 항목 ${itemIds.length}개를 모두 ${label}할까요?`)) return;
 
+    const actionContext = captureQueryContext();
     setPendingAction(`bulk:${action}`);
     setError(undefined);
     try {
@@ -645,15 +734,20 @@ function ReviewPageContent() {
         action,
         item_ids: itemIds,
       });
+      if (!isCurrentQueryContext(actionContext)) return;
       notifyReviewQueueUpdated();
       if (result.failed_items.length > 0) {
         setError(`${label} 처리 중 ${result.failed_items.length}개 항목은 건너뛰었습니다. 필수 정보와 근거를 확인해 주세요.`);
       }
     } catch (caught) {
-      setError(safeMutationError(caught, `모두 ${label} 처리하지 못했습니다. 현재 상태를 다시 확인해 주세요.`));
+      if (isCurrentQueryContext(actionContext)) {
+        setError(safeMutationError(caught, `모두 ${label} 처리하지 못했습니다. 현재 상태를 다시 확인해 주세요.`));
+      }
     } finally {
-      await refreshReviewData();
-      setPendingAction(undefined);
+      if (isCurrentQueryContext(actionContext)) {
+        await refreshReviewData(actionContext);
+        if (isCurrentQueryContext(actionContext)) setPendingAction(undefined);
+      }
     }
   }
   async function saveEdit(item: ReviewItem) {
@@ -668,18 +762,24 @@ function ReviewPageContent() {
       },
     };
 
+    const actionContext = captureQueryContext();
     setPendingAction(`${item.id}:edit`);
     setError(undefined);
 
     try {
       await apiPatch<ReviewItem>(`/api/v1/review/${item.id}`, update);
+      if (!isCurrentQueryContext(actionContext)) return;
       notifyReviewQueueUpdated();
       setEditingId(undefined);
     } catch (caught) {
-      setError(safeMutationError(caught, "검토 항목을 수정하지 못했습니다. 현재 상태를 다시 확인해 주세요."));
+      if (isCurrentQueryContext(actionContext)) {
+        setError(safeMutationError(caught, "검토 항목을 수정하지 못했습니다. 현재 상태를 다시 확인해 주세요."));
+      }
     } finally {
-      await refreshReviewData();
-      setPendingAction(undefined);
+      if (isCurrentQueryContext(actionContext)) {
+        await refreshReviewData(actionContext);
+        if (isCurrentQueryContext(actionContext)) setPendingAction(undefined);
+      }
     }
   }
 
@@ -690,28 +790,40 @@ function ReviewPageContent() {
       : workflowStatus.status === "checkpoint_failed" && workflowStatus.retry_allowed;
     if (!allowed) return;
 
+    const actionContext = captureQueryContext();
     setWorkflowActionPending(true);
     try {
       await resumeReviewWorkflow(workflowThreadId);
     } catch {
       // A lost resume response can still have advanced the checkpoint; reload its authoritative status.
     } finally {
-      await refreshReviewData();
-      setWorkflowActionPending(false);
+      if (isCurrentQueryContext(actionContext)) {
+        await refreshReviewData(actionContext);
+        if (isCurrentQueryContext(actionContext)) setWorkflowActionPending(false);
+      }
     }
   }
 
-  const totalAgentItems = groups.reduce((acc, g) => acc + g.items.filter(i => Boolean(i.payload.agent_name)).length, 0);
-  const loadedItemCount = groups.reduce((acc, group) => acc + group.items.length, 0);
-  const loadedItems = groups.flatMap((group) => group.items);
+  const isRenderedContextCurrent = renderedContextKey === queryKey;
+  const visibleGroups = isRenderedContextCurrent ? groups : [];
+  const visibleError = isRenderedContextCurrent ? error : undefined;
+  const visibleWorkflowStatus = isRenderedContextCurrent ? workflowStatus : undefined;
+  const visibleWorkflowUnavailable = isRenderedContextCurrent && workflowUnavailable;
+  const visibleWorkflowLoading = isRenderedContextCurrent ? workflowLoading : Boolean(workflowThreadId);
+  const visibleLoading = isRenderedContextCurrent ? loading : true;
+  const visibleTotalCount = isRenderedContextCurrent ? totalCount : 0;
+  const visibleHasMore = isRenderedContextCurrent && hasMore;
+  const totalAgentItems = visibleGroups.reduce((acc, g) => acc + g.items.filter(i => Boolean(i.payload.agent_name)).length, 0);
+  const loadedItemCount = visibleGroups.reduce((acc, group) => acc + group.items.length, 0);
+  const loadedItems = visibleGroups.flatMap((group) => group.items);
   const loadedItemIds = loadedItems.map((item) => item.id);
   const selectedLoadedIds = loadedItemIds.filter((itemId) => selectedItemIds.has(itemId));
-  const duplicateItemIds = groups
+  const duplicateItemIds = visibleGroups
     .filter((group) => group.total_count > 1)
     .flatMap((group) => group.items.map((item) => item.id));
   const allLoadedSelected = loadedItemCount > 0 && selectedLoadedIds.length === loadedItemCount;
   const someLoadedSelected = selectedLoadedIds.length > 0 && !allLoadedSelected;
-  const authRequired = error ? error.includes("Authentication required") || error.includes("401") : false;
+  const authRequired = visibleError ? visibleError.includes("Authentication required") || visibleError.includes("401") : false;
 
   function toggleAllLoadedSelection() {
     setSelectedItemIds((current) => {
@@ -785,16 +897,16 @@ function ReviewPageContent() {
           </div>
         </div>
         <ReviewWorkflowContextPanel
-          status={workflowStatus}
-          loading={workflowLoading}
-          unavailable={workflowUnavailable}
+          status={visibleWorkflowStatus}
+          loading={visibleWorkflowLoading}
+          unavailable={visibleWorkflowUnavailable}
           actionPending={workflowActionPending}
           onResume={() => void resumeWorkflow()}
         />
         <div className="flex flex-wrap items-center gap-2">
           <span className="inline-flex h-9 items-center gap-2 rounded-lg border border-[var(--line-soft)] bg-[var(--glass-elevated)] px-3 text-sm font-semibold text-[var(--ink-muted)] shadow-sm">
             <Bot className="h-4 w-4 text-[var(--workspace-accent)]" aria-hidden="true" />
-            Agent 후보 {totalAgentItems}개 · {loadedItemCount}/{totalCount}개 로드
+            Agent 후보 {totalAgentItems}개 · {loadedItemCount}/{visibleTotalCount}개 로드
           </span>
           <button
             type="button"
@@ -818,8 +930,8 @@ function ReviewPageContent() {
           </button>
           <button
             type="button"
-            onClick={() => void refreshReviewData()}
-            disabled={loading}
+            onClick={() => void refreshReviewData(captureQueryContext())}
+            disabled={!isRenderedContextCurrent || visibleLoading}
             className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-[var(--line-soft)] bg-[var(--glass-elevated)] px-3 text-sm font-semibold text-ink shadow-sm hover:bg-[var(--glass-strong)] disabled:cursor-not-allowed disabled:text-[var(--ink-muted)]"
           >
             <RefreshCw className="h-4 w-4" aria-hidden="true" />
@@ -828,7 +940,7 @@ function ReviewPageContent() {
         </div>
       </div>
 
-      {error ? (
+      {visibleError ? (
         <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
           {authRequired ? (
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -844,12 +956,12 @@ function ReviewPageContent() {
               </Link>
             </div>
           ) : (
-            error
+            visibleError
           )}
         </div>
       ) : null}
 
-      {promotionNotice ? (
+      {isRenderedContextCurrent && promotionNotice ? (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -947,7 +1059,7 @@ function ReviewPageContent() {
       </section>
 
       <section className="space-y-4">
-        {groups.map((group) => {
+        {visibleGroups.map((group) => {
           const isExpanded = expandedGroups[group.group_id];
           const hasMultiple = group.total_count > 1;
           const groupSelected = isGroupFullySelected(group);
@@ -1402,12 +1514,12 @@ function ReviewPageContent() {
           );
         })}
 
-        {!loading && !error && groups.length === 0 ? (
+        {!visibleLoading && !visibleError && visibleGroups.length === 0 ? (
           <div className="rounded-lg border border-[var(--line-soft)] bg-[var(--glass-elevated)] p-8 text-sm text-[var(--ink-muted)] shadow-sm text-center">
             대기 중인 검토 항목이 없습니다.
           </div>
         ) : null}
-        {!loading && hasMore ? (
+        {!visibleLoading && visibleHasMore ? (
           <div className="flex justify-center">
             <button
               type="button"
@@ -1418,14 +1530,14 @@ function ReviewPageContent() {
             </button>
           </div>
         ) : null}
-        {loading && groups.length === 0 ? (
+        {visibleLoading && visibleGroups.length === 0 ? (
           <div className="rounded-lg border border-[var(--line-soft)] bg-[var(--glass-elevated)] p-8 text-sm text-[var(--ink-muted)] shadow-sm text-center">
             검토 항목을 불러오는 중입니다...
           </div>
         ) : null}
       </section>
 
-      {typeof document !== "undefined" && contextMenu ? createPortal((
+      {typeof document !== "undefined" && isRenderedContextCurrent && contextMenu ? createPortal((
         <div
           data-testid="review-context-menu"
           className="fixed z-[110] w-60 overflow-hidden rounded-2xl border border-[var(--line-soft)] bg-white p-2 text-sm font-semibold text-[var(--ink)] shadow-2xl ring-1 ring-slate-950/5"
@@ -1475,7 +1587,7 @@ function ReviewPageContent() {
         </div>
       ), document.body) : null}
 
-      {typeof document !== "undefined" && bulkConfirm ? createPortal((
+      {typeof document !== "undefined" && isRenderedContextCurrent && bulkConfirm ? createPortal((
         <div data-testid="review-bulk-backdrop" className="fixed inset-0 z-[100] flex min-h-screen w-screen items-center justify-center bg-slate-950/45 px-4 backdrop-blur-sm">
           <div
             data-testid="review-bulk-confirm"

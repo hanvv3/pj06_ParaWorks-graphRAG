@@ -327,3 +327,87 @@ test("in-progress lifecycle states have distinct Korean guidance", async ({ page
     await expect(page.getByTestId("review-workflow-context")).toContainText(guidance);
   }
 });
+
+test("a mutation from workflow A cannot refresh or overwrite workflow B after navigation", async ({ page }) => {
+  const secondThreadId = "workflow-thread-2";
+  const secondItem = { ...item, id: 2002, payload: { ...item.payload, title: "Workflow B candidate" } };
+  const listThreads: string[] = [];
+  let releaseApproval: (() => void) | undefined;
+  const approvalGate = new Promise<void>((resolve) => { releaseApproval = resolve; });
+  let signalApprovalStarted: (() => void) | undefined;
+  const approvalStarted = new Promise<void>((resolve) => { signalApprovalStarted = resolve; });
+  await installReviewRoutes(page);
+  await page.route("**/api/v1/review?status=pending_review**", async (route) => {
+    const activeThread = new URL(route.request().url()).searchParams.get("workflow_thread_id") ?? "";
+    listThreads.push(activeThread);
+    const items = activeThread === secondThreadId ? [secondItem] : [item];
+    await route.fulfill({ contentType: "application/json", json: {
+      groups: [{ group_id: `history_event:${activeThread}`, title: items[0].payload.title, item_type: "history_event", status: "pending_review", permission_level: "internal", items, total_count: 1, avg_confidence: 0.9 }],
+      items, total_count: 1, limit: 50, offset: 0, has_more: false, include_previews: false,
+    } });
+  });
+  await page.route(`**/api/v1/orchestration/v2/company-memory/runs/${secondThreadId}`, (route) => route.fulfill({ contentType: "application/json", json: workflowStatus({ thread_id: secondThreadId }) }));
+  await page.route(`**/api/v1/review/${item.id}/approve`, async (route) => {
+    signalApprovalStarted?.();
+    await approvalGate;
+    await route.fulfill({ contentType: "application/json", json: { ...item, status: "approved" } });
+  });
+
+  await page.goto(`/review?workflow_thread_id=${threadId}`);
+  await page.locator(".group-container > div:first-child").click();
+  const approval = page.getByTestId(`review-item-${item.id}`).getByRole("button", { name: "승인" }).click({ noWaitAfter: true });
+  await approvalStarted;
+  await page.evaluate((nextUrl) => {
+    window.history.pushState({}, "", nextUrl);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, `/review?workflow_thread_id=${secondThreadId}`);
+  await expect(page.getByText("Workflow B candidate", { exact: true })).toBeVisible();
+  const beforeRelease = [...listThreads];
+  releaseApproval?.();
+  await approval;
+
+  await expect(page.getByText("Workflow B candidate", { exact: true })).toBeVisible();
+  await expect(page.getByText("Workflow candidate", { exact: true })).toHaveCount(0);
+  expect(listThreads).toEqual(beforeRelease);
+});
+
+test("a query replacement never leaves old workflow content visible while the new list is pending", async ({ page }) => {
+  const secondThreadId = "workflow-thread-2";
+  let releaseSecond: (() => void) | undefined;
+  const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  await installReviewRoutes(page);
+  await page.route("**/api/v1/review?status=pending_review**", async (route) => {
+    const activeThread = new URL(route.request().url()).searchParams.get("workflow_thread_id");
+    if (activeThread === secondThreadId) await secondGate;
+    const currentItem = activeThread === secondThreadId
+      ? { ...item, id: 2002, payload: { ...item.payload, title: "Workflow B candidate" } }
+      : item;
+    await route.fulfill({ contentType: "application/json", json: {
+      groups: [{ group_id: `history_event:${activeThread}`, title: currentItem.payload.title, item_type: "history_event", status: "pending_review", permission_level: "internal", items: [currentItem], total_count: 1, avg_confidence: 0.9 }],
+      items: [currentItem], total_count: 1, limit: 50, offset: 0, has_more: false, include_previews: false,
+    } });
+  });
+  await page.route(`**/api/v1/orchestration/v2/company-memory/runs/${secondThreadId}`, (route) => route.fulfill({ contentType: "application/json", json: workflowStatus({ thread_id: secondThreadId }) }));
+
+  await page.goto(`/review?workflow_thread_id=${threadId}`);
+  await expect(page.getByText("Workflow candidate", { exact: true })).toBeVisible();
+  await page.evaluate((nextUrl) => {
+    window.history.pushState({}, "", nextUrl);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, `/review?workflow_thread_id=${secondThreadId}`);
+  await expect(page.getByText("Workflow candidate", { exact: true })).toHaveCount(0);
+  releaseSecond?.();
+  await expect(page.getByText("Workflow B candidate", { exact: true })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByText("Workflow B candidate", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Workflow candidate", { exact: true })).toBeVisible();
+});
+
+test("a projects metadata outage does not hide a valid filtered review list", async ({ page }) => {
+  await installReviewRoutes(page);
+  await page.route("**/api/v1/projects/defined", (route) => route.fulfill({ status: 503, contentType: "application/json", json: { detail: "projects unavailable" } }));
+
+  await page.goto(`/review?workflow_thread_id=${threadId}`);
+  await expect(page.getByText("Workflow", { exact: true })).toBeVisible();
+  await expect(page.getByText("projects unavailable", { exact: false })).toHaveCount(0);
+});
