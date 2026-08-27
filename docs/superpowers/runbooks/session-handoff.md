@@ -2,6 +2,46 @@
 
 Updated: 2026-08-27
 
+## 2026-08-27 Review Queue HITL V2 release verified
+
+- Deliverable C is implemented through the approved eleven-task plan. Its
+  release commit uses subject `test: verify review workflow v2 release`; the
+  exact SHA is recorded in the Task 11 implementer report and final handoff.
+- User flow remains only
+  `Integrations -> 검토 후보 만들기 -> Review -> 검토 완료`. V2 still defaults
+  off (`langgraph_review_v2_enabled: bool = False`); rollback is disabling the
+  flag and keeping existing V2 threads on V2 rather than falling back to V1.
+- The PostgreSQL release target must be disposable, include pgvector, and have
+  both database and user names ending in `_test`. The fresh sanitized target
+  was PostgreSQL 16 with database/user `paraworks_review_test`; no DSN, host,
+  port, or credential was committed.
+- Exact PostgreSQL recovery/race result: `14 passed, 0 skipped, 10 warnings`.
+  It covers independent pool/app restart, root namespace, checkpoint privacy,
+  status/checkpoint reconciliation, exact shared-batch ownership, concurrent
+  approval/resume/terminal races, canonical promotion ids and Timeline
+  provenance, and exact generated-row cleanup.
+- A PostgreSQL RED exposed the unused always-empty `review_item_ids`
+  checkpoint key. The minimal production privacy fix removes that key from
+  checkpoint schema/initialization/probes only; ReviewItem ids remain in the
+  application database and API behavior/graph topology is unchanged.
+- Fresh gates: touched-module `199 passed`; Deliverable C `333 passed` plus its
+  one known deferred Slack orchestration failure; Deliverable B `229 passed`;
+  non-Slack `989 passed, 1 skipped, 10 deselected`; full backend `989 passed,
+  1 skipped` plus exactly the ten user-deferred Slack failures. The optional
+  skip is unrelated to either Task 11 PostgreSQL file.
+- Whole-tree Ruff moved from 32 findings to `All checks passed!` through safe
+  lint-only cleanup; Slack code received no behavior/data-source change. Lock
+  resolved 99 packages and `git diff --check` is green.
+- Frontend lint/build passed (18 generated pages); Playwright passed desktop
+  V2 `48`, mobile V2 `44`, adjacent UX `9`; deterministic backend smoke passed
+  `9`. The frontend server was stopped and port 3000 was verified closed.
+- The ten Slack failures remain visible and must stay deferred until the final
+  Slack recovery phase, per the user's missing-data-source direction. Do not
+  add deselections beyond the approved non-Slack comparison.
+- Next boundary is Deliverable D GraphRAG planning/design review using
+  Gmail/Drive/Calendar, approved knowledge, and deterministic fixtures. This
+  is a planning step; implementation is not authorized by this release commit.
+
 ## 2026-08-27 Review Queue HITL V2 implementation plan ready
 
 - The implementation plan is

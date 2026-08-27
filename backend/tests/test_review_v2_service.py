@@ -760,13 +760,12 @@ def test_live_review_count_change_rotates_old_snapshot_then_completes(
         COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
     )(saver)
     snapshot = graph.get_state(checkpoint_config(current.checkpoint_thread_id))
-    assert snapshot.values['review_item_ids'] == []
+    assert 'review_item_ids' not in snapshot.values
     assert set(snapshot.values) == {
         'workflow_thread_id',
         'graph_version',
         'input_hash',
         'evidence_version_hash',
-        'review_item_ids',
         'review_status_counts',
         'phase',
         'completed_nodes',
@@ -1441,13 +1440,12 @@ def test_checkpoint_interrupt_requires_exact_minimized_task6_shape(
         'graph_version',
         'input_hash',
         'evidence_version_hash',
-        'review_item_ids',
         'review_status_counts',
         'phase',
         'completed_nodes',
         'error_codes',
     }
-    assert snapshot.values['review_item_ids'] == []
+    assert 'review_item_ids' not in snapshot.values
     assert snapshot.values['review_status_counts'] == {
         'pending_review': 1,
         'approved': 0,
@@ -1524,7 +1522,7 @@ def test_checkpoint_terminal_requires_exact_node_status_and_count_shape(
     snapshot = real_builder(saver).get_state(
         checkpoint_config(current.checkpoint_thread_id)
     )
-    assert snapshot.values['review_item_ids'] == []
+    assert 'review_item_ids' not in snapshot.values
     assert snapshot.values['review_status_counts'] == {
         'pending_review': 0,
         'approved': 1,
@@ -1611,7 +1609,6 @@ def test_needs_more_terminal_reconciles_with_task6_precedence(
         'graph_version',
         'input_hash',
         'evidence_version_hash',
-        'review_item_ids',
         'review_status_counts',
         'phase',
         'completed_nodes',
@@ -1619,7 +1616,7 @@ def test_needs_more_terminal_reconciles_with_task6_precedence(
         'status',
         'review_item_count',
     }
-    assert snapshot.values['review_item_ids'] == []
+    assert 'review_item_ids' not in snapshot.values
     assert snapshot.values['review_status_counts'] == expected_counts
     assert snapshot.values['status'] == 'needs_more_evidence'
     assert snapshot.values['phase'] == 'needs_more_evidence'
@@ -1706,13 +1703,12 @@ def test_pending_approved_terminal_is_corrupt_and_rotates(
         'graph_version',
         'input_hash',
         'evidence_version_hash',
-        'review_item_ids',
         'review_status_counts',
         'phase',
         'completed_nodes',
         'error_codes',
     }
-    assert snapshot.values['review_item_ids'] == []
+    assert 'review_item_ids' not in snapshot.values
     assert snapshot.values['review_status_counts'] == {
         'pending_review': 1,
         'approved': 1,

@@ -151,7 +151,7 @@ class LocalTokenVault:
     def _load(self) -> None:
         try:
             if os.path.exists(self.storage_path):
-                with open(self.storage_path, 'r') as f:
+                with open(self.storage_path) as f:
                     self._secrets = json.load(f)
         except Exception:
             self._secrets = {}

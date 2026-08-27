@@ -1,13 +1,14 @@
 import io
-from pypdf import PdfReader
+
 from docx import Document as DocxDocument
+from pypdf import PdfReader
+
 from backend.app.documents.parsers import (
-    DocumentParser,
     ParsedDocument,
     ParsedDocumentChunk,
     ParserRun,
-    DocumentParserError,
 )
+
 
 class PdfDocumentParser:
     parser_name = 'pypdf'
@@ -58,7 +59,7 @@ class DocxDocumentParser:
             # Simple chunking by paragraph (or grouping)
             current_chunk_text = []
             current_length = 0
-            MAX_LENGTH = 1200
+            max_length = 1200
             
             def add_chunk():
                 nonlocal chunk_index, current_chunk_text, current_length
@@ -77,7 +78,7 @@ class DocxDocumentParser:
                 text = para.text.strip()
                 if not text:
                     continue
-                if current_length + len(text) > MAX_LENGTH and current_length > 0:
+                if current_length + len(text) > max_length and current_length > 0:
                     add_chunk()
                 current_chunk_text.append(text)
                 current_length += len(text)
@@ -118,7 +119,7 @@ class TextDocumentParser:
             
             current_chunk_text = []
             current_length = 0
-            MAX_LENGTH = 1200
+            max_length = 1200
             
             def add_chunk():
                 nonlocal chunk_index, current_chunk_text, current_length
@@ -136,7 +137,7 @@ class TextDocumentParser:
             for para in paragraphs:
                 if not para:
                     continue
-                if current_length + len(para) > MAX_LENGTH and current_length > 0:
+                if current_length + len(para) > max_length and current_length > 0:
                     add_chunk()
                 current_chunk_text.append(para)
                 current_length += len(para)

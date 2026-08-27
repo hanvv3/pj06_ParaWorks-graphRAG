@@ -6,6 +6,42 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-27 Review Queue HITL V2 release verification
+
+- Completed the two-screen user journey without adding navigation depth:
+  `Integrations -> 검토 후보 만들기 -> Review -> 검토 완료`. Review actions
+  update authoritative database state but never auto-resume; the explicit
+  completion action resumes the same workflow thread.
+- Production extraction continues through the existing LangChain structured
+  adapters, while the review workflow uses actual LangGraph `interrupt()` and
+  same-thread `Command(resume=...)`. Tests and smoke runs used deterministic
+  models/fake connector clients and made no live provider calls.
+- Verified PostgreSQL restart/recovery, commit/checkpoint reconciliation,
+  shared-scope exact-batch launch, exactly-once decision/history/todo promotion
+  and companion Timeline provenance, concurrent resume, terminal races, root
+  checkpoint namespace, privacy scanning, and generated-id-only cleanup:
+  `14 passed, 0 skipped` on a disposable PostgreSQL 16 + pgvector test target.
+- A real RED privacy check found that checkpoint state still serialized an
+  unused, always-empty `review_item_ids` key. The minimal correction removed
+  that checkpoint-only field without changing ReviewItem rows, graph nodes,
+  API payloads, permissions, or promotion behavior; its focused RED was
+  `3 failed, 4 passed` and GREEN was `7 passed`.
+- Fresh release evidence: touched-module regression `199 passed`; Deliverable C
+  `333 passed` with its one known deferred Slack failure still visible;
+  Deliverable B `229 passed`; non-Slack backend `989 passed, 1 skipped,
+  10 deselected`; full backend `989 passed, 1 skipped` with exactly the ten
+  user-deferred Slack failures and no new failure.
+- Cleared the whole-tree legacy Ruff baseline from 32 findings using 23 safe
+  automatic fixes and nine minimal behavior-preserving B008/N806/F841 edits.
+  Slack files received import/mode cleanup only. Whole-tree Ruff, lock, and
+  `git diff --check` are green.
+- Frontend lint/build passed with 18 generated pages. Deterministic Playwright
+  passed desktop V2 `48`, mobile V2 `44`, and adjacent UX `9`; deterministic
+  backend two-screen smoke passed `9`.
+- V2 remains disabled by default and Slack recovery remains last. The next
+  activity is Deliverable D GraphRAG planning/design review, not GraphRAG
+  implementation.
+
 ## 2026-08-27 Review Queue HITL V2 implementation plan
 
 - Converted the approved Deliverable C design into eleven independently

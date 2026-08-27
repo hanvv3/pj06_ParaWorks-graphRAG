@@ -1,7 +1,12 @@
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from backend.app.models.source import Document, DocumentParserRun, DocumentVersion, Source
+from backend.app.models.source import (
+    Document,
+    DocumentParserRun,
+    DocumentVersion,
+    Source,
+)
 
 
 def test_list_documents(client: TestClient, db_session: Session) -> None:

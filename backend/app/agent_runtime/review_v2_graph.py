@@ -83,7 +83,6 @@ def _validate_input(
         db.rollback()
     return {
         **values,
-        'review_item_ids': [],
         'review_status_counts': _empty_review_status_counts(),
         'phase': 'input_validated',
         'completed_nodes': ['validate_input'],

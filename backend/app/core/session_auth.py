@@ -4,6 +4,7 @@ import hmac
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy import select
@@ -196,7 +197,10 @@ def set_auth_cookies(response: Response, session_token: str, refresh_token: str,
     set_csrf_cookie(response, settings)
 
 
-async def check_csrf(request: Request, settings: Settings = Depends(get_settings)):
+async def check_csrf(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+):
     if request.method in ('GET', 'HEAD', 'OPTIONS', 'TRACE'):
         return True
     # Exempt login and refresh from established session CSRF

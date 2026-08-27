@@ -1,4 +1,8 @@
-from backend.app.rag.embeddings import OpenAIEmbeddingConfig, OpenAIEmbeddingModel, openai_compatible_embedding_config
+from backend.app.rag.embeddings import (
+    OpenAIEmbeddingConfig,
+    OpenAIEmbeddingModel,
+    openai_compatible_embedding_config,
+)
 
 
 class FakeEmbeddingResponse:

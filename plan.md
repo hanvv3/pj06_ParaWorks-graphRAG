@@ -141,11 +141,21 @@ Current state:
 - Company Memory orchestration now emits a Review Queue HITL checkpoint
   strategy with target ReviewItem ids, resume policy, required statuses, and
   trusted-knowledge approval boundary.
+- Deliverable C Review Queue HITL V2 is implemented behind its
+  disabled-by-default flag. Gmail/Drive/Calendar can launch the exact completed
+  source batch from Integrations, pause through real LangGraph `interrupt()`,
+  resolve authoritative ReviewItem rows in Review, and explicitly resume the
+  same thread with `Command(resume=...)`.
+- PostgreSQL restart, reconciliation, exact-batch launch, concurrent Review
+  transition, concurrent resume, terminal-race, checkpoint privacy, and exact
+  cleanup coverage is release-verified with zero PostgreSQL skips.
 
 Next priorities:
 
-1. Add Knowledge Map only if time allows after core product polish.
+1. Plan and review Deliverable D GraphRAG against the completed HITL trust
+   boundary before implementation.
 2. Continue frontend consistency pass before final portfolio recording.
+3. Keep Slack data reconstruction and its visible regression baseline last.
 
 ## 4. Shared Runtime Contracts
 
@@ -393,10 +403,11 @@ Tasks:
     dedicated PostgreSQL `30 passed`, focused Deliverable B `224 passed`,
     non-Slack backend `717 passed, 1 skipped, 10 deselected`, and full backend
     `10 failed, 717 passed, 1 skipped` with only the deferred Slack ids.
-  - Deliverable C still has no implementation authorization. Its design is
-    approved and its separate implementation plan is ready for review, but an
-    execution mode must be explicitly authorized before product code changes.
-- Deliverable C Review Queue HITL V2: Design approved, implementation plan ready.
+  - At the Deliverable B completion checkpoint, Deliverable C was still
+    unimplemented and awaiting its separate authorization. That historical
+    boundary is superseded by the completed Deliverable C record below.
+- Deliverable C Review Queue HITL V2: Implemented and release-verified; rollout
+  remains disabled by default.
   - The approved spec is
     `docs/superpowers/specs/2026-08-27-review-queue-hitl-v2-design.md`.
   - The implementation plan is
@@ -420,15 +431,24 @@ Tasks:
   - CDC, transactional outbox, brokers, and streaming projections are deferred
     until measured ingestion backlog, freshness, fan-out, or polling/worker
     bottlenecks justify a separate design.
-  - Next: review the Deliverable C implementation plan and choose subagent-driven
-    or inline execution. Do not change product code before explicit implementation
-    authorization.
+  - Release verification on a disposable PostgreSQL 16 + pgvector target:
+    PostgreSQL recovery/race `14 passed, 0 skipped`; Deliverable C selection
+    `333 passed` plus the one visible deferred Slack failure; Deliverable B
+    `229 passed`; non-Slack backend `989 passed, 1 skipped, 10 deselected`; full
+    backend `989 passed, 1 skipped` plus exactly the ten deferred Slack failures.
+    Whole-tree Ruff, lock, and diff gates are green.
+  - Frontend release gates are green: lint/build with 18 generated pages,
+    desktop V2 `48 passed`, mobile V2 `44 passed`, and adjacent UX `9 passed`.
+    The deterministic backend two-screen smoke is `9 passed`.
+  - The release privacy correction removes an unused, always-empty
+    `review_item_ids` field from checkpoint state only; PostgreSQL ReviewItem
+    rows remain authoritative and V2 remains off by default.
+  - Next boundary: Deliverable D GraphRAG planning and design review. This is a
+    planning step, not authorization for GraphRAG implementation.
 - User-directed execution order for the remaining program:
-  1. Deliverable C Review Queue HITL V2, only after its separate plan is
-     reviewed and implementation is explicitly authorized.
-  2. Deliverable D and GraphRAG using Gmail, Drive, Calendar, approved
+  1. Deliverable D and GraphRAG using Gmail, Drive, Calendar, approved
      knowledge, and deterministic fixtures as the primary evidence path.
-  3. Slack data recovery and Slack-related regressions last, after choosing
+  2. Slack data recovery and Slack-related regressions last, after choosing
      between deterministic local reconstruction, a newly seeded Slack
      workspace, or an alternate chat connector.
 - Do not skip or hide Slack regressions while they are deferred. Keep the ten

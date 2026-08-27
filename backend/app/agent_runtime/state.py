@@ -42,7 +42,6 @@ _CHECKPOINT_STATE_KEYS = frozenset({
     'graph_version',
     'input_hash',
     'evidence_version_hash',
-    'review_item_ids',
     'review_status_counts',
     'phase',
     'completed_nodes',
@@ -116,11 +115,6 @@ def _validate_hash_field(state: Mapping[str, object], field: str) -> None:
         raise ValueError(f'checkpoint state field {field} must be a keyed HMAC')
 
 
-def _validate_review_item_ids(value: object) -> None:
-    if type(value) is not list or any(type(item) is not int for item in value):
-        raise ValueError('checkpoint review_item_ids must be a list of integers')
-
-
 def _validate_review_status_counts(value: object) -> None:
     if type(value) is not dict:
         raise ValueError('checkpoint review_status_counts must be a dictionary')
@@ -162,7 +156,6 @@ def validate_checkpoint_state(state: Mapping[str, object]) -> None:
     _validate_string_field(state, 'graph_version')
     _validate_hash_field(state, 'input_hash')
     _validate_hash_field(state, 'evidence_version_hash')
-    _validate_review_item_ids(state['review_item_ids'])
     _validate_review_status_counts(state['review_status_counts'])
     _validate_string_field(state, 'phase')
     _validate_completed_nodes(state['completed_nodes'])
@@ -178,7 +171,6 @@ class ReviewGraphState(TypedDict):
     graph_version: str
     input_hash: str
     evidence_version_hash: str
-    review_item_ids: list[int]
     review_status_counts: dict[str, int]
     phase: str
     completed_nodes: Annotated[list[str], merge_completed_nodes]

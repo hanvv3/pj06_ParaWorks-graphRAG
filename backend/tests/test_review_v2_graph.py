@@ -886,7 +886,7 @@ def test_checkpoint_contains_no_evidence_prompt_or_model_output(
     assert review_item_id not in checkpoint_integers
     assert saved.config['configurable']['checkpoint_id']
     assert saved.config['configurable'].get('checkpoint_ns', '') == ''
-    assert saved.checkpoint['channel_values']['review_item_ids'] == []
+    assert 'review_item_ids' not in saved.checkpoint['channel_values']
 
 
 def test_graph_has_no_rag_slack_neo4j_or_trusted_knowledge_node(

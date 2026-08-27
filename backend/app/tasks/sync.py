@@ -1,6 +1,9 @@
 from logging import getLogger
 
-from backend.app.connectors.factory import ConnectorNotConfiguredError, get_sync_connector
+from backend.app.connectors.factory import (
+    ConnectorNotConfiguredError,
+    get_sync_connector,
+)
 from backend.app.core.config import get_settings
 from backend.app.db.session import SessionLocal
 from backend.app.ingestion.sync import sync_connector_events

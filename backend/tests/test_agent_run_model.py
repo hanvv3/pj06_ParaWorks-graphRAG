@@ -7,7 +7,14 @@ from backend.app.agents.slack_agent import (
     SlackAgentModelResponse,
     create_slack_agent_review_items,
 )
-from backend.app.models import AgentRun, Document, DocumentChunk, DocumentVersion, ReviewItem, Source
+from backend.app.models import (
+    AgentRun,
+    Document,
+    DocumentChunk,
+    DocumentVersion,
+    ReviewItem,
+    Source,
+)
 
 
 class FakeSlackModel:

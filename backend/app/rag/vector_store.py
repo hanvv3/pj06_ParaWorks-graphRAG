@@ -1,6 +1,6 @@
-from dataclasses import asdict, dataclass
 import math
 import re
+from dataclasses import asdict, dataclass
 from typing import Protocol
 
 from backend.app.core.demo_auth import DemoUser

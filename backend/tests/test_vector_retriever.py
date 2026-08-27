@@ -1,5 +1,8 @@
+from backend.app.agents.rag_orchestrator_agent.service import (
+    RagEvidenceCandidate,
+    vector_documents_from_candidates,
+)
 from backend.app.core.demo_auth import USERS
-from backend.app.agents.rag_orchestrator_agent.service import RagEvidenceCandidate, vector_documents_from_candidates
 from backend.app.rag.vector_store import InMemoryVectorStore, VectorDocument
 
 

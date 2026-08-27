@@ -1,25 +1,24 @@
 from urllib.parse import parse_qs, urlparse
+
 import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
-import secrets
 
-from backend.app.connectors.slack_oauth import (
-    build_slack_oauth_install_url,
-    complete_slack_oauth_callback,
-    SlackOAuthStateSigner,
-    pkce_challenge
+from backend.app.auth.google_identity import (
+    build_google_identity_login_url,
 )
 from backend.app.connectors.google_oauth import (
     build_google_oauth_install_url,
     complete_google_oauth_callback,
 )
-from backend.app.auth.google_identity import (
-    build_google_identity_login_url,
-    complete_google_identity_login,
+from backend.app.connectors.slack_oauth import (
+    SlackOAuthStateSigner,
+    build_slack_oauth_install_url,
+    complete_slack_oauth_callback,
+    pkce_challenge,
 )
 from backend.app.core.config import Settings, get_settings
-from backend.app.models import IntegrationConnection, AuthUser
+
 
 def test_slack_oauth_pkce_generation() -> None:
     settings = Settings(

@@ -74,7 +74,6 @@ _REVIEW_GRAPH_STATE_KEYS = frozenset({
     'graph_version',
     'input_hash',
     'evidence_version_hash',
-    'review_item_ids',
     'review_status_counts',
     'phase',
     'completed_nodes',
@@ -248,8 +247,7 @@ def _validate_minimized_snapshot_state(
     except (TypeError, ValueError):
         raise _CorruptCheckpointError from None
     if (
-        safe_state['review_item_ids'] != []
-        or safe_state['review_status_counts']
+        safe_state['review_status_counts']
         != _live_review_counts(projection)
         or safe_state['error_codes'] != []
     ):

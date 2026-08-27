@@ -13,7 +13,6 @@ def _valid_checkpoint_state() -> dict[str, object]:
         'graph_version': 'company-memory-review-v2.0',
         'input_hash': 'a' * 64,
         'evidence_version_hash': 'b' * 64,
-        'review_item_ids': [1, 2],
         'review_status_counts': {'pending_review': 2},
         'phase': 'created',
         'completed_nodes': ['validate_input'],
@@ -50,6 +49,7 @@ def test_error_codes_reject_unknown_values_and_stay_bounded() -> None:
         ('question', 'secret question'),
         ('source_url', 'https://restricted.example'),
         ('model_output', {'answer': 'secret'}),
+        ('review_item_ids', []),
         ('session', object()),
     ],
 )
@@ -62,7 +62,6 @@ def test_checkpoint_state_rejects_sensitive_or_non_json_values(
         'graph_version': 'company-memory-review-v2.0',
         'input_hash': 'a' * 64,
         'evidence_version_hash': 'b' * 64,
-        'review_item_ids': [],
         'review_status_counts': {},
         'phase': 'created',
         'completed_nodes': [],
@@ -81,8 +80,6 @@ def test_checkpoint_state_rejects_sensitive_or_non_json_values(
         ('graph_version', False),
         ('input_hash', 'not-a-keyed-hmac'),
         ('evidence_version_hash', 'g' * 64),
-        ('review_item_ids', [True]),
-        ('review_item_ids', ['1']),
         ('review_status_counts', {'pending_review': True}),
         ('review_status_counts', {'pending_review': -1}),
         ('review_status_counts', {'unreviewed': 1}),
@@ -137,7 +134,7 @@ def test_checkpoint_state_rejects_excessive_nesting_with_value_error() -> None:
     for _ in range(2_000):
         nested = [nested]
     state = _valid_checkpoint_state()
-    state['review_item_ids'] = nested
+    state['review_status_counts'] = nested
 
     with pytest.raises(ValueError):
         validate_checkpoint_state(state)

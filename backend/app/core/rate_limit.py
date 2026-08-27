@@ -1,7 +1,7 @@
 import time
 from collections import defaultdict
+
 from fastapi import HTTPException, Request
-from backend.app.core.config import get_settings
 
 # Simple in-memory storage for rate limiting
 # In production, this should be moved to Redis
@@ -19,7 +19,6 @@ def is_rate_limited(key: str, limit: int, window_seconds: int) -> bool:
     return False
 
 async def rate_limit_auth(request: Request):
-    settings = get_settings()
     # We use the client IP as the key
     client_ip = request.client.host if request.client else "unknown"
     

@@ -9,7 +9,11 @@ from urllib.parse import urlencode
 import httpx
 from sqlalchemy.orm import Session
 
-from backend.app.connectors.slack_oauth import LocalTokenVault, mask_secret, pkce_challenge
+from backend.app.connectors.slack_oauth import (
+    LocalTokenVault,
+    mask_secret,
+    pkce_challenge,
+)
 from backend.app.core.config import Settings
 from backend.app.models import IntegrationConnection
 

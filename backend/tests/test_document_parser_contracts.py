@@ -104,7 +104,9 @@ def test_parser_adapter_decision_keeps_hwp_and_hwpx_unsupported() -> None:
 
 def test_pdf_document_parser_extracts_text_by_page() -> None:
     import io
+
     from reportlab.pdfgen import canvas as rl_canvas  # type: ignore[import]
+
     from backend.app.documents.adapters import PdfDocumentParser
 
     buf = io.BytesIO()
@@ -135,7 +137,9 @@ def test_pdf_document_parser_extracts_text_by_page() -> None:
 
 def test_docx_document_parser_extracts_paragraphs() -> None:
     import io
+
     from docx import Document as DocxDoc
+
     from backend.app.documents.adapters import DocxDocumentParser
 
     buf = io.BytesIO()
@@ -177,7 +181,7 @@ def test_pdf_document_parser_returns_error_status_on_invalid_payload() -> None:
 def test_text_document_parser_extracts_paragraphs() -> None:
     from backend.app.documents.adapters import TextDocumentParser
 
-    payload = "First paragraph.\n\nSecond paragraph.".encode('utf-8')
+    payload = b"First paragraph.\n\nSecond paragraph."
     metadata = {
         'source_id': 'drive:text-1',
         'source_url': 'https://drive.google.com/file/d/text-1/view',
@@ -198,7 +202,7 @@ def test_text_document_parser_extracts_paragraphs() -> None:
 def test_markdown_document_parser_extracts_paragraphs() -> None:
     from backend.app.documents.adapters import TextDocumentParser
 
-    payload = "# Title\n\nContent body.".encode('utf-8')
+    payload = b"# Title\n\nContent body."
     metadata = {
         'source_id': 'drive:md-1',
         'source_url': 'https://drive.google.com/file/d/md-1/view',
