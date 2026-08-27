@@ -813,6 +813,8 @@ function ReviewPageContent() {
   const visibleLoading = isRenderedContextCurrent ? loading : true;
   const visibleTotalCount = isRenderedContextCurrent ? totalCount : 0;
   const visibleHasMore = isRenderedContextCurrent && hasMore;
+  const visibleDefinedProjects = isRenderedContextCurrent && !visibleLoading ? definedProjects : [];
+  const bulkProjectDisabled = !isRenderedContextCurrent || visibleLoading;
   const totalAgentItems = visibleGroups.reduce((acc, g) => acc + g.items.filter(i => Boolean(i.payload.agent_name)).length, 0);
   const loadedItemCount = visibleGroups.reduce((acc, group) => acc + group.items.length, 0);
   const loadedItems = visibleGroups.flatMap((group) => group.items);
@@ -1004,12 +1006,15 @@ function ReviewPageContent() {
             </span>
             <select
               data-testid="review-bulk-project"
-              value={bulkProjectKey}
-              onChange={(event) => setBulkProjectKey(event.target.value)}
+              value={isRenderedContextCurrent ? bulkProjectKey : ""}
+              onChange={(event) => {
+                if (isRenderedContextCurrent) setBulkProjectKey(event.target.value);
+              }}
+              disabled={bulkProjectDisabled}
               className="h-9 min-w-[180px] rounded-lg border border-[var(--line-soft)] bg-white px-3 text-sm font-semibold text-[var(--ink)] outline-none focus:border-[#21132b]"
             >
               <option value="">프로젝트 선택</option>
-              {definedProjects.map((project) => (
+              {visibleDefinedProjects.map((project) => (
                 <option key={project.project_key} value={project.project_key}>
                   {project.name}
                 </option>

@@ -376,6 +376,14 @@ test("a query replacement never leaves old workflow content visible while the ne
   let releaseSecond: (() => void) | undefined;
   const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
   await installReviewRoutes(page);
+  let projectRequest = 0;
+  await page.route("**/api/v1/projects/defined", (route) => {
+    projectRequest += 1;
+    const projects = projectRequest === 1
+      ? [{ project_key: "project-a", name: "프로젝트 A" }]
+      : [{ project_key: "project-b", name: "프로젝트 B" }];
+    return route.fulfill({ contentType: "application/json", json: { projects } });
+  });
   await page.route("**/api/v1/review?status=pending_review**", async (route) => {
     const activeThread = new URL(route.request().url()).searchParams.get("workflow_thread_id");
     if (activeThread === secondThreadId) await secondGate;
@@ -391,13 +399,24 @@ test("a query replacement never leaves old workflow content visible while the ne
 
   await page.goto(`/review?workflow_thread_id=${threadId}`);
   await expect(page.getByText("Workflow candidate", { exact: true })).toBeVisible();
+  const bulkProject = page.getByTestId("review-bulk-project");
+  await expect(bulkProject).toBeEnabled();
+  await expect(bulkProject.locator("option")).toHaveText(["프로젝트 선택", "프로젝트 A"]);
+  await bulkProject.selectOption("project-a");
+  await expect(bulkProject).toHaveValue("project-a");
   await page.evaluate((nextUrl) => {
     window.history.pushState({}, "", nextUrl);
     window.dispatchEvent(new PopStateEvent("popstate"));
   }, `/review?workflow_thread_id=${secondThreadId}`);
   await expect(page.getByText("Workflow candidate", { exact: true })).toHaveCount(0);
+  await expect(bulkProject).toBeDisabled();
+  await expect(bulkProject).toHaveValue("");
+  await expect(bulkProject.locator("option")).toHaveText(["프로젝트 선택"]);
   releaseSecond?.();
   await expect(page.getByText("Workflow B candidate", { exact: true })).toBeVisible();
+  await expect(bulkProject).toBeEnabled();
+  await expect(bulkProject.locator("option")).toHaveText(["프로젝트 선택", "프로젝트 B"]);
+  await expect(bulkProject).toHaveValue("");
   await page.goBack();
   await expect(page.getByText("Workflow B candidate", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Workflow candidate", { exact: true })).toBeVisible();
