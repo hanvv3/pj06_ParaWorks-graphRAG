@@ -25,6 +25,7 @@ from backend.app.agent_runtime.review_v2_drafting import (
     ReviewDraftResult,
 )
 from backend.app.agent_runtime.review_v2_service import (
+    ReviewModelReadiness,
     ReviewWorkflowService,
     ReviewWorkflowServiceError,
 )
@@ -35,7 +36,12 @@ from backend.app.models.agent_workflows import (
     AgentWorkflowThread,
 )
 from backend.app.models.review import ReviewItem
-from backend.app.models.source import Source
+from backend.app.models.source import (
+    Document,
+    DocumentParserRun,
+    DocumentVersion,
+    Source,
+)
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
     COMPANY_MEMORY_REVIEW_WORKFLOW,
@@ -128,6 +134,43 @@ def _request(
         agent_names=['mail_document_agent'],
         client_request_id=client_request_id,
     )
+
+
+def _attach_document_version(
+    db: Session,
+    source: Source,
+    *,
+    version: str = 'v1',
+    revision_id: str = 'revision-1',
+) -> tuple[Document, DocumentVersion, DocumentParserRun]:
+    document = Document(
+        source_id=source.id,
+        title=source.title,
+        current_version=version,
+    )
+    db.add(document)
+    db.flush()
+    document_version = DocumentVersion(
+        document_id=document.id,
+        version=version,
+        body=f'body for {version}',
+    )
+    db.add(document_version)
+    db.flush()
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=document_version.id,
+        source_id=source.id,
+        parser_name='test-parser',
+        parser_status='completed',
+        document_version_label=version,
+        revision_id=revision_id,
+        content_signature=f'parser-signature-{version}',
+        chunk_count=1,
+    )
+    db.add(parser_run)
+    db.flush()
+    return document, document_version, parser_run
 
 
 @dataclass
@@ -255,6 +298,18 @@ class _FakeDraftService:
         )
 
 
+@dataclass
+class _UnavailableDraftService:
+    draft_calls: int = 0
+
+    def draft(self, **_kwargs: object) -> ReviewDraftResult:
+        self.draft_calls += 1
+        raise ReviewDraftError(
+            'model_unavailable',
+            'provider credentials or model route changed',
+        )
+
+
 class _CorruptTupleProxy(InMemorySaver):
     def __init__(
         self,
@@ -278,6 +333,43 @@ class _CorruptTupleProxy(InMemorySaver):
         return super().get_tuple(config)
 
 
+class _SnapshotMutatingGraph:
+    def __init__(
+        self,
+        delegate: object,
+        *,
+        checkpoint_thread_id: str,
+        identity_field: str | None = None,
+        partial: bool = False,
+        terminal_status: str | None = None,
+    ) -> None:
+        self._delegate = delegate
+        self._checkpoint_thread_id = checkpoint_thread_id
+        self._identity_field = identity_field
+        self._partial = partial
+        self._terminal_status = terminal_status
+
+    def get_state(self, config: dict[str, dict[str, str]]):
+        snapshot = self._delegate.get_state(config)
+        if config['configurable']['thread_id'] != self._checkpoint_thread_id:
+            return snapshot
+        if self._partial:
+            return snapshot._replace(
+                tasks=(),
+                next=('verify_review_resolution_from_postgres',),
+            )
+        values = dict(snapshot.values)
+        if self._terminal_status is not None:
+            values['status'] = self._terminal_status
+            return snapshot._replace(tasks=(), next=(), values=values)
+        assert self._identity_field is not None
+        values[self._identity_field] = 'wrong-snapshot-identity'
+        return snapshot._replace(values=values)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._delegate, name)
+
+
 @pytest.fixture
 def service_parts(
     application_session_factory: sessionmaker[Session],
@@ -299,11 +391,17 @@ def _service(
     application_session_factory: Callable[[], Session],
     service_parts,
     *,
-    draft: _FakeDraftService | None = None,
+    draft: object | None = None,
     runtime: object | None = None,
     settings: Settings | None = None,
+    model_readiness: object | None = None,
 ) -> ReviewWorkflowService:
     base_settings, base_runtime, registry, agent_registry, base_draft = service_parts
+    extra = (
+        {'model_readiness': model_readiness}
+        if model_readiness is not None
+        else {}
+    )
     return ReviewWorkflowService(
         session_factory=application_session_factory,
         settings=settings or base_settings,
@@ -311,6 +409,7 @@ def _service(
         graph_registry=registry,
         agent_registry=agent_registry,
         draft_service=draft or base_draft,
+        **extra,
     )
 
 
@@ -348,6 +447,96 @@ def _set_item_statuses(
         for item, status in zip(items, statuses, strict=True):
             item.status = status
         db.commit()
+
+
+def test_model_readiness_blocks_only_new_work_and_preserves_checkpoint_mode(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+) -> None:
+    unavailable_draft = _UnavailableDraftService()
+    runtime = SimpleNamespace(
+        readiness=CheckpointReadiness(
+            enabled=True,
+            mode='postgres',
+            ready=True,
+            durable=True,
+            checkpoint_store='postgres',
+        ),
+        saver=object(),
+    )
+    service = _service(
+        application_session_factory,
+        service_parts,
+        runtime=runtime,
+        draft=unavailable_draft,
+        model_readiness=ReviewModelReadiness(
+            ready=False,
+            error_code='model_unavailable',
+        ),
+    )
+    source = _seed_source(db_session)
+    db_session.commit()
+
+    diagnostic = service.diagnostic()
+    with pytest.raises(ReviewWorkflowServiceError) as dry_error:
+        service.dry_run(actor=_actor(), request=_request(source))
+    with pytest.raises(ReviewWorkflowServiceError) as start_error:
+        service.start(actor=_actor(), request=_request(source))
+
+    assert diagnostic.enabled is True
+    assert diagnostic.available is False
+    assert diagnostic.checkpoint_mode == 'postgres'
+    assert diagnostic.durable is True
+    assert diagnostic.error_code == 'model_unavailable'
+    assert dry_error.value.code == start_error.value.code == 'model_unavailable'
+    assert unavailable_draft.draft_calls == 0
+    assert db_session.scalar(
+        select(func.count()).select_from(AgentWorkflowThread)
+    ) == 0
+
+
+def test_model_unavailable_keeps_existing_status_resume_and_cancel_serviceable(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+) -> None:
+    initial_service = _service(application_session_factory, service_parts)
+    _, resumable = _start(db_session, initial_service)
+    _, cancellable = _start(db_session, initial_service, sequence=2)
+    unavailable_draft = _UnavailableDraftService()
+    existing_service = _service(
+        application_session_factory,
+        service_parts,
+        draft=unavailable_draft,
+        model_readiness=ReviewModelReadiness(
+            ready=False,
+            error_code='model_unavailable',
+        ),
+    )
+
+    projected = existing_service.status(
+        actor=_actor(),
+        thread_id=resumable.thread_id,
+    )
+    _set_item_statuses(
+        application_session_factory,
+        resumable.thread_id,
+        ['approved'],
+    )
+    resumed = existing_service.resume(
+        actor=_actor(),
+        thread_id=resumable.thread_id,
+    )
+    cancelled = existing_service.cancel(
+        actor=_actor(),
+        thread_id=cancellable.thread_id,
+    )
+
+    assert projected.status == 'awaiting_human_review'
+    assert resumed.status == 'completed'
+    assert cancelled.status == 'cancelled'
+    assert unavailable_draft.draft_calls == 0
 
 
 def test_initial_candidate_run_returns_only_after_confirmed_interrupt(
@@ -464,6 +653,233 @@ def test_same_thread_resume_completes_after_all_items_resolve(
     assert db_session.get(AgentWorkflowThread, started.thread_id).checkpoint_thread_id == checkpoint_thread_id
 
 
+def test_resume_rechecks_exact_runtime_after_claim_before_invoke(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(application_session_factory, service_parts)
+    _, started = _start(db_session, service)
+    _set_item_statuses(application_session_factory, started.thread_id, ['approved'])
+    runtime = service_parts[1]
+    saver = runtime.saver
+    assert saver is not None
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    checkpoint_thread_id = thread.checkpoint_thread_id
+    before = saver.get_tuple(checkpoint_config(checkpoint_thread_id))
+    assert before is not None
+    original_readiness = runtime.readiness
+    original_cas = service._cas_status
+
+    def switch_runtime_after_claim(**kwargs: object) -> bool:
+        result = original_cas(**kwargs)
+        if result and kwargs.get('target_status') == 'resuming':
+            runtime._readiness = CheckpointReadiness(
+                enabled=True,
+                mode='postgres',
+                ready=True,
+                durable=True,
+                checkpoint_store='postgres',
+            )
+        return result
+
+    monkeypatch.setattr(service, '_cas_status', switch_runtime_after_claim)
+    try:
+        with pytest.raises(ReviewWorkflowServiceError) as exc_info:
+            service.resume(actor=_actor(), thread_id=started.thread_id)
+    finally:
+        runtime._readiness = original_readiness
+
+    assert exc_info.value.code == 'checkpoint_unavailable'
+    after = saver.get_tuple(checkpoint_config(checkpoint_thread_id))
+    assert after is not None
+    assert (
+        after.config['configurable']['checkpoint_id']
+        == before.config['configurable']['checkpoint_id']
+    )
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert current is not None and current.status == 'awaiting_human_review'
+
+
+def test_evidence_drift_after_resume_claim_restores_awaiting_without_saver_write(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(application_session_factory, service_parts)
+    source, started = _start(db_session, service)
+    _set_item_statuses(application_session_factory, started.thread_id, ['approved'])
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    saver = service_parts[1].saver
+    assert saver is not None
+    before = saver.get_tuple(checkpoint_config(thread.checkpoint_thread_id))
+    assert before is not None
+    original_cas = service._cas_status
+
+    def drift_after_claim(**kwargs: object) -> bool:
+        result = original_cas(**kwargs)
+        if result and kwargs.get('target_status') == 'resuming':
+            with application_session_factory() as db:
+                current_source = db.get(Source, source.id)
+                assert current_source is not None
+                current_source.raw_metadata['content_signature'] = (
+                    'changed-after-resume-claim'
+                )
+                db.commit()
+        return result
+
+    monkeypatch.setattr(service, '_cas_status', drift_after_claim)
+
+    with pytest.raises(ReviewWorkflowServiceError) as exc_info:
+        service.resume(actor=_actor(), thread_id=started.thread_id)
+
+    assert exc_info.value.code == 'evidence_changed'
+    after = saver.get_tuple(checkpoint_config(thread.checkpoint_thread_id))
+    assert after is not None
+    assert (
+        after.config['configurable']['checkpoint_id']
+        == before.config['configurable']['checkpoint_id']
+    )
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert current is not None and current.status == 'awaiting_human_review'
+
+
+def test_repair_rechecks_exact_runtime_after_rotation_before_invoke(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(application_session_factory, service_parts)
+    _, started = _start(db_session, service)
+    runtime = service_parts[1]
+    saver = runtime.saver
+    assert saver is not None
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    thread.status = 'checkpoint_failed'
+    thread.checkpoint_thread_id = 'review-v2:missing-before-runtime-change'
+    thread.state_version += 1
+    db_session.commit()
+    original_readiness = runtime.readiness
+    original_rotate = service._rotate_checkpoint_attempt
+
+    def switch_runtime_after_rotation(projection):
+        rotated = original_rotate(projection)
+        if rotated is not None:
+            runtime._readiness = CheckpointReadiness(
+                enabled=True,
+                mode='postgres',
+                ready=True,
+                durable=True,
+                checkpoint_store='postgres',
+            )
+        return rotated
+
+    monkeypatch.setattr(
+        service,
+        '_rotate_checkpoint_attempt',
+        switch_runtime_after_rotation,
+    )
+    try:
+        with pytest.raises(ReviewWorkflowServiceError) as exc_info:
+            service.resume(actor=_actor(), thread_id=started.thread_id)
+    finally:
+        runtime._readiness = original_readiness
+
+    assert exc_info.value.code == 'checkpoint_unavailable'
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert current is not None and current.status == 'checkpoint_failed'
+    assert saver.get_tuple(
+        checkpoint_config(current.checkpoint_thread_id)
+    ) is None
+
+
+@pytest.mark.parametrize(
+    'drift',
+    [
+        'parser_status',
+        'parser_signature',
+        'external_revision',
+        'document_version',
+        'source_signature',
+        'permission_level',
+    ],
+)
+def test_resume_revalidates_full_canonical_evidence_before_saver_write(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+    drift: str,
+) -> None:
+    service = _service(application_session_factory, service_parts)
+    source = _seed_source(db_session)
+    document, _, parser_run = _attach_document_version(db_session, source)
+    db_session.commit()
+    started = service.start(actor=_actor(), request=_request(source))
+    _set_item_statuses(application_session_factory, started.thread_id, ['approved'])
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    saver = service_parts[1].saver
+    assert saver is not None
+    before = saver.get_tuple(checkpoint_config(thread.checkpoint_thread_id))
+    assert before is not None
+
+    if drift == 'parser_status':
+        parser_run.parser_status = 'failed'
+    elif drift == 'parser_signature':
+        parser_run.content_signature = 'changed-parser-signature'
+    elif drift == 'external_revision':
+        parser_run.revision_id = 'revision-2'
+    elif drift == 'source_signature':
+        source.raw_metadata['content_signature'] = 'changed-source-signature'
+    elif drift == 'permission_level':
+        source.permission_level = 'public'
+    else:
+        document.current_version = 'v2'
+        v2 = DocumentVersion(
+            document_id=document.id,
+            version='v2',
+            body='changed document body',
+        )
+        db_session.add(v2)
+        db_session.flush()
+        db_session.add(DocumentParserRun(
+            document_id=document.id,
+            document_version_id=v2.id,
+            source_id=source.id,
+            parser_name='test-parser',
+            parser_status='completed',
+            document_version_label='v2',
+            revision_id='revision-1',
+            content_signature='parser-signature-v2',
+            chunk_count=1,
+        ))
+    db_session.commit()
+
+    with pytest.raises(ReviewWorkflowServiceError) as exc_info:
+        service.resume(actor=_actor(), thread_id=started.thread_id)
+
+    assert exc_info.value.code == 'evidence_changed'
+    after = saver.get_tuple(checkpoint_config(thread.checkpoint_thread_id))
+    assert after is not None
+    assert (
+        after.config['configurable']['checkpoint_id']
+        == before.config['configurable']['checkpoint_id']
+    )
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert current is not None
+    assert current.status == 'awaiting_human_review'
+
+
 def test_checkpoint_failed_repairs_same_application_thread_and_reuses_effects(
     db_session: Session,
     application_session_factory,
@@ -493,6 +909,113 @@ def test_checkpoint_failed_repairs_same_application_thread_and_reuses_effects(
     }
     assert db_session.scalar(select(func.count()).select_from(AgentRun)) == run_count
     assert db_session.scalar(select(func.count()).select_from(ReviewItem)) == item_count
+
+
+def test_checkpoint_repair_replays_bound_items_without_draft_or_provider_calls(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+) -> None:
+    initial_service = _service(application_session_factory, service_parts)
+    _, started = _start(db_session, initial_service)
+    item_ids = tuple(
+        db_session.scalars(
+            select(ReviewItem.id).where(
+                ReviewItem.workflow_thread_id == started.thread_id
+            )
+        ).all()
+    )
+    run_ids = tuple(
+        db_session.scalars(
+            select(AgentRun.id).where(
+                AgentRun.workflow_thread_id == started.thread_id
+            )
+        ).all()
+    )
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    thread.status = 'checkpoint_failed'
+    thread.checkpoint_thread_id = 'review-v2:missing-after-model-route-change'
+    thread.state_version += 1
+    db_session.commit()
+    unavailable_draft = _UnavailableDraftService()
+    repair_service = _service(
+        application_session_factory,
+        service_parts,
+        draft=unavailable_draft,
+        model_readiness=ReviewModelReadiness(
+            ready=False,
+            error_code='model_unavailable',
+        ),
+    )
+
+    before = repair_service.status(actor=_actor(), thread_id=started.thread_id)
+    repaired = repair_service.resume(
+        actor=_actor(permission_levels={'public', 'internal', 'restricted'}),
+        thread_id=started.thread_id,
+    )
+
+    assert before.retry_allowed is True
+    assert repaired.status == 'awaiting_human_review'
+    assert unavailable_draft.draft_calls == 0
+    assert tuple(
+        db_session.scalars(
+            select(ReviewItem.id).where(
+                ReviewItem.workflow_thread_id == started.thread_id
+            )
+        ).all()
+    ) == item_ids
+    assert tuple(
+        db_session.scalars(
+            select(AgentRun.id).where(
+                AgentRun.workflow_thread_id == started.thread_id
+            )
+        ).all()
+    ) == run_ids
+
+
+def test_zero_item_checkpoint_failed_repairs_to_terminal_completed(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+) -> None:
+    initial_draft = _FakeDraftService(
+        application_session_factory,
+        candidate_count=0,
+    )
+    initial_service = _service(
+        application_session_factory,
+        service_parts,
+        draft=initial_draft,
+    )
+    _, started = _start(db_session, initial_service)
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    thread.status = 'checkpoint_failed'
+    thread.checkpoint_thread_id = 'review-v2:missing-zero-item-attempt'
+    thread.state_version += 1
+    db_session.commit()
+    unavailable_draft = _UnavailableDraftService()
+    repair_service = _service(
+        application_session_factory,
+        service_parts,
+        draft=unavailable_draft,
+        model_readiness=ReviewModelReadiness(
+            ready=False,
+            error_code='model_unavailable',
+        ),
+    )
+
+    before = repair_service.status(actor=_actor(), thread_id=started.thread_id)
+    repaired = repair_service.resume(actor=_actor(), thread_id=started.thread_id)
+
+    assert before.retry_allowed is True
+    assert repaired.status == 'completed'
+    assert repaired.review_item_count == 0
+    assert repaired.retry_allowed is False
+    assert unavailable_draft.draft_calls == 0
+    assert db_session.scalar(select(func.count()).select_from(AgentRun)) == 0
+    assert db_session.scalar(select(func.count()).select_from(ReviewItem)) == 0
 
 
 def test_valid_saved_tuple_reconciles_status_without_rewriting_checkpoint(
@@ -635,6 +1158,154 @@ def test_corrupt_tuple_rotates_only_checkpoint_attempt_and_reuses_business_rows(
     assert current.checkpoint_thread_id != original_checkpoint_thread_id
     assert db_session.scalar(select(func.count()).select_from(AgentRun)) == run_count
     assert db_session.scalar(select(func.count()).select_from(ReviewItem)) == item_count
+
+
+@pytest.mark.parametrize(
+    'identity_field',
+    [
+        'workflow_thread_id',
+        'graph_version',
+        'input_hash',
+        'evidence_version_hash',
+    ],
+)
+def test_checkpoint_snapshot_identity_mismatch_rotates_before_repair(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    identity_field: str,
+) -> None:
+    service = _service(application_session_factory, service_parts)
+    _, started = _start(db_session, service)
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    old_checkpoint_thread_id = thread.checkpoint_thread_id
+    thread.status = 'checkpoint_failed'
+    thread.state_version += 1
+    db_session.commit()
+    real_builder = service_parts[2].resolve(
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+    )
+
+    def corrupting_builder(saver: object) -> _SnapshotMutatingGraph:
+        return _SnapshotMutatingGraph(
+            real_builder(saver),
+            checkpoint_thread_id=old_checkpoint_thread_id,
+            identity_field=identity_field,
+        )
+
+    monkeypatch.setattr(
+        service,
+        '_resolve_builder',
+        lambda _projection: corrupting_builder,
+    )
+
+    repaired = service.resume(actor=_actor(), thread_id=started.thread_id)
+
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert repaired.status == 'awaiting_human_review'
+    assert current is not None
+    assert current.checkpoint_thread_id != old_checkpoint_thread_id
+
+
+def test_nonterminal_checkpoint_without_interrupt_rotates_before_repair(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(application_session_factory, service_parts)
+    _, started = _start(db_session, service)
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    old_checkpoint_thread_id = thread.checkpoint_thread_id
+    thread.status = 'checkpoint_failed'
+    thread.state_version += 1
+    db_session.commit()
+    real_builder = service_parts[2].resolve(
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+    )
+
+    def partial_builder(saver: object) -> _SnapshotMutatingGraph:
+        return _SnapshotMutatingGraph(
+            real_builder(saver),
+            checkpoint_thread_id=old_checkpoint_thread_id,
+            partial=True,
+        )
+
+    monkeypatch.setattr(
+        service,
+        '_resolve_builder',
+        lambda _projection: partial_builder,
+    )
+
+    repaired = service.resume(actor=_actor(), thread_id=started.thread_id)
+
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert repaired.status == 'awaiting_human_review'
+    assert current is not None
+    assert current.checkpoint_thread_id != old_checkpoint_thread_id
+
+
+@pytest.mark.parametrize(
+    ('live_status', 'forged_terminal_status'),
+    [
+        ('pending_review', 'completed'),
+        ('needs_more_evidence', 'completed'),
+        ('approved', 'needs_more_evidence'),
+    ],
+)
+def test_checkpoint_terminal_shape_must_match_live_review_rows(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    live_status: str,
+    forged_terminal_status: str,
+) -> None:
+    service = _service(application_session_factory, service_parts)
+    _, started = _start(db_session, service)
+    _set_item_statuses(
+        application_session_factory,
+        started.thread_id,
+        [live_status],
+    )
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    old_checkpoint_thread_id = thread.checkpoint_thread_id
+    thread.status = 'checkpoint_failed'
+    thread.state_version += 1
+    db_session.commit()
+    real_builder = service_parts[2].resolve(
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+    )
+
+    def terminal_builder(saver: object) -> _SnapshotMutatingGraph:
+        return _SnapshotMutatingGraph(
+            real_builder(saver),
+            checkpoint_thread_id=old_checkpoint_thread_id,
+            terminal_status=forged_terminal_status,
+        )
+
+    monkeypatch.setattr(
+        service,
+        '_resolve_builder',
+        lambda _projection: terminal_builder,
+    )
+
+    repaired = service.resume(actor=_actor(), thread_id=started.thread_id)
+
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert repaired.status == 'awaiting_human_review'
+    assert current is not None
+    assert current.checkpoint_thread_id != old_checkpoint_thread_id
 
 
 def test_checkpoint_write_failure_is_bounded_and_preserves_business_rows(

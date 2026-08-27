@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.agent_runtime.canonical_sources import (
     ReviewWorkflowPreflightError,
+    resolve_source_versions,
 )
 from backend.app.agent_runtime.checkpoint_execution import (
     CheckpointConfirmationError,
@@ -40,6 +41,10 @@ from backend.app.agent_runtime.review_v2_preflight import (
 )
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
+from backend.app.ingestion.source_versions import (
+    CanonicalSourceType,
+    SourceVersionRef,
+)
 from backend.app.models.agent_workflows import (
     AgentWorkflowEvidenceRef,
     AgentWorkflowThread,
@@ -120,15 +125,24 @@ class ReviewWorkflowStatus:
 
 
 @dataclass(frozen=True)
+class ReviewModelReadiness:
+    ready: bool
+    error_code: ReviewWorkflowErrorCode | None = None
+
+
+@dataclass(frozen=True)
 class _ThreadProjection:
     thread_id: str
     workflow_name: str
     graph_version: str
+    input_hash: str
+    evidence_version_hash: str
     checkpoint_thread_id: str
     checkpoint_store: str
     owner_subject_id: str
     status: str
     state_version: int
+    review_item_ids: tuple[int, ...]
     review_status_counts: dict[ReviewItemResolutionStatus, int]
     created_at: datetime
     updated_at: datetime
@@ -147,7 +161,6 @@ class _ThreadProjection:
 
 @dataclass(frozen=True)
 class _CheckpointProbe:
-    graph: object
     interrupt_state_version: int | None
     terminal_status: str | None
 
@@ -209,6 +222,7 @@ class ReviewWorkflowService:
         graph_registry: GraphVersionRegistry,
         agent_registry: AgentRegistry,
         draft_service: object,
+        model_readiness: ReviewModelReadiness | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -217,6 +231,9 @@ class ReviewWorkflowService:
         self._graph_registry = graph_registry
         self._agent_registry = agent_registry
         self._draft_service = draft_service
+        self._model_readiness = model_readiness or ReviewModelReadiness(
+            ready=True
+        )
         self._now = now or (lambda: datetime.now(UTC))
         self._lifecycle_lock = RLock()
 
@@ -232,15 +249,24 @@ class ReviewWorkflowService:
                 error_code=None,
             )
         readiness = self._checkpoint_runtime.readiness
-        available = bool(readiness.ready and self._checkpoint_runtime.saver)
+        checkpoint_available = bool(
+            readiness.ready and self._checkpoint_runtime.saver
+        )
+        available = checkpoint_available and self._model_readiness.ready
+        if not self._model_readiness.ready:
+            error_code: ReviewWorkflowErrorCode | None = 'model_unavailable'
+        elif not checkpoint_available:
+            error_code = 'checkpoint_unavailable'
+        else:
+            error_code = None
         return ReviewWorkflowDiagnosticResponse(
             enabled=True,
             available=available,
             checkpoint_mode=readiness.mode,
-            durable=readiness.durable if available else False,
+            durable=readiness.durable if checkpoint_available else False,
             graph_version=COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
             default_agent_names=list(DEFAULT_REVIEW_AGENT_NAMES),
-            error_code=None if available else 'checkpoint_unavailable',
+            error_code=error_code,
         )
 
     def dry_run(
@@ -492,7 +518,6 @@ class ReviewWorkflowService:
                         projection=projection,
                         actor=actor,
                         builder=builder,
-                        saver=saver,
                     )
                 except CheckpointUnavailableError:
                     raise ReviewWorkflowServiceError(
@@ -538,16 +563,21 @@ class ReviewWorkflowService:
                 target_status='resuming',
             ):
                 raise ReviewWorkflowServiceError('concurrent_resume')
-            claimed = self._read_projection(
-                actor=actor,
-                thread_id=thread_id,
-                action='resume',
-                require_current_versions=True,
-            )
             try:
+                claimed = self._read_projection(
+                    actor=actor,
+                    thread_id=thread_id,
+                    action='resume',
+                    require_current_versions=True,
+                )
+                fresh_saver = require_thread_checkpoint_runtime(
+                    thread=claimed,
+                    runtime=self._checkpoint_runtime,
+                )
+                fresh_graph = builder(fresh_saver)
                 confirmation = invoke_and_confirm_checkpoint(
-                    graph=probe.graph,
-                    saver=saver,
+                    graph=fresh_graph,
+                    saver=fresh_saver,
                     command_or_input=Command(resume={
                         'event': 'review_resolution_checked',
                         'state_version': claimed.state_version,
@@ -556,6 +586,9 @@ class ReviewWorkflowService:
                     runtime_context=self._runtime_context(actor),
                     expect_interrupt=False,
                 )
+            except ReviewWorkflowServiceError:
+                self._mark_status(thread_id, 'awaiting_human_review')
+                raise
             except CheckpointUnavailableError:
                 self._restore_after_resume_failure(claimed)
                 raise ReviewWorkflowServiceError('checkpoint_unavailable') from None
@@ -616,6 +649,8 @@ class ReviewWorkflowService:
     def _require_new_run_availability(self) -> None:
         if not self._settings.langgraph_review_v2_enabled:
             raise ReviewWorkflowServiceError('not_found')
+        if not self._model_readiness.ready:
+            raise ReviewWorkflowServiceError('model_unavailable')
         readiness = self._checkpoint_runtime.readiness
         if (
             not readiness.ready
@@ -692,7 +727,10 @@ class ReviewWorkflowService:
                     .order_by(AgentWorkflowEvidenceRef.ordinal)
                 ).all()
             )
-            if not refs or any(ref.canonical_table != 'sources' for ref in refs):
+            if not refs or (
+                not require_current_versions
+                and any(ref.canonical_table != 'sources' for ref in refs)
+            ):
                 db.rollback()
                 raise ReviewWorkflowServiceError('not_found')
             source_ids = tuple(ref.canonical_row_id for ref in refs)
@@ -706,17 +744,54 @@ class ReviewWorkflowService:
             for ref in refs:
                 source = by_id[ref.canonical_row_id]
                 if (
-                    source.source_type != ref.canonical_source_type
-                    or source.permission_level not in actor.permission_levels
+                    source.permission_level not in actor.permission_levels
+                    or (
+                        not require_current_versions
+                        and source.source_type != ref.canonical_source_type
+                    )
                 ):
                     db.rollback()
                     raise ReviewWorkflowServiceError('not_found')
-                if require_current_versions and (
-                    (source.raw_metadata or {}).get('content_signature')
-                    != ref.content_signature
-                ):
+            if require_current_versions:
+                canonical_refs = tuple(
+                    SourceVersionRef(
+                        source_type=cast(
+                            CanonicalSourceType,
+                            ref.canonical_source_type,
+                        ),
+                        source_id=by_id[ref.canonical_row_id].source_id,
+                        version_or_signature=ref.content_signature,
+                    )
+                    for ref in refs
+                )
+                try:
+                    resolved_refs = resolve_source_versions(
+                        db,
+                        refs=canonical_refs,
+                        actor=actor,
+                        settings=self._settings,
+                    )
+                except ReviewWorkflowPreflightError as exc:
                     db.rollback()
-                    raise ReviewWorkflowServiceError('evidence_changed')
+                    if exc.code == 'not_found':
+                        raise ReviewWorkflowServiceError('not_found') from None
+                    raise ReviewWorkflowServiceError('evidence_changed') from None
+                for stored, resolved in zip(refs, resolved_refs, strict=True):
+                    if (
+                        stored.canonical_source_type != resolved.source_type
+                        or stored.canonical_table != resolved.canonical_table
+                        or stored.canonical_row_id != resolved.canonical_row_id
+                        or stored.document_version_id
+                        != resolved.document_version_id
+                        or stored.external_revision != resolved.external_revision
+                        or stored.content_signature != resolved.content_signature
+                        or stored.permission_level_snapshot
+                        != resolved.permission_level
+                        or stored.content_fingerprint
+                        != resolved.content_fingerprint
+                    ):
+                        db.rollback()
+                        raise ReviewWorkflowServiceError('evidence_changed')
             items = tuple(
                 db.scalars(
                     select(ReviewItem)
@@ -742,11 +817,14 @@ class ReviewWorkflowService:
                 thread_id=thread.thread_id,
                 workflow_name=thread.workflow_name,
                 graph_version=thread.graph_version,
+                input_hash=thread.input_hash,
+                evidence_version_hash=thread.evidence_version_hash,
                 checkpoint_thread_id=thread.checkpoint_thread_id,
                 checkpoint_store=thread.checkpoint_store,
                 owner_subject_id=thread.owner_subject_id,
                 status=thread.status,
                 state_version=thread.state_version,
+                review_item_ids=tuple(item.id for item in items),
                 review_status_counts=counts,
                 created_at=thread.created_at,
                 updated_at=thread.updated_at,
@@ -862,19 +940,60 @@ class ReviewWorkflowService:
             not isinstance(snapshot_config, Mapping)
             or not isinstance(snapshot_values, Mapping)
             or snapshot_identity != saved_identity
+            or not isinstance(snapshot_state, Mapping)
+        ):
+            raise _CorruptCheckpointError
+        expected_state_identity = {
+            'workflow_thread_id': projection.thread_id,
+            'graph_version': projection.graph_version,
+            'input_hash': projection.input_hash,
+            'evidence_version_hash': projection.evidence_version_hash,
+        }
+        if any(
+            snapshot_state.get(field) != expected
+            for field, expected in expected_state_identity.items()
+        ):
+            raise _CorruptCheckpointError
+        snapshot_counts = snapshot_state.get('review_status_counts')
+        snapshot_item_ids = snapshot_state.get('review_item_ids')
+        if (
+            not isinstance(snapshot_counts, Mapping)
+            or set(snapshot_counts) != set(_REVIEW_STATUSES)
+            or any(
+                type(count) is not int or count < 0
+                for count in snapshot_counts.values()
+            )
+            or sum(snapshot_counts.values()) != projection.review_item_count
+            or type(snapshot_item_ids) is not list
+            or any(type(item_id) is not int for item_id in snapshot_item_ids)
         ):
             raise _CorruptCheckpointError
         if not interrupts:
-            terminal_status = None
-            if not snapshot_next and isinstance(snapshot_state, Mapping):
-                stored_status = snapshot_state.get('status')
-                if stored_status in {'completed', 'needs_more_evidence'}:
-                    terminal_status = cast(str, stored_status)
+            if snapshot_next:
+                raise _CorruptCheckpointError
+            stored_status = snapshot_state.get('status')
+            if stored_status not in {'completed', 'needs_more_evidence'}:
+                raise _CorruptCheckpointError
+            if projection.review_status_counts.get('pending_review', 0):
+                expected_terminal_status = None
+            elif projection.review_status_counts.get(
+                'needs_more_evidence',
+                0,
+            ):
+                expected_terminal_status = 'needs_more_evidence'
+            else:
+                expected_terminal_status = 'completed'
+            if stored_status != expected_terminal_status:
+                raise _CorruptCheckpointError
             return _CheckpointProbe(
-                graph=graph,
                 interrupt_state_version=None,
-                terminal_status=terminal_status,
+                terminal_status=cast(str, stored_status),
             )
+        if (
+            projection.review_item_count == 0
+            or snapshot_next != ('await_human_review',)
+        ):
+            raise _CorruptCheckpointError
         if len(interrupts) != 1 or type(interrupts[0]) is not Interrupt:
             raise _CorruptCheckpointError
         payload = interrupts[0].value
@@ -886,7 +1005,6 @@ class ReviewWorkflowService:
         ):
             raise _CorruptCheckpointError
         return _CheckpointProbe(
-            graph=graph,
             interrupt_state_version=state_version,
             terminal_status=None,
         )
@@ -897,26 +1015,46 @@ class ReviewWorkflowService:
         projection: _ThreadProjection,
         actor: DemoUser,
         builder,
-        saver: BaseCheckpointSaver,
     ) -> ReviewWorkflowStatus:
-        if projection.review_item_count == 0:
-            raise ReviewWorkflowServiceError('invalid_state_transition')
         rotated = self._rotate_checkpoint_attempt(projection)
         if rotated is None:
             raise ReviewWorkflowServiceError('concurrent_resume')
         try:
-            graph = builder(saver)
-            invoke_and_confirm_checkpoint(
+            fresh = self._read_projection(
+                actor=actor,
+                thread_id=projection.thread_id,
+                action='resume',
+                require_current_versions=True,
+            )
+            prepared_result = ReviewDraftResult(
+                review_item_ids=fresh.review_item_ids,
+                review_status_counts=dict(fresh.review_status_counts),
+            )
+            fresh_saver = require_thread_checkpoint_runtime(
+                thread=fresh,
+                runtime=self._checkpoint_runtime,
+            )
+            graph = builder(fresh_saver)
+            confirmation = invoke_and_confirm_checkpoint(
                 graph=graph,
-                saver=saver,
-                command_or_input={'workflow_thread_id': projection.thread_id},
-                checkpoint_thread_id=rotated.checkpoint_thread_id,
-                runtime_context=self._runtime_context(actor),
-                expect_interrupt=True,
+                saver=fresh_saver,
+                command_or_input={'workflow_thread_id': fresh.thread_id},
+                checkpoint_thread_id=fresh.checkpoint_thread_id,
+                runtime_context=self._runtime_context(
+                    actor,
+                    draft_service=_PreparedDraftService(
+                        workflow_thread_id=fresh.thread_id,
+                        result=prepared_result,
+                    ),
+                ),
+                expect_interrupt=bool(fresh.review_item_ids),
             )
         except CheckpointUnavailableError:
             self._mark_checkpoint_failed(projection.thread_id)
             raise ReviewWorkflowServiceError('checkpoint_unavailable') from None
+        except ReviewWorkflowServiceError:
+            self._mark_checkpoint_failed(projection.thread_id)
+            raise
         except CheckpointConfirmationError:
             self._mark_checkpoint_failed(projection.thread_id)
             raise ReviewWorkflowServiceError('checkpoint_failed') from None
@@ -935,10 +1073,18 @@ class ReviewWorkflowService:
             thread_id=projection.thread_id,
             action='resume',
         )
+        if fresh.review_item_ids:
+            target_status = 'awaiting_human_review'
+        elif confirmation.result.get('status') == 'completed':
+            target_status = 'completed'
+        else:
+            self._mark_checkpoint_failed(projection.thread_id)
+            raise ReviewWorkflowServiceError('checkpoint_failed')
         if current.status != 'checkpoint_pending' or not self._cas_status(
             projection=current,
-            target_status='awaiting_human_review',
+            target_status=target_status,
             checkpoint_confirmed=True,
+            completed=target_status == 'completed',
         ):
             raise ReviewWorkflowServiceError('checkpoint_failed')
         return self.status(actor=actor, thread_id=projection.thread_id)
@@ -1094,11 +1240,14 @@ class ReviewWorkflowService:
                 thread_id=thread.thread_id,
                 workflow_name=thread.workflow_name,
                 graph_version=thread.graph_version,
+                input_hash=thread.input_hash,
+                evidence_version_hash=thread.evidence_version_hash,
                 checkpoint_thread_id=thread.checkpoint_thread_id,
                 checkpoint_store=thread.checkpoint_store,
                 owner_subject_id=thread.owner_subject_id,
                 status=thread.status,
                 state_version=thread.state_version,
+                review_item_ids=(),
                 review_status_counts={},
                 created_at=thread.created_at,
                 updated_at=thread.updated_at,

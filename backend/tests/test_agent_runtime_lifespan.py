@@ -54,6 +54,7 @@ def test_app_lifespan_starts_exposes_and_closes_checkpoint_runtime_once() -> Non
     with TestClient(app) as client:
         assert events == ['factory', 'start:False']
         assert app.state.agent_checkpoint_runtime is runtime
+        assert app.state.review_model_readiness.ready is True
         assert client.get('/health').status_code == 200
 
     assert events == ['factory', 'start:False', 'close']
@@ -199,6 +200,11 @@ def test_missing_production_model_credentials_do_not_block_app_lifespan(
         with TestClient(app) as client:
             assert client.get('/health').status_code == 200
             assert app.state.review_workflow_service is not None
+            assert app.state.review_model_readiness.ready is False
+            assert (
+                app.state.review_model_readiness.error_code
+                == 'model_unavailable'
+            )
     finally:
         get_settings.cache_clear()
 

@@ -24,7 +24,10 @@ from backend.app.agent_runtime.review_v2_drafting import (
     ReviewDraftError,
     ReviewDraftService,
 )
-from backend.app.agent_runtime.review_v2_service import ReviewWorkflowService
+from backend.app.agent_runtime.review_v2_service import (
+    ReviewModelReadiness,
+    ReviewWorkflowService,
+)
 from backend.app.api.v1.router import api_router
 from backend.app.core.config import Settings, get_settings
 from backend.app.db.session import SessionLocal
@@ -91,12 +94,17 @@ def create_app(
                 catalog=catalog,
                 settings=settings,
             )
+            model_readiness = ReviewModelReadiness(ready=True)
         except ReviewModelUnavailableError:
             catalog = None
             agent_registry = AgentRegistry()
             for name in DEFAULT_REVIEW_AGENT_NAMES:
                 agent_registry.register(APPROVED_REVIEW_AGENT_MANIFESTS[name])
             draft_service = _UnavailableReviewDraftService()
+            model_readiness = ReviewModelReadiness(
+                ready=False,
+                error_code='model_unavailable',
+            )
         review_workflow_service = ReviewWorkflowService(
             session_factory=workflow_session_factory,
             settings=settings,
@@ -104,11 +112,13 @@ def create_app(
             graph_registry=graph_registry,
             agent_registry=agent_registry,
             draft_service=draft_service,
+            model_readiness=model_readiness,
         )
         app.state.agent_checkpoint_runtime = checkpoint_runtime
         app.state.agent_graph_registry = graph_registry
         app.state.review_agent_catalog = catalog
         app.state.review_agent_registry = agent_registry
+        app.state.review_model_readiness = model_readiness
         app.state.review_workflow_service = review_workflow_service
         try:
             yield

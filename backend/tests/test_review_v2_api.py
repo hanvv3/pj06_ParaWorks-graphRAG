@@ -202,6 +202,16 @@ def _request_body() -> dict[str, object]:
             ),
             (True, False, 'postgres', False, 'checkpoint_unavailable'),
         ),
+        (
+            _diagnostic(
+                enabled=True,
+                available=False,
+                checkpoint_mode='postgres',
+                durable=True,
+                error_code='model_unavailable',
+            ),
+            (True, False, 'postgres', True, 'model_unavailable'),
+        ),
     ],
 )
 def test_diagnostic_feature_flag_and_readiness_matrix(
@@ -340,6 +350,49 @@ def test_unready_checkpoint_blocks_new_work_and_resume_but_not_status_or_cancel(
     assert dry_run.status_code == start.status_code == resume.status_code == 503
     assert dry_run.json() == start.json() == resume.json() == {
         'detail': {'code': 'checkpoint_unavailable'}
+    }
+
+
+def test_model_unavailable_blocks_new_work_but_not_existing_thread_routes(
+    api_client,
+) -> None:
+    client, fake = api_client
+    fake.diagnostic_response = _diagnostic(
+        enabled=True,
+        available=False,
+        checkpoint_mode='postgres',
+        durable=True,
+        error_code='model_unavailable',
+    )
+    fake.failure_by_method = {
+        'dry_run': 'model_unavailable',
+        'start': 'model_unavailable',
+    }
+
+    diagnostic = client.get('/api/v1/orchestration/v2/company-memory')
+    dry_run = client.post(
+        '/api/v1/orchestration/v2/company-memory/dry-run',
+        json=_request_body(),
+    )
+    start = client.post(
+        '/api/v1/orchestration/v2/company-memory/runs',
+        json=_request_body(),
+    )
+    status = client.get(
+        '/api/v1/orchestration/v2/company-memory/runs/opaque-thread-id'
+    )
+    resume = client.post(
+        '/api/v1/orchestration/v2/company-memory/runs/opaque-thread-id/resume'
+    )
+    cancel = client.post(
+        '/api/v1/orchestration/v2/company-memory/runs/opaque-thread-id/cancel'
+    )
+
+    assert diagnostic.status_code == status.status_code == 200
+    assert resume.status_code == cancel.status_code == 200
+    assert dry_run.status_code == start.status_code == 503
+    assert dry_run.json() == start.json() == {
+        'detail': {'code': 'model_unavailable'}
     }
 
 
