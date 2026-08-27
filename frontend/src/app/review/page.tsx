@@ -16,8 +16,10 @@ import {
 import Link from "next/link";
 import { type MouseEvent, useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { ReviewWorkflowContextPanel } from "@/app/review/ReviewWorkflowContextPanel";
 import { SourceEvidenceDrawer } from "@/components/shared/SourceEvidenceDrawer";
 import { apiGet, apiPatch, apiPost } from "@/lib/api/client";
+import { getReviewWorkflowStatus, resumeReviewWorkflow } from "@/lib/api/reviewWorkflow";
 import { notifyReviewQueueUpdated } from "@/lib/reviewQueueEvents";
 import { sourceFamilyLabel, sourceTypeFromUrl } from "@/lib/sourceLabels";
 import type {
@@ -30,6 +32,7 @@ import type {
   ReviewPromotionPreview,
   ReviewResponse,
   ReviewPromotionResult,
+  ReviewWorkflowStatus,
 } from "@/lib/api/types";
 
 const REVIEW_PAGE_SIZE = 50;
@@ -311,6 +314,12 @@ type ReviewContextMenu = {
   item: ReviewItem;
 };
 
+type ReviewQueryState = {
+  ready: boolean;
+  itemId?: number;
+  workflowThreadId?: string;
+};
+
 export default function ReviewPage() {
   const [groups, setGroups] = useState<ReviewGroup[]>([]);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
@@ -335,15 +344,25 @@ export default function ReviewPage() {
   const [bulkConfirm, setBulkConfirm] = useState<BulkConfirmState>();
   const [contextMenu, setContextMenu] = useState<ReviewContextMenu>();
   const [deepLinkedItemId, setDeepLinkedItemId] = useState<number>();
+  const [reviewQuery, setReviewQuery] = useState<ReviewQueryState>({ ready: false });
+  const [workflowStatus, setWorkflowStatus] = useState<ReviewWorkflowStatus>();
+  const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [workflowUnavailable, setWorkflowUnavailable] = useState(false);
+  const [workflowActionPending, setWorkflowActionPending] = useState(false);
 
   const loadItems = useCallback(async (nextOffset = 0, append = false) => {
     setLoading(true);
     setError(undefined);
 
     try {
-      const review = await apiGet<ReviewResponse>(
-        `/api/v1/review?status=pending_review&limit=${REVIEW_PAGE_SIZE}&offset=${nextOffset}&include_previews=false`,
-      );
+      const params = new URLSearchParams({
+        status: "pending_review",
+        limit: String(REVIEW_PAGE_SIZE),
+        offset: String(nextOffset),
+        include_previews: "false",
+      });
+      if (reviewQuery.workflowThreadId) params.set("workflow_thread_id", reviewQuery.workflowThreadId);
+      const review = await apiGet<ReviewResponse>(`/api/v1/review?${params.toString()}`);
       setGroups((current) => (append ? mergeReviewGroups(current, review.groups || []) : review.groups || []));
       setTotalCount(review.total_count ?? review.items.length);
       setLoadedOffset(nextOffset);
@@ -356,19 +375,49 @@ export default function ReviewPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
-
-  useEffect(() => {
-    void loadItems();
-  }, [loadItems]);
+  }, [reviewQuery.workflowThreadId]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const itemId = Number(params.get("itemId") ?? params.get("item_id"));
-    if (Number.isInteger(itemId) && itemId > 0) {
-      setDeepLinkedItemId(itemId);
-    }
+    const workflowThreadId = params.get("workflow_thread_id")?.trim() || undefined;
+    setReviewQuery({
+      ready: true,
+      itemId: Number.isInteger(itemId) && itemId > 0 ? itemId : undefined,
+      workflowThreadId,
+    });
   }, []);
+
+  useEffect(() => {
+    setDeepLinkedItemId(reviewQuery.itemId);
+  }, [reviewQuery.itemId]);
+
+  const loadWorkflowStatus = useCallback(async () => {
+    if (!reviewQuery.workflowThreadId) {
+      setWorkflowStatus(undefined);
+      setWorkflowUnavailable(false);
+      return;
+    }
+    setWorkflowLoading(true);
+    setWorkflowUnavailable(false);
+    try {
+      setWorkflowStatus(await getReviewWorkflowStatus(reviewQuery.workflowThreadId));
+    } catch {
+      setWorkflowStatus(undefined);
+      setWorkflowUnavailable(true);
+    } finally {
+      setWorkflowLoading(false);
+    }
+  }, [reviewQuery.workflowThreadId]);
+
+  useEffect(() => {
+    if (!reviewQuery.ready) return;
+    void Promise.all([loadItems(), loadWorkflowStatus()]);
+  }, [loadItems, loadWorkflowStatus, reviewQuery.ready]);
+
+  const refreshReviewData = useCallback(async () => {
+    await Promise.all([loadItems(), loadWorkflowStatus()]);
+  }, [loadItems, loadWorkflowStatus]);
 
   useEffect(() => {
     if (!deepLinkedItemId || groups.length === 0) return;
@@ -439,7 +488,7 @@ export default function ReviewPage() {
           result: result.promotion_result,
         });
       }
-      await loadItems();
+      await refreshReviewData();
       notifyReviewQueueUpdated();
 
       if (action === "request-more-evidence") {
@@ -469,7 +518,7 @@ export default function ReviewPage() {
         delete next[item.id];
         return next;
       });
-      await loadItems();
+      await refreshReviewData();
       notifyReviewQueueUpdated();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "프로젝트를 저장하지 못했습니다.");
@@ -506,7 +555,7 @@ export default function ReviewPage() {
         action,
         item_ids: itemIds,
       });
-      await loadItems();
+      await refreshReviewData();
       notifyReviewQueueUpdated();
       setSelectedItemIds((current) => {
         const next = new Set(current);
@@ -541,7 +590,7 @@ export default function ReviewPage() {
         action,
         item_ids: itemIds,
       });
-      await loadItems();
+      await refreshReviewData();
       notifyReviewQueueUpdated();
       if (result.failed_items.length > 0) {
         setError(`${label} 처리 중 ${result.failed_items.length}개 항목은 건너뛰었습니다. 필수 정보와 근거를 확인해 주세요.`);
@@ -569,7 +618,7 @@ export default function ReviewPage() {
 
     try {
       await apiPatch<ReviewItem>(`/api/v1/review/${item.id}`, update);
-      await loadItems();
+      await refreshReviewData();
       notifyReviewQueueUpdated();
       setEditingId(undefined);
     } catch (caught) {
@@ -578,6 +627,25 @@ export default function ReviewPage() {
       setPendingAction(undefined);
     }
   }
+
+  async function resumeWorkflow() {
+    if (!reviewQuery.workflowThreadId || !workflowStatus) return;
+    const allowed = workflowStatus.status === "awaiting_human_review"
+      ? workflowStatus.review_resolution_ready && workflowStatus.resume_allowed
+      : workflowStatus.status === "checkpoint_failed" && workflowStatus.retry_allowed;
+    if (!allowed) return;
+
+    setWorkflowActionPending(true);
+    try {
+      await resumeReviewWorkflow(reviewQuery.workflowThreadId);
+    } catch {
+      // A lost resume response can still have advanced the checkpoint; reload its authoritative status.
+    } finally {
+      await refreshReviewData();
+      setWorkflowActionPending(false);
+    }
+  }
+
   const totalAgentItems = groups.reduce((acc, g) => acc + g.items.filter(i => Boolean(i.payload.agent_name)).length, 0);
   const loadedItemCount = groups.reduce((acc, group) => acc + group.items.length, 0);
   const loadedItems = groups.flatMap((group) => group.items);
@@ -651,14 +719,23 @@ export default function ReviewPage() {
 
   return (
     <div className="reference-dashboard space-y-5">
-      <div className="page-heading reference-heading">
-        <div>
-          <p className="text-[13px] font-bold text-[var(--primary-dark)]">Review Items</p>
-          <h1>검토사항</h1>
-          <p>
-            유사한 항목들은 그룹화되어 표시됩니다. 각 그룹을 펼쳐 상세 내용을 확인하세요.
-          </p>
+      <div className="space-y-3">
+        <div className="page-heading reference-heading">
+          <div>
+            <p className="text-[13px] font-bold text-[var(--primary-dark)]">Review Items</p>
+            <h1>검토사항</h1>
+            <p>
+              유사한 항목들은 그룹화되어 표시됩니다. 각 그룹을 펼쳐 상세 내용을 확인하세요.
+            </p>
+          </div>
         </div>
+        <ReviewWorkflowContextPanel
+          status={workflowStatus}
+          loading={workflowLoading}
+          unavailable={workflowUnavailable}
+          actionPending={workflowActionPending}
+          onResume={() => void resumeWorkflow()}
+        />
         <div className="flex flex-wrap items-center gap-2">
           <span className="inline-flex h-9 items-center gap-2 rounded-lg border border-[var(--line-soft)] bg-[var(--glass-elevated)] px-3 text-sm font-semibold text-[var(--ink-muted)] shadow-sm">
             <Bot className="h-4 w-4 text-[var(--workspace-accent)]" aria-hidden="true" />
@@ -686,7 +763,7 @@ export default function ReviewPage() {
           </button>
           <button
             type="button"
-            onClick={() => void loadItems()}
+            onClick={() => void refreshReviewData()}
             disabled={loading}
             className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-[var(--line-soft)] bg-[var(--glass-elevated)] px-3 text-sm font-semibold text-ink shadow-sm hover:bg-[var(--glass-strong)] disabled:cursor-not-allowed disabled:text-[var(--ink-muted)]"
           >
