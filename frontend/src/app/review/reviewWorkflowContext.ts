@@ -13,12 +13,11 @@ const REVIEW_WORKFLOW_THREAD_ID_MAX_LENGTH = 64;
 export function parseReviewWorkflowQuery(rawWorkflowThreadId: string | null): ReviewWorkflowQuery {
   if (rawWorkflowThreadId === null) return { kind: "global" };
 
-  const workflowThreadId = rawWorkflowThreadId.trim();
-  if (!workflowThreadId || workflowThreadId.length > REVIEW_WORKFLOW_THREAD_ID_MAX_LENGTH) {
+  if (!rawWorkflowThreadId.trim() || Array.from(rawWorkflowThreadId).length > REVIEW_WORKFLOW_THREAD_ID_MAX_LENGTH) {
     return { kind: "invalid" };
   }
 
-  return { kind: "workflow", workflowThreadId };
+  return { kind: "workflow", workflowThreadId: rawWorkflowThreadId };
 }
 
 export function deriveReviewBulkProjectState({

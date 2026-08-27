@@ -28,11 +28,17 @@ test("bulk project derived state hides stale workflow selection before effects",
   })).toEqual({ value: "", projects: [], disabled: true });
 });
 
-test("workflow query parsing distinguishes absent from invalid opaque ids", () => {
+test("workflow query parsing preserves opaque ids and applies Unicode code point bounds", () => {
+  const punctuationId = "review:v2/[team]?owner=a+b&stage=human";
+  const edgeWhitespaceId = " workflow-thread-1 ";
+  const nonBmpId = "😀".repeat(33);
   expect(parseReviewWorkflowQuery(null)).toEqual({ kind: "global" });
-  expect(parseReviewWorkflowQuery("  workflow-thread-1  ")).toEqual({ kind: "workflow", workflowThreadId: "workflow-thread-1" });
-  expect(parseReviewWorkflowQuery("   ")).toEqual({ kind: "invalid" });
+  expect(parseReviewWorkflowQuery(punctuationId)).toEqual({ kind: "workflow", workflowThreadId: punctuationId });
+  expect(parseReviewWorkflowQuery(edgeWhitespaceId)).toEqual({ kind: "workflow", workflowThreadId: edgeWhitespaceId });
+  expect(parseReviewWorkflowQuery(nonBmpId)).toEqual({ kind: "workflow", workflowThreadId: nonBmpId });
+  expect(parseReviewWorkflowQuery("x".repeat(64))).toEqual({ kind: "workflow", workflowThreadId: "x".repeat(64) });
   expect(parseReviewWorkflowQuery("x".repeat(65))).toEqual({ kind: "invalid" });
+  expect(parseReviewWorkflowQuery(" \t\n ")).toEqual({ kind: "invalid" });
 });
 
 function workflowStatus(overrides: Record<string, unknown> = {}) {
