@@ -8,7 +8,7 @@ import {
   launchReviewWorkflow,
   resumeReviewWorkflow,
 } from "../src/lib/api/reviewWorkflow";
-import type { ReviewWorkflowRunRequest } from "../src/lib/api/types";
+import type { ReviewTransitionPromotion, ReviewWorkflowRunRequest } from "../src/lib/api/types";
 
 const request = {
   source_refs: [
@@ -38,6 +38,16 @@ const status = {
   error_code: null,
   resume_error_code: null,
 };
+
+const nullableTransitionPromotion = {
+  target_type: null,
+  created_record_ids: [],
+  created_timeline_event_ids: [],
+} satisfies ReviewTransitionPromotion;
+
+test("review transition promotion contract accepts a nullable target type", () => {
+  expect(nullableTransitionPromotion.target_type).toBeNull();
+});
 
 test("review workflow wrappers use the approved methods, paths, and bounded run payloads", async () => {
   const originalFetch = globalThis.fetch;

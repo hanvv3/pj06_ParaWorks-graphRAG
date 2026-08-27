@@ -440,7 +440,7 @@ export type ReviewApprovalResponse = ReviewItem & {
 };
 
 export type ReviewTransitionPromotion = {
-  target_type: string;
+  target_type: string | null;
   created_record_ids: number[];
   created_timeline_event_ids: number[];
 };
