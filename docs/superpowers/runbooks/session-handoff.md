@@ -1,6 +1,66 @@
 # ParaWorks Harness Session Handoff
 
-Updated: 2026-08-27
+Updated: 2026-08-28
+
+## 2026-08-28 Deliverable C.5 design awaiting written approval
+
+- The proposed design is
+  `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`
+  on branch `codex/review-hitl-v2-design`. It is planning/specification only;
+  no product code, migration, live model call, rollout enablement, push, merge,
+  or PR was performed.
+- C.5 is inserted between completed Deliverable C and Deliverable D. The
+  remaining order is C.5 Auto-Review Trust Promotion -> D Retriever Port and
+  RAG Answer Graph V2 -> E Neo4j GraphRAG -> Slack recovery last. CDC/streaming
+  remains deferred until measured need.
+- The trust boundary is three-tiered: canonical source evidence, pending AI
+  knowledge, and trusted knowledge. Every AI candidate starts pending. Initial
+  auto approval is limited to public/internal direct-fact Timeline and narrowly
+  extractive History; Decision, Todo, restricted, inferred, conflicting, and
+  uncertain items remain human-reviewed.
+- The proposed validator is OpenAI `gpt-5.6-terra` with medium reasoning and
+  strict LangChain structured output. It has no approval authority. A pure,
+  versioned deterministic policy owns the final result, and an exact same
+  provider/model as candidate generation cannot validate that candidate.
+- Existing durable `company-memory-review-v2.0` graph/state/topology remains
+  immutable for every existing and paused thread. C.5 proposes
+  `company-memory-review-v2.1-auto-review` for new shadow/enforce launches only;
+  Registry keeps both versions, and effective runtime mode may be demoted but
+  never promoted beyond the mode stored at launch.
+- The design adds candidate-to-canonical evidence refs, per-field evidence-slot
+  validation, validation leases/cache/cost, an internal-only resolution actor,
+  and one locked transition service for both new promotion and exact duplicate
+  reaffirmation. No model can call a public auto-approval action.
+- Exact post-migration approval provenance prevents cross-item revoke. Revoking
+  one reaffirmation removes only its link; shared knowledge remains trusted
+  while another active human/auto or legacy human provenance exists. The last
+  provenance adds a vector tombstone, revokes the exact knowledge/companion
+  Timeline, and deletes exact pgvector/index-state documents transactionally.
+- C.5 explicitly prevents auto approval from expanding raw chunk eligibility:
+  source chunks remain indexable only from human or legacy-human approvals.
+  Auto-policy approvals contribute promoted trusted knowledge documents only;
+  the canonical-raw-evidence retrieval lane remains Deliverable D work.
+- Shadow is a paid Terra path but can run only after the existing Integrations
+  dry-run displays extraction + validation + total maximum cost and the user
+  presses the same explicit launch button. A signed preview token binds the
+  input, graph, mode, policy/model, cost ceilings, and expiry. Sync/status/page
+  polling never calls the provider.
+- Proposed values needing approval with the written spec include policy/prompt
+  versions, `0.9800` per-field threshold, 8 candidates/12 slots/12,000 input
+  characters, USD 0.02 batch and USD 0.20 workflow ceilings, new schema/status/
+  API fields, 500 shadow comparisons, 99% precision, 10% canary, and post-audit
+  sampling percentages.
+- A scope-wide existence-only collision guard routes hidden restricted
+  collisions to human review without exposing content, identity, permission, or
+  count. Exact duplicate reuse remains limited to currently visible trusted
+  knowledge.
+- Sampled auto approvals create durable `AutoReviewPostAudit` rows, while
+  `AutoReviewRolloutState` makes first-50/10%/2% audits and the critical
+  enforce-to-shadow breaker enforceable rather than a manual checklist. A
+  critical outcome opens/commits the breaker before exact revoke is attempted.
+- Next work classification: review/approval of the written spec. After approval,
+  creating the implementation plan with TDD checkpoints is still **planning**.
+  Product-code implementation requires a separately reviewed/approved plan.
 
 ## 2026-08-27 Review Queue HITL V2 release verified
 
@@ -52,9 +112,8 @@ Updated: 2026-08-27
 - The ten Slack failures remain visible and must stay deferred until the final
   Slack recovery phase, per the user's missing-data-source direction. Do not
   add deselections beyond the approved non-Slack comparison.
-- Next boundary is Deliverable D GraphRAG planning/design review using
-  Gmail/Drive/Calendar, approved knowledge, and deterministic fixtures. This
-  is a planning step; implementation is not authorized by this release commit.
+- This historical next boundary was superseded on 2026-08-28 by the separate
+  Deliverable C.5 design before Deliverable D. C.5 is not implemented yet.
 
 ## 2026-08-27 Review Queue HITL V2 implementation plan ready
 

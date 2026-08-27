@@ -1,10 +1,50 @@
 # ParaWorks Portfolio Log
 
-Last updated: 2026-08-27
+Last updated: 2026-08-28
 
 This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
+
+## 2026-08-28 Auto-Review Trust Promotion design
+
+- Wrote the proposed Deliverable C.5 design between Review Queue HITL V2 and
+  the RAG retriever migration. This is planning/specification only; no product
+  code, database schema, provider call, feature enablement, push, or merge was
+  performed.
+- Reframed trust as three layers: canonical source evidence, pending AI
+  knowledge, and trusted knowledge. Raw evidence may support answers later but
+  does not become an official Decision, Timeline, History, or Todo by itself.
+- Kept AI candidates pending first. Only public/internal direct-fact Timeline
+  and narrowly extractive History candidates can enter the initial auto-review
+  allowlist; Decision, Todo, restricted, inferred, conflicting, and uncertain
+  candidates remain human-reviewed.
+- Separated an independent OpenAI `gpt-5.6-terra` medium-reasoning structured
+  validator from the final deterministic policy authority. Validator failure,
+  malformed output, source drift, permission drift, or budget overflow falls
+  back to human review and never silently changes models.
+- Preserved the existing locked exactly-once Review transition and promotion
+  boundary. Auto-policy approval cannot insert trusted knowledge directly, and
+  tests continue to use fake models rather than live provider APIs.
+- Designed post-migration approval provenance so exact duplicate
+  reaffirmations reuse a canonical knowledge row without letting one revoke
+  remove another active human/auto approval. The last active provenance alone
+  can revoke the shared knowledge, companion Timeline, and exact vector state.
+- Kept UX depth unchanged: existing Review surfaces gain bounded counts,
+  auto-validation badges, filtering, audit details, and an authorized revoke
+  action instead of a new page or wizard.
+- Proposed disabled/shadow/enforce rollout with default disabled, 10% stable
+  canary, zero hard-negative/permission/version violations, at least 500 shadow
+  comparisons, and at least 99% precision before enforce.
+- A read-only architecture audit caught durable-graph, shared-revoke, raw-index,
+  and post-audit gaps before implementation. The revised design keeps V2.0
+  immutable, adds V2.1-only state, blocks inaccessible collision buckets without
+  leaking them, and persists sampled human audits plus an enforce-to-shadow
+  breaker.
+- The written design awaits user approval. After approval, the next activity is
+  creating a TDD implementation plan, which is still planning rather than
+  product-code implementation. Sequence remains C.5 -> D Retriever/RAG Answer
+  Graph V2 -> E Neo4j GraphRAG -> Slack recovery last.
 
 ## 2026-08-27 Review Queue HITL V2 release verification
 
@@ -51,9 +91,9 @@ demo story changes.
 - Frontend lint/build passed with 18 generated pages. Deterministic Playwright
   passed desktop V2 `48`, mobile V2 `44`, and adjacent UX `9`; deterministic
   backend two-screen smoke passed `9`.
-- V2 remains disabled by default and Slack recovery remains last. The next
-  activity is Deliverable D GraphRAG planning/design review, not GraphRAG
-  implementation.
+- V2 remains disabled by default and Slack recovery remains last. This
+  historical next boundary was superseded on 2026-08-28 by the separately
+  proposed Deliverable C.5 trust-promotion design before Deliverable D.
 
 ## 2026-08-27 Review Queue HITL V2 implementation plan
 

@@ -149,13 +149,22 @@ Current state:
 - PostgreSQL restart, reconciliation, exact-batch launch, concurrent Review
   transition, concurrent resume, terminal-race, checkpoint privacy, and exact
   cleanup coverage is release-verified with zero PostgreSQL skips.
+- Deliverable C.5 Auto-Review Trust Promotion has a written design awaiting
+  user review. It keeps every AI candidate pending first, then permits only
+  low-risk direct Timeline/History facts to be promoted by an independent
+  structured validator plus a versioned deterministic policy.
 
 Next priorities:
 
-1. Plan and review Deliverable D GraphRAG against the completed HITL trust
-   boundary before implementation.
-2. Continue frontend consistency pass before final portfolio recording.
-3. Keep Slack data reconstruction and its visible regression baseline last.
+1. Review and approve the written Deliverable C.5 design, then create its
+   implementation plan. Both are planning work; product-code implementation is
+   not yet authorized.
+2. After a separately approved C.5 implementation plan, implement and verify
+   Auto-Review Trust Promotion before Deliverable D.
+3. Plan Deliverable D Retriever Port and RAG Answer Graph V2, followed by
+   Deliverable E Neo4j GraphRAG.
+4. Continue frontend consistency before final portfolio recording, and keep
+   Slack data reconstruction plus its visible regression baseline last.
 
 ## 4. Shared Runtime Contracts
 
@@ -453,20 +462,47 @@ Tasks:
   - PostgreSQL restart evidence now uses fully independent application A/B
     SQLAlchemy engines, pools, and sessionmakers as well as independent
     checkpoint runtimes/pools/savers; A is closed and disposed before B exists.
-  - Next boundary: Deliverable D GraphRAG planning and design review. This is a
-    planning step, not authorization for GraphRAG implementation.
+  - Next boundary: written review of Deliverable C.5 Auto-Review Trust
+    Promotion. After spec approval, producing the implementation plan is still
+    planning work and is not authorization for product-code implementation.
+- Deliverable C.5 Auto-Review Trust Promotion: design written; awaiting user
+  approval before implementation planning.
+  - Proposed spec:
+    `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
+  - Separates canonical source evidence, pending AI knowledge, and trusted
+    knowledge. Raw evidence is not official knowledge and C.5 does not broaden
+    current RAG indexing.
+  - Uses OpenAI `gpt-5.6-terra` at medium reasoning only as an independent
+    structured validator. A deterministic versioned policy owns the final
+    decision; generation models cannot self-approve.
+  - Initial allowlist is public/internal direct-fact Timeline and narrowly
+    extractive History. Decision, Todo, restricted, inferred, conflicting, or
+    uncertain candidates remain human-reviewed.
+  - Keeps the same locked exactly-once Review transition/promotion boundary,
+    adds disabled/shadow/enforce modes with default disabled, and requires exact
+    provenance-aware revoke without affecting unrelated reaffirmations.
+  - Keeps immutable V2.0 threads on V2.0 and proposes a separate V2.1 graph for
+    new shadow/enforce launches, with signed paid previews and a persistent
+    post-audit rollout breaker.
+  - Proposed gates include zero hard-negative, permission/version, duplicate,
+    and cross-item-revoke failures; at least 500 shadow comparisons and at least
+    99% precision before operational enforce.
+  - No production code or database schema is changed by the design commit.
 - User-directed execution order for the remaining program:
-  1. Deliverable D and GraphRAG using Gmail, Drive, Calendar, approved
-     knowledge, and deterministic fixtures as the primary evidence path.
-  2. Slack data recovery and Slack-related regressions last, after choosing
+  1. Deliverable C.5 Auto-Review Trust Promotion.
+  2. Deliverable D Retriever Port and RAG Answer Graph V2 using Gmail, Drive,
+     Calendar, trusted knowledge, and deterministic fixtures.
+  3. Deliverable E Neo4j GraphRAG after D establishes the safe retriever and
+     answer contracts.
+  4. Slack data recovery and Slack-related regressions last, after choosing
      between deterministic local reconstruction, a newly seeded Slack
      workspace, or an alternate chat connector.
 - Do not skip or hide Slack regressions while they are deferred. Keep the ten
   known Slack-related backend failures visible in the full-suite report and
   require every non-Slack gate to remain green.
-- Execute the reviewed foundation as four independent green deliverables:
-  dependency compatibility, runtime/checkpoint primitives, Review Queue HITL
-  V2, and the RAG retriever/graph V2 migration.
+- Preserve independent green checkpoints for dependency compatibility,
+  runtime/checkpoint primitives, Review Queue HITL V2, Auto-Review Trust
+  Promotion, Retriever/RAG Answer Graph V2, and Neo4j GraphRAG.
 - Keep legacy orchestration routes stable while disabled-by-default V2 routes
   prove actual `interrupt()` / `Command(resume=...)` and PostgreSQL
   checkpointing.
