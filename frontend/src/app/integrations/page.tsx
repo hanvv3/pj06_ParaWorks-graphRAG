@@ -256,6 +256,56 @@ const NON_RETRYABLE_LAUNCH_ERROR_CODES = new Set<ReviewWorkflowErrorCode>([
   "budget_exceeded",
 ]);
 
+function canLaunchReviewWorkflow(reviewWorkflow: SyncProgressState["reviewWorkflow"]) {
+  if (!reviewWorkflow?.dryRun || reviewWorkflow.dryRun.budget_status === "over_budget") {
+    return false;
+  }
+  return reviewWorkflow.launchState === "ready" || reviewWorkflow.launchState === "error";
+}
+
+function reviewWorkflowCompletionNotice(reviewWorkflow: SyncProgressState["reviewWorkflow"]) {
+  if (!reviewWorkflow) {
+    return undefined;
+  }
+  if (reviewWorkflow.launchState === "loading_preview") {
+    return "검토 후보 미리보기를 준비하고 있습니다.";
+  }
+  if (reviewWorkflow.launchState === "launching") {
+    return "검토 후보를 만들고 있습니다.";
+  }
+  if (reviewWorkflow.launchState === "error" && !reviewWorkflow.dryRun) {
+    return "검토 후보 미리보기를 다시 시도할 수 있습니다.";
+  }
+  if (reviewWorkflow.dryRun?.budget_status === "over_budget") {
+    return "예산 초과로 검토 후보를 만들 수 없습니다.";
+  }
+  if (reviewWorkflow.launchState === "no_candidates") {
+    return "새 검토 후보가 없습니다.";
+  }
+  if (reviewWorkflow.launchState === "terminal") {
+    if (reviewWorkflow.terminalStatus === "cancelled") {
+      return "작업 취소됨 — 데이터 변경 후 다시 동기화해 주세요.";
+    }
+    if (reviewWorkflow.terminalStatus === "failed") {
+      return "작업 실패 — 데이터 변경 후 다시 동기화해 주세요.";
+    }
+    return "검토 후보 만들기가 완료되지 않았습니다. 새 동기화를 시작해 주세요.";
+  }
+  if (reviewWorkflow.launchState === "non_retryable_error") {
+    if (reviewWorkflow.errorCode === "evidence_changed") {
+      return "동기화 이후 데이터가 변경되었습니다. 데이터 변경 후 다시 동기화해 주세요.";
+    }
+    if (
+      reviewWorkflow.errorCode === "idempotency_key_reused" ||
+      reviewWorkflow.errorCode === "budget_exceeded"
+    ) {
+      return "현재 동기화 배치는 다시 실행할 수 없습니다. 데이터 변경 후 다시 동기화해 새 미리보기를 준비해 주세요.";
+    }
+    return "현재 동기화 배치는 다시 실행할 수 없습니다. 데이터 변경 후 다시 동기화해 주세요.";
+  }
+  return undefined;
+}
+
 function syncResponseFromRuntimeStatus(
   connectorType: string,
   runtime: IntegrationRuntimeStatus,
@@ -456,24 +506,6 @@ export default function IntegrationsPage() {
       active = false;
     };
   }, []);
-
-  useEffect(() => {
-    if (!reviewWorkflowDiagnostic) {
-      return;
-    }
-    setSyncProgress((current) => {
-      if (!current || current.connectorType === "slack") {
-        return current;
-      }
-      const completionCopyMode = reviewCompletionCopyMode(
-        current.connectorType,
-        reviewWorkflowDiagnostic,
-      );
-      return current.completionCopyMode === completionCopyMode
-        ? current
-        : { ...current, completionCopyMode };
-    });
-  }, [reviewWorkflowDiagnostic]);
 
   useEffect(() => {
     if (syncProgress?.status !== "running") {
@@ -823,20 +855,21 @@ export default function IntegrationsPage() {
     const reviewWorkflow = syncProgress?.reviewWorkflow;
     const jobId = syncProgress?.jobId;
     const batchKey = reviewWorkflow?.batchKey;
+    const dryRun = reviewWorkflow?.dryRun;
     if (
       !syncProgress ||
       !reviewWorkflow ||
       !jobId ||
       !batchKey ||
-      !reviewWorkflow.dryRun ||
-      reviewWorkflow.launchState === "launching" ||
+      !dryRun ||
+      !canLaunchReviewWorkflow(reviewWorkflow) ||
       activeSyncJobRef.current !== jobId ||
       activeReviewBatchRef.current !== batchKey
     ) {
       return;
     }
 
-    const clientRequestId = `review:${jobId}:${reviewWorkflow.dryRun.selection_policy_version}`;
+    const clientRequestId = `review:${jobId}:${dryRun.selection_policy_version}`;
     setSyncProgress((current) =>
       current?.jobId === jobId && current.reviewWorkflow?.batchKey === batchKey
         ? {
@@ -1423,9 +1456,9 @@ function SyncProgressModal({
   const createdReviewItems = result?.created_review_items ?? 0;
   const pendingReviewCount = result?.pending_review_count ?? 0;
   const usesV2TruthfulCopy = progress.completionCopyMode !== "legacy";
-  const hasLaunchPanel = Boolean(progress.reviewWorkflow);
   const canLaunchFromCompletion =
-    progress.completionCopyMode === "v2_actionable" && hasLaunchPanel;
+    progress.completionCopyMode === "v2_actionable" && canLaunchReviewWorkflow(progress.reviewWorkflow);
+  const nonPromissoryReviewNotice = reviewWorkflowCompletionNotice(progress.reviewWorkflow);
   const runningStages = usesV2TruthfulCopy ? V2_SYNC_RUNNING_STAGES : SYNC_RUNNING_STAGES;
   const changedSourceCount = result?.changed_source_refs?.length ?? 0;
 
@@ -1463,7 +1496,9 @@ function SyncProgressModal({
                   ? usesV2TruthfulCopy
                     ? canLaunchFromCompletion
                       ? `${progress.displayName} 변경 근거를 준비했습니다. 검토 후보는 아래에서 명시적으로 만듭니다.`
-                      : (progress.completionNotice ?? `${progress.displayName} 변경 근거와 검토 후보 가능 여부를 확인하고 있습니다.`)
+                      : (progress.completionNotice ??
+                        nonPromissoryReviewNotice ??
+                        `${progress.displayName} 변경 근거와 검토 후보 가능 여부를 확인하고 있습니다.`)
                     : `${progress.displayName} 데이터를 검토 큐에 반영했습니다.`
                   : isError
                     ? (progress.errorMessage ?? "동기화 중 오류가 발생했습니다.")
@@ -1515,7 +1550,9 @@ function SyncProgressModal({
               <p className="mt-3 text-sm font-medium text-[var(--ink-strong)]">
                 {canLaunchFromCompletion
                   ? `변경 근거 ${changedSourceCount.toLocaleString()}개를 준비했습니다. 검토 후보는 아래에서 만듭니다.`
-                  : (progress.completionNotice ?? `변경 근거 ${changedSourceCount.toLocaleString()}개를 확인하고 있습니다.`)}
+                  : (progress.completionNotice ??
+                    nonPromissoryReviewNotice ??
+                    `변경 근거 ${changedSourceCount.toLocaleString()}개를 확인하고 있습니다.`)}
               </p>
             </>
           ) : (

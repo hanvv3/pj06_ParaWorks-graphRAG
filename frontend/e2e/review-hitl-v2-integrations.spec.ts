@@ -381,6 +381,27 @@ test("keeps completion copy truthful while the V2 diagnostic is still resolving"
   await expect(modal).not.toContainText("아래에서 명시적으로 만듭니다");
   resolveDiagnostic?.();
   await expect(page.getByTestId("review-candidate-launch-panel")).toBeVisible();
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("변경 근거를 준비했습니다");
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("아래에서 명시적으로 만듭니다");
+});
+
+test("keeps completion copy non-promissory while the preview is loading", async ({ page }) => {
+  let resolveDryRun: (() => void) | undefined;
+  const dryRunGate = new Promise<void>((resolve) => {
+    resolveDryRun = resolve;
+  });
+  await installIntegrationsRoutes(page);
+  await page.route("**/api/v1/orchestration/v2/company-memory/dry-run", async (route) => {
+    await dryRunGate;
+    await route.fulfill({ contentType: "application/json", json: dryRun });
+  });
+
+  await completeGmailSync(page);
+  const modal = page.getByTestId("sync-progress-modal");
+  await expect(page.getByTestId("review-candidate-launch-panel")).toContainText("비용을 확인하고 있습니다");
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("검토 후보 미리보기를 준비하고 있습니다");
+  await expect(modal.getByTestId("sync-modal-step")).not.toContainText("아래에서 명시적으로 만듭니다");
+  resolveDryRun?.();
 });
 
 test("does not offer V2 launch for Slack sync", async ({ page }) => {
@@ -424,6 +445,7 @@ for (const [code, guidance] of [
     });
 
     await completeGmailSync(page);
+    const modal = page.getByTestId("sync-progress-modal");
     const panel = page.getByTestId("review-candidate-launch-panel");
     const button = panel.getByRole("button", { name: "검토 후보 만들기" });
     await button.click();
@@ -431,6 +453,8 @@ for (const [code, guidance] of [
     await expect(panel).toContainText(guidance);
     await expect(panel).not.toContainText(code);
     await expect(button).toBeDisabled();
+    await expect(modal.getByTestId("sync-modal-step")).toContainText(guidance);
+    await expect(modal.getByTestId("sync-modal-step")).not.toContainText("아래에서 명시적으로 만듭니다");
     expect(launchBodies).toEqual([
       {
         source_refs: sourceRefs,
@@ -494,9 +518,12 @@ test("renders over-budget cost outcome and blocks launch", async ({ page }) => {
   });
 
   await completeGmailSync(page);
+  const modal = page.getByTestId("sync-progress-modal");
   const panel = page.getByTestId("review-candidate-launch-panel");
   await expect(panel).toContainText("예산 초과");
   await expect(panel.getByRole("button", { name: "검토 후보 만들기" })).toBeDisabled();
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("예산 초과로 검토 후보를 만들 수 없습니다");
+  await expect(modal.getByTestId("sync-modal-step")).not.toContainText("아래에서 명시적으로 만듭니다");
 });
 
 test("renders cached cost outcome", async ({ page }) => {
@@ -523,8 +550,11 @@ test("offers a working preview retry after transient dry-run failure", async ({ 
   });
 
   await completeGmailSync(page);
+  const modal = page.getByTestId("sync-progress-modal");
   const panel = page.getByTestId("review-candidate-launch-panel");
   await expect(panel).toContainText("비용을 확인하지 못했습니다");
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("검토 후보 미리보기를 다시 시도할 수 있습니다");
+  await expect(modal.getByTestId("sync-modal-step")).not.toContainText("아래에서 명시적으로 만듭니다");
   await panel.getByRole("button", { name: "미리보기 다시 시도" }).click();
   await expect(panel).toContainText("예산 이내");
 });
@@ -538,11 +568,14 @@ test("preserves failed terminal status and blocks its stable-id replay", async (
   const button = page.getByTestId("review-candidate-launch-panel").getByRole("button", { name: "검토 후보 만들기" });
   await button.click();
 
+  const modal = page.getByTestId("sync-progress-modal");
   const panel = page.getByTestId("review-candidate-launch-panel");
   await expect(panel).not.toContainText("새 검토 후보 없음");
   await expect(panel).toContainText("작업 실패");
   await expect(panel).toContainText("데이터 변경 후 다시 동기화");
   await expect(button).toBeDisabled();
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("작업 실패");
+  await expect(modal.getByTestId("sync-modal-step")).not.toContainText("아래에서 명시적으로 만듭니다");
 });
 
 test("preserves cancelled terminal status and blocks its stable-id replay", async ({ page }) => {
@@ -554,9 +587,12 @@ test("preserves cancelled terminal status and blocks its stable-id replay", asyn
   const button = page.getByTestId("review-candidate-launch-panel").getByRole("button", { name: "검토 후보 만들기" });
   await button.click();
 
+  const modal = page.getByTestId("sync-progress-modal");
   const panel = page.getByTestId("review-candidate-launch-panel");
   await expect(panel).not.toContainText("새 검토 후보 없음");
   await expect(panel).toContainText("작업 취소됨");
   await expect(panel).toContainText("데이터 변경 후 다시 동기화");
   await expect(button).toBeDisabled();
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("작업 취소됨");
+  await expect(modal.getByTestId("sync-modal-step")).not.toContainText("아래에서 명시적으로 만듭니다");
 });
