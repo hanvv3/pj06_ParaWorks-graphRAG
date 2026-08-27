@@ -1,6 +1,7 @@
 import type {
   ReviewWorkflowDiagnostic,
   ReviewWorkflowDryRun,
+  ReviewWorkflowErrorCode,
   ReviewWorkflowLifecycleStatus,
 } from "@/lib/api/types";
 
@@ -9,6 +10,7 @@ type LaunchState =
   | "ready"
   | "launching"
   | "error"
+  | "non_retryable_error"
   | "no_candidates"
   | "terminal";
 
@@ -17,6 +19,7 @@ type ReviewCandidateLaunchPanelProps = {
   dryRun?: ReviewWorkflowDryRun;
   launchState: LaunchState;
   terminalStatus?: ReviewWorkflowLifecycleStatus;
+  errorCode?: ReviewWorkflowErrorCode | null;
   errorMessage?: string;
   onLaunch: () => void;
   onRetryPreview: () => void;
@@ -32,6 +35,7 @@ export function ReviewCandidateLaunchPanel({
   dryRun,
   launchState,
   terminalStatus,
+  errorCode,
   errorMessage,
   onLaunch,
   onRetryPreview,
@@ -39,7 +43,10 @@ export function ReviewCandidateLaunchPanel({
   const previewLoading = launchState === "loading_preview";
   const launching = launchState === "launching";
   const budgetExceeded = dryRun?.budget_status === "over_budget";
-  const terminal = launchState === "terminal" || launchState === "no_candidates";
+  const terminal =
+    launchState === "terminal" ||
+    launchState === "no_candidates" ||
+    launchState === "non_retryable_error";
   const disabled = previewLoading || launching || budgetExceeded || terminal || !dryRun;
 
   return (
@@ -101,6 +108,11 @@ export function ReviewCandidateLaunchPanel({
           {errorMessage ?? "요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요."} 다시 시도할 수 있습니다.
         </p>
       ) : null}
+      {launchState === "non_retryable_error" ? (
+        <p className="mt-3 text-sm font-medium text-rose-700">
+          {nonRetryableRecoveryCopy(errorCode)}
+        </p>
+      ) : null}
 
       {launchState === "error" && !dryRun ? (
         <button
@@ -122,6 +134,16 @@ export function ReviewCandidateLaunchPanel({
       </button>
     </section>
   );
+}
+
+function nonRetryableRecoveryCopy(errorCode: ReviewWorkflowErrorCode | null | undefined) {
+  if (errorCode === "evidence_changed") {
+    return "동기화 이후 데이터가 변경되었습니다. 데이터 변경 후 다시 동기화해 주세요.";
+  }
+  if (errorCode === "idempotency_key_reused" || errorCode === "budget_exceeded") {
+    return "현재 동기화 배치는 다시 실행할 수 없습니다. 데이터 변경 후 다시 동기화해 새 미리보기를 준비해 주세요.";
+  }
+  return "현재 동기화 배치는 다시 실행할 수 없습니다. 데이터 변경 후 다시 동기화해 주세요.";
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

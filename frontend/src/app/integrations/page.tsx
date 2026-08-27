@@ -22,6 +22,7 @@ import {
   getReviewWorkflowDiagnostic,
   launchReviewWorkflow,
   readReviewWorkflowError,
+  ReviewWorkflowClientError,
 } from "@/lib/api/reviewWorkflow";
 import { notifyReviewQueueUpdated } from "@/lib/reviewQueueEvents";
 import type {
@@ -34,6 +35,7 @@ import type {
   DashboardResponse,
   ReviewWorkflowDiagnostic,
   ReviewWorkflowDryRun,
+  ReviewWorkflowErrorCode,
   ReviewWorkflowLifecycleStatus,
   ReviewWorkflowSourceRef,
 } from "@/lib/api/types";
@@ -69,14 +71,23 @@ type SyncProgressState = {
   lastMessage?: string;
   result?: IntegrationSyncResponse;
   errorMessage?: string;
-  completionCopyMode: "legacy" | "v2_pending" | "v2_ready";
+  completionCopyMode: "legacy" | "v2_pending" | "v2_actionable" | "v2_unavailable";
+  completionNotice?: string;
   reviewWorkflow?: {
     diagnostic: ReviewWorkflowDiagnostic;
     sourceRefs: ReviewWorkflowSourceRef[];
     batchKey: string;
     dryRun?: ReviewWorkflowDryRun;
-    launchState: "loading_preview" | "ready" | "launching" | "error" | "no_candidates" | "terminal";
+    launchState:
+      | "loading_preview"
+      | "ready"
+      | "launching"
+      | "error"
+      | "non_retryable_error"
+      | "no_candidates"
+      | "terminal";
     terminalStatus?: ReviewWorkflowLifecycleStatus;
+    errorCode?: ReviewWorkflowErrorCode | null;
     errorMessage?: string;
   };
 };
@@ -236,8 +247,14 @@ function reviewCompletionCopyMode(
   if (connectorType === "slack" || (diagnostic && (!diagnostic.enabled || !diagnostic.available))) {
     return "legacy";
   }
-  return diagnostic ? "v2_ready" : "v2_pending";
+  return "v2_pending";
 }
+
+const NON_RETRYABLE_LAUNCH_ERROR_CODES = new Set<ReviewWorkflowErrorCode>([
+  "evidence_changed",
+  "idempotency_key_reused",
+  "budget_exceeded",
+]);
 
 function syncResponseFromRuntimeStatus(
   connectorType: string,
@@ -709,26 +726,49 @@ export default function IntegrationsPage() {
 
   async function prepareReviewCandidateLaunch(type: string, result: IntegrationSyncResponse) {
     const sourceRefs = result.changed_source_refs ?? [];
-    const diagnostic =
-      reviewWorkflowDiagnostic ??
-      (await getReviewWorkflowDiagnostic()
-        .then((nextDiagnostic) => {
-          setReviewWorkflowDiagnostic(nextDiagnostic);
-          return nextDiagnostic;
-        })
-        .catch(() => undefined));
+    let diagnostic = reviewWorkflowDiagnostic;
+    let diagnosticLoadFailed = false;
+    if (!diagnostic) {
+      try {
+        diagnostic = await getReviewWorkflowDiagnostic();
+        setReviewWorkflowDiagnostic(diagnostic);
+      } catch {
+        diagnosticLoadFailed = true;
+      }
+    }
     setSyncProgress((current) =>
       current?.connectorType === type && current.jobId === result.job_id
-        ? { ...current, completionCopyMode: reviewCompletionCopyMode(type, diagnostic) }
+        ? {
+            ...current,
+            completionCopyMode: diagnosticLoadFailed && type !== "slack"
+              ? "v2_unavailable"
+              : reviewCompletionCopyMode(type, diagnostic),
+            completionNotice: diagnosticLoadFailed && type !== "slack"
+              ? "검토 후보 기능을 확인할 수 없습니다. 데이터 변경 후 다시 동기화해 주세요."
+              : undefined,
+          }
         : current,
     );
     if (
       activeSyncJobRef.current !== result.job_id ||
       type === "slack" ||
-      sourceRefs.length === 0 ||
+      diagnosticLoadFailed ||
       !diagnostic?.enabled ||
       !diagnostic.available
     ) {
+      return;
+    }
+
+    if (sourceRefs.length === 0) {
+      setSyncProgress((current) =>
+        current?.connectorType === type && current.jobId === result.job_id
+          ? {
+              ...current,
+              completionCopyMode: "v2_unavailable",
+              completionNotice: "이번 동기화에서 변경 근거를 찾지 못했습니다. 검토 후보를 만들 수 없습니다.",
+            }
+          : current,
+      );
       return;
     }
 
@@ -736,8 +776,10 @@ export default function IntegrationsPage() {
     activeReviewBatchRef.current = batchKey;
     setSyncProgress((current) =>
       current?.connectorType === type && current.jobId === result.job_id && current.status === "complete"
-        ? {
+          ? {
             ...current,
+            completionCopyMode: "v2_actionable",
+            completionNotice: undefined,
             reviewWorkflow: {
               diagnostic,
               sourceRefs,
@@ -833,7 +875,12 @@ export default function IntegrationsPage() {
           : current,
       );
     } catch (error) {
-      const safeError = readReviewWorkflowError(error);
+      const safeError =
+        error instanceof ReviewWorkflowClientError
+          ? error
+          : readReviewWorkflowError(error);
+      const nonRetryable =
+        safeError.code !== null && NON_RETRYABLE_LAUNCH_ERROR_CODES.has(safeError.code);
       if (activeSyncJobRef.current !== jobId || activeReviewBatchRef.current !== batchKey) {
         return;
       }
@@ -843,8 +890,9 @@ export default function IntegrationsPage() {
               ...current,
               reviewWorkflow: {
                 ...current.reviewWorkflow,
-                launchState: "error",
-                errorMessage: safeError.message,
+                launchState: nonRetryable ? "non_retryable_error" : "error",
+                errorCode: safeError.code,
+                errorMessage: nonRetryable ? undefined : safeError.message,
               },
             }
           : current,
@@ -1375,6 +1423,9 @@ function SyncProgressModal({
   const createdReviewItems = result?.created_review_items ?? 0;
   const pendingReviewCount = result?.pending_review_count ?? 0;
   const usesV2TruthfulCopy = progress.completionCopyMode !== "legacy";
+  const hasLaunchPanel = Boolean(progress.reviewWorkflow);
+  const canLaunchFromCompletion =
+    progress.completionCopyMode === "v2_actionable" && hasLaunchPanel;
   const runningStages = usesV2TruthfulCopy ? V2_SYNC_RUNNING_STAGES : SYNC_RUNNING_STAGES;
   const changedSourceCount = result?.changed_source_refs?.length ?? 0;
 
@@ -1410,7 +1461,9 @@ function SyncProgressModal({
               <p data-testid="sync-modal-step" className="mt-1 text-sm leading-6 text-[var(--ink-muted)]">
                 {isComplete
                   ? usesV2TruthfulCopy
-                    ? `${progress.displayName} 변경 근거를 준비했습니다. 검토 후보는 아래에서 명시적으로 만듭니다.`
+                    ? canLaunchFromCompletion
+                      ? `${progress.displayName} 변경 근거를 준비했습니다. 검토 후보는 아래에서 명시적으로 만듭니다.`
+                      : (progress.completionNotice ?? `${progress.displayName} 변경 근거와 검토 후보 가능 여부를 확인하고 있습니다.`)
                     : `${progress.displayName} 데이터를 검토 큐에 반영했습니다.`
                   : isError
                     ? (progress.errorMessage ?? "동기화 중 오류가 발생했습니다.")
@@ -1460,7 +1513,9 @@ function SyncProgressModal({
                 <ResultMetric label="변경 근거" value={`${changedSourceCount.toLocaleString()}개`} />
               </div>
               <p className="mt-3 text-sm font-medium text-[var(--ink-strong)]">
-                변경 근거 {changedSourceCount.toLocaleString()}개를 준비했습니다. 검토 후보는 아래에서 만듭니다.
+                {canLaunchFromCompletion
+                  ? `변경 근거 ${changedSourceCount.toLocaleString()}개를 준비했습니다. 검토 후보는 아래에서 만듭니다.`
+                  : (progress.completionNotice ?? `변경 근거 ${changedSourceCount.toLocaleString()}개를 확인하고 있습니다.`)}
               </p>
             </>
           ) : (
@@ -1483,6 +1538,7 @@ function SyncProgressModal({
             dryRun={progress.reviewWorkflow.dryRun}
             launchState={progress.reviewWorkflow.launchState}
             terminalStatus={progress.reviewWorkflow.terminalStatus}
+            errorCode={progress.reviewWorkflow.errorCode}
             errorMessage={progress.reviewWorkflow.errorMessage}
             onLaunch={onLaunchReviewCandidates}
             onRetryPreview={onRetryReviewPreview}
@@ -1499,7 +1555,7 @@ function SyncProgressModal({
               백그라운드에서 계속 진행
             </button>
           ) : null}
-          {isComplete && !progress.reviewWorkflow ? (
+          {isComplete && progress.completionCopyMode === "legacy" && !progress.reviewWorkflow ? (
             <a
               href="/review"
               className="liquid-primary inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg px-3 text-sm font-semibold sm:w-auto"

@@ -58,6 +58,7 @@ async function installIntegrationsRoutes(
   options: {
     diagnosticResponse?: typeof diagnostic;
     connectorType?: "gmail" | "slack";
+    diagnosticFailure?: boolean;
     launchStatuses?: Array<Record<string, unknown>>;
     syncResponses?: Array<Record<string, unknown>>;
     runtimeSyncResponses?: Array<Record<string, unknown> | null>;
@@ -190,6 +191,10 @@ async function installIntegrationsRoutes(
     });
   });
   await page.route("**/api/v1/orchestration/v2/company-memory", async (route) => {
+    if (options.diagnosticFailure) {
+      await route.fulfill({ status: 500, contentType: "application/json", json: { detail: "diagnostic unavailable" } });
+      return;
+    }
     await route.fulfill({ contentType: "application/json", json: diagnosticResponse });
   });
   await page.route("**/api/v1/orchestration/v2/company-memory/dry-run", async (route) => {
@@ -204,8 +209,12 @@ async function installIntegrationsRoutes(
   await page.route("**/api/v1/orchestration/v2/company-memory/runs", async (route) => {
     options.onLaunch?.(route.request().postDataJSON());
     const next = launchStatuses.shift() ?? awaitingReviewStatus();
-    if (next.status === 500) {
-      await route.fulfill({ status: 500, contentType: "application/json", json: { detail: "lost response" } });
+    if (typeof next.status === "number") {
+      await route.fulfill({
+        status: next.status,
+        contentType: "application/json",
+        json: { detail: next.code ? { code: next.code } : "lost response" },
+      });
       return;
     }
     await route.fulfill({ contentType: "application/json", json: next });
@@ -328,6 +337,32 @@ test("hides launch when readiness is disabled or unavailable", async ({ page }) 
   await expect(page.getByTestId("sync-progress-modal")).toContainText("검토 항목 저장");
 });
 
+test("does not promise a V2 action when the completed batch has zero canonical refs", async ({ page }) => {
+  await installIntegrationsRoutes(page, {
+    syncResponses: [{ ...completedSync, changed_source_refs: [] }],
+  });
+
+  await completeGmailSync(page);
+  const modal = page.getByTestId("sync-progress-modal");
+  await expect(page.getByTestId("review-candidate-launch-panel")).toHaveCount(0);
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("변경 근거를 찾지 못했습니다");
+  await expect(modal).not.toContainText("아래에서 명시적으로 만듭니다");
+  await expect(modal).not.toContainText("검토 큐에 반영했습니다");
+  await expect(modal).not.toContainText("AI 분석");
+});
+
+test("shows bounded unavailable guidance when the V2 diagnostic fails permanently", async ({ page }) => {
+  await installIntegrationsRoutes(page, { diagnosticFailure: true });
+
+  await completeGmailSync(page);
+  const modal = page.getByTestId("sync-progress-modal");
+  await expect(page.getByTestId("review-candidate-launch-panel")).toHaveCount(0);
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("검토 후보 기능을 확인할 수 없습니다");
+  await expect(modal).not.toContainText("아래에서 명시적으로 만듭니다");
+  await expect(modal).not.toContainText("검토 큐에 반영했습니다");
+  await expect(modal).not.toContainText("AI 분석");
+});
+
 test("keeps completion copy truthful while the V2 diagnostic is still resolving", async ({ page }) => {
   let resolveDiagnostic: (() => void) | undefined;
   const diagnosticGate = new Promise<void>((resolve) => {
@@ -341,8 +376,9 @@ test("keeps completion copy truthful while the V2 diagnostic is still resolving"
 
   await completeGmailSync(page);
   const modal = page.getByTestId("sync-progress-modal");
-  await expect(modal.getByTestId("sync-modal-step")).toContainText("변경 근거를 준비했습니다");
+  await expect(modal.getByTestId("sync-modal-step")).toContainText("검토 후보 가능 여부를 확인하고 있습니다");
   await expect(modal).not.toContainText("검토 큐에 반영했습니다");
+  await expect(modal).not.toContainText("아래에서 명시적으로 만듭니다");
   resolveDiagnostic?.();
   await expect(page.getByTestId("review-candidate-launch-panel")).toBeVisible();
 });
@@ -374,6 +410,36 @@ test("reuses one stable client request id after response loss", async ({ page })
   expect(launchBodies).toHaveLength(2);
   expect(launchBodies[0]).toEqual(launchBodies[1]);
 });
+
+for (const [code, guidance] of [
+  ["evidence_changed", "데이터 변경 후 다시 동기화"],
+  ["idempotency_key_reused", "새 미리보기를 준비"],
+  ["budget_exceeded", "새 미리보기를 준비"],
+] as const) {
+  test(`does not replay a stable launch id after non-retryable ${code}`, async ({ page }) => {
+    const launchBodies: unknown[] = [];
+    await installIntegrationsRoutes(page, {
+      launchStatuses: [{ status: 409, code }],
+      onLaunch: (body) => launchBodies.push(body),
+    });
+
+    await completeGmailSync(page);
+    const panel = page.getByTestId("review-candidate-launch-panel");
+    const button = panel.getByRole("button", { name: "검토 후보 만들기" });
+    await button.click();
+
+    await expect(panel).toContainText(guidance);
+    await expect(panel).not.toContainText(code);
+    await expect(button).toBeDisabled();
+    expect(launchBodies).toEqual([
+      {
+        source_refs: sourceRefs,
+        agent_names: diagnostic.default_agent_names,
+        client_request_id: "review:gmail-sync-review-v2:company-memory-review-selection:v1",
+      },
+    ]);
+  });
+}
 
 test("does not navigate when a delayed launch belongs to a superseded sync", async ({ page }) => {
   let signalLaunchStarted: (() => void) | undefined;
