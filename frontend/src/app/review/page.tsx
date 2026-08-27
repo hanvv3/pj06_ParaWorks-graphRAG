@@ -18,6 +18,7 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, type MouseEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ReviewWorkflowContextPanel } from "@/app/review/ReviewWorkflowContextPanel";
+import { deriveReviewBulkProjectState, parseReviewWorkflowQuery } from "@/app/review/reviewWorkflowContext";
 import { SourceEvidenceDrawer } from "@/components/shared/SourceEvidenceDrawer";
 import { apiGet, apiPatch, apiPost } from "@/lib/api/client";
 import { getReviewWorkflowStatus, resumeReviewWorkflow } from "@/lib/api/reviewWorkflow";
@@ -374,10 +375,13 @@ function ReviewPageContent() {
   const [workflowUnavailable, setWorkflowUnavailable] = useState(false);
   const [workflowActionPending, setWorkflowActionPending] = useState(false);
   const searchParams = useSearchParams();
-  const workflowThreadId = searchParams.get("workflow_thread_id")?.trim() || undefined;
+  const workflowQuery = parseReviewWorkflowQuery(searchParams.get("workflow_thread_id"));
+  const workflowThreadId = workflowQuery.kind === "workflow" ? workflowQuery.workflowThreadId : undefined;
+  const invalidWorkflowContext = workflowQuery.kind === "invalid";
   const itemId = Number(searchParams.get("itemId") ?? searchParams.get("item_id"));
   const deepLinkItemId = Number.isInteger(itemId) && itemId > 0 ? itemId : undefined;
-  const queryKey = `${workflowThreadId ?? ""}:${deepLinkItemId ?? ""}`;
+  const workflowQueryKey = workflowQuery.kind === "workflow" ? `workflow:${workflowThreadId}` : workflowQuery.kind;
+  const queryKey = `${workflowQueryKey}:${deepLinkItemId ?? ""}`;
   const [renderedContextKey, setRenderedContextKey] = useState(queryKey);
   const contextGeneration = useRef(0);
   const listRequestGeneration = useRef(0);
@@ -404,6 +408,7 @@ function ReviewPageContent() {
     requestContext = contextGeneration.current,
     requestKey = queryKey,
   ) => {
+    if (invalidWorkflowContext) return;
     if (requestContext !== contextGeneration.current || requestKey !== currentQueryKey.current) return;
     const request = ++listRequestGeneration.current;
     if (requestContext === contextGeneration.current) {
@@ -463,12 +468,13 @@ function ReviewPageContent() {
         setLoading(false);
       }
     }
-  }, [queryKey, workflowThreadId]);
+  }, [invalidWorkflowContext, queryKey, workflowThreadId]);
 
   const loadWorkflowStatus = useCallback(async (
     requestContext = contextGeneration.current,
     requestKey = queryKey,
   ) => {
+    if (invalidWorkflowContext) return;
     if (!workflowThreadId) return;
     if (requestContext !== contextGeneration.current || requestKey !== currentQueryKey.current) return;
     const request = ++statusRequestGeneration.current;
@@ -501,7 +507,7 @@ function ReviewPageContent() {
         setWorkflowLoading(false);
       }
     }
-  }, [queryKey, workflowThreadId]);
+  }, [invalidWorkflowContext, queryKey, workflowThreadId]);
 
   useEffect(() => {
     const requestContext = ++contextGeneration.current;
@@ -534,9 +540,10 @@ function ReviewPageContent() {
     setWorkflowLoading(Boolean(workflowThreadId));
     setWorkflowActionPending(false);
     setRenderedContextKey(queryKey);
+    if (invalidWorkflowContext) return;
     void loadItems(0, false, requestContext, queryKey);
     if (workflowThreadId) void loadWorkflowStatus(requestContext, queryKey);
-  }, [deepLinkItemId, loadItems, loadWorkflowStatus, queryKey, workflowThreadId]);
+  }, [deepLinkItemId, invalidWorkflowContext, loadItems, loadWorkflowStatus, queryKey, workflowThreadId]);
 
   const refreshReviewData = useCallback(async (context: ReviewQueryContext) => {
     if (!isCurrentQueryContext(context)) return;
@@ -813,8 +820,13 @@ function ReviewPageContent() {
   const visibleLoading = isRenderedContextCurrent ? loading : true;
   const visibleTotalCount = isRenderedContextCurrent ? totalCount : 0;
   const visibleHasMore = isRenderedContextCurrent && hasMore;
-  const visibleDefinedProjects = isRenderedContextCurrent && !visibleLoading ? definedProjects : [];
-  const bulkProjectDisabled = !isRenderedContextCurrent || visibleLoading;
+  const bulkProjectState = deriveReviewBulkProjectState({
+    isRenderedContextCurrent,
+    loading: visibleLoading,
+    invalidWorkflowContext,
+    bulkProjectKey,
+    definedProjects,
+  });
   const totalAgentItems = visibleGroups.reduce((acc, g) => acc + g.items.filter(i => Boolean(i.payload.agent_name)).length, 0);
   const loadedItemCount = visibleGroups.reduce((acc, group) => acc + group.items.length, 0);
   const loadedItems = visibleGroups.flatMap((group) => group.items);
@@ -902,6 +914,7 @@ function ReviewPageContent() {
           status={visibleWorkflowStatus}
           loading={visibleWorkflowLoading}
           unavailable={visibleWorkflowUnavailable}
+          invalidContext={invalidWorkflowContext}
           actionPending={workflowActionPending}
           onResume={() => void resumeWorkflow()}
         />
@@ -933,7 +946,7 @@ function ReviewPageContent() {
           <button
             type="button"
             onClick={() => void refreshReviewData(captureQueryContext())}
-            disabled={!isRenderedContextCurrent || visibleLoading}
+            disabled={invalidWorkflowContext || !isRenderedContextCurrent || visibleLoading}
             className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-[var(--line-soft)] bg-[var(--glass-elevated)] px-3 text-sm font-semibold text-ink shadow-sm hover:bg-[var(--glass-strong)] disabled:cursor-not-allowed disabled:text-[var(--ink-muted)]"
           >
             <RefreshCw className="h-4 w-4" aria-hidden="true" />
@@ -1006,15 +1019,15 @@ function ReviewPageContent() {
             </span>
             <select
               data-testid="review-bulk-project"
-              value={isRenderedContextCurrent ? bulkProjectKey : ""}
+              value={bulkProjectState.value}
               onChange={(event) => {
-                if (isRenderedContextCurrent) setBulkProjectKey(event.target.value);
+                if (!bulkProjectState.disabled) setBulkProjectKey(event.target.value);
               }}
-              disabled={bulkProjectDisabled}
+              disabled={bulkProjectState.disabled}
               className="h-9 min-w-[180px] rounded-lg border border-[var(--line-soft)] bg-white px-3 text-sm font-semibold text-[var(--ink)] outline-none focus:border-[#21132b]"
             >
               <option value="">프로젝트 선택</option>
-              {visibleDefinedProjects.map((project) => (
+              {bulkProjectState.projects.map((project) => (
                 <option key={project.project_key} value={project.project_key}>
                   {project.name}
                 </option>

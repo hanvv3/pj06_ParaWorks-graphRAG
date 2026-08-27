@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { deriveReviewBulkProjectState, parseReviewWorkflowQuery } from "../src/app/review/reviewWorkflowContext";
 
 const threadId = "workflow-thread-1";
 
@@ -16,6 +17,23 @@ const item = {
   status: "pending_review",
   reviewer_id: null,
 };
+
+test("bulk project derived state hides stale workflow selection before effects", () => {
+  expect(deriveReviewBulkProjectState({
+    isRenderedContextCurrent: false,
+    loading: false,
+    invalidWorkflowContext: false,
+    bulkProjectKey: "project-a",
+    definedProjects: [{ project_key: "project-a", name: "프로젝트 A" }],
+  })).toEqual({ value: "", projects: [], disabled: true });
+});
+
+test("workflow query parsing distinguishes absent from invalid opaque ids", () => {
+  expect(parseReviewWorkflowQuery(null)).toEqual({ kind: "global" });
+  expect(parseReviewWorkflowQuery("  workflow-thread-1  ")).toEqual({ kind: "workflow", workflowThreadId: "workflow-thread-1" });
+  expect(parseReviewWorkflowQuery("   ")).toEqual({ kind: "invalid" });
+  expect(parseReviewWorkflowQuery("x".repeat(65))).toEqual({ kind: "invalid" });
+});
 
 function workflowStatus(overrides: Record<string, unknown> = {}) {
   return {
@@ -429,4 +447,43 @@ test("a projects metadata outage does not hide a valid filtered review list", as
   await page.goto(`/review?workflow_thread_id=${threadId}`);
   await expect(page.getByText("Workflow", { exact: true })).toBeVisible();
   await expect(page.getByText("projects unavailable", { exact: false })).toHaveCount(0);
+});
+
+test("a whitespace workflow query fails closed without falling back to the global queue", async ({ page }) => {
+  let reviewRequests = 0;
+  let globalReviewRequests = 0;
+  let statusRequests = 0;
+  await installReviewRoutes(page);
+  await page.route("**/api/v1/review?status=pending_review**", async (route) => {
+    reviewRequests += 1;
+    if (!new URL(route.request().url()).searchParams.has("workflow_thread_id")) globalReviewRequests += 1;
+    await route.fulfill({ contentType: "application/json", json: {
+      groups: [{ group_id: "history_event:workflow", title: "Workflow", item_type: "history_event", status: "pending_review", permission_level: "internal", items: [item], total_count: 1, avg_confidence: 0.9 }],
+      items: [item], total_count: 1, limit: 50, offset: 0, has_more: false, include_previews: false,
+    } });
+  });
+  await page.route("**/api/v1/orchestration/v2/company-memory/runs/**", async (route) => {
+    statusRequests += 1;
+    await route.fulfill({ contentType: "application/json", json: workflowStatus() });
+  });
+
+  await page.goto(`/review?workflow_thread_id=${threadId}`);
+  await expect(page.getByText("Workflow", { exact: true })).toBeVisible();
+  await page.getByTestId("review-select-all").click();
+  const requestsAfterValidContext = reviewRequests;
+  const statusAfterValidContext = statusRequests;
+  await page.evaluate(() => {
+    window.history.pushState({}, "", "/review?workflow_thread_id=%20%20");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+
+  await expect(page.getByTestId("review-workflow-context")).toContainText("워크플로 정보를 확인할 수 없습니다");
+  await expect(page.getByText("Workflow", { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("review-selected-count")).toHaveText("선택 0개");
+  await expect(page.getByTestId("review-select-all")).toBeDisabled();
+  await expect(page.getByTestId("review-bulk-project")).toBeDisabled();
+  await expect(page.getByTestId("review-bulk-approve")).toBeDisabled();
+  expect(reviewRequests).toBe(requestsAfterValidContext);
+  expect(globalReviewRequests).toBe(0);
+  expect(statusRequests).toBe(statusAfterValidContext);
 });

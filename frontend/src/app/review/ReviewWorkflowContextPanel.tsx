@@ -7,6 +7,7 @@ type ReviewWorkflowContextPanelProps = {
   status?: ReviewWorkflowStatus;
   loading: boolean;
   unavailable: boolean;
+  invalidContext: boolean;
   actionPending: boolean;
   onResume: () => void;
 };
@@ -63,10 +64,19 @@ export function ReviewWorkflowContextPanel({
   status,
   loading,
   unavailable,
+  invalidContext,
   actionPending,
   onResume,
 }: ReviewWorkflowContextPanelProps) {
-  if (!status && !loading && !unavailable) return null;
+  if (!status && !loading && !unavailable && !invalidContext) return null;
+
+  if (invalidContext) {
+    return (
+      <section data-testid="review-workflow-context" className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+        워크플로 정보를 확인할 수 없습니다. 주소를 확인한 뒤 다시 시도하세요.
+      </section>
+    );
+  }
 
   if (unavailable) {
     return (
