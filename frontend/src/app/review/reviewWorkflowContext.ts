@@ -8,12 +8,12 @@ export type ReviewWorkflowQuery =
   | { kind: "invalid" }
   | { kind: "workflow"; workflowThreadId: string };
 
-const REVIEW_WORKFLOW_THREAD_ID_MAX_LENGTH = 64;
+const SERVER_ISSUED_REVIEW_WORKFLOW_ID = /^[0-9a-f]{32}$/;
 
 export function parseReviewWorkflowQuery(rawWorkflowThreadId: string | null): ReviewWorkflowQuery {
   if (rawWorkflowThreadId === null) return { kind: "global" };
 
-  if (!rawWorkflowThreadId.trim() || Array.from(rawWorkflowThreadId).length > REVIEW_WORKFLOW_THREAD_ID_MAX_LENGTH) {
+  if (!SERVER_ISSUED_REVIEW_WORKFLOW_ID.test(rawWorkflowThreadId)) {
     return { kind: "invalid" };
   }
 

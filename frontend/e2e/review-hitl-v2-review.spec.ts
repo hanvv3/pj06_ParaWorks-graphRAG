@@ -1,7 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import { deriveReviewBulkProjectState, parseReviewWorkflowQuery } from "../src/app/review/reviewWorkflowContext";
 
-const threadId = "workflow-thread-1";
+const threadId = "0123456789abcdef0123456789abcdef";
+const secondThreadId = "fedcba9876543210fedcba9876543210";
 
 const item = {
   id: 1001,
@@ -28,17 +29,21 @@ test("bulk project derived state hides stale workflow selection before effects",
   })).toEqual({ value: "", projects: [], disabled: true });
 });
 
-test("workflow query parsing preserves opaque ids and applies Unicode code point bounds", () => {
-  const punctuationId = "review:v2/[team]?owner=a+b&stage=human";
-  const edgeWhitespaceId = " workflow-thread-1 ";
-  const nonBmpId = "😀".repeat(33);
+test("workflow query parsing accepts only server-issued V2 workflow ids", () => {
   expect(parseReviewWorkflowQuery(null)).toEqual({ kind: "global" });
-  expect(parseReviewWorkflowQuery(punctuationId)).toEqual({ kind: "workflow", workflowThreadId: punctuationId });
-  expect(parseReviewWorkflowQuery(edgeWhitespaceId)).toEqual({ kind: "workflow", workflowThreadId: edgeWhitespaceId });
-  expect(parseReviewWorkflowQuery(nonBmpId)).toEqual({ kind: "workflow", workflowThreadId: nonBmpId });
-  expect(parseReviewWorkflowQuery("x".repeat(64))).toEqual({ kind: "workflow", workflowThreadId: "x".repeat(64) });
-  expect(parseReviewWorkflowQuery("x".repeat(65))).toEqual({ kind: "invalid" });
-  expect(parseReviewWorkflowQuery(" \t\n ")).toEqual({ kind: "invalid" });
+  expect(parseReviewWorkflowQuery(threadId)).toEqual({ kind: "workflow", workflowThreadId: threadId });
+  for (const invalidId of [
+    threadId.toUpperCase(),
+    threadId.slice(0, 31),
+    `${threadId}0`,
+    ` ${threadId}`,
+    `${threadId} `,
+    "review/v2.path",
+    "😀".repeat(32),
+    " \t\n ",
+  ]) {
+    expect(parseReviewWorkflowQuery(invalidId)).toEqual({ kind: "invalid" });
+  }
 });
 
 function workflowStatus(overrides: Record<string, unknown> = {}) {
@@ -117,6 +122,39 @@ test("filters review items and enables explicit completion only when ready", asy
   await expect(page.getByRole("button", { name: "검토 완료" })).toBeEnabled();
   await page.getByRole("button", { name: "검토 완료" }).click();
   await expect.poll(() => resumes).toBe(1);
+});
+
+test("a server-issued workflow id flows unchanged through filter, status, and explicit resume", async ({ page }) => {
+  const listFilterIds: string[] = [];
+  const statusPaths: string[] = [];
+  const resumePaths: string[] = [];
+  const statusPath = `/api/v1/orchestration/v2/company-memory/runs/${threadId}`;
+  const resumePath = `${statusPath}/resume`;
+  await installReviewRoutes(page);
+  await page.route("**/api/v1/review?status=pending_review**", async (route) => {
+    listFilterIds.push(new URL(route.request().url()).searchParams.get("workflow_thread_id") ?? "");
+    await route.fulfill({ contentType: "application/json", json: {
+      groups: [{ group_id: "history_event:workflow", title: "Workflow", item_type: "history_event", status: "pending_review", permission_level: "internal", items: [item], total_count: 1, avg_confidence: 0.9 }],
+      items: [item], total_count: 1, limit: 50, offset: 0, has_more: false, include_previews: false,
+    } });
+  });
+  await page.route(`**${statusPath}`, async (route) => {
+    statusPaths.push(new URL(route.request().url()).pathname);
+    await route.fulfill({ contentType: "application/json", json: workflowStatus({ review_resolution_ready: true, resume_allowed: true }) });
+  });
+  await page.route(`**${resumePath}`, async (route) => {
+    resumePaths.push(new URL(route.request().url()).pathname);
+    await route.fulfill({ contentType: "application/json", json: workflowStatus({ status: "completed" }) });
+  });
+
+  await page.goto(`/review?workflow_thread_id=${threadId}`);
+  await expect(page.getByRole("button", { name: "검토 완료" })).toBeEnabled();
+  await page.getByRole("button", { name: "검토 완료" }).click();
+  await expect.poll(() => resumePaths).toEqual([resumePath]);
+  await expect.poll(() => listFilterIds.length).toBeGreaterThan(1);
+  await expect.poll(() => statusPaths.length).toBeGreaterThan(1);
+  expect(listFilterIds.every((id) => id === threadId)).toBe(true);
+  expect(statusPaths.every((path) => path === statusPath)).toBe(true);
 });
 
 test("review item actions never auto resume the workflow", async ({ page }) => {
@@ -206,7 +244,6 @@ test("an empty hidden workflow keeps group and bulk controls safe", async ({ pag
 });
 
 test("same-route workflow navigation replaces the queue before fetching the new context", async ({ page }) => {
-  const secondThreadId = "workflow-thread-2";
   const secondItem = { ...item, id: 2002, payload: { ...item.payload, title: "Second workflow candidate" } };
   const requestedThreads: string[] = [];
   await installReviewRoutes(page);
@@ -239,7 +276,6 @@ test("same-route workflow navigation replaces the queue before fetching the new 
 });
 
 test("late responses from a superseded workflow cannot overwrite the newer queue", async ({ page }) => {
-  const secondThreadId = "workflow-thread-2";
   let releaseFirst: (() => void) | undefined;
   const firstResponse = new Promise<void>((resolve) => { releaseFirst = resolve; });
   await installReviewRoutes(page);
@@ -353,7 +389,6 @@ test("in-progress lifecycle states have distinct Korean guidance", async ({ page
 });
 
 test("a mutation from workflow A cannot refresh or overwrite workflow B after navigation", async ({ page }) => {
-  const secondThreadId = "workflow-thread-2";
   const secondItem = { ...item, id: 2002, payload: { ...item.payload, title: "Workflow B candidate" } };
   const listThreads: string[] = [];
   let releaseApproval: (() => void) | undefined;
@@ -396,7 +431,6 @@ test("a mutation from workflow A cannot refresh or overwrite workflow B after na
 });
 
 test("a query replacement never leaves old workflow content visible while the new list is pending", async ({ page }) => {
-  const secondThreadId = "workflow-thread-2";
   let releaseSecond: (() => void) | undefined;
   const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
   await installReviewRoutes(page);
