@@ -2,6 +2,8 @@ from sqlalchemy import select
 
 from backend.app.models import (
     AgentRun,
+    AgentWorkflowEvidenceRef,
+    AgentWorkflowThread,
     AuditLog,
     Document,
     DocumentChunk,
@@ -12,6 +14,73 @@ from backend.app.models import (
     TimelineEvent,
     Todo,
 )
+from backend.app.schemas.review_workflow import (
+    COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+    COMPANY_MEMORY_REVIEW_WORKFLOW,
+)
+
+
+def _seed_filtered_review_workflow(
+    db_session,
+    thread_id: str,
+    *,
+    security_scope_id: str = 'default',
+    permission_level: str = 'internal',
+    statuses: tuple[str, ...] = ('pending_review',),
+) -> AgentWorkflowThread:
+    source = Source(
+        source_type='gmail',
+        source_id=f'gmail:{thread_id}',
+        source_url=f'https://mail.example.test/{thread_id}',
+        title=f'Workflow source {thread_id}',
+        permission_level=permission_level,
+        raw_metadata={'content_signature': f'signature-{thread_id}'},
+    )
+    db_session.add(source)
+    db_session.flush()
+    thread = AgentWorkflowThread(
+        thread_id=thread_id,
+        workflow_name=COMPANY_MEMORY_REVIEW_WORKFLOW,
+        graph_version=COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+        checkpoint_thread_id=f'review-v2:{thread_id}',
+        checkpoint_store='memory',
+        owner_subject_id='demo-admin',
+        security_scope_id=security_scope_id,
+        input_hash='a' * 64,
+        evidence_version_hash='b' * 64,
+        status='awaiting_human_review',
+    )
+    db_session.add(thread)
+    db_session.add(
+        AgentWorkflowEvidenceRef(
+            workflow_thread_id=thread_id,
+            ordinal=0,
+            canonical_source_type='gmail',
+            canonical_table='sources',
+            canonical_row_id=source.id,
+            document_version_id=None,
+            external_revision=None,
+            content_signature=source.raw_metadata['content_signature'],
+            permission_level_snapshot=permission_level,
+            content_fingerprint='c' * 64,
+        )
+    )
+    for index, status in enumerate(statuses):
+        db_session.add(
+            ReviewItem(
+                item_type='history_event',
+                payload={'title': f'{thread_id} candidate {index + 1}'},
+                source_links=[source.source_url],
+                source_snippets=[f'{thread_id} snippet {index + 1}'],
+                confidence_score=0.8 + (index / 100),
+                permission_level=permission_level,
+                status=status,
+                workflow_thread_id=thread_id,
+                candidate_key=f'{thread_id}-candidate-{index + 1}',
+            )
+        )
+    db_session.commit()
+    return thread
 
 
 def test_approve_review_item_changes_status(client) -> None:
@@ -20,6 +89,140 @@ def test_approve_review_item_changes_status(client) -> None:
     response = client.post(f"/api/v1/review/{item['id']}/approve")
     assert response.status_code == 200
     assert response.json()['status'] == 'approved'
+
+
+def test_visible_workflow_filter_returns_only_bound_items(client, db_session) -> None:
+    visible = _seed_filtered_review_workflow(
+        db_session,
+        'workflow-visible-filter',
+        statuses=('pending_review', 'pending_review'),
+    )
+    db_session.add(
+        ReviewItem(
+            item_type='todo',
+            payload={'title': 'Unrelated queue item'},
+            source_links=['https://mail.example.test/unrelated'],
+            source_snippets=['Unrelated visible review item'],
+            confidence_score=0.7,
+            permission_level='internal',
+            status='pending_review',
+        )
+    )
+    db_session.commit()
+
+    response = client.get(
+        '/api/v1/review',
+        params={
+            'status': 'pending_review',
+            'workflow_thread_id': visible.thread_id,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['total_count'] == 2
+    assert len(body['items']) == 2
+    assert all(
+        item['payload']['title'].startswith('workflow-visible-filter')
+        for item in body['items']
+    )
+
+
+def test_hidden_missing_and_zero_visible_workflow_filters_are_identical_empty_results(
+    client,
+    db_session,
+) -> None:
+    foreign = _seed_filtered_review_workflow(
+        db_session,
+        'workflow-foreign-filter',
+        security_scope_id='another-security-scope',
+    )
+    hidden = _seed_filtered_review_workflow(
+        db_session,
+        'workflow-hidden-filter',
+        permission_level='restricted',
+    )
+    zero = _seed_filtered_review_workflow(
+        db_session,
+        'workflow-zero-filter',
+        statuses=(),
+    )
+
+    responses = [
+        client.get(
+            '/api/v1/review',
+            params={'workflow_thread_id': foreign.thread_id},
+        ),
+        client.get(
+            '/api/v1/review',
+            params={'workflow_thread_id': hidden.thread_id},
+            headers={'X-Demo-User': 'viewer'},
+        ),
+        client.get(
+            '/api/v1/review',
+            params={'workflow_thread_id': 'workflow-missing-filter'},
+        ),
+        client.get(
+            '/api/v1/review',
+            params={'workflow_thread_id': zero.thread_id},
+        ),
+    ]
+
+    projections = [
+        {
+            'items': response.json()['items'],
+            'groups': response.json()['groups'],
+            'total_count': response.json()['total_count'],
+        }
+        for response in responses
+    ]
+    assert all(response.status_code == 200 for response in responses)
+    assert projections == [
+        {'items': [], 'groups': [], 'total_count': 0},
+    ] * 4
+
+
+def test_workflow_filter_runs_before_pagination_grouping_and_respects_status(
+    client,
+    db_session,
+) -> None:
+    workflow = _seed_filtered_review_workflow(
+        db_session,
+        'workflow-order-filter',
+        statuses=('pending_review', 'approved', 'approved'),
+    )
+    for index in range(3):
+        db_session.add(
+            ReviewItem(
+                item_type='history_event',
+                payload={'title': f'Unrelated approved {index}'},
+                source_links=[f'https://mail.example.test/unrelated-{index}'],
+                source_snippets=[f'Unrelated {index}'],
+                confidence_score=0.7,
+                permission_level='internal',
+                status='approved',
+            )
+        )
+    db_session.commit()
+
+    response = client.get(
+        '/api/v1/review',
+        params={
+            'workflow_thread_id': workflow.thread_id,
+            'status': 'approved',
+            'limit': 1,
+            'offset': 1,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['total_count'] == 2
+    assert len(body['items']) == 1
+    assert body['has_more'] is False
+    assert sum(group['total_count'] for group in body['groups']) == 1
+    assert body['items'][0]['status'] == 'approved'
+    assert body['items'][0]['payload']['title'].startswith('workflow-order-filter')
 
 
 def test_reject_review_item_changes_status(client) -> None:

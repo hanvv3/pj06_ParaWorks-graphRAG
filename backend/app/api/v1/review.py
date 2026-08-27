@@ -13,7 +13,14 @@ from backend.app.knowledge.promotion import (
     build_promotion_preview,
     build_promotion_response,
 )
-from backend.app.models import AgentRun, Project, ReviewItem
+from backend.app.models import (
+    AgentRun,
+    AgentWorkflowEvidenceRef,
+    AgentWorkflowThread,
+    Project,
+    ReviewItem,
+    Source,
+)
 from backend.app.review.transitions import (
     InvalidReviewTransition,
     ReviewAction,
@@ -24,6 +31,10 @@ from backend.app.schemas.review import (
     ReviewBulkActionRequest,
     ReviewEvidenceRequest,
     ReviewItemUpdate,
+)
+from backend.app.schemas.review_workflow import (
+    COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+    COMPANY_MEMORY_REVIEW_WORKFLOW,
 )
 from backend.app.services.audit import record_audit_log
 from backend.app.services.review_display import review_item_display_title
@@ -78,11 +89,23 @@ def list_review_items(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     include_previews: bool = False,
+    workflow_thread_id: str | None = Query(default=None, min_length=1, max_length=64),
 ) -> dict:
     items = db.scalars(
-        select(ReviewItem).where(ReviewItem.status == status).order_by(ReviewItem.created_at.desc(), ReviewItem.id.desc())
+        select(ReviewItem).order_by(ReviewItem.created_at.desc(), ReviewItem.id.desc())
     ).all()
-    all_visible_items = _sort_review_items_for_queue(_visible_review_items(items, user, settings))
+    all_visible_items = _visible_review_items(items, user, settings)
+    if workflow_thread_id is not None:
+        all_visible_items = _visible_workflow_items(
+            db,
+            items=all_visible_items,
+            user=user,
+            settings=settings,
+            workflow_thread_id=workflow_thread_id,
+        )
+    all_visible_items = _sort_review_items_for_queue([
+        item for item in all_visible_items if item.status == status
+    ])
     total_count = len(all_visible_items)
     visible_items = all_visible_items[offset : offset + limit]
     agent_runs = _agent_runs_by_id(db, visible_items)
@@ -498,6 +521,61 @@ def _source_ids_for_legacy_audit(item: ReviewItem) -> list[str]:
 def _visible_review_items(items: list[ReviewItem], user: DemoUser, settings: Settings) -> list[ReviewItem]:
     environment_items = items if settings.paraworks_demo_mode else filter_review_items(items)
     return [item for item in environment_items if _user_can_see_review_item(user, item)]
+
+
+def _visible_workflow_items(
+    db: Session,
+    *,
+    items: list[ReviewItem],
+    user: DemoUser,
+    settings: Settings,
+    workflow_thread_id: str,
+) -> list[ReviewItem]:
+    thread = db.get(AgentWorkflowThread, workflow_thread_id)
+    if (
+        thread is None
+        or thread.security_scope_id != settings.agent_runtime_security_scope_id
+        or thread.workflow_name != COMPANY_MEMORY_REVIEW_WORKFLOW
+        or thread.graph_version != COMPANY_MEMORY_REVIEW_GRAPH_VERSION
+    ):
+        return []
+    refs = tuple(
+        db.scalars(
+            select(AgentWorkflowEvidenceRef)
+            .where(
+                AgentWorkflowEvidenceRef.workflow_thread_id == workflow_thread_id
+            )
+            .order_by(AgentWorkflowEvidenceRef.ordinal)
+        ).all()
+    )
+    if not refs or any(ref.canonical_table != 'sources' for ref in refs):
+        return []
+    source_ids = tuple(ref.canonical_row_id for ref in refs)
+    sources = tuple(
+        db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
+    )
+    sources_by_id = {source.id: source for source in sources}
+    if len(sources_by_id) != len(source_ids) or any(
+        sources_by_id[ref.canonical_row_id].source_type
+        != ref.canonical_source_type
+        or sources_by_id[ref.canonical_row_id].permission_level
+        not in user.permission_levels
+        for ref in refs
+    ):
+        return []
+    bound_items = tuple(
+        db.scalars(
+            select(ReviewItem)
+            .where(ReviewItem.workflow_thread_id == workflow_thread_id)
+            .order_by(ReviewItem.id)
+        ).all()
+    )
+    if not bound_items:
+        return []
+    visible_ids = {item.id for item in items}
+    if any(item.id not in visible_ids for item in bound_items):
+        return []
+    return [item for item in items if item.workflow_thread_id == workflow_thread_id]
 
 
 def _sort_review_items_for_queue(items: list[ReviewItem]) -> list[ReviewItem]:

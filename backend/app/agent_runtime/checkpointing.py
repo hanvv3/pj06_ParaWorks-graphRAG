@@ -82,6 +82,10 @@ class _StrictCheckpointSerializer(JsonPlusSerializer):
 def resolve_checkpoint_mode(settings: Settings) -> CheckpointMode:
     if not settings.langgraph_review_v2_enabled:
         return 'disabled'
+    return _resolve_enabled_checkpoint_mode(settings)
+
+
+def _resolve_enabled_checkpoint_mode(settings: Settings) -> CheckpointMode:
     try:
         backend = make_url(settings.resolved_database_url()).get_backend_name()
     except (ArgumentError, ValueError):
@@ -188,16 +192,26 @@ class CheckpointRuntime:
     def readiness(self) -> CheckpointReadiness:
         return self._readiness
 
-    def start(self) -> None:
+    def start(self, preserve_existing_review_threads: bool = False) -> None:
         if self._closed:
             raise CheckpointUnavailableError(_CHECKPOINT_RUNTIME_CLOSED_ERROR)
         if self._started:
             return
         self._started = True
+        mode = self._mode
+        if mode == 'disabled' and preserve_existing_review_threads:
+            mode = _resolve_enabled_checkpoint_mode(self._settings)
+            self._readiness = CheckpointReadiness(
+                enabled=True,
+                mode=mode,
+                ready=False,
+                durable=False,
+                checkpoint_store=mode,
+            )
         serializer = build_strict_checkpoint_serializer()
-        if self._mode == 'disabled':
+        if mode == 'disabled':
             return
-        if self._mode == 'memory':
+        if mode == 'memory':
             self._saver = InMemorySaver(serde=serializer)
             self._readiness = CheckpointReadiness(
                 enabled=True,
