@@ -858,6 +858,8 @@ export type SlackRuntimeStatus = {
     status: string;
     message: string;
     progress_pct: number;
+    changed_source_ids?: string[];
+    changed_source_refs?: ReviewWorkflowSourceRef[];
     created_at?: string | null;
     updated_at?: string | null;
   } | null;
@@ -894,6 +896,8 @@ export type GoogleRuntimeStatus = {
     status: string;
     message: string;
     progress_pct: number;
+    changed_source_ids?: string[];
+    changed_source_refs?: ReviewWorkflowSourceRef[];
     created_at?: string | null;
     updated_at?: string | null;
   } | null;

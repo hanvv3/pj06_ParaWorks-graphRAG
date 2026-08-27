@@ -1,6 +1,7 @@
 import type {
   ReviewWorkflowDiagnostic,
   ReviewWorkflowDryRun,
+  ReviewWorkflowLifecycleStatus,
 } from "@/lib/api/types";
 
 type LaunchState =
@@ -15,8 +16,10 @@ type ReviewCandidateLaunchPanelProps = {
   diagnostic: ReviewWorkflowDiagnostic;
   dryRun?: ReviewWorkflowDryRun;
   launchState: LaunchState;
+  terminalStatus?: ReviewWorkflowLifecycleStatus;
   errorMessage?: string;
   onLaunch: () => void;
+  onRetryPreview: () => void;
 };
 
 function formatUsd(value: number) {
@@ -28,13 +31,16 @@ export function ReviewCandidateLaunchPanel({
   diagnostic,
   dryRun,
   launchState,
+  terminalStatus,
   errorMessage,
   onLaunch,
+  onRetryPreview,
 }: ReviewCandidateLaunchPanelProps) {
   const previewLoading = launchState === "loading_preview";
   const launching = launchState === "launching";
   const budgetExceeded = dryRun?.budget_status === "over_budget";
-  const disabled = previewLoading || launching || budgetExceeded || !dryRun;
+  const terminal = launchState === "terminal" || launchState === "no_candidates";
+  const disabled = previewLoading || launching || budgetExceeded || terminal || !dryRun;
 
   return (
     <section
@@ -60,6 +66,10 @@ export function ReviewCandidateLaunchPanel({
         </div>
       ) : null}
 
+      {dryRun?.budget_status === "within_budget" ? (
+        <p className="mt-3 text-sm font-medium text-emerald-700">예산 이내</p>
+      ) : null}
+
       {dryRun?.budget_status === "over_budget" ? (
         <p className="mt-3 text-sm font-medium text-rose-700">예산 초과로 검토 후보를 만들 수 없습니다.</p>
       ) : null}
@@ -79,13 +89,27 @@ export function ReviewCandidateLaunchPanel({
       ) : null}
       {launchState === "terminal" ? (
         <p className="mt-3 text-sm font-medium text-[var(--ink-strong)]">
-          검토 후보 만들기가 완료되지 않았습니다. 잠시 후 다시 시도해 주세요.
+          {terminalStatus === "cancelled"
+            ? "작업 취소됨 — 이 동기화 배치의 검토 후보 만들기는 다시 실행할 수 없습니다."
+            : terminalStatus === "failed"
+              ? "작업 실패 — 이 동기화 배치의 검토 후보 만들기는 다시 실행할 수 없습니다."
+              : "검토 후보 만들기가 완료되지 않았습니다. 잠시 후 새 동기화를 시작해 주세요."}
         </p>
       ) : null}
       {launchState === "error" ? (
         <p className="mt-3 text-sm font-medium text-rose-700">
           {errorMessage ?? "요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요."} 다시 시도할 수 있습니다.
         </p>
+      ) : null}
+
+      {launchState === "error" && !dryRun ? (
+        <button
+          type="button"
+          onClick={onRetryPreview}
+          className="liquid-control mt-3 inline-flex h-9 w-full items-center justify-center rounded-lg px-3 text-sm font-semibold"
+        >
+          미리보기 다시 시도
+        </button>
       ) : null}
 
       <button

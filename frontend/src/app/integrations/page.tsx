@@ -14,7 +14,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { apiGet, apiPost, apiDelete } from "@/lib/api/client";
 import {
@@ -34,6 +34,7 @@ import type {
   DashboardResponse,
   ReviewWorkflowDiagnostic,
   ReviewWorkflowDryRun,
+  ReviewWorkflowLifecycleStatus,
   ReviewWorkflowSourceRef,
 } from "@/lib/api/types";
 import { ReviewCandidateLaunchPanel } from "./ReviewCandidateLaunchPanel";
@@ -66,8 +67,10 @@ type SyncProgressState = {
   reviewWorkflow?: {
     diagnostic: ReviewWorkflowDiagnostic;
     sourceRefs: ReviewWorkflowSourceRef[];
+    batchKey: string;
     dryRun?: ReviewWorkflowDryRun;
     launchState: "loading_preview" | "ready" | "launching" | "error" | "no_candidates" | "terminal";
+    terminalStatus?: ReviewWorkflowLifecycleStatus;
     errorMessage?: string;
   };
 };
@@ -214,6 +217,12 @@ function isBackgroundSyncContinuation(message: string) {
   return message.includes("백그라운드에서 계속 진행 중입니다");
 }
 
+function reviewBatchKey(jobId: string, sourceRefs: ReviewWorkflowSourceRef[]) {
+  return `${jobId}:${sourceRefs
+    .map((source) => `${source.source_type}:${source.source_id}:${source.version_or_signature}`)
+    .join("|")}`;
+}
+
 function syncResponseFromRuntimeStatus(
   connectorType: string,
   runtime: IntegrationRuntimeStatus,
@@ -253,7 +262,8 @@ function syncResponseFromRuntimeStatus(
       fallback?.skipped_events ??
       0,
     parser_status_counts: fallback?.parser_status_counts ?? {},
-    changed_source_ids: fallback?.changed_source_ids ?? [],
+    changed_source_ids: latest.changed_source_ids ?? fallback?.changed_source_ids ?? [],
+    changed_source_refs: latest.changed_source_refs ?? fallback?.changed_source_refs ?? [],
     agent_generated_items: fallback?.agent_generated_items ?? 0,
     project_assignment_items: fallback?.project_assignment_items ?? 0,
   };
@@ -272,6 +282,8 @@ export default function IntegrationsPage() {
   const [syncProgress, setSyncProgress] = useState<SyncProgressState>();
   const [syncModalOpen, setSyncModalOpen] = useState(false);
   const [reviewWorkflowDiagnostic, setReviewWorkflowDiagnostic] = useState<ReviewWorkflowDiagnostic>();
+  const activeSyncJobRef = useRef<string | undefined>(undefined);
+  const activeReviewBatchRef = useRef<string | undefined>(undefined);
 
   // 초기 로드 시 다양한 연동 정보 및 상태 조회
   useEffect(() => {
@@ -586,6 +598,81 @@ export default function IntegrationsPage() {
     return undefined;
   }
 
+  async function loadReviewCandidatePreview({
+    type,
+    jobId,
+    batchKey,
+    diagnostic,
+    sourceRefs,
+  }: {
+    type: string;
+    jobId: string;
+    batchKey: string;
+    diagnostic: ReviewWorkflowDiagnostic;
+    sourceRefs: ReviewWorkflowSourceRef[];
+  }) {
+    if (activeSyncJobRef.current !== jobId || activeReviewBatchRef.current !== batchKey) {
+      return;
+    }
+    setSyncProgress((current) =>
+      current?.connectorType === type &&
+      current.jobId === jobId &&
+      current.status === "complete" &&
+      current.reviewWorkflow?.batchKey === batchKey
+        ? {
+            ...current,
+            reviewWorkflow: {
+              ...current.reviewWorkflow,
+              dryRun: undefined,
+              launchState: "loading_preview",
+              errorMessage: undefined,
+            },
+          }
+        : current,
+    );
+
+    try {
+      const dryRun = await dryRunReviewWorkflow({
+        source_refs: sourceRefs,
+        agent_names: diagnostic.default_agent_names,
+      });
+      if (activeSyncJobRef.current !== jobId || activeReviewBatchRef.current !== batchKey) {
+        return;
+      }
+      setSyncProgress((current) =>
+        current?.connectorType === type &&
+        current.jobId === jobId &&
+        current.status === "complete" &&
+        current.reviewWorkflow?.batchKey === batchKey
+          ? {
+              ...current,
+              reviewWorkflow: { ...current.reviewWorkflow, dryRun, launchState: "ready" },
+            }
+          : current,
+      );
+    } catch {
+      if (activeSyncJobRef.current !== jobId || activeReviewBatchRef.current !== batchKey) {
+        return;
+      }
+      setSyncProgress((current) =>
+        current?.connectorType === type &&
+        current.jobId === jobId &&
+        current.status === "complete" &&
+        current.reviewWorkflow?.batchKey === batchKey
+          ? {
+              ...current,
+              reviewWorkflow: {
+                ...current.reviewWorkflow,
+                dryRun: undefined,
+                launchState: "error",
+                errorMessage: "비용을 확인하지 못했습니다.",
+              },
+            }
+          : current,
+      );
+    }
+  }
+
   async function prepareReviewCandidateLaunch(type: string, result: IntegrationSyncResponse) {
     const sourceRefs = result.changed_source_refs ?? [];
     const diagnostic =
@@ -597,6 +684,7 @@ export default function IntegrationsPage() {
         })
         .catch(() => undefined));
     if (
+      activeSyncJobRef.current !== result.job_id ||
       type === "slack" ||
       sourceRefs.length === 0 ||
       !diagnostic?.enabled ||
@@ -605,6 +693,8 @@ export default function IntegrationsPage() {
       return;
     }
 
+    const batchKey = reviewBatchKey(result.job_id, sourceRefs);
+    activeReviewBatchRef.current = batchKey;
     setSyncProgress((current) =>
       current?.connectorType === type && current.jobId === result.job_id && current.status === "complete"
         ? {
@@ -612,48 +702,25 @@ export default function IntegrationsPage() {
             reviewWorkflow: {
               diagnostic,
               sourceRefs,
+              batchKey,
               launchState: "loading_preview",
             },
           }
         : current,
     );
-
-    try {
-      const dryRun = await dryRunReviewWorkflow({
-        source_refs: sourceRefs,
-        agent_names: diagnostic.default_agent_names,
-      });
-      setSyncProgress((current) =>
-        current?.connectorType === type && current.jobId === result.job_id && current.status === "complete"
-          ? {
-              ...current,
-              reviewWorkflow: {
-                diagnostic,
-                sourceRefs,
-                dryRun,
-                launchState: "ready",
-              },
-            }
-          : current,
-      );
-    } catch {
-      setSyncProgress((current) =>
-        current?.connectorType === type && current.jobId === result.job_id && current.status === "complete"
-          ? {
-              ...current,
-              reviewWorkflow: {
-                diagnostic,
-                sourceRefs,
-                launchState: "error",
-                errorMessage: "비용을 확인하지 못했습니다.",
-              },
-            }
-          : current,
-      );
-    }
+    await loadReviewCandidatePreview({
+      type,
+      jobId: result.job_id,
+      batchKey,
+      diagnostic,
+      sourceRefs,
+    });
   }
 
   async function markSyncComplete(type: string, result: IntegrationSyncResponse) {
+    if (activeSyncJobRef.current !== result.job_id) {
+      return;
+    }
     setSyncProgress((current) =>
       current?.connectorType === type
         ? {
@@ -674,13 +741,23 @@ export default function IntegrationsPage() {
   async function launchReviewCandidates() {
     const reviewWorkflow = syncProgress?.reviewWorkflow;
     const jobId = syncProgress?.jobId;
-    if (!syncProgress || !reviewWorkflow || !jobId || !reviewWorkflow.dryRun || reviewWorkflow.launchState === "launching") {
+    const batchKey = reviewWorkflow?.batchKey;
+    if (
+      !syncProgress ||
+      !reviewWorkflow ||
+      !jobId ||
+      !batchKey ||
+      !reviewWorkflow.dryRun ||
+      reviewWorkflow.launchState === "launching" ||
+      activeSyncJobRef.current !== jobId ||
+      activeReviewBatchRef.current !== batchKey
+    ) {
       return;
     }
 
     const clientRequestId = `review:${jobId}:${reviewWorkflow.dryRun.selection_policy_version}`;
     setSyncProgress((current) =>
-      current?.jobId === jobId && current.reviewWorkflow
+      current?.jobId === jobId && current.reviewWorkflow?.batchKey === batchKey
         ? {
             ...current,
             reviewWorkflow: { ...current.reviewWorkflow, launchState: "launching", errorMessage: undefined },
@@ -694,12 +771,15 @@ export default function IntegrationsPage() {
         agent_names: reviewWorkflow.diagnostic.default_agent_names,
         client_request_id: clientRequestId,
       });
+      if (activeSyncJobRef.current !== jobId || activeReviewBatchRef.current !== batchKey) {
+        return;
+      }
       if (status.status === "awaiting_human_review") {
         window.location.assign(`/review?workflow_thread_id=${encodeURIComponent(status.thread_id)}`);
         return;
       }
       setSyncProgress((current) =>
-        current?.jobId === jobId && current.reviewWorkflow
+        current?.jobId === jobId && current.reviewWorkflow?.batchKey === batchKey
           ? {
               ...current,
               reviewWorkflow: {
@@ -708,14 +788,18 @@ export default function IntegrationsPage() {
                   status.status === "completed" && status.review_item_count === 0
                     ? "no_candidates"
                     : "terminal",
+                terminalStatus: status.status,
               },
             }
           : current,
       );
     } catch (error) {
       const safeError = readReviewWorkflowError(error);
+      if (activeSyncJobRef.current !== jobId || activeReviewBatchRef.current !== batchKey) {
+        return;
+      }
       setSyncProgress((current) =>
-        current?.jobId === jobId && current.reviewWorkflow
+        current?.jobId === jobId && current.reviewWorkflow?.batchKey === batchKey
           ? {
               ...current,
               reviewWorkflow: {
@@ -729,6 +813,28 @@ export default function IntegrationsPage() {
     }
   }
 
+  async function retryReviewCandidatePreview() {
+    const reviewWorkflow = syncProgress?.reviewWorkflow;
+    const jobId = syncProgress?.jobId;
+    if (
+      !syncProgress ||
+      !reviewWorkflow ||
+      !jobId ||
+      reviewWorkflow.launchState !== "error" ||
+      activeSyncJobRef.current !== jobId ||
+      activeReviewBatchRef.current !== reviewWorkflow.batchKey
+    ) {
+      return;
+    }
+    await loadReviewCandidatePreview({
+      type: syncProgress.connectorType,
+      jobId,
+      batchKey: reviewWorkflow.batchKey,
+      diagnostic: reviewWorkflow.diagnostic,
+      sourceRefs: reviewWorkflow.sourceRefs,
+    });
+  }
+
   const visibleManifests = useMemo(
     () => (manifests.length > 0 ? manifests : DEFAULT_INTEGRATION_MANIFESTS),
     [manifests],
@@ -740,6 +846,8 @@ export default function IntegrationsPage() {
   async function startSync(type: string) {
     const displayName = connectorDisplayName(type, manifests);
     const startedAtMs = Date.now();
+    activeSyncJobRef.current = undefined;
+    activeReviewBatchRef.current = undefined;
     setPendingType(type);
     setSyncProgress({
       connectorType: type,
@@ -770,6 +878,7 @@ export default function IntegrationsPage() {
           ? { selected_channel_ids: selectedSlackChannels, run_async: true }
           : { run_async: true },
       );
+      activeSyncJobRef.current = result.job_id;
       setSyncProgress((current) =>
         current?.connectorType === type
           ? {
@@ -794,6 +903,7 @@ export default function IntegrationsPage() {
         try {
           const recovered = await recoverCompletedSyncAfterLostResponse(type, startedAtMs);
           if (recovered) {
+            activeSyncJobRef.current = recovered.job_id;
             await markSyncComplete(type, recovered);
             return;
           }
@@ -976,6 +1086,7 @@ export default function IntegrationsPage() {
           }}
           onClose={() => setSyncModalOpen(false)}
           onLaunchReviewCandidates={() => void launchReviewCandidates()}
+          onRetryReviewPreview={() => void retryReviewCandidatePreview()}
         />
       ) : null}
 
@@ -1209,11 +1320,13 @@ function SyncProgressModal({
   onBackground,
   onClose,
   onLaunchReviewCandidates,
+  onRetryReviewPreview,
 }: {
   progress: SyncProgressState;
   onBackground: () => void;
   onClose: () => void;
   onLaunchReviewCandidates: () => void;
+  onRetryReviewPreview: () => void;
 }) {
   const isRunning = progress.status === "running";
   const isComplete = progress.status === "complete";
@@ -1304,8 +1417,10 @@ function SyncProgressModal({
             diagnostic={progress.reviewWorkflow.diagnostic}
             dryRun={progress.reviewWorkflow.dryRun}
             launchState={progress.reviewWorkflow.launchState}
+            terminalStatus={progress.reviewWorkflow.terminalStatus}
             errorMessage={progress.reviewWorkflow.errorMessage}
             onLaunch={onLaunchReviewCandidates}
+            onRetryPreview={onRetryReviewPreview}
           />
         ) : null}
 

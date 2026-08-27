@@ -59,6 +59,9 @@ async function installIntegrationsRoutes(
     diagnosticResponse?: typeof diagnostic;
     connectorType?: "gmail" | "slack";
     launchStatuses?: Array<Record<string, unknown>>;
+    syncResponses?: Array<Record<string, unknown>>;
+    runtimeSyncResponses?: Array<Record<string, unknown> | null>;
+    dryRunResponses?: Array<Record<string, unknown>>;
     onDryRun?: (body: unknown) => void;
     onLaunch?: (body: unknown) => void;
   } = {},
@@ -66,6 +69,11 @@ async function installIntegrationsRoutes(
   const connectorType = options.connectorType ?? "gmail";
   const diagnosticResponse = options.diagnosticResponse ?? diagnostic;
   const launchStatuses = [...(options.launchStatuses ?? [awaitingReviewStatus()])];
+  const syncResponses = [...(options.syncResponses ?? [{ ...completedSync, connector_type: connectorType }])];
+  const runtimeSyncResponses = [...(options.runtimeSyncResponses ?? [])];
+  const dryRunResponses = [...(options.dryRunResponses ?? [dryRun])];
+  let syncRequested = false;
+  let latestRuntimeSync: Record<string, unknown> | null = null;
 
   await page.route("**/api/v1/auth/me", async (route) => {
     await route.fulfill({
@@ -158,6 +166,9 @@ async function installIntegrationsRoutes(
       });
     });
     await page.route(`**/api/v1/integrations/${type}/runtime-status`, async (route) => {
+      if (type === connectorType && syncRequested && runtimeSyncResponses.length > 0) {
+        latestRuntimeSync = runtimeSyncResponses.shift() ?? latestRuntimeSync;
+      }
       await route.fulfill({
         contentType: "application/json",
         json: {
@@ -165,16 +176,17 @@ async function installIntegrationsRoutes(
           mode: "live",
           connection_status: type === connectorType ? "connected" : "disconnected",
           credential_status: type === connectorType ? "available" : "missing",
-          latest_sync: null,
+          latest_sync: type === connectorType ? latestRuntimeSync : null,
           cost_policy: { status_lookup_triggers_sync: false, status_lookup_triggers_llm: false },
         },
       });
     });
   }
   await page.route(`**/api/v1/integrations/${connectorType}/sync`, async (route) => {
+    syncRequested = true;
     await route.fulfill({
       contentType: "application/json",
-      json: { ...completedSync, connector_type: connectorType },
+      json: syncResponses.shift() ?? { ...completedSync, connector_type: connectorType },
     });
   });
   await page.route("**/api/v1/orchestration/v2/company-memory", async (route) => {
@@ -182,7 +194,12 @@ async function installIntegrationsRoutes(
   });
   await page.route("**/api/v1/orchestration/v2/company-memory/dry-run", async (route) => {
     options.onDryRun?.(route.request().postDataJSON());
-    await route.fulfill({ contentType: "application/json", json: dryRun });
+    const next = dryRunResponses.shift() ?? dryRun;
+    if (next.status === 500) {
+      await route.fulfill({ status: 500, contentType: "application/json", json: { detail: "preview lost" } });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", json: next });
   });
   await page.route("**/api/v1/orchestration/v2/company-memory/runs", async (route) => {
     options.onLaunch?.(route.request().postDataJSON());
@@ -237,6 +254,7 @@ test("shows cost and launches the exact completed source batch", async ({ page }
 
   const panel = page.getByTestId("review-candidate-launch-panel");
   await expect(panel).toContainText("예상 비용");
+  await expect(panel).toContainText("예산 이내");
   await expect(panel).toContainText("120");
   await expect(panel).toContainText("메모리 모드");
   expect(dryRunBody).toEqual({ source_refs: sourceRefs, agent_names: diagnostic.default_agent_names });
@@ -248,6 +266,36 @@ test("shows cost and launches the exact completed source batch", async ({ page }
     agent_names: diagnostic.default_agent_names,
     client_request_id: "review:gmail-sync-review-v2:company-memory-review-selection:v1",
   });
+});
+
+test("uses canonical refs returned by queued runtime completion", async ({ page }) => {
+  let dryRunBody: unknown;
+  await installIntegrationsRoutes(page, {
+    syncResponses: [
+      {
+        ...completedSync,
+        status: "queued",
+        changed_source_refs: [],
+      },
+    ],
+    runtimeSyncResponses: [
+      {
+        job_id: completedSync.job_id,
+        status: "complete",
+        message: "fetched=2 created_review_items=0 skipped_events=0 pending_review_items=3",
+        progress_pct: 100,
+        changed_source_refs: sourceRefs,
+      },
+    ],
+    onDryRun: (body) => {
+      dryRunBody = body;
+    },
+  });
+
+  await completeGmailSync(page);
+
+  await expect(page.getByTestId("review-candidate-launch-panel")).toContainText("검토 후보 미리보기");
+  expect(dryRunBody).toEqual({ source_refs: sourceRefs, agent_names: diagnostic.default_agent_names });
 });
 
 test("keeps the user on integrations when no candidates are created", async ({ page }) => {
@@ -300,12 +348,97 @@ test("reuses one stable client request id after response loss", async ({ page })
   expect(launchBodies[0]).toEqual(launchBodies[1]);
 });
 
-test("does not label failed or cancelled zero effect replay as no candidates", async ({ page }) => {
+test("does not navigate when a delayed launch belongs to a superseded sync", async ({ page }) => {
+  let signalLaunchStarted: (() => void) | undefined;
+  const launchStarted = new Promise<void>((resolve) => {
+    signalLaunchStarted = resolve;
+  });
+  let releaseLaunch: (() => void) | undefined;
+  const waitForRelease = new Promise<void>((resolve) => {
+    releaseLaunch = resolve;
+  });
+  const newerRefs = [
+    {
+      source_type: "calendar",
+      source_id: "calendar:event-new",
+      version_or_signature: "calendar:v2",
+    },
+  ];
+  const dryRunBodies: unknown[] = [];
   await installIntegrationsRoutes(page, {
-    launchStatuses: [
-      { ...awaitingReviewStatus(), status: "failed", review_item_count: 0 },
-      { ...awaitingReviewStatus(), status: "cancelled", review_item_count: 0 },
+    syncResponses: [
+      { ...completedSync, job_id: "gmail-sync-old", changed_source_refs: sourceRefs },
+      { ...completedSync, job_id: "gmail-sync-new", changed_source_refs: newerRefs },
     ],
+    dryRunResponses: [dryRun, { ...dryRun, source_count: newerRefs.length }],
+    onDryRun: (body) => dryRunBodies.push(body),
+  });
+  await page.route("**/api/v1/orchestration/v2/company-memory/runs", async (route) => {
+    signalLaunchStarted?.();
+    await waitForRelease;
+    await route.fulfill({ contentType: "application/json", json: awaitingReviewStatus() });
+  });
+
+  await completeGmailSync(page);
+  const firstLaunch = page.getByTestId("review-candidate-launch-panel").getByRole("button", { name: "검토 후보 만들기" }).click();
+  await launchStarted;
+  await page.getByRole("button", { name: "모달 닫기" }).click();
+  await page.getByTestId("gmail-card-actions").getByRole("button", { name: "동기화" }).click();
+  await expect(page.getByTestId("review-candidate-launch-panel")).toContainText("1개");
+  releaseLaunch?.();
+  await firstLaunch;
+
+  await expect(page).toHaveURL(/\/integrations$/);
+  expect(dryRunBodies).toEqual([
+    { source_refs: sourceRefs, agent_names: diagnostic.default_agent_names },
+    { source_refs: newerRefs, agent_names: diagnostic.default_agent_names },
+  ]);
+});
+
+test("renders over-budget cost outcome and blocks launch", async ({ page }) => {
+  await installIntegrationsRoutes(page, {
+    dryRunResponses: [{ ...dryRun, budget_status: "over_budget" }],
+  });
+
+  await completeGmailSync(page);
+  const panel = page.getByTestId("review-candidate-launch-panel");
+  await expect(panel).toContainText("예산 초과");
+  await expect(panel.getByRole("button", { name: "검토 후보 만들기" })).toBeDisabled();
+});
+
+test("renders cached cost outcome", async ({ page }) => {
+  await installIntegrationsRoutes(page, {
+    dryRunResponses: [{ ...dryRun, budget_status: "cached", cache_hit: true }],
+  });
+
+  await completeGmailSync(page);
+  await expect(page.getByTestId("review-candidate-launch-panel")).toContainText("캐시 재사용 · 추가 모델 호출 없음");
+});
+
+test("renders no-input cost outcome", async ({ page }) => {
+  await installIntegrationsRoutes(page, {
+    dryRunResponses: [{ ...dryRun, budget_status: "no_input", estimated_cost_usd: 0 }],
+  });
+
+  await completeGmailSync(page);
+  await expect(page.getByTestId("review-candidate-launch-panel")).toContainText("추가 비용 없음");
+});
+
+test("offers a working preview retry after transient dry-run failure", async ({ page }) => {
+  await installIntegrationsRoutes(page, {
+    dryRunResponses: [{ status: 500 }, dryRun],
+  });
+
+  await completeGmailSync(page);
+  const panel = page.getByTestId("review-candidate-launch-panel");
+  await expect(panel).toContainText("비용을 확인하지 못했습니다");
+  await panel.getByRole("button", { name: "미리보기 다시 시도" }).click();
+  await expect(panel).toContainText("예산 이내");
+});
+
+test("preserves failed terminal status and blocks its stable-id replay", async ({ page }) => {
+  await installIntegrationsRoutes(page, {
+    launchStatuses: [{ ...awaitingReviewStatus(), status: "failed", review_item_count: 0 }],
   });
 
   await completeGmailSync(page);
@@ -314,8 +447,21 @@ test("does not label failed or cancelled zero effect replay as no candidates", a
 
   const panel = page.getByTestId("review-candidate-launch-panel");
   await expect(panel).not.toContainText("새 검토 후보 없음");
-  await expect(panel).toContainText("완료되지 않았습니다");
+  await expect(panel).toContainText("작업 실패");
+  await expect(button).toBeDisabled();
+});
+
+test("preserves cancelled terminal status and blocks its stable-id replay", async ({ page }) => {
+  await installIntegrationsRoutes(page, {
+    launchStatuses: [{ ...awaitingReviewStatus(), status: "cancelled", review_item_count: 0 }],
+  });
+
+  await completeGmailSync(page);
+  const button = page.getByTestId("review-candidate-launch-panel").getByRole("button", { name: "검토 후보 만들기" });
   await button.click();
+
+  const panel = page.getByTestId("review-candidate-launch-panel");
   await expect(panel).not.toContainText("새 검토 후보 없음");
-  await expect(panel).toContainText("완료되지 않았습니다");
+  await expect(panel).toContainText("작업 취소됨");
+  await expect(button).toBeDisabled();
 });
