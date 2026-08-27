@@ -14,7 +14,8 @@ import {
   Layers,
 } from "lucide-react";
 import Link from "next/link";
-import { type MouseEvent, useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, type MouseEvent, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ReviewWorkflowContextPanel } from "@/app/review/ReviewWorkflowContextPanel";
 import { SourceEvidenceDrawer } from "@/components/shared/SourceEvidenceDrawer";
@@ -273,6 +274,13 @@ function formatCost(value: unknown) {
   return `$${cost.toFixed(6)}`;
 }
 
+function safeMutationError(error: unknown, fallback: string) {
+  if (error instanceof Error && (error.message.includes("Authentication required") || error.message.includes("401"))) {
+    return error.message;
+  }
+  return fallback;
+}
+
 function reviewPromptLabel(item: ReviewItem, agentName: string) {
   const payloadPrompt = knownStringField(item.payload.prompt_version);
   if (payloadPrompt) return payloadPrompt;
@@ -314,13 +322,25 @@ type ReviewContextMenu = {
   item: ReviewItem;
 };
 
-type ReviewQueryState = {
-  ready: boolean;
-  itemId?: number;
-  workflowThreadId?: string;
-};
-
 export default function ReviewPage() {
+  return (
+    <Suspense fallback={<ReviewPageFallback />}>
+      <ReviewPageContent />
+    </Suspense>
+  );
+}
+
+function ReviewPageFallback() {
+  return (
+    <div className="reference-dashboard space-y-5">
+      <div className="rounded-lg border border-[var(--line-soft)] bg-[var(--glass-elevated)] p-8 text-center text-sm text-[var(--ink-muted)]">
+        검토 항목을 불러오는 중입니다...
+      </div>
+    </div>
+  );
+}
+
+function ReviewPageContent() {
   const [groups, setGroups] = useState<ReviewGroup[]>([]);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [editingId, setEditingId] = useState<number>();
@@ -344,15 +364,28 @@ export default function ReviewPage() {
   const [bulkConfirm, setBulkConfirm] = useState<BulkConfirmState>();
   const [contextMenu, setContextMenu] = useState<ReviewContextMenu>();
   const [deepLinkedItemId, setDeepLinkedItemId] = useState<number>();
-  const [reviewQuery, setReviewQuery] = useState<ReviewQueryState>({ ready: false });
   const [workflowStatus, setWorkflowStatus] = useState<ReviewWorkflowStatus>();
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [workflowUnavailable, setWorkflowUnavailable] = useState(false);
   const [workflowActionPending, setWorkflowActionPending] = useState(false);
+  const searchParams = useSearchParams();
+  const workflowThreadId = searchParams.get("workflow_thread_id")?.trim() || undefined;
+  const itemId = Number(searchParams.get("itemId") ?? searchParams.get("item_id"));
+  const deepLinkItemId = Number.isInteger(itemId) && itemId > 0 ? itemId : undefined;
+  const queryKey = `${workflowThreadId ?? ""}:${deepLinkItemId ?? ""}`;
+  const contextGeneration = useRef(0);
+  const listRequestGeneration = useRef(0);
+  const statusRequestGeneration = useRef(0);
 
-  const loadItems = useCallback(async (nextOffset = 0, append = false) => {
-    setLoading(true);
-    setError(undefined);
+  const loadItems = useCallback(async (
+    nextOffset = 0,
+    append = false,
+    requestContext = contextGeneration.current,
+  ) => {
+    const request = ++listRequestGeneration.current;
+    if (requestContext === contextGeneration.current) {
+      setLoading(true);
+    }
 
     try {
       const params = new URLSearchParams({
@@ -361,62 +394,86 @@ export default function ReviewPage() {
         offset: String(nextOffset),
         include_previews: "false",
       });
-      if (reviewQuery.workflowThreadId) params.set("workflow_thread_id", reviewQuery.workflowThreadId);
-      const review = await apiGet<ReviewResponse>(`/api/v1/review?${params.toString()}`);
+      if (workflowThreadId) params.set("workflow_thread_id", workflowThreadId);
+      const [review, projectsRes] = await Promise.all([
+        apiGet<ReviewResponse>(`/api/v1/review?${params.toString()}`),
+        apiGet<{projects: Array<{project_key: string, name: string}>}>("/api/v1/projects/defined"),
+      ]);
+      if (requestContext !== contextGeneration.current || request !== listRequestGeneration.current) return;
       setGroups((current) => (append ? mergeReviewGroups(current, review.groups || []) : review.groups || []));
       setTotalCount(review.total_count ?? review.items.length);
       setLoadedOffset(nextOffset);
       setHasMore(Boolean(review.has_more));
-      
-      const projectsRes = await apiGet<{projects: Array<{project_key: string, name: string}>}>("/api/v1/projects/defined");
       setDefinedProjects(projectsRes.projects || []);
     } catch (caught) {
+      if (requestContext !== contextGeneration.current || request !== listRequestGeneration.current) return;
       setError(caught instanceof Error ? caught.message : "검토 항목을 불러오지 못했습니다.");
     } finally {
-      setLoading(false);
+      if (requestContext === contextGeneration.current && request === listRequestGeneration.current) {
+        setLoading(false);
+      }
     }
-  }, [reviewQuery.workflowThreadId]);
+  }, [workflowThreadId]);
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const itemId = Number(params.get("itemId") ?? params.get("item_id"));
-    const workflowThreadId = params.get("workflow_thread_id")?.trim() || undefined;
-    setReviewQuery({
-      ready: true,
-      itemId: Number.isInteger(itemId) && itemId > 0 ? itemId : undefined,
-      workflowThreadId,
-    });
-  }, []);
-
-  useEffect(() => {
-    setDeepLinkedItemId(reviewQuery.itemId);
-  }, [reviewQuery.itemId]);
-
-  const loadWorkflowStatus = useCallback(async () => {
-    if (!reviewQuery.workflowThreadId) {
-      setWorkflowStatus(undefined);
+  const loadWorkflowStatus = useCallback(async (requestContext = contextGeneration.current) => {
+    if (!workflowThreadId) return;
+    const request = ++statusRequestGeneration.current;
+    if (requestContext === contextGeneration.current) {
+      setWorkflowLoading(true);
       setWorkflowUnavailable(false);
-      return;
     }
-    setWorkflowLoading(true);
-    setWorkflowUnavailable(false);
     try {
-      setWorkflowStatus(await getReviewWorkflowStatus(reviewQuery.workflowThreadId));
+      const status = await getReviewWorkflowStatus(workflowThreadId);
+      if (requestContext !== contextGeneration.current || request !== statusRequestGeneration.current) return;
+      setWorkflowStatus(status);
     } catch {
+      if (requestContext !== contextGeneration.current || request !== statusRequestGeneration.current) return;
       setWorkflowStatus(undefined);
       setWorkflowUnavailable(true);
     } finally {
-      setWorkflowLoading(false);
+      if (requestContext === contextGeneration.current && request === statusRequestGeneration.current) {
+        setWorkflowLoading(false);
+      }
     }
-  }, [reviewQuery.workflowThreadId]);
+  }, [workflowThreadId]);
 
   useEffect(() => {
-    if (!reviewQuery.ready) return;
-    void Promise.all([loadItems(), loadWorkflowStatus()]);
-  }, [loadItems, loadWorkflowStatus, reviewQuery.ready]);
+    const requestContext = ++contextGeneration.current;
+    listRequestGeneration.current += 1;
+    statusRequestGeneration.current += 1;
+    setGroups([]);
+    setExpandedGroups({});
+    setDefinedProjects([]);
+    setPreviews({});
+    setSelectedItemIds(new Set());
+    setBulkProjectKey("");
+    setBulkConfirm(undefined);
+    setContextMenu(undefined);
+    setPendingAction(undefined);
+    setEditingId(undefined);
+    setEditTitle("");
+    setEditSummary("");
+    setEditProjectKey("");
+    setEditNextStep("");
+    setEvidenceRequestId(undefined);
+    setEvidenceRequestNote("");
+    setPromotionNotice(undefined);
+    setError(undefined);
+    setTotalCount(0);
+    setLoadedOffset(0);
+    setHasMore(false);
+    setDeepLinkedItemId(deepLinkItemId);
+    setWorkflowStatus(undefined);
+    setWorkflowUnavailable(false);
+    setWorkflowLoading(Boolean(workflowThreadId));
+    setWorkflowActionPending(false);
+    void loadItems(0, false, requestContext);
+    if (workflowThreadId) void loadWorkflowStatus(requestContext);
+  }, [deepLinkItemId, loadItems, loadWorkflowStatus, queryKey, workflowThreadId]);
 
   const refreshReviewData = useCallback(async () => {
-    await Promise.all([loadItems(), loadWorkflowStatus()]);
+    const requestContext = contextGeneration.current;
+    await Promise.all([loadItems(0, false, requestContext), loadWorkflowStatus(requestContext)]);
   }, [loadItems, loadWorkflowStatus]);
 
   useEffect(() => {
@@ -447,12 +504,14 @@ export default function ReviewPage() {
   async function loadPreviewsForItems(items: ReviewItem[]) {
     const missingItems = items.filter((item) => !previews[item.id]);
     if (missingItems.length === 0) return;
+    const requestContext = contextGeneration.current;
     const previewPairs = await Promise.all(
       missingItems.map(async (item) => [
         item.id,
         await apiGet<ReviewPromotionPreview>(`/api/v1/review/${item.id}/promotion-preview`),
       ] as const),
     );
+    if (requestContext !== contextGeneration.current) return;
     setPreviews((current) => ({ ...current, ...Object.fromEntries(previewPairs) }));
   }
 
@@ -488,7 +547,6 @@ export default function ReviewPage() {
           result: result.promotion_result,
         });
       }
-      await refreshReviewData();
       notifyReviewQueueUpdated();
 
       if (action === "request-more-evidence") {
@@ -496,8 +554,9 @@ export default function ReviewPage() {
         setEvidenceRequestNote("");
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Review action failed.");
+      setError(safeMutationError(caught, "검토 상태를 변경하지 못했습니다. 현재 상태를 다시 확인해 주세요."));
     } finally {
+      await refreshReviewData();
       setPendingAction(undefined);
     }
   }
@@ -518,11 +577,11 @@ export default function ReviewPage() {
         delete next[item.id];
         return next;
       });
-      await refreshReviewData();
       notifyReviewQueueUpdated();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "프로젝트를 저장하지 못했습니다.");
+      setError(safeMutationError(caught, "프로젝트를 저장하지 못했습니다. 현재 상태를 다시 확인해 주세요."));
     } finally {
+      await refreshReviewData();
       setPendingAction(undefined);
     }
   }
@@ -534,7 +593,6 @@ export default function ReviewPage() {
 
   async function executeBulkAction(confirmState: BulkConfirmState) {
     const { action, itemIds } = confirmState;
-    const readableLabel = action === "approve" ? "승인" : "반려";
     const label = action === "approve" ? "승인" : "반려";
     setPendingAction(`bulk:${action}`);
     setError(undefined);
@@ -555,7 +613,6 @@ export default function ReviewPage() {
         action,
         item_ids: itemIds,
       });
-      await refreshReviewData();
       notifyReviewQueueUpdated();
       setSelectedItemIds((current) => {
         const next = new Set(current);
@@ -566,12 +623,10 @@ export default function ReviewPage() {
       if (result.failed_items.length > 0) {
         setError(`${label} 처리 중 ${result.failed_items.length}개 항목은 건너뛰었습니다. 필수 정보와 근거를 확인해 주세요.`);
       }
-      if (result.failed_items.length > 0) {
-        setError(`${readableLabel} 처리 중 ${result.failed_items.length}개 항목은 건너뛰었습니다. 필수 정보와 근거를 확인해 주세요.`);
-      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : `紐⑤몢 ${label} 泥섎━?섏? 紐삵뻽?듬땲??`);
+      setError(safeMutationError(caught, `선택한 항목을 ${label} 처리하지 못했습니다. 현재 상태를 다시 확인해 주세요.`));
     } finally {
+      await refreshReviewData();
       setPendingAction(undefined);
     }
   }
@@ -590,14 +645,14 @@ export default function ReviewPage() {
         action,
         item_ids: itemIds,
       });
-      await refreshReviewData();
       notifyReviewQueueUpdated();
       if (result.failed_items.length > 0) {
         setError(`${label} 처리 중 ${result.failed_items.length}개 항목은 건너뛰었습니다. 필수 정보와 근거를 확인해 주세요.`);
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : `모두 ${label} 처리하지 못했습니다.`);
+      setError(safeMutationError(caught, `모두 ${label} 처리하지 못했습니다. 현재 상태를 다시 확인해 주세요.`));
     } finally {
+      await refreshReviewData();
       setPendingAction(undefined);
     }
   }
@@ -618,18 +673,18 @@ export default function ReviewPage() {
 
     try {
       await apiPatch<ReviewItem>(`/api/v1/review/${item.id}`, update);
-      await refreshReviewData();
       notifyReviewQueueUpdated();
       setEditingId(undefined);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Failed to update review item.");
+      setError(safeMutationError(caught, "검토 항목을 수정하지 못했습니다. 현재 상태를 다시 확인해 주세요."));
     } finally {
+      await refreshReviewData();
       setPendingAction(undefined);
     }
   }
 
   async function resumeWorkflow() {
-    if (!reviewQuery.workflowThreadId || !workflowStatus) return;
+    if (!workflowThreadId || !workflowStatus) return;
     const allowed = workflowStatus.status === "awaiting_human_review"
       ? workflowStatus.review_resolution_ready && workflowStatus.resume_allowed
       : workflowStatus.status === "checkpoint_failed" && workflowStatus.retry_allowed;
@@ -637,7 +692,7 @@ export default function ReviewPage() {
 
     setWorkflowActionPending(true);
     try {
-      await resumeReviewWorkflow(reviewQuery.workflowThreadId);
+      await resumeReviewWorkflow(workflowThreadId);
     } catch {
       // A lost resume response can still have advanced the checkpoint; reload its authoritative status.
     } finally {

@@ -180,3 +180,150 @@ test("an empty hidden workflow keeps group and bulk controls safe", async ({ pag
   await expect(page.getByTestId("review-approve-loaded")).toBeDisabled();
   await expect(page.getByTestId("review-bulk-approve")).toBeDisabled();
 });
+
+test("same-route workflow navigation replaces the queue before fetching the new context", async ({ page }) => {
+  const secondThreadId = "workflow-thread-2";
+  const secondItem = { ...item, id: 2002, payload: { ...item.payload, title: "Second workflow candidate" } };
+  const requestedThreads: string[] = [];
+  await installReviewRoutes(page);
+  await page.route("**/api/v1/review?status=pending_review**", async (route) => {
+    const workflowThreadId = new URL(route.request().url()).searchParams.get("workflow_thread_id");
+    requestedThreads.push(workflowThreadId ?? "");
+    const items = workflowThreadId === secondThreadId ? [secondItem] : [item];
+    await route.fulfill({ contentType: "application/json", json: {
+      groups: [{ group_id: `history_event:${workflowThreadId}`, title: items[0].payload.title, item_type: "history_event", status: "pending_review", permission_level: "internal", items, total_count: 1, avg_confidence: 0.9 }],
+      items,
+      total_count: 1,
+      limit: 50,
+      offset: 0,
+      has_more: false,
+      include_previews: false,
+    } });
+  });
+  await page.route(`**/api/v1/orchestration/v2/company-memory/runs/${secondThreadId}`, (route) => route.fulfill({ contentType: "application/json", json: workflowStatus({ thread_id: secondThreadId, review_item_count: 1, review_status_counts: { pending_review: 1 } }) }));
+
+  await page.goto(`/review?workflow_thread_id=${threadId}&itemId=${item.id}`);
+  await expect(page.getByText("Workflow candidate", { exact: true })).toBeVisible();
+  await page.evaluate((nextUrl) => {
+    window.history.pushState({}, "", nextUrl);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, `/review?workflow_thread_id=${secondThreadId}&itemId=${secondItem.id}`);
+
+  await expect(page.getByText("Second workflow candidate", { exact: true })).toBeVisible();
+  await expect(page.getByText("Workflow candidate", { exact: true })).toHaveCount(0);
+  expect(requestedThreads).toEqual([threadId, secondThreadId]);
+});
+
+test("late responses from a superseded workflow cannot overwrite the newer queue", async ({ page }) => {
+  const secondThreadId = "workflow-thread-2";
+  let releaseFirst: (() => void) | undefined;
+  const firstResponse = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  await installReviewRoutes(page);
+  await page.route("**/api/v1/review?status=pending_review**", async (route) => {
+    const workflowThreadId = new URL(route.request().url()).searchParams.get("workflow_thread_id");
+    if (workflowThreadId === threadId) await firstResponse;
+    const currentItem = workflowThreadId === secondThreadId
+      ? { ...item, id: 2002, payload: { ...item.payload, title: "New authoritative candidate" } }
+      : item;
+    await route.fulfill({ contentType: "application/json", json: {
+      groups: [{ group_id: `history_event:${workflowThreadId}`, title: currentItem.payload.title, item_type: "history_event", status: "pending_review", permission_level: "internal", items: [currentItem], total_count: 1, avg_confidence: 0.9 }],
+      items: [currentItem], total_count: 1, limit: 50, offset: 0, has_more: false, include_previews: false,
+    } });
+  });
+  await page.route(`**/api/v1/orchestration/v2/company-memory/runs/${secondThreadId}`, (route) => route.fulfill({ contentType: "application/json", json: workflowStatus({ thread_id: secondThreadId }) }));
+
+  await page.goto(`/review?workflow_thread_id=${threadId}`);
+  await page.evaluate((nextUrl) => {
+    window.history.pushState({}, "", nextUrl);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, `/review?workflow_thread_id=${secondThreadId}`);
+  await expect(page.getByText("New authoritative candidate", { exact: true })).toBeVisible();
+  releaseFirst?.();
+  await expect(page.getByText("New authoritative candidate", { exact: true })).toBeVisible();
+  await expect(page.getByText("Workflow candidate", { exact: true })).toHaveCount(0);
+});
+
+test("a lost review mutation response still reconciles the filtered queue and workflow status", async ({ page }) => {
+  let listRequests = 0;
+  let statusRequests = 0;
+  await installReviewRoutes(page);
+  await page.route("**/api/v1/review?status=pending_review**", async (route) => {
+    listRequests += 1;
+    await route.fulfill({ contentType: "application/json", json: {
+      groups: [{ group_id: "history_event:workflow", title: "Workflow", item_type: "history_event", status: "pending_review", permission_level: "internal", items: [item], total_count: 1, avg_confidence: 0.9 }],
+      items: [item], total_count: 1, limit: 50, offset: 0, has_more: false, include_previews: false,
+    } });
+  });
+  await page.route(`**/api/v1/orchestration/v2/company-memory/runs/${threadId}`, async (route) => {
+    statusRequests += 1;
+    await route.fulfill({ contentType: "application/json", json: workflowStatus() });
+  });
+  await page.route(`**/api/v1/review/${item.id}/approve`, (route) => route.fulfill({ status: 503, contentType: "application/json", json: { detail: "response lost" } }));
+
+  await page.goto(`/review?workflow_thread_id=${threadId}`);
+  await expect.poll(() => listRequests).toBe(1);
+  await expect.poll(() => statusRequests).toBe(1);
+  await page.locator(".group-container > div:first-child").click();
+  await page.getByTestId(`review-item-${item.id}`).getByRole("button", { name: "승인" }).click();
+
+  await expect.poll(() => listRequests).toBeGreaterThan(1);
+  await expect.poll(() => statusRequests).toBeGreaterThan(1);
+});
+
+test("checkpoint retry resumes exactly once through the explicit lifecycle action", async ({ page }) => {
+  let resumes = 0;
+  await installReviewRoutes(page, { status: { status: "checkpoint_failed", retry_allowed: true }, onResume: () => { resumes += 1; } });
+  await page.goto(`/review?workflow_thread_id=${threadId}`);
+
+  await page.getByRole("button", { name: "다시 시도" }).click();
+  await expect.poll(() => resumes).toBe(1);
+});
+
+test("lifecycle states use Korean labels and bounded recovery context", async ({ page }) => {
+  await installReviewRoutes(page, { status: { status: "drafting" } });
+  await page.goto(`/review?workflow_thread_id=${threadId}`);
+  await expect(page.getByTestId("review-workflow-context")).toContainText("상태: 후보 작성 중");
+  await expect(page.getByTestId("review-workflow-context")).toContainText("연결된 검토 항목만 표시합니다");
+  await expect(page.getByTestId("review-workflow-context")).toContainText("워크플로 버전 company-memory-review-v2.0");
+
+  await installReviewRoutes(page, { status: { status: "failed" } });
+  await page.goto(`/review?workflow_thread_id=${threadId}`);
+  await expect(page.getByTestId("review-workflow-context")).toContainText("Integrations에서 다시 동기화");
+});
+
+test("filtered pagination preserves the workflow filter and item deep link behavior", async ({ page }) => {
+  const urls: string[] = [];
+  const nextItem = { ...item, id: 1002, payload: { ...item.payload, title: "Second filtered candidate" } };
+  await installReviewRoutes(page);
+  await page.route("**/api/v1/review?status=pending_review**", async (route) => {
+    const url = route.request().url();
+    urls.push(url);
+    const offset = Number(new URL(url).searchParams.get("offset"));
+    const items = offset === 0 ? [item] : [nextItem];
+    await route.fulfill({ contentType: "application/json", json: {
+      groups: [{ group_id: "history_event:workflow", title: "Workflow", item_type: "history_event", status: "pending_review", permission_level: "internal", items, total_count: 2, avg_confidence: 0.9 }],
+      items, total_count: 2, limit: 50, offset, has_more: offset === 0, include_previews: false,
+    } });
+  });
+
+  await page.goto(`/review?workflow_thread_id=${threadId}&itemId=${item.id}`);
+  await expect(page.getByTestId(`review-item-${item.id}`)).toBeVisible();
+  await page.getByRole("button", { name: "더 보기" }).click();
+  await expect(page.getByTestId(`review-item-${nextItem.id}`)).toBeVisible();
+  expect(urls.map((url) => new URL(url).searchParams.get("workflow_thread_id"))).toEqual([threadId, threadId]);
+  expect(urls.map((url) => new URL(url).searchParams.get("offset"))).toEqual(["0", "50"]);
+});
+
+test("in-progress lifecycle states have distinct Korean guidance", async ({ page }) => {
+  for (const [status, label, guidance] of [
+    ["created", "시작 준비", "시작할 준비"],
+    ["drafting", "후보 작성 중", "검토 후보를 작성"],
+    ["checkpoint_pending", "검토 대기 저장 중", "안전하게 저장"],
+    ["resuming", "검토 결과 반영 중", "검토 결과를 반영"],
+  ] as const) {
+    await installReviewRoutes(page, { status: { status } });
+    await page.goto(`/review?workflow_thread_id=${threadId}`);
+    await expect(page.getByTestId("review-workflow-context")).toContainText(`상태: ${label}`);
+    await expect(page.getByTestId("review-workflow-context")).toContainText(guidance);
+  }
+});
