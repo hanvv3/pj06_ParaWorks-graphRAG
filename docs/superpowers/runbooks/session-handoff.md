@@ -24,6 +24,20 @@ Updated: 2026-08-27
   checkpoint key. The minimal production privacy fix removes that key from
   checkpoint schema/initialization/probes only; ReviewItem ids remain in the
   application database and API behavior/graph topology is unchanged.
+- Final review found and fixed a separate approval/resume defect: comparing the
+  immutable paused tuple's original status distribution to mutable live
+  ReviewItem rows made a normal approval appear corrupt. Status now remains
+  `awaiting_human_review` with `checkpoint_resumable=true`,
+  `review_resolution_ready=true`, and `resume_allowed=true`; explicit
+  completion preserves `checkpoint_thread_id` and completes through the direct
+  `Command(resume=...)` path with exactly two thread state-version transitions.
+  It must not enter `checkpoint_failed`, rotate, or repair on ordinary approval.
+- Saved tuple validation still fails closed on identity mismatch, missing/extra
+  status keys, wrong total review count, invalid values, error codes, or bad
+  graph/task shape. Live DB permission and current-version checks are unchanged.
+- The restart fixture now gives app A and app B independent application
+  SQLAlchemy engines, pools, and sessionmakers plus independent checkpoint
+  runtimes/pools/savers. App A is fully closed/disposed before app B is built.
 - Fresh gates: touched-module `199 passed`; Deliverable C `333 passed` plus its
   one known deferred Slack orchestration failure; Deliverable B `229 passed`;
   non-Slack `989 passed, 1 skipped, 10 deselected`; full backend `989 passed,

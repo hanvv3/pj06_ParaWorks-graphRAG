@@ -13,7 +13,12 @@ def _valid_checkpoint_state() -> dict[str, object]:
         'graph_version': 'company-memory-review-v2.0',
         'input_hash': 'a' * 64,
         'evidence_version_hash': 'b' * 64,
-        'review_status_counts': {'pending_review': 2},
+        'review_status_counts': {
+            'pending_review': 2,
+            'approved': 0,
+            'rejected': 0,
+            'needs_more_evidence': 0,
+        },
         'phase': 'created',
         'completed_nodes': ['validate_input'],
         'error_codes': [],

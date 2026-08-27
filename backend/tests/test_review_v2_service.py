@@ -375,6 +375,7 @@ class _SnapshotMutatingGraph:
                 values['source_content'] = 'must-not-be-checkpointed'
             elif corruption in {
                 'swapped_equal_total_counts',
+                'wrong_total_counts',
                 'missing_count_status',
                 'extra_count_status',
                 'pending_approved_terminal_counts',
@@ -383,6 +384,8 @@ class _SnapshotMutatingGraph:
                 if corruption == 'swapped_equal_total_counts':
                     counts['pending_review'] = 0
                     counts['approved'] = 1
+                elif corruption == 'wrong_total_counts':
+                    counts['pending_review'] += 1
                 elif corruption == 'missing_count_status':
                     counts.pop('rejected')
                 elif corruption == 'pending_approved_terminal_counts':
@@ -676,15 +679,26 @@ def test_status_projects_current_review_rows_not_checkpoint_counts(
 ) -> None:
     service = _service(application_session_factory, service_parts)
     _, started = _start(db_session, service)
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    checkpoint_thread_id = thread.checkpoint_thread_id
+    state_version = thread.state_version
     _set_item_statuses(application_session_factory, started.thread_id, ['approved'])
 
     status = service.status(actor=_actor(), thread_id=started.thread_id)
 
+    assert status.status == 'awaiting_human_review'
     assert status.review_status_counts == {'approved': 1}
     assert status.review_resolution_ready is True
-    assert status.checkpoint_resumable is False
-    assert status.resume_allowed is False
-    assert status.resume_error_code == 'checkpoint_unavailable'
+    assert status.checkpoint_resumable is True
+    assert status.resume_allowed is True
+    assert status.resume_error_code is None
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert current is not None
+    assert current.status == 'awaiting_human_review'
+    assert current.checkpoint_thread_id == checkpoint_thread_id
+    assert current.state_version == state_version
 
 
 def test_pending_resume_returns_review_unresolved_before_command_or_saver_write(
@@ -718,6 +732,7 @@ def test_same_thread_resume_completes_after_all_items_resolve(
     thread = db_session.get(AgentWorkflowThread, started.thread_id)
     assert thread is not None
     checkpoint_thread_id = thread.checkpoint_thread_id
+    state_version = thread.state_version
     _set_item_statuses(application_session_factory, started.thread_id, ['approved'])
 
     resumed = service.resume(actor=_actor(), thread_id=started.thread_id)
@@ -727,22 +742,38 @@ def test_same_thread_resume_completes_after_all_items_resolve(
     current = db_session.get(AgentWorkflowThread, started.thread_id)
     assert current is not None
     assert current.thread_id == started.thread_id
-    assert current.checkpoint_thread_id != checkpoint_thread_id
+    assert current.checkpoint_thread_id == checkpoint_thread_id
+    assert current.state_version == state_version + 2
 
 
-def test_live_review_count_change_rotates_old_snapshot_then_completes(
+def test_live_review_count_change_uses_direct_saved_resume_without_repair(
     db_session: Session,
     application_session_factory,
     service_parts,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(application_session_factory, service_parts)
     _, started = _start(db_session, service)
     thread = db_session.get(AgentWorkflowThread, started.thread_id)
     assert thread is not None
     old_checkpoint_thread_id = thread.checkpoint_thread_id
+    old_state_version = thread.state_version
     run_count = db_session.scalar(select(func.count()).select_from(AgentRun))
     item_count = db_session.scalar(select(func.count()).select_from(ReviewItem))
     _set_item_statuses(application_session_factory, started.thread_id, ['approved'])
+
+    def forbidden_path(*_args: object, **_kwargs: object) -> None:
+        pytest.fail('normal approval must not rotate, repair, or fail checkpoint')
+
+    monkeypatch.setattr(service, '_mark_checkpoint_failed', forbidden_path)
+    monkeypatch.setattr(service, '_repair_checkpoint', forbidden_path)
+    monkeypatch.setattr(service, '_rotate_checkpoint_attempt', forbidden_path)
+
+    ready = service.status(actor=_actor(), thread_id=started.thread_id)
+    assert ready.status == 'awaiting_human_review'
+    assert ready.checkpoint_resumable is True
+    assert ready.review_resolution_ready is True
+    assert ready.resume_allowed is True
 
     resumed = service.resume(actor=_actor(), thread_id=started.thread_id)
 
@@ -750,7 +781,8 @@ def test_live_review_count_change_rotates_old_snapshot_then_completes(
     current = db_session.get(AgentWorkflowThread, started.thread_id)
     assert current is not None
     assert resumed.status == 'completed'
-    assert current.checkpoint_thread_id != old_checkpoint_thread_id
+    assert current.checkpoint_thread_id == old_checkpoint_thread_id
+    assert current.state_version == old_state_version + 2
     assert db_session.scalar(select(func.count()).select_from(AgentRun)) == run_count
     assert db_session.scalar(select(func.count()).select_from(ReviewItem)) == item_count
     saver = service_parts[1].saver
@@ -1382,7 +1414,7 @@ def test_nonterminal_checkpoint_without_interrupt_rotates_before_repair(
         'extra_interrupt_key',
         'future_interrupt_version',
         'stale_interrupt_version',
-        'swapped_equal_total_counts',
+        'wrong_total_counts',
         'missing_count_status',
         'extra_count_status',
         'wrong_interrupt_phase',

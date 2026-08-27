@@ -246,9 +246,18 @@ def _validate_minimized_snapshot_state(
         validate_checkpoint_state(safe_state)
     except (TypeError, ValueError):
         raise _CorruptCheckpointError from None
+    saved_review_status_counts = cast(
+        dict[str, int],
+        safe_state['review_status_counts'],
+    )
     if (
-        safe_state['review_status_counts']
-        != _live_review_counts(projection)
+        sum(saved_review_status_counts.values())
+        != projection.review_item_count
+        or (
+            terminal
+            and saved_review_status_counts
+            != _live_review_counts(projection)
+        )
         or safe_state['error_codes'] != []
     ):
         raise _CorruptCheckpointError

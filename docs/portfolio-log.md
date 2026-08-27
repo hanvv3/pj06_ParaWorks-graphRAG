@@ -26,6 +26,19 @@ demo story changes.
   that checkpoint-only field without changing ReviewItem rows, graph nodes,
   API payloads, permissions, or promotion behavior; its focused RED was
   `3 failed, 4 passed` and GREEN was `7 passed`.
+- Final review caught that a normal approval changed the live ReviewItem
+  distribution and was incorrectly classified as checkpoint corruption. A
+  focused RED (`3 failed`) and real PostgreSQL RED (`2 failed`) proved the UI's
+  explicit completion path was rotating/repairing the checkpoint and consuming
+  five state versions. The corrected validator treats current PostgreSQL
+  ReviewItem resolution as authoritative while the paused tuple must retain
+  exact identity, schema, and total count. Normal completion now preserves the
+  checkpoint thread, never invokes repair/rotation, and uses the contractual
+  `+2` state-version path with no duplicate AgentRun, ReviewItem, knowledge, or
+  Timeline effects.
+- Strengthened restart evidence so application A and B own different
+  SQLAlchemy engines/pools/sessionmakers in addition to different checkpoint
+  runtimes/pools/savers. A is fully closed and disposed before B is created.
 - Fresh release evidence: touched-module regression `199 passed`; Deliverable C
   `333 passed` with its one known deferred Slack failure still visible;
   Deliverable B `229 passed`; non-Slack backend `989 passed, 1 skipped,

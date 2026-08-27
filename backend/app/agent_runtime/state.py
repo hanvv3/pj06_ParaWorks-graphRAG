@@ -118,6 +118,8 @@ def _validate_hash_field(state: Mapping[str, object], field: str) -> None:
 def _validate_review_status_counts(value: object) -> None:
     if type(value) is not dict:
         raise ValueError('checkpoint review_status_counts must be a dictionary')
+    if set(value) != ALLOWED_REVIEW_STATUSES:
+        raise ValueError('checkpoint review status keys are incomplete')
     for status, count in value.items():
         if type(status) is not str or status not in ALLOWED_REVIEW_STATUSES:
             raise ValueError('checkpoint review status is unsupported')

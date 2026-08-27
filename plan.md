@@ -443,6 +443,16 @@ Tasks:
   - The release privacy correction removes an unused, always-empty
     `review_item_ids` field from checkpoint state only; PostgreSQL ReviewItem
     rows remain authoritative and V2 remains off by default.
+  - Final review verified that normal Review approval changes only the live,
+    authoritative PostgreSQL status distribution. The immutable paused tuple
+    remains valid by exact identity/schema/total count, status stays resumable,
+    and explicit completion uses the original checkpoint thread with the
+    normal `awaiting -> resuming -> completed` state-version delta of `+2`.
+    Missing/extra count keys, wrong total count, permission mismatches, and
+    tuple identity corruption still fail closed.
+  - PostgreSQL restart evidence now uses fully independent application A/B
+    SQLAlchemy engines, pools, and sessionmakers as well as independent
+    checkpoint runtimes/pools/savers; A is closed and disposed before B exists.
   - Next boundary: Deliverable D GraphRAG planning and design review. This is a
     planning step, not authorization for GraphRAG implementation.
 - User-directed execution order for the remaining program:

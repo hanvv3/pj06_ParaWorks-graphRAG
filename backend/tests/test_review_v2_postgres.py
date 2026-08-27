@@ -337,16 +337,26 @@ class _ExplodingGraph:
 
 @dataclass
 class _AppResources:
+    application_engine: Engine
+    session_factory: sessionmaker[Session]
     runtime: CheckpointRuntime
     service: ReviewWorkflowService
     draft_service: _DeterministicDraftService
+    closed: bool = False
 
     def close(self) -> None:
-        self.runtime.close()
+        if self.closed:
+            return
+        try:
+            self.runtime.close()
+        finally:
+            self.application_engine.dispose()
+            self.closed = True
 
 
 @dataclass
 class _PostgresHarness:
+    database_url: str
     engine: Engine
     session_factory: sessionmaker[Session]
     settings: Settings
@@ -356,30 +366,52 @@ class _PostgresHarness:
     apps: list[_AppResources] = field(default_factory=list)
 
     def new_app(self, *, exploding_graph: bool = False) -> _AppResources:
+        application_engine = create_engine(self.database_url)
+        application_session_factory = sessionmaker(
+            bind=application_engine,
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+        )
         runtime = CheckpointRuntime(self.settings)
-        runtime.start()
-        assert runtime.readiness.ready is True
-        assert runtime.readiness.mode == 'postgres'
-        assert runtime.readiness.durable is True
-        registry = GraphVersionRegistry()
-        if exploding_graph:
-            registry.register(
-                COMPANY_MEMORY_REVIEW_WORKFLOW,
-                COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
-                lambda _saver: _ExplodingGraph(),
+        try:
+            runtime.start()
+            assert runtime.readiness.ready is True
+            assert runtime.readiness.mode == 'postgres'
+            assert runtime.readiness.durable is True
+            registry = GraphVersionRegistry()
+            if exploding_graph:
+                registry.register(
+                    COMPANY_MEMORY_REVIEW_WORKFLOW,
+                    COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+                    lambda _saver: _ExplodingGraph(),
+                )
+            else:
+                register_company_memory_review_v2(registry)
+            draft_service = _DeterministicDraftService(
+                application_session_factory
             )
-        else:
-            register_company_memory_review_v2(registry)
-        draft_service = _DeterministicDraftService(self.session_factory)
-        service = ReviewWorkflowService(
-            session_factory=self.session_factory,
-            settings=self.settings,
-            checkpoint_runtime=runtime,
-            graph_registry=registry,
-            agent_registry=_registry(),
+            service = ReviewWorkflowService(
+                session_factory=application_session_factory,
+                settings=self.settings,
+                checkpoint_runtime=runtime,
+                graph_registry=registry,
+                agent_registry=_registry(),
+                draft_service=draft_service,
+            )
+        except Exception:
+            try:
+                runtime.close()
+            finally:
+                application_engine.dispose()
+            raise
+        resources = _AppResources(
+            application_engine=application_engine,
+            session_factory=application_session_factory,
+            runtime=runtime,
+            service=service,
             draft_service=draft_service,
         )
-        resources = _AppResources(runtime, service, draft_service)
         self.apps.append(resources)
         return resources
 
@@ -575,6 +607,7 @@ def postgres_review_harness(
             session_factory=factory,
         )
         harness = _PostgresHarness(
+            database_url=database_url,
             engine=engine,
             session_factory=factory,
             settings=settings,
@@ -802,9 +835,36 @@ def test_postgres_interrupt_survives_pool_and_app_restart_then_resumes_same_thre
     assert paused.durable is True
     before_counts = _business_counts(harness, paused.thread_id)
     _approve_only_item(harness, paused.thread_id)
+    ready = app_a.service.status(
+        actor=USERS['admin'],
+        thread_id=paused.thread_id,
+    )
+    assert ready.status == 'awaiting_human_review'
+    assert ready.checkpoint_resumable is True
+    assert ready.review_resolution_ready is True
+    assert ready.resume_allowed is True
+    with harness.session_factory() as db:
+        before_thread = db.get(AgentWorkflowThread, paused.thread_id)
+        assert before_thread is not None
+        checkpoint_thread_id = before_thread.checkpoint_thread_id
+        state_version = before_thread.state_version
+        db.rollback()
+    app_a_engine = app_a.application_engine
+    app_a_pool = app_a_engine.pool
     app_a.close()
+    assert app_a.closed is True
+    assert app_a_engine.pool is not app_a_pool
 
     app_b = harness.new_app()
+    assert app_b.application_engine is not app_a_engine
+    assert app_b.application_engine.pool is not app_a_pool
+
+    def forbidden_path(*_args: object, **_kwargs: object) -> None:
+        pytest.fail('normal approval must not rotate, repair, or fail checkpoint')
+
+    app_b.service._mark_checkpoint_failed = forbidden_path  # type: ignore[method-assign]
+    app_b.service._repair_checkpoint = forbidden_path  # type: ignore[method-assign]
+    app_b.service._rotate_checkpoint_attempt = forbidden_path  # type: ignore[method-assign]
     resumed = app_b.service.resume(
         actor=USERS['admin'],
         thread_id=paused.thread_id,
@@ -822,6 +882,8 @@ def test_postgres_interrupt_survives_pool_and_app_restart_then_resumes_same_thre
     with harness.session_factory() as db:
         thread = db.get(AgentWorkflowThread, paused.thread_id)
         assert thread is not None
+        assert thread.checkpoint_thread_id == checkpoint_thread_id
+        assert thread.state_version == state_version + 2
         saver = app_b.runtime.saver
         assert saver is not None
         saved = saver.get_tuple(checkpoint_config(thread.checkpoint_thread_id))
@@ -1118,6 +1180,7 @@ def test_concurrent_resume_has_one_state_version_winner(
         before = db.get(AgentWorkflowThread, paused.thread_id)
         assert before is not None
         before_version = before.state_version
+        checkpoint_thread_id = before.checkpoint_thread_id
         db.rollback()
 
     def resume(app: _AppResources) -> tuple[str, object]:
@@ -1147,7 +1210,8 @@ def test_concurrent_resume_has_one_state_version_winner(
         thread = db.get(AgentWorkflowThread, paused.thread_id)
         assert thread is not None
         assert thread.status == 'completed'
-        assert thread.state_version == before_version + 5
+        assert thread.state_version == before_version + 2
+        assert thread.checkpoint_thread_id == checkpoint_thread_id
         db.rollback()
     assert _business_counts(harness, paused.thread_id) == (1, 1, 1, 1)
 
@@ -1213,6 +1277,7 @@ def test_cleanup_runs_checkpoint_and_dispose_after_application_cleanup_failure()
             events.append('engine_dispose')
 
     harness = _PostgresHarness(
+        database_url='postgresql+psycopg://unused-test-target',
         engine=FakeEngine(),  # type: ignore[arg-type]
         session_factory=lambda: FailingSessionContext(),  # type: ignore[arg-type]
         settings=object(),  # type: ignore[arg-type]
