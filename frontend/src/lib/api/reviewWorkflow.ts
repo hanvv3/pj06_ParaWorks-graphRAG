@@ -47,15 +47,11 @@ function isKnownErrorCode(value: unknown): value is ReviewWorkflowErrorCode {
 }
 
 function readSerializedCode(value: unknown): ReviewWorkflowErrorCode | null {
-  if (isKnownErrorCode(value)) return value;
   if (!isRecord(value)) return null;
 
   const keys = Object.keys(value);
   if (keys.length === 1 && keys[0] === "code" && isKnownErrorCode(value.code)) {
     return value.code;
-  }
-  if (keys.length === 1 && keys[0] === "detail") {
-    return readSerializedCode(value.detail);
   }
   return null;
 }
@@ -69,7 +65,7 @@ export function readReviewWorkflowError(error: unknown): ReviewWorkflowClientErr
   try {
     return new ReviewWorkflowClientError(readSerializedCode(JSON.parse(error.message)));
   } catch {
-    return new ReviewWorkflowClientError(readSerializedCode(error.message));
+    return new ReviewWorkflowClientError(null);
   }
 }
 

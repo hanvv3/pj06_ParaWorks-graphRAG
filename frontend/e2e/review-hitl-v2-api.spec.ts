@@ -8,6 +8,7 @@ import {
   launchReviewWorkflow,
   resumeReviewWorkflow,
 } from "../src/lib/api/reviewWorkflow";
+import type { ReviewWorkflowRunRequest } from "../src/lib/api/types";
 
 const request = {
   source_refs: [
@@ -38,9 +39,18 @@ const status = {
   resume_error_code: null,
 };
 
-test("review workflow wrappers use the approved methods, paths, and launch payload", async () => {
+test("review workflow wrappers use the approved methods, paths, and bounded run payloads", async () => {
   const originalFetch = globalThis.fetch;
   const calls: Array<{ path: string; method: string; body?: unknown }> = [];
+  const runtimeExtraRequest = {
+    ...request,
+    source_refs: [{ ...request.source_refs[0], untrusted_source_field: "must not be sent" }],
+    untrusted_top_level: "must not be sent",
+  } as unknown as ReviewWorkflowRunRequest;
+  const requestWithoutClientId: ReviewWorkflowRunRequest = {
+    source_refs: request.source_refs,
+    agent_names: request.agent_names,
+  };
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push({
@@ -56,8 +66,9 @@ test("review workflow wrappers use the approved methods, paths, and launch paylo
 
   try {
     await getReviewWorkflowDiagnostic();
-    await dryRunReviewWorkflow(request);
-    await launchReviewWorkflow(request);
+    await dryRunReviewWorkflow(runtimeExtraRequest);
+    await launchReviewWorkflow(runtimeExtraRequest);
+    await launchReviewWorkflow(requestWithoutClientId);
     await getReviewWorkflowStatus(status.thread_id);
     await resumeReviewWorkflow(status.thread_id);
     await cancelReviewWorkflow(status.thread_id);
@@ -76,6 +87,14 @@ test("review workflow wrappers use the approved methods, paths, and launch paylo
       path: "/api/v1/orchestration/v2/company-memory/runs",
       method: "POST",
       body: request,
+    },
+    {
+      path: "/api/v1/orchestration/v2/company-memory/runs",
+      method: "POST",
+      body: {
+        source_refs: request.source_refs,
+        agent_names: request.agent_names,
+      },
     },
     {
       path: "/api/v1/orchestration/v2/company-memory/runs/thread%20id%2Fwith%20%3F%20punctuation",
@@ -104,6 +123,42 @@ test("review workflow wrappers expose only a bounded backend error code", async 
       code: "evidence_changed",
       message: "요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.",
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("review workflow wrappers hide malformed and untrusted backend failures", async () => {
+  const originalFetch = globalThis.fetch;
+  const rawSecrets = [
+    "unknown-provider-code",
+    "evidence_changed",
+    "oversized-provider-detail",
+    "raw-provider-text",
+  ];
+  const responses = [
+    new Response(JSON.stringify({ detail: { code: rawSecrets[0] } }), {
+      status: 409,
+      headers: { "Content-Type": "application/json" },
+    }),
+    new Response(JSON.stringify({ detail: { detail: { code: rawSecrets[1] } } }), {
+      status: 409,
+      headers: { "Content-Type": "application/json" },
+    }),
+    new Response(rawSecrets[2].repeat(64), { status: 500 }),
+    new Response(`provider failure: ${rawSecrets[3]}`, { status: 500 }),
+  ];
+  globalThis.fetch = (async () => responses.shift() ?? new Response(null, { status: 500 })) as typeof fetch;
+
+  try {
+    for (const rawSecret of rawSecrets) {
+      const error = await launchReviewWorkflow(request).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({
+        code: null,
+        message: "요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+      });
+      expect((error as Error).message).not.toContain(rawSecret);
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
