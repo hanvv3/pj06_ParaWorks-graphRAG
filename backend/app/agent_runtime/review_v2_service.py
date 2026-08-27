@@ -39,6 +39,7 @@ from backend.app.agent_runtime.review_v2_preflight import (
     create_or_reuse_review_thread,
     prepare_review_request,
 )
+from backend.app.agent_runtime.state import validate_checkpoint_state
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
 from backend.app.ingestion.source_versions import (
@@ -67,6 +68,33 @@ _REVIEW_STATUSES = (
     'approved',
     'rejected',
     'needs_more_evidence',
+)
+_REVIEW_GRAPH_STATE_KEYS = frozenset({
+    'workflow_thread_id',
+    'graph_version',
+    'input_hash',
+    'evidence_version_hash',
+    'review_item_ids',
+    'review_status_counts',
+    'phase',
+    'completed_nodes',
+    'error_codes',
+})
+_REVIEW_GRAPH_TERMINAL_KEYS = _REVIEW_GRAPH_STATE_KEYS | {
+    'status',
+    'review_item_count',
+}
+_INITIAL_COMPLETED_NODES = (
+    'validate_input',
+    'collect_evidence_refs',
+    'plan_agent_runs',
+    'draft_review_candidates_transaction',
+    'route_review_boundary',
+)
+_RESOLUTION_COMPLETED_NODES = (
+    *_INITIAL_COMPLETED_NODES,
+    'await_human_review',
+    'verify_review_resolution_from_postgres',
 )
 _TERMINAL_THREAD_STATUSES = frozenset({
     'completed',
@@ -142,6 +170,7 @@ class _ThreadProjection:
     owner_subject_id: str
     status: str
     state_version: int
+    checkpoint_confirmed_at: datetime | None
     review_item_ids: tuple[int, ...]
     review_status_counts: dict[ReviewItemResolutionStatus, int]
     created_at: datetime
@@ -171,6 +200,61 @@ class _MissingCheckpointError(RuntimeError):
 
 class _CorruptCheckpointError(RuntimeError):
     pass
+
+
+def _live_review_counts(
+    projection: _ThreadProjection,
+) -> dict[str, int]:
+    return {
+        status: projection.review_status_counts.get(status, 0)
+        for status in _REVIEW_STATUSES
+    }
+
+
+def _expected_interrupt_state_version(
+    projection: _ThreadProjection,
+) -> int:
+    if projection.status == 'checkpoint_pending':
+        return projection.state_version
+    if projection.status == 'awaiting_human_review':
+        return projection.state_version - 1
+    if projection.status == 'checkpoint_failed':
+        transitions_after_pause = (
+            2 if projection.checkpoint_confirmed_at is not None else 1
+        )
+        return projection.state_version - transitions_after_pause
+    raise _CorruptCheckpointError
+
+
+def _validate_minimized_snapshot_state(
+    *,
+    projection: _ThreadProjection,
+    snapshot_state: Mapping[str, object],
+    terminal: bool,
+) -> dict[str, object]:
+    expected_keys = (
+        _REVIEW_GRAPH_TERMINAL_KEYS
+        if terminal
+        else _REVIEW_GRAPH_STATE_KEYS
+    )
+    if set(snapshot_state) != expected_keys:
+        raise _CorruptCheckpointError
+    safe_state = {
+        key: snapshot_state[key]
+        for key in _REVIEW_GRAPH_STATE_KEYS
+    }
+    try:
+        validate_checkpoint_state(safe_state)
+    except (TypeError, ValueError):
+        raise _CorruptCheckpointError from None
+    if (
+        safe_state['review_item_ids'] != []
+        or safe_state['review_status_counts']
+        != _live_review_counts(projection)
+        or safe_state['error_codes'] != []
+    ):
+        raise _CorruptCheckpointError
+    return safe_state
 
 
 class _UnusedLeaseService:
@@ -548,14 +632,32 @@ class ReviewWorkflowService:
                     builder=builder,
                     saver=saver,
                 )
-            except (
-                CheckpointUnavailableError,
-                _MissingCheckpointError,
-                _CorruptCheckpointError,
-            ):
+            except CheckpointUnavailableError:
                 raise ReviewWorkflowServiceError(
                     'checkpoint_unavailable'
                 ) from None
+            except (_MissingCheckpointError, _CorruptCheckpointError):
+                if not self._cas_status(
+                    projection=projection,
+                    target_status='checkpoint_failed',
+                ):
+                    raise ReviewWorkflowServiceError(
+                        'concurrent_resume'
+                    ) from None
+                failed = self._read_projection(
+                    actor=actor,
+                    thread_id=thread_id,
+                    action='resume',
+                    require_current_versions=True,
+                )
+                repaired = self._repair_checkpoint(
+                    projection=failed,
+                    actor=actor,
+                    builder=builder,
+                )
+                if repaired.status == 'awaiting_human_review':
+                    return self.resume(actor=actor, thread_id=thread_id)
+                return repaired
             if probe.interrupt_state_version is None:
                 raise ReviewWorkflowServiceError('checkpoint_unavailable')
             if not self._cas_status(
@@ -824,6 +926,7 @@ class ReviewWorkflowService:
                 owner_subject_id=thread.owner_subject_id,
                 status=thread.status,
                 state_version=thread.state_version,
+                checkpoint_confirmed_at=thread.checkpoint_confirmed_at,
                 review_item_ids=tuple(item.id for item in items),
                 review_status_counts=counts,
                 created_at=thread.created_at,
@@ -902,6 +1005,9 @@ class ReviewWorkflowService:
         if (
             not isinstance(saved_config, Mapping)
             or not isinstance(configurable, Mapping)
+            or set(saved_config) != {'configurable'}
+            or set(configurable)
+            != {'thread_id', 'checkpoint_ns', 'checkpoint_id'}
             or saved_identity[0] != projection.checkpoint_thread_id
             or saved_identity[1] != ''
             or type(saved_identity[2]) is not str
@@ -929,16 +1035,16 @@ class ReviewWorkflowService:
             )
             snapshot_next = tuple(snapshot.next)
             snapshot_state = snapshot.values
-            interrupts = tuple(
-                pending
-                for task in snapshot.tasks
-                for pending in getattr(task, 'interrupts', ())
-            )
+            snapshot_tasks = tuple(snapshot.tasks)
+            snapshot_interrupts = tuple(snapshot.interrupts)
         except (AttributeError, KeyError, TypeError):
             raise _CorruptCheckpointError from None
         if (
             not isinstance(snapshot_config, Mapping)
             or not isinstance(snapshot_values, Mapping)
+            or set(snapshot_config) != {'configurable'}
+            or set(snapshot_values)
+            != {'thread_id', 'checkpoint_ns', 'checkpoint_id'}
             or snapshot_identity != saved_identity
             or not isinstance(snapshot_state, Mapping)
         ):
@@ -954,36 +1060,55 @@ class ReviewWorkflowService:
             for field, expected in expected_state_identity.items()
         ):
             raise _CorruptCheckpointError
-        snapshot_counts = snapshot_state.get('review_status_counts')
-        snapshot_item_ids = snapshot_state.get('review_item_ids')
-        if (
-            not isinstance(snapshot_counts, Mapping)
-            or set(snapshot_counts) != set(_REVIEW_STATUSES)
-            or any(
-                type(count) is not int or count < 0
-                for count in snapshot_counts.values()
+        if not snapshot_interrupts:
+            if snapshot_next or snapshot_tasks:
+                raise _CorruptCheckpointError
+            safe_state = _validate_minimized_snapshot_state(
+                projection=projection,
+                snapshot_state=snapshot_state,
+                terminal=True,
             )
-            or sum(snapshot_counts.values()) != projection.review_item_count
-            or type(snapshot_item_ids) is not list
-            or any(type(item_id) is not int for item_id in snapshot_item_ids)
-        ):
-            raise _CorruptCheckpointError
-        if not interrupts:
-            if snapshot_next:
-                raise _CorruptCheckpointError
-            stored_status = snapshot_state.get('status')
-            if stored_status not in {'completed', 'needs_more_evidence'}:
-                raise _CorruptCheckpointError
-            if projection.review_status_counts.get('pending_review', 0):
-                expected_terminal_status = None
-            elif projection.review_status_counts.get(
-                'needs_more_evidence',
-                0,
+            stored_status = snapshot_state['status']
+            stored_count = snapshot_state['review_item_count']
+            if (
+                type(stored_count) is not int
+                or stored_count != projection.review_item_count
             ):
-                expected_terminal_status = 'needs_more_evidence'
-            else:
+                raise _CorruptCheckpointError
+            live_counts = _live_review_counts(projection)
+            if projection.review_item_count == 0:
                 expected_terminal_status = 'completed'
-            if stored_status != expected_terminal_status:
+                expected_phase = 'completed'
+                expected_nodes = (
+                    *_INITIAL_COMPLETED_NODES,
+                    'finalize_no_candidates',
+                )
+            elif live_counts['pending_review']:
+                raise _CorruptCheckpointError
+            elif live_counts['needs_more_evidence']:
+                expected_terminal_status = 'needs_more_evidence'
+                expected_phase = 'needs_more_evidence'
+                expected_nodes = (
+                    *_RESOLUTION_COMPLETED_NODES,
+                    'finalize_needs_more_evidence',
+                )
+            else:
+                if (
+                    live_counts['approved'] + live_counts['rejected']
+                    != projection.review_item_count
+                ):
+                    raise _CorruptCheckpointError
+                expected_terminal_status = 'completed'
+                expected_phase = 'completed'
+                expected_nodes = (
+                    *_RESOLUTION_COMPLETED_NODES,
+                    'finalize_review_trace',
+                )
+            if (
+                stored_status != expected_terminal_status
+                or safe_state['phase'] != expected_phase
+                or safe_state['completed_nodes'] != list(expected_nodes)
+            ):
                 raise _CorruptCheckpointError
             return _CheckpointProbe(
                 interrupt_state_version=None,
@@ -992,16 +1117,47 @@ class ReviewWorkflowService:
         if (
             projection.review_item_count == 0
             or snapshot_next != ('await_human_review',)
+            or len(snapshot_tasks) != 1
         ):
             raise _CorruptCheckpointError
-        if len(interrupts) != 1 or type(interrupts[0]) is not Interrupt:
-            raise _CorruptCheckpointError
-        payload = interrupts[0].value
-        state_version = payload.get('state_version') if isinstance(payload, dict) else None
+        safe_state = _validate_minimized_snapshot_state(
+            projection=projection,
+            snapshot_state=snapshot_state,
+            terminal=False,
+        )
+        task = snapshot_tasks[0]
+        task_interrupts = tuple(getattr(task, 'interrupts', ()))
         if (
-            not isinstance(payload, dict)
+            getattr(task, 'name', None) != 'await_human_review'
+            or getattr(task, 'path', None)
+            != ('__pregel_pull', 'await_human_review')
+            or getattr(task, 'error', None) is not None
+            or getattr(task, 'state', None) is not None
+            or getattr(task, 'result', None) is not None
+            or len(task_interrupts) != 1
+            or snapshot_interrupts != task_interrupts
+            or type(task_interrupts[0]) is not Interrupt
+            or type(task_interrupts[0].id) is not str
+            or not task_interrupts[0].id
+            or safe_state['phase'] != 'review_boundary_routed'
+            or safe_state['completed_nodes']
+            != list(_INITIAL_COMPLETED_NODES)
+        ):
+            raise _CorruptCheckpointError
+        payload = task_interrupts[0].value
+        state_version = (
+            payload.get('state_version')
+            if type(payload) is dict
+            else None
+        )
+        expected_state_version = _expected_interrupt_state_version(projection)
+        if (
+            type(payload) is not dict
+            or set(payload) != {'event', 'state_version'}
+            or type(payload.get('event')) is not str
             or payload.get('event') != 'review_resolution_required'
             or type(state_version) is not int
+            or state_version != expected_state_version
         ):
             raise _CorruptCheckpointError
         return _CheckpointProbe(
@@ -1086,7 +1242,7 @@ class ReviewWorkflowService:
             checkpoint_confirmed=True,
             completed=target_status == 'completed',
         ):
-            raise ReviewWorkflowServiceError('checkpoint_failed')
+            raise ReviewWorkflowServiceError('concurrent_resume')
         return self.status(actor=actor, thread_id=projection.thread_id)
 
     def _rotate_checkpoint_attempt(
@@ -1247,6 +1403,7 @@ class ReviewWorkflowService:
                 owner_subject_id=thread.owner_subject_id,
                 status=thread.status,
                 state_version=thread.state_version,
+                checkpoint_confirmed_at=thread.checkpoint_confirmed_at,
                 review_item_ids=(),
                 review_status_counts={},
                 created_at=thread.created_at,

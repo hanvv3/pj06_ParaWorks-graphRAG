@@ -6,11 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command, Interrupt
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.agent_runtime import review_v2_service as lifecycle_module
-from backend.app.agent_runtime.checkpoint_execution import checkpoint_config
+from backend.app.agent_runtime.checkpoint_execution import (
+    checkpoint_config,
+    invoke_and_confirm_checkpoint,
+)
 from backend.app.agent_runtime.checkpointing import (
     CheckpointReadiness,
     CheckpointRuntime,
@@ -342,12 +346,14 @@ class _SnapshotMutatingGraph:
         identity_field: str | None = None,
         partial: bool = False,
         terminal_status: str | None = None,
+        shape_corruption: str | None = None,
     ) -> None:
         self._delegate = delegate
         self._checkpoint_thread_id = checkpoint_thread_id
         self._identity_field = identity_field
         self._partial = partial
         self._terminal_status = terminal_status
+        self._shape_corruption = shape_corruption
 
     def get_state(self, config: dict[str, dict[str, str]]):
         snapshot = self._delegate.get_state(config)
@@ -359,6 +365,64 @@ class _SnapshotMutatingGraph:
                 next=('verify_review_resolution_from_postgres',),
             )
         values = dict(snapshot.values)
+        if self._shape_corruption is not None:
+            corruption = self._shape_corruption
+            tasks = tuple(snapshot.tasks)
+            interrupts = tuple(snapshot.interrupts)
+            if corruption == 'nonempty_review_item_ids':
+                values['review_item_ids'] = [987_654_321]
+            elif corruption == 'extra_state_key':
+                values['source_content'] = 'must-not-be-checkpointed'
+            elif corruption in {
+                'swapped_equal_total_counts',
+                'missing_count_status',
+                'extra_count_status',
+            }:
+                counts = dict(values['review_status_counts'])
+                if corruption == 'swapped_equal_total_counts':
+                    counts['pending_review'] = 0
+                    counts['approved'] = 1
+                elif corruption == 'missing_count_status':
+                    counts.pop('rejected')
+                else:
+                    counts['unknown_status'] = 0
+                values['review_status_counts'] = counts
+            elif corruption in {
+                'extra_interrupt_key',
+                'future_interrupt_version',
+                'stale_interrupt_version',
+            }:
+                task = tasks[0]
+                original = task.interrupts[0]
+                payload = dict(original.value)
+                if corruption == 'extra_interrupt_key':
+                    payload['source_id'] = 'must-not-be-checkpointed'
+                elif corruption == 'future_interrupt_version':
+                    payload['state_version'] += 10_000
+                else:
+                    payload['state_version'] -= 1
+                mutated_interrupt = Interrupt(payload, id=original.id)
+                tasks = (task._replace(interrupts=(mutated_interrupt,)),)
+                interrupts = (mutated_interrupt,)
+            elif corruption == 'wrong_interrupt_phase':
+                values['phase'] = 'checkpoint_pending'
+            elif corruption == 'wrong_terminal_phase':
+                values['phase'] = 'needs_more_evidence'
+            elif corruption == 'wrong_terminal_node':
+                completed_nodes = list(values['completed_nodes'])
+                completed_nodes[-1] = 'finalize_needs_more_evidence'
+                values['completed_nodes'] = completed_nodes
+            elif corruption == 'wrong_terminal_status':
+                values['status'] = 'needs_more_evidence'
+            elif corruption == 'wrong_terminal_review_count':
+                values['review_item_count'] += 1
+            else:
+                raise AssertionError(f'unknown corruption: {corruption}')
+            return snapshot._replace(
+                values=values,
+                tasks=tasks,
+                interrupts=interrupts,
+            )
         if self._terminal_status is not None:
             values['status'] = self._terminal_status
             return snapshot._replace(tasks=(), next=(), values=values)
@@ -610,7 +674,9 @@ def test_status_projects_current_review_rows_not_checkpoint_counts(
 
     assert status.review_status_counts == {'approved': 1}
     assert status.review_resolution_ready is True
-    assert status.resume_allowed is True
+    assert status.checkpoint_resumable is False
+    assert status.resume_allowed is False
+    assert status.resume_error_code == 'checkpoint_unavailable'
 
 
 def test_pending_resume_returns_review_unresolved_before_command_or_saver_write(
@@ -650,7 +716,56 @@ def test_same_thread_resume_completes_after_all_items_resolve(
 
     assert resumed.status == 'completed'
     db_session.expire_all()
-    assert db_session.get(AgentWorkflowThread, started.thread_id).checkpoint_thread_id == checkpoint_thread_id
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert current is not None
+    assert current.thread_id == started.thread_id
+    assert current.checkpoint_thread_id != checkpoint_thread_id
+
+
+def test_live_review_count_change_rotates_old_snapshot_then_completes(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+) -> None:
+    service = _service(application_session_factory, service_parts)
+    _, started = _start(db_session, service)
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    old_checkpoint_thread_id = thread.checkpoint_thread_id
+    run_count = db_session.scalar(select(func.count()).select_from(AgentRun))
+    item_count = db_session.scalar(select(func.count()).select_from(ReviewItem))
+    _set_item_statuses(application_session_factory, started.thread_id, ['approved'])
+
+    resumed = service.resume(actor=_actor(), thread_id=started.thread_id)
+
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert current is not None
+    assert resumed.status == 'completed'
+    assert current.checkpoint_thread_id != old_checkpoint_thread_id
+    assert db_session.scalar(select(func.count()).select_from(AgentRun)) == run_count
+    assert db_session.scalar(select(func.count()).select_from(ReviewItem)) == item_count
+    saver = service_parts[1].saver
+    assert saver is not None
+    graph = service_parts[2].resolve(
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+    )(saver)
+    snapshot = graph.get_state(checkpoint_config(current.checkpoint_thread_id))
+    assert snapshot.values['review_item_ids'] == []
+    assert set(snapshot.values) == {
+        'workflow_thread_id',
+        'graph_version',
+        'input_hash',
+        'evidence_version_hash',
+        'review_item_ids',
+        'review_status_counts',
+        'phase',
+        'completed_nodes',
+        'error_codes',
+        'status',
+        'review_item_count',
+    }
 
 
 def test_resume_rechecks_exact_runtime_after_claim_before_invoke(
@@ -1250,6 +1365,164 @@ def test_nonterminal_checkpoint_without_interrupt_rotates_before_repair(
     assert repaired.status == 'awaiting_human_review'
     assert current is not None
     assert current.checkpoint_thread_id != old_checkpoint_thread_id
+
+
+@pytest.mark.parametrize(
+    'corruption',
+    [
+        'nonempty_review_item_ids',
+        'extra_state_key',
+        'extra_interrupt_key',
+        'future_interrupt_version',
+        'stale_interrupt_version',
+        'swapped_equal_total_counts',
+        'missing_count_status',
+        'extra_count_status',
+        'wrong_interrupt_phase',
+    ],
+)
+def test_checkpoint_interrupt_requires_exact_minimized_task6_shape(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    service = _service(application_session_factory, service_parts)
+    _, started = _start(db_session, service)
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    old_checkpoint_thread_id = thread.checkpoint_thread_id
+    thread.status = 'checkpoint_failed'
+    thread.state_version += 1
+    db_session.commit()
+    run_count = db_session.scalar(select(func.count()).select_from(AgentRun))
+    item_count = db_session.scalar(select(func.count()).select_from(ReviewItem))
+    saver = service_parts[1].saver
+    assert saver is not None
+    real_builder = service_parts[2].resolve(
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+    )
+
+    def corrupting_builder(checkpointer: object) -> _SnapshotMutatingGraph:
+        return _SnapshotMutatingGraph(
+            real_builder(checkpointer),
+            checkpoint_thread_id=old_checkpoint_thread_id,
+            shape_corruption=corruption,
+        )
+
+    monkeypatch.setattr(
+        service,
+        '_resolve_builder',
+        lambda _projection: corrupting_builder,
+    )
+
+    repaired = service.resume(actor=_actor(), thread_id=started.thread_id)
+
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert current is not None
+    assert repaired.status == 'awaiting_human_review'
+    assert current.checkpoint_thread_id != old_checkpoint_thread_id
+    snapshot = real_builder(saver).get_state(
+        checkpoint_config(current.checkpoint_thread_id)
+    )
+    assert set(snapshot.values) == {
+        'workflow_thread_id',
+        'graph_version',
+        'input_hash',
+        'evidence_version_hash',
+        'review_item_ids',
+        'review_status_counts',
+        'phase',
+        'completed_nodes',
+        'error_codes',
+    }
+    assert snapshot.values['review_item_ids'] == []
+    assert snapshot.values['review_status_counts'] == {
+        'pending_review': 1,
+        'approved': 0,
+        'rejected': 0,
+        'needs_more_evidence': 0,
+    }
+    assert db_session.scalar(select(func.count()).select_from(AgentRun)) == run_count
+    assert db_session.scalar(select(func.count()).select_from(ReviewItem)) == item_count
+
+
+@pytest.mark.parametrize(
+    'corruption',
+    [
+        'wrong_terminal_phase',
+        'wrong_terminal_node',
+        'wrong_terminal_status',
+        'wrong_terminal_review_count',
+    ],
+)
+def test_checkpoint_terminal_requires_exact_node_status_and_count_shape(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    service = _service(application_session_factory, service_parts)
+    _, started = _start(db_session, service)
+    _set_item_statuses(application_session_factory, started.thread_id, ['approved'])
+    thread = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert thread is not None
+    old_checkpoint_thread_id = thread.checkpoint_thread_id
+    saver = service_parts[1].saver
+    assert saver is not None
+    real_builder = service_parts[2].resolve(
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+    )
+    invoke_and_confirm_checkpoint(
+        graph=real_builder(saver),
+        saver=saver,
+        command_or_input=Command(resume={
+            'event': 'review_resolution_checked',
+            'state_version': thread.state_version,
+        }),
+        checkpoint_thread_id=old_checkpoint_thread_id,
+        runtime_context=service._runtime_context(_actor()),
+        expect_interrupt=False,
+    )
+    thread.status = 'checkpoint_failed'
+    thread.state_version += 1
+    db_session.commit()
+
+    def corrupting_builder(checkpointer: object) -> _SnapshotMutatingGraph:
+        return _SnapshotMutatingGraph(
+            real_builder(checkpointer),
+            checkpoint_thread_id=old_checkpoint_thread_id,
+            shape_corruption=corruption,
+        )
+
+    monkeypatch.setattr(
+        service,
+        '_resolve_builder',
+        lambda _projection: corrupting_builder,
+    )
+
+    repaired = service.resume(actor=_actor(), thread_id=started.thread_id)
+
+    db_session.expire_all()
+    current = db_session.get(AgentWorkflowThread, started.thread_id)
+    assert current is not None
+    assert repaired.status == 'awaiting_human_review'
+    assert current.checkpoint_thread_id != old_checkpoint_thread_id
+    snapshot = real_builder(saver).get_state(
+        checkpoint_config(current.checkpoint_thread_id)
+    )
+    assert snapshot.values['review_item_ids'] == []
+    assert snapshot.values['review_status_counts'] == {
+        'pending_review': 0,
+        'approved': 1,
+        'rejected': 0,
+        'needs_more_evidence': 0,
+    }
 
 
 @pytest.mark.parametrize(
