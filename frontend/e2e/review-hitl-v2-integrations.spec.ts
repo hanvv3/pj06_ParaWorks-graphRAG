@@ -1,4 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
+import { parseReviewWorkflowQuery } from "../src/app/review/reviewWorkflowContext";
+
+const serverIssuedWorkflowThreadId = "89abcdef0123456789abcdef01234567";
 
 const sourceRefs = [
   {
@@ -223,7 +226,7 @@ async function installIntegrationsRoutes(
 
 function awaitingReviewStatus() {
   return {
-    thread_id: "workflow-thread-1",
+    thread_id: serverIssuedWorkflowThreadId,
     status: "awaiting_human_review",
     review_item_count: 2,
     review_status_counts: { pending_review: 2 },
@@ -259,6 +262,9 @@ test("shows cost and launches the exact completed source batch", async ({ page }
     },
   });
 
+  const launchedThreadId = awaitingReviewStatus().thread_id;
+  expect(parseReviewWorkflowQuery(launchedThreadId)).toEqual({ kind: "workflow", workflowThreadId: launchedThreadId });
+
   await completeGmailSync(page);
 
   const panel = page.getByTestId("review-candidate-launch-panel");
@@ -274,7 +280,10 @@ test("shows cost and launches the exact completed source batch", async ({ page }
   expect(dryRunBody).toEqual({ source_refs: sourceRefs, agent_names: diagnostic.default_agent_names });
 
   await panel.getByRole("button", { name: "검토 후보 만들기" }).click();
-  await expect(page).toHaveURL(/\/review\?workflow_thread_id=workflow-thread-1$/);
+  await expect(page).toHaveURL(new RegExp(`/review\\?workflow_thread_id=${serverIssuedWorkflowThreadId}$`));
+  const navigatedThreadId = new URL(page.url()).searchParams.get("workflow_thread_id");
+  expect(navigatedThreadId).toBe(serverIssuedWorkflowThreadId);
+  expect(parseReviewWorkflowQuery(navigatedThreadId)).toEqual({ kind: "workflow", workflowThreadId: serverIssuedWorkflowThreadId });
   expect(launchBody).toEqual({
     source_refs: sourceRefs,
     agent_names: diagnostic.default_agent_names,
@@ -427,7 +436,7 @@ test("reuses one stable client request id after response loss", async ({ page })
   await expect(page.getByTestId("review-candidate-launch-panel")).toContainText("다시 시도");
   await button.click();
 
-  await expect(page).toHaveURL(/\/review\?workflow_thread_id=workflow-thread-1$/);
+  await expect(page).toHaveURL(new RegExp(`/review\\?workflow_thread_id=${serverIssuedWorkflowThreadId}$`));
   expect(launchBodies).toHaveLength(2);
   expect(launchBodies[0]).toEqual(launchBodies[1]);
 });
