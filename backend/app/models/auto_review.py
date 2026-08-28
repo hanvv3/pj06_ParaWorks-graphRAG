@@ -172,9 +172,10 @@ class AutoReviewProviderSafetyEvent(Base):
             name='ck_auto_review_provider_safety_event_key_material',
         ),
         CheckConstraint(
-            "(event_kind = 'budget_overrun' AND length(call_hmac) = 64 AND "
-            'actor_subject_hmac IS NULL) OR '
+            "(event_kind = 'budget_overrun' AND call_hmac IS NOT NULL AND "
+            'length(call_hmac) = 64 AND actor_subject_hmac IS NULL) OR '
             "(event_kind IN ('initial_authorized', 'breaker_cleared') AND "
+            'actor_subject_hmac IS NOT NULL AND '
             'length(actor_subject_hmac) = 64 AND call_hmac IS NULL)',
             name='ck_auto_review_provider_safety_event_actor_or_call',
         ),

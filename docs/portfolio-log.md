@@ -4762,7 +4762,9 @@ Cost/security note:
   Provider counters/cost/time/reason/gate/timestamps require the exact event
   backpointer, and event kinds are semantic: an overrun cannot replace the
   authorized estimator/framing/price authority, while only an operator clear
-  may replace it after an open breaker. Rollout authorization, breaker open,
+  may replace it after an open breaker. Operator and call attribution are
+  explicitly non-null and mutually exclusive by event kind. Rollout
+  authorization, breaker open,
   breaker close, and generation invalidation each have disjoint prior/new
   control transitions, so a correctly backpointed event cannot use the wrong
   kind. Metric-only updates still increment `state_version` while preserving
@@ -4777,5 +4779,5 @@ Cost/security note:
   SQLite and isolated PostgreSQL/pgvector only, with no live provider calls.
 - Round-3 verification used a pinned manual `2f6a8b9c0d1e` schema fixture,
   exact Task 2 index assertions, and finally-dropped PostgreSQL schemas:
-  `159 passed` in the focused suite, including `70` PostgreSQL tests with zero
+  `176 passed` in the focused suite, including `87` PostgreSQL tests with zero
   skips; the Task 1 compatibility suite remains `118 passed`.

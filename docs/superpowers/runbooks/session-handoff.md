@@ -2902,8 +2902,10 @@ tests passed with 53 tests; ruff passed.
   and require exact state-version/event/backpointer alignment. `budget_overrun`
   preserves the authorized estimator/framing/price tuple; `breaker_cleared`
   requires an open breaker, operator attribution, a different reviewed cost
-  policy, and the exact replacement authority. Rollout control kinds are
-  transition-specific: percentage authorization cannot change a breaker,
+  policy, and the exact replacement authority. Provider event attribution is
+  explicitly non-null and mutually exclusive: operator events cannot carry a
+  call HMAC, and overrun events cannot carry an operator HMAC. Rollout control
+  kinds are transition-specific: percentage authorization cannot change a breaker,
   breaker open/close cannot masquerade as authorization or invalidation, and
   generation invalidation only lowers the latch and advances its generation.
   Rollout metrics use `state_version + 1` without changing `control_epoch` or
@@ -2921,8 +2923,8 @@ tests passed with 53 tests; ruff passed.
   creates a unique schema and drops it in `finally`, so generated rows do not
   leak between runs. Missing URLs fail, not skip.
 - Historical-upgrade coverage is pinned to a manual `2f6a8b9c0d1e` schema and
-  must not call current `Base.metadata`. Current round-3 evidence is `159`
-  focused tests and `70` PostgreSQL-only tests (zero skips), plus the unchanged
+  must not call current `Base.metadata`. Current round-4 evidence is `176`
+  focused tests and `87` PostgreSQL-only tests (zero skips), plus the unchanged
   `118`-test Task 1 compatibility suite.
 - Cutover stays drain/migrate/deploy/bootstrap/reconcile. Slack remains
   C.5-ineligible and Task 2 never calls live providers or connectors.

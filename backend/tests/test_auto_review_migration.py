@@ -2,7 +2,7 @@ import os
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -49,6 +49,7 @@ from backend.app.models import (
 
 REVISION = '7c5a2e9f4b10'
 PREVIOUS_REVISION = '2f6a8b9c0d1e'
+PROVIDER_OVERRIDE_UNSET = object()
 
 AUTO_REVIEW_TABLES = {
     'auto_review_runtime_key_states',
@@ -474,7 +475,12 @@ def _claimed_extraction_call(
     )
 
 
-def _insert_initial_provider_state(connection, *, suffix: str) -> tuple[int, int]:
+def _insert_initial_provider_state(
+    connection,
+    *,
+    suffix: str,
+    gate_reference: str | None = None,
+) -> tuple[int, int]:
     model = f'provider-round2-{suffix}'
     state_id = connection.scalar(
         text(
@@ -483,13 +489,15 @@ def _insert_initial_provider_state(connection, *, suffix: str) -> tuple[int, int
             'authorized_cost_policy_version, token_estimator_version, '
             'tokenizer_encoding, reply_priming_tokens, framing_safety_tokens, '
             'input_usd_per_1m, output_usd_per_1m, breaker_open, overrun_count, '
-            'authorized_at, last_event_sequence, created_at, updated_at) VALUES '
+            'regression_gate_reference, authorized_at, last_event_sequence, '
+            'created_at, updated_at) VALUES '
             "('validation', 'openai', :model, 'medium', 1, 'cost:v1', "
             "'estimator:v1', 'o200k_base', 16, 512, 2.000000, 12.000000, "
-            'false, 0, CURRENT_TIMESTAMP, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) '
+            'false, 0, :gate_reference, CURRENT_TIMESTAMP, 0, '
+            'CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) '
             'RETURNING id'
         ),
-        {'model': model},
+        {'model': model, 'gate_reference': gate_reference},
     )
     event_id = connection.scalar(
         text(
@@ -499,16 +507,19 @@ def _insert_initial_provider_state(connection, *, suffix: str) -> tuple[int, int
             'new_state_version, cost_policy_version, token_estimator_version, '
             'tokenizer_encoding, reply_priming_tokens, framing_safety_tokens, '
             'input_usd_per_1m, output_usd_per_1m, prior_breaker_open, '
-            'new_breaker_open, actor_subject_hmac, fingerprint_key_version, '
-            'fingerprint_key_material_verifier, created_at) VALUES '
+            'new_breaker_open, regression_gate_reference, actor_subject_hmac, '
+            'fingerprint_key_version, fingerprint_key_material_verifier, '
+            'created_at) VALUES '
             "(:state_id, 'validation', 'openai', :model, 'medium', 1, "
             "'initial_authorized', 0, 1, 'cost:v1', 'estimator:v1', "
             "'o200k_base', 16, 512, 2.000000, 12.000000, false, false, "
-            ':actor, :key_version, :verifier, CURRENT_TIMESTAMP) RETURNING id'
+            ':gate_reference, :actor, :key_version, :verifier, '
+            'CURRENT_TIMESTAMP) RETURNING id'
         ),
         {
             'state_id': state_id,
             'model': model,
+            'gate_reference': gate_reference,
             'actor': 'a' * 64,
             'key_version': 'pg-test-v1',
             'verifier': 'b' * 64,
@@ -530,6 +541,13 @@ def _apply_provider_transition(
     state_id: int,
     event_kind: str,
     authority_updates: dict[str, object] | None = None,
+    gate_reference: object = PROVIDER_OVERRIDE_UNSET,
+    actor_subject_hmac: object = PROVIDER_OVERRIDE_UNSET,
+    call_hmac: object = PROVIDER_OVERRIDE_UNSET,
+    overrun_count: object = PROVIDER_OVERRIDE_UNSET,
+    last_overrun_cost_usd: object = PROVIDER_OVERRIDE_UNSET,
+    last_overrun_at: object = PROVIDER_OVERRIDE_UNSET,
+    cleared_at: object = PROVIDER_OVERRIDE_UNSET,
 ) -> int:
     state = connection.execute(
         text(
@@ -552,11 +570,32 @@ def _apply_provider_transition(
     is_overrun = event_kind == 'budget_overrun'
     new_breaker_open = is_overrun
     reason_code = 'budget_overrun' if is_overrun else None
-    gate_reference = (
-        'gate:provider-remediated'
-        if event_kind == 'breaker_cleared'
-        else state['regression_gate_reference']
-    )
+    if gate_reference is PROVIDER_OVERRIDE_UNSET:
+        gate_reference = (
+            'gate:provider-remediated'
+            if event_kind == 'breaker_cleared'
+            else state['regression_gate_reference']
+        )
+    if actor_subject_hmac is PROVIDER_OVERRIDE_UNSET:
+        actor_subject_hmac = None if is_overrun else 'c' * 64
+    if call_hmac is PROVIDER_OVERRIDE_UNSET:
+        call_hmac = 'd' * 64 if is_overrun else None
+    if overrun_count is PROVIDER_OVERRIDE_UNSET:
+        overrun_count = state['overrun_count'] + (1 if is_overrun else 0)
+    if last_overrun_cost_usd is PROVIDER_OVERRIDE_UNSET:
+        last_overrun_cost_usd = (
+            Decimal('0.500000')
+            if is_overrun
+            else state['last_overrun_cost_usd']
+        )
+    if last_overrun_at is PROVIDER_OVERRIDE_UNSET:
+        last_overrun_at = created_at if is_overrun else state['last_overrun_at']
+    if cleared_at is PROVIDER_OVERRIDE_UNSET:
+        cleared_at = (
+            created_at
+            if event_kind == 'breaker_cleared'
+            else state['cleared_at']
+        )
     event_id = connection.scalar(
         text(
             'INSERT INTO auto_review_provider_safety_events '
@@ -598,8 +637,8 @@ def _apply_provider_transition(
             'new_breaker_open': new_breaker_open,
             'reason_code': reason_code,
             'regression_gate_reference': gate_reference,
-            'actor_subject_hmac': None if is_overrun else 'c' * 64,
-            'call_hmac': 'd' * 64 if is_overrun else None,
+            'actor_subject_hmac': actor_subject_hmac,
+            'call_hmac': call_hmac,
             'fingerprint_key_version': 'pg-test-v1',
             'fingerprint_key_material_verifier': 'b' * 64,
             'created_at': created_at,
@@ -636,17 +675,11 @@ def _apply_provider_transition(
             'output_usd_per_1m': authority['output_usd_per_1m'],
             'new_breaker_open': new_breaker_open,
             'reason_code': reason_code,
-            'overrun_count': state['overrun_count'] + (1 if is_overrun else 0),
-            'last_overrun_cost_usd': (
-                Decimal('0.500000')
-                if is_overrun
-                else state['last_overrun_cost_usd']
-            ),
-            'last_overrun_at': (
-                created_at if is_overrun else state['last_overrun_at']
-            ),
+            'overrun_count': overrun_count,
+            'last_overrun_cost_usd': last_overrun_cost_usd,
+            'last_overrun_at': last_overrun_at,
             'regression_gate_reference': gate_reference,
-            'cleared_at': created_at if event_kind == 'breaker_cleared' else None,
+            'cleared_at': cleared_at,
             'event_sequence': state['last_event_sequence'] + 1,
             'event_id': event_id,
         },
@@ -671,6 +704,27 @@ def _insert_rollout_state(
         db.add(state)
         db.commit()
         return state.id
+
+
+def _insert_open_provider_state(
+    engine: Engine,
+    *,
+    suffix: str,
+    gate_reference: str | None = None,
+) -> int:
+    with engine.begin() as connection:
+        state_id, _ = _insert_initial_provider_state(
+            connection,
+            suffix=suffix,
+            gate_reference=gate_reference,
+        )
+    with engine.begin() as connection:
+        _apply_provider_transition(
+            connection,
+            state_id=state_id,
+            event_kind='budget_overrun',
+        )
+    return state_id
 
 
 def _apply_rollout_transition(
@@ -1586,6 +1640,240 @@ def test_postgresql_budget_overrun_cannot_replace_authorized_provider_authority(
         state_id=state_id,
         event_kind='budget_overrun',
         authority_updates={column_name: replacement},
+    )
+    with pytest.raises(DBAPIError, match='provider event transition mismatch'):
+        transaction.commit()
+    connection.close()
+
+
+def test_postgresql_budget_overrun_preserves_regression_gate_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    with engine.begin() as connection:
+        state_id, _ = _insert_initial_provider_state(
+            connection,
+            suffix=uuid4().hex[:10],
+            gate_reference='gate:initial',
+        )
+
+    connection = engine.connect()
+    transaction = connection.begin()
+    _apply_provider_transition(
+        connection,
+        state_id=state_id,
+        event_kind='budget_overrun',
+        gate_reference='gate:wrong-overrun',
+    )
+    with pytest.raises(DBAPIError, match='provider event transition mismatch'):
+        transaction.commit()
+    connection.close()
+
+
+def test_postgresql_open_provider_breaker_clear_requires_new_cost_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    state_id = _insert_open_provider_state(
+        engine,
+        suffix=uuid4().hex[:10],
+    )
+
+    connection = engine.connect()
+    transaction = connection.begin()
+    _apply_provider_transition(
+        connection,
+        state_id=state_id,
+        event_kind='breaker_cleared',
+    )
+    with pytest.raises(DBAPIError, match='provider event transition mismatch'):
+        transaction.commit()
+    connection.close()
+
+
+@pytest.mark.parametrize('replacement_gate', [None, 'gate:initial'])
+def test_postgresql_open_provider_breaker_clear_requires_new_nonempty_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_gate: str | None,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    state_id = _insert_open_provider_state(
+        engine,
+        suffix=uuid4().hex[:10],
+        gate_reference='gate:initial',
+    )
+
+    connection = engine.connect()
+    transaction = connection.begin()
+    _apply_provider_transition(
+        connection,
+        state_id=state_id,
+        event_kind='breaker_cleared',
+        authority_updates={'authorized_cost_policy_version': 'cost:v2'},
+        gate_reference=replacement_gate,
+    )
+    with pytest.raises(DBAPIError, match='provider event transition mismatch'):
+        transaction.commit()
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    ('actor_subject_hmac', 'call_hmac'),
+    [
+        (None, None),
+        ('c' * 63, None),
+        (None, 'd' * 64),
+        ('c' * 64, 'd' * 64),
+    ],
+)
+def test_postgresql_provider_breaker_clear_requires_exact_operator_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+    actor_subject_hmac: str | None,
+    call_hmac: str | None,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    state_id = _insert_open_provider_state(
+        engine,
+        suffix=uuid4().hex[:10],
+    )
+
+    connection = engine.connect()
+    transaction = connection.begin()
+    with pytest.raises(
+        DBAPIError,
+        match='ck_auto_review_provider_safety_event_actor_or_call',
+    ):
+        _apply_provider_transition(
+            connection,
+            state_id=state_id,
+            event_kind='breaker_cleared',
+            authority_updates={'authorized_cost_policy_version': 'cost:v2'},
+            actor_subject_hmac=actor_subject_hmac,
+            call_hmac=call_hmac,
+        )
+        transaction.commit()
+    transaction.rollback()
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    'history_mutation',
+    [
+        'count_incremented',
+        'count_decremented',
+        'cost_altered',
+        'cost_missing',
+        'time_altered',
+        'time_missing',
+    ],
+)
+def test_postgresql_provider_breaker_clear_preserves_overrun_history(
+    monkeypatch: pytest.MonkeyPatch,
+    history_mutation: str,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    state_id = _insert_open_provider_state(
+        engine,
+        suffix=uuid4().hex[:10],
+    )
+    with engine.connect() as connection:
+        state = connection.execute(
+            text(
+                'SELECT overrun_count, last_overrun_cost_usd, last_overrun_at '
+                'FROM auto_review_provider_safety_states WHERE id=:state_id'
+            ),
+            {'state_id': state_id},
+        ).one()
+    overrides: dict[str, object] = {}
+    if history_mutation == 'count_incremented':
+        overrides['overrun_count'] = state.overrun_count + 1
+    elif history_mutation == 'count_decremented':
+        overrides['overrun_count'] = state.overrun_count - 1
+    elif history_mutation == 'cost_altered':
+        overrides['last_overrun_cost_usd'] = (
+            state.last_overrun_cost_usd + Decimal('0.100000')
+        )
+    elif history_mutation == 'cost_missing':
+        overrides['last_overrun_cost_usd'] = None
+    elif history_mutation == 'time_altered':
+        overrides['last_overrun_at'] = state.last_overrun_at + timedelta(seconds=1)
+    elif history_mutation == 'time_missing':
+        overrides['last_overrun_at'] = None
+    else:
+        raise AssertionError(f'unknown history mutation: {history_mutation}')
+
+    connection = engine.connect()
+    transaction = connection.begin()
+    _apply_provider_transition(
+        connection,
+        state_id=state_id,
+        event_kind='breaker_cleared',
+        authority_updates={'authorized_cost_policy_version': 'cost:v2'},
+        **overrides,
+    )
+    with pytest.raises(DBAPIError, match='provider event transition mismatch'):
+        transaction.commit()
+    connection.close()
+
+
+@pytest.mark.parametrize('timestamp_mutation', ['missing', 'unchanged', 'incorrect'])
+def test_postgresql_provider_breaker_clear_requires_exact_clear_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+    timestamp_mutation: str,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    state_id = _insert_open_provider_state(
+        engine,
+        suffix=uuid4().hex[:10],
+    )
+    cost_policy_version = 'cost:v2'
+    gate_reference = 'gate:provider-remediated'
+    if timestamp_mutation == 'unchanged':
+        with engine.begin() as connection:
+            _apply_provider_transition(
+                connection,
+                state_id=state_id,
+                event_kind='breaker_cleared',
+                authority_updates={
+                    'authorized_cost_policy_version': cost_policy_version
+                },
+                gate_reference=gate_reference,
+            )
+        with engine.begin() as connection:
+            _apply_provider_transition(
+                connection,
+                state_id=state_id,
+                event_kind='budget_overrun',
+            )
+        with engine.connect() as connection:
+            unchanged_timestamp = connection.scalar(
+                text(
+                    'SELECT cleared_at FROM auto_review_provider_safety_states '
+                    'WHERE id=:state_id'
+                ),
+                {'state_id': state_id},
+            )
+        cleared_at_override = unchanged_timestamp
+        cost_policy_version = 'cost:v3'
+        gate_reference = 'gate:provider-remediated:v2'
+    elif timestamp_mutation == 'missing':
+        cleared_at_override = None
+    elif timestamp_mutation == 'incorrect':
+        cleared_at_override = datetime(2000, 1, 1, tzinfo=UTC)
+    else:
+        raise AssertionError(f'unknown timestamp mutation: {timestamp_mutation}')
+
+    connection = engine.connect()
+    transaction = connection.begin()
+    _apply_provider_transition(
+        connection,
+        state_id=state_id,
+        event_kind='breaker_cleared',
+        authority_updates={
+            'authorized_cost_policy_version': cost_policy_version,
+        },
+        gate_reference=gate_reference,
+        cleared_at=cleared_at_override,
     )
     with pytest.raises(DBAPIError, match='provider event transition mismatch'):
         transaction.commit()
