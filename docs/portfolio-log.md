@@ -4799,8 +4799,11 @@ Cost/security note:
   commits and releases all database/grant locks, then consumes the permit
   before its one body-blind Task 1 HTTP-hook dispatch. Grants and permits are
   non-copyable, non-pickleable, redacted and process-local; retry, fallback,
-  cache, callbacks and tracing stay disabled. Terminal, cancellation, drift,
-  corruption, recovery, and lease-expiry paths revoke retained authority.
+  cache, callbacks and tracing stay disabled. Terminal, attempt-zero
+  cancellation, drift, corruption, recovery, and lease-expiry paths revoke
+  retained authority. Post-E2 cancellation is instead an output-discard latch:
+  its still-live permit may dispatch exactly once before expiry, then E3
+  discards and charges.
 - Candidate completion is callback-independent: E3 re-queries exactly one
   same-workflow ReviewItem and its contiguous immutable evidence children,
   recomputes the exact selected message-set HMAC from prepared slot identities

@@ -902,7 +902,6 @@ class ExtractionCallLedger:
                 state.status != 'claimed'
                 or state.provider_attempt_count != 1
                 or state.plan.invocation is not invocation
-                or state.cancelled
                 or state.drifted
                 or self._db_clock() >= state.lease_expires_at
             ):
@@ -995,8 +994,8 @@ class ExtractionCallLedger:
         with self._lock:
             state = self._state(context)
             state.cancelled = True
-            self._invalidate_permit(context)
             if state.provider_attempt_count == 0 and state.status == 'claimed':
+                self._invalidate_permit(context)
                 self._terminal_fail(state, charge=False)
 
     def set_drift(self, context: ExtractionLockedContext) -> None:
@@ -1565,7 +1564,6 @@ class ExtractionCallStore:
                     or call.provider_attempt_count != 1
                     or call.lease_expires_at is None
                     or now >= call.lease_expires_at
-                    or thread.cancelled_at is not None
                     or not self._runtime_key_matches(db, request)
                     or context.owner_subject_id is None
                     or thread.owner_subject_id != context.owner_subject_id
@@ -1581,6 +1579,7 @@ class ExtractionCallStore:
                         sources=sources,
                         safety=safety,
                         plan=plan,
+                        allow_cancelled=True,
                     )
                 ):
                     live = False
@@ -1901,7 +1900,7 @@ class ExtractionCallStore:
         *,
         actor_subject_id: str,
     ) -> None:
-        cancelled = False
+        revoke_unstarted_authority = False
         with self._session_factory() as db, db.begin():
             thread, _request, _refs, _sources, _safety = self._lock_prefix(
                 db, workflow_thread_id=context.workflow_thread_id
@@ -1924,8 +1923,8 @@ class ExtractionCallStore:
             if thread.cancelled_at is None:
                 thread.cancelled_at = now
                 thread.cancelled_by_subject_id = actor_subject_id
-            cancelled = True
             if call.provider_attempt_count == 0:
+                revoke_unstarted_authority = True
                 call.charged_input_tokens = 0
                 call.charged_output_tokens = 0
                 call.charged_cost_usd = Decimal('0')
@@ -1934,7 +1933,7 @@ class ExtractionCallStore:
                     'failure_reason_code': 'cancelled',
                 }
                 self._sql_fail(call, run, now=now)
-        if cancelled:
+        if revoke_unstarted_authority:
             self._invalidate_active_grant(context)
 
     def recover_expired(
@@ -2187,6 +2186,7 @@ class ExtractionCallStore:
         sources: dict[int, Source],
         safety: dict[str, AutoReviewProviderSafetyState],
         plan: PreparedExtractionPlan,
+        allow_cancelled: bool = False,
     ) -> bool:
         extraction = safety.get('extraction')
         validation = safety.get('validation')
@@ -2202,7 +2202,7 @@ class ExtractionCallStore:
             )
         return bool(
             thread.graph_version == 'company-memory-review-v2.1-auto-review'
-            and thread.cancelled_at is None
+            and (allow_cancelled or thread.cancelled_at is None)
             and refs
             and sources_match
             and request.extraction_plan_set_hmac == self._plan_set.plan_set_hmac

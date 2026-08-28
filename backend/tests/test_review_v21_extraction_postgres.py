@@ -1507,7 +1507,7 @@ def test_postgresql_blocked_provider_failure_or_timeout_releases_cancel_and_gran
 
 @pytest.mark.parametrize(
     'authority_loss',
-    ('complete', 'fail', 'cancel', 'recovery', 'drift', 'lease_expiry'),
+    ('complete', 'fail', 'recovery', 'drift', 'lease_expiry'),
 )
 def test_postgresql_terminal_or_authority_loss_invalidates_store_dispatch_grant(
     postgres_runtime,
@@ -1535,8 +1535,6 @@ def test_postgresql_terminal_or_authority_loss_invalidates_store_dispatch_grant(
         )
     elif authority_loss == 'fail':
         store.fail(context, reason_code='provider_failure', usage=ProviderUsage(1, 1))
-    elif authority_loss == 'cancel':
-        store.cancel(context, actor_subject_id='task3-owner')
     else:
         with factory() as db, db.begin():
             if authority_loss == 'drift':
@@ -1568,6 +1566,93 @@ def test_postgresql_terminal_or_authority_loss_invalidates_store_dispatch_grant(
     with pytest.raises(ProviderSendFenceError):
         grant.permit.consume_at_dispatch()
     assert called is False
+
+
+def test_postgresql_post_e2_cancel_retains_one_dispatch_then_e3_discards_and_charges(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    grant = store.mark_attempt_started(context)
+    store.cancel(context, actor_subject_id='task3-owner')
+    calls = []
+    invoke_prepared_extraction(
+        plan.invocation,
+        lambda same, *, timeout: calls.append((same, timeout)) or {'output': True},
+        store=store,
+        grant=grant,
+    )
+    assert calls == [(plan.invocation, plan.provider_timeout_seconds)]
+    with pytest.raises((ExtractionCallStateError, ProviderSendFenceError)):
+        invoke_prepared_extraction(
+            plan.invocation,
+            lambda *_args, **_kwargs: pytest.fail('provider called twice'),
+            store=store,
+            grant=grant,
+        )
+    store.complete(
+        context,
+        result={
+            'result_kind': 'no_candidate',
+            'candidate': None,
+            'no_candidate_reason': 'no_relevant_evidence',
+        },
+        usage=ProviderUsage(7, 5),
+    )
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        assert call is not None and call.status == 'failed'
+        assert call.charged_input_tokens == 7
+        assert call.charged_output_tokens == 5
+        assert call.result_kind is None
+        assert db.scalar(select(ReviewItem)) is None
+
+
+def test_postgresql_post_e2_cancelled_permit_expiry_recovers_reserve_without_retry(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    grant = store.mark_attempt_started(context)
+    store.cancel(context, actor_subject_id='task3-owner')
+    with factory() as db, db.begin():
+        db.execute(
+            text(
+                "UPDATE auto_review_extraction_calls SET lease_expires_at="
+                "clock_timestamp() - interval '1 second'"
+            )
+        )
+    with pytest.raises(ExtractionCallStateError, match='live'):
+        invoke_prepared_extraction(
+            plan.invocation,
+            lambda *_args, **_kwargs: pytest.fail('expired provider called'),
+            store=store,
+            grant=grant,
+        )
+    assert store.recover_expired(context) is None
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        assert call is not None and call.status == 'failed'
+        assert call.charged_cost_usd == call.reserved_cost_usd
+    with pytest.raises(ExtractionCallStateError, match='grant'):
+        invoke_prepared_extraction(
+            plan.invocation,
+            lambda *_args, **_kwargs: pytest.fail('retry called'),
+            store=store,
+            grant=grant,
+        )
 
 
 def test_postgresql_candidate_proof_rederives_exact_message_set_and_cached_replay(

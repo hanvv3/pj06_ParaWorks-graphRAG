@@ -383,15 +383,35 @@ def test_cancel_between_extraction_marker_and_send_latches_without_premature_ter
     grant = ledger.mark_attempt_started(context)
     ledger.cancel(context)
     assert ledger.snapshot(context).status == 'claimed'
+    calls = []
+    invoke_prepared_extraction(
+        plan.invocation,
+        lambda same, *, timeout: calls.append((same, timeout)) or {},
+        store=ledger,
+        grant=grant,
+    )
+    assert calls == [(plan.invocation, plan.provider_timeout_seconds)]
     with pytest.raises((ExtractionCallStateError, ProviderSendFenceError)):
         invoke_prepared_extraction(
             plan.invocation,
-            lambda *_args, **_kwargs: pytest.fail('provider called'),
+            lambda *_args, **_kwargs: pytest.fail('provider called twice'),
             store=ledger,
             grant=grant,
         )
-    with pytest.raises(ProviderSendFenceError):
-        grant.permit.consume_at_dispatch()
+    with pytest.raises(ExtractionCallStateError, match='changed'):
+        ledger.complete(
+            context,
+            result={
+                'result_kind': 'no_candidate',
+                'candidate': None,
+                'no_candidate_reason': 'no_relevant_evidence',
+            },
+            usage=ProviderUsage(7, 5),
+        )
+    snapshot = ledger.snapshot(context)
+    assert snapshot.status == 'failed'
+    assert snapshot.charged_cost_usd == Decimal('0.000028')
+    assert snapshot.result_kind is None
 
 
 def test_terminal_extraction_call_can_never_send_after_lease_recovery():

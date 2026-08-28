@@ -2955,7 +2955,11 @@ tests passed with 53 tests; ruff passed.
   live attempt in a short transaction, closes that transaction, consumes the
   permit under the store lock, releases the lock, and only then performs the
   one provider I/O through `FencedOpenAITransport` and the server-owned Task 1
-  hook. Every terminal or authority-loss path invalidates retained grants.
+  hook. Every terminal or true authority-loss path invalidates retained
+  grants. Cancellation before E2 terminalizes zero-charge and revokes; after
+  E2 it latches output discard while preserving one dispatch until permit or
+  lease expiry. E3/failure then charges actual usage or reserve exactly once
+  and persists no candidate/cache marker.
 - Evidence replay recomputes the selected aggregate message set from prepared
   slot identities and locked current canonical refs, and binds source
   kind/id/version or signature, strictest permission, fingerprint key identities,

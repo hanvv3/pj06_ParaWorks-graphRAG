@@ -220,7 +220,7 @@ def test_store_dispatch_authenticates_task1_server_owned_hook(monkeypatch):
 
 @pytest.mark.parametrize(
     'terminal_cause',
-    ('complete', 'fail', 'cancel', 'recovery', 'drift', 'lease_expiry', 'corruption'),
+    ('complete', 'fail', 'recovery', 'drift', 'lease_expiry', 'corruption'),
 )
 def test_every_terminal_or_authority_loss_removes_indirect_and_permit_dispatch(
     terminal_cause: str,
@@ -240,8 +240,6 @@ def test_every_terminal_or_authority_loss_removes_indirect_and_permit_dispatch(
         )
     elif terminal_cause == 'fail':
         ledger.fail(context, reason_code='provider_failure')
-    elif terminal_cause == 'cancel':
-        ledger.cancel(context)
     elif terminal_cause == 'recovery':
         now[0] += timedelta(seconds=121)
         ledger.recover_expired(context)
