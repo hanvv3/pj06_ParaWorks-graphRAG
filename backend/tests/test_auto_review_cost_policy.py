@@ -148,3 +148,52 @@ def test_max_profile_reserve_is_0181308_below_twenty_cent_budget() -> None:
     assert Decimal('0.181308') == AUTO_REVIEW_MAX_PROFILE_COST_USD
     assert AUTO_REVIEW_MAX_PROFILE_COST_USD < AUTO_REVIEW_MAX_WORKFLOW_COST_USD
     assert Decimal('0.20') == AUTO_REVIEW_MAX_WORKFLOW_COST_USD
+
+
+def test_shadow_enforce_rejects_price_config_below_above_or_different_from_registry() -> None:
+    from backend.app.agent_runtime.auto_review_cost_policy import (
+        confirmation_prices_match_registry,
+    )
+
+    assert not confirmation_prices_match_registry(
+        extraction_input=Decimal('0.749999'),
+        extraction_output=Decimal('4.500000'),
+        validation_input=Decimal('2.000000'),
+        validation_output=Decimal('12.000000'),
+    )
+    assert not confirmation_prices_match_registry(
+        extraction_input=Decimal('0.750001'),
+        extraction_output=Decimal('4.500000'),
+        validation_input=Decimal('2.000000'),
+        validation_output=Decimal('12.000000'),
+    )
+
+
+def test_validation_preview_admission_authorization_and_launch_resolve_one_exact_policy_entry() -> None:
+    from backend.app.agent_runtime.auto_review_cost_policy import get_validation_policy
+
+    assert get_validation_policy(
+        cost_policy_version='auto-review-cost:v1',
+        provider='openai',
+        model='gpt-5.6-terra',
+        reasoning_effort='medium',
+    ) is not None
+
+
+def test_each_extraction_route_preview_admission_authorization_and_launch_resolve_its_exact_registry_entry() -> None:
+    from backend.app.agent_runtime.auto_review_cost_policy import (
+        EXTRACTION_ROUTE_POLICIES,
+        get_extraction_route,
+    )
+
+    for route in EXTRACTION_ROUTE_POLICIES:
+        assert get_extraction_route(
+            route.agent_name,
+            extraction_cost_policy_version=route.extraction_cost_policy_version,
+            provider=route.provider,
+            model=route.model,
+            reasoning_effort=route.reasoning_effort,
+            route_version=route.route_version,
+            prompt_version=route.prompt_version,
+            output_contract_version=route.output_contract_version,
+        ) == route

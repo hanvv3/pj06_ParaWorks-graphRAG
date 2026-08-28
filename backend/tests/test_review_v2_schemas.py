@@ -198,3 +198,9 @@ def test_v20_response_models_keep_exact_additive_free_field_sets() -> None:
         'checkpoint_resumable', 'resume_allowed', 'retry_allowed', 'created_at',
         'updated_at', 'error_code', 'resume_error_code',
     }
+
+
+def test_v20_status_class_retains_str_graph_version_while_union_uses_alias() -> None:
+    from backend.app.schemas.review_workflow import ReviewWorkflowStatusResponse
+
+    assert ReviewWorkflowStatusResponse.model_fields['graph_version'].annotation is str

@@ -12,6 +12,12 @@ AUTO_REVIEW_EXTRACTION_PROVIDER = 'openai'
 AUTO_REVIEW_EXTRACTION_MODEL = 'gpt-5.4-mini-2026-03-17'
 AUTO_REVIEW_EXTRACTION_REASONING_EFFORT = 'none'
 AUTO_REVIEW_EXTRACTION_ROUTE_VERSION = 'auto-review-extraction-route:v1'
+AUTO_REVIEW_EXTRACTION_AGENT_NAMES = DEFAULT_REVIEW_AGENT_NAMES
+AUTO_REVIEW_MAX_SELECTED_EXTRACTION_AGENTS = 5
+AUTO_REVIEW_PROVIDER_TIMEOUT_SECONDS = 60
+AUTO_REVIEW_PROVIDER_SEND_START_WINDOW_SECONDS = 5
+AUTO_REVIEW_PROVIDER_ATTEMPT_LEASE_SECONDS = 120
+AUTO_REVIEW_PROVIDER_COMMIT_GRACE_SECONDS = 30
 AUTO_REVIEW_TOKENIZER_ENCODING = 'o200k_base'
 AUTO_REVIEW_REPLY_PRIMING_TOKENS = 16
 AUTO_REVIEW_FRAMING_SAFETY_TOKENS = 512
@@ -135,9 +141,31 @@ def _maximum_cost(input_tokens: int, output_tokens: int, input_price: Decimal, o
     return ((Decimal(input_tokens) * input_price + Decimal(output_tokens) * output_price) / Decimal(1_000_000)).quantize(Decimal('0.000001'), rounding=ROUND_CEILING)
 
 
-assert tuple(route.agent_name for route in EXTRACTION_ROUTE_POLICIES) == DEFAULT_REVIEW_AGENT_NAMES
+assert tuple(route.agent_name for route in EXTRACTION_ROUTE_POLICIES) == AUTO_REVIEW_EXTRACTION_AGENT_NAMES
+assert len(EXTRACTION_ROUTE_POLICIES) == AUTO_REVIEW_MAX_SELECTED_EXTRACTION_AGENTS
+assert len({route.prompt_version for route in EXTRACTION_ROUTE_POLICIES}) == len(EXTRACTION_ROUTE_POLICIES)
+assert len({route.output_contract_version for route in EXTRACTION_ROUTE_POLICIES}) == len(EXTRACTION_ROUTE_POLICIES)
+assert {
+    (route.provider, route.model, route.reasoning_effort, route.route_version,
+     route.max_input_chars, route.max_input_tokens, route.max_output_tokens,
+     route.max_candidates, route.max_provider_attempts, route.input_cost_per_1m_tokens,
+     route.output_cost_per_1m_tokens)
+    for route in EXTRACTION_ROUTE_POLICIES
+} == {(
+    AUTO_REVIEW_EXTRACTION_PROVIDER, AUTO_REVIEW_EXTRACTION_MODEL,
+    AUTO_REVIEW_EXTRACTION_REASONING_EFFORT, AUTO_REVIEW_EXTRACTION_ROUTE_VERSION,
+    AUTO_REVIEW_MAX_EXTRACTION_INPUT_CHARS_PER_AGENT,
+    AUTO_REVIEW_MAX_EXTRACTION_INPUT_TOKENS_PER_AGENT,
+    AUTO_REVIEW_MAX_EXTRACTION_OUTPUT_TOKENS_PER_AGENT,
+    AUTO_REVIEW_MAX_EXTRACTION_CANDIDATES_PER_AGENT,
+    AUTO_REVIEW_EXTRACTION_MAX_PROVIDER_ATTEMPTS_PER_AGENT,
+    AUTO_REVIEW_EXTRACTION_INPUT_USD_PER_1M,
+    AUTO_REVIEW_EXTRACTION_OUTPUT_USD_PER_1M,
+)}
 assert _maximum_cost(10_000, 2_048, AUTO_REVIEW_EXTRACTION_INPUT_USD_PER_1M, AUTO_REVIEW_EXTRACTION_OUTPUT_USD_PER_1M) == Decimal('0.016716')
 assert _maximum_cost(6_000, 3_072, AUTO_REVIEW_VALIDATOR_INPUT_USD_PER_1M, AUTO_REVIEW_VALIDATOR_OUTPUT_USD_PER_1M) == AUTO_REVIEW_MAX_BATCH_COST_USD
+assert Decimal(AUTO_REVIEW_MAX_SELECTED_EXTRACTION_AGENTS) * Decimal('0.016716') == AUTO_REVIEW_MAX_EXTRACTION_COST_USD
+assert Decimal(AUTO_REVIEW_MAX_BATCHES_PER_WORKFLOW) * AUTO_REVIEW_MAX_BATCH_COST_USD == AUTO_REVIEW_MAX_VALIDATION_COST_USD
 assert AUTO_REVIEW_MAX_EXTRACTION_COST_USD + AUTO_REVIEW_MAX_VALIDATION_COST_USD == AUTO_REVIEW_MAX_PROFILE_COST_USD
 
 
@@ -153,3 +181,12 @@ def get_extraction_route(agent_name: str, *, extraction_cost_policy_version: str
         if (agent_name, extraction_cost_policy_version, provider, model, reasoning_effort, route_version, prompt_version, output_contract_version) == (policy.agent_name, policy.extraction_cost_policy_version, policy.provider, policy.model, policy.reasoning_effort, policy.route_version, policy.prompt_version, policy.output_contract_version):
             return policy
     return None
+
+
+def confirmation_prices_match_registry(*, extraction_input: Decimal | None, extraction_output: Decimal | None, validation_input: Decimal | None, validation_output: Decimal | None) -> bool:
+    return (extraction_input, extraction_output, validation_input, validation_output) == (
+        AUTO_REVIEW_EXTRACTION_INPUT_USD_PER_1M,
+        AUTO_REVIEW_EXTRACTION_OUTPUT_USD_PER_1M,
+        AUTO_REVIEW_VALIDATOR_INPUT_USD_PER_1M,
+        AUTO_REVIEW_VALIDATOR_OUTPUT_USD_PER_1M,
+    )

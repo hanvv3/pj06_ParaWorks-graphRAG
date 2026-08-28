@@ -117,6 +117,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode='after')
     def _validate_auto_review_profile(self) -> 'Settings':
+        from backend.app.agent_runtime.auto_review_cost_policy import (
+            AUTO_REVIEW_PROVIDER_ATTEMPT_LEASE_SECONDS,
+            AUTO_REVIEW_PROVIDER_COMMIT_GRACE_SECONDS,
+            AUTO_REVIEW_PROVIDER_SEND_START_WINDOW_SECONDS,
+            AUTO_REVIEW_PROVIDER_TIMEOUT_SECONDS,
+        )
+
         if self.auto_review_mode in {'disabled', 'shadow'}:
             if self.auto_review_enforce_percentage != 0:
                 raise ValueError('disabled and shadow modes require enforce percentage 0')
@@ -129,6 +136,18 @@ class Settings(BaseSettings):
         ):
             raise ValueError('provider attempt lease must exceed send window, timeout, and grace')
         if (
+            self.auto_review_provider_timeout_seconds,
+            self.auto_review_provider_send_start_window_seconds,
+            self.auto_review_provider_attempt_lease_seconds,
+            self.auto_review_provider_commit_grace_seconds,
+        ) != (
+            AUTO_REVIEW_PROVIDER_TIMEOUT_SECONDS,
+            AUTO_REVIEW_PROVIDER_SEND_START_WINDOW_SECONDS,
+            AUTO_REVIEW_PROVIDER_ATTEMPT_LEASE_SECONDS,
+            AUTO_REVIEW_PROVIDER_COMMIT_GRACE_SECONDS,
+        ):
+            raise ValueError('provider timing values must match the immutable cost policy')
+        if (
             self.auto_review_mode != 'disabled'
             and self.agent_runtime_fingerprint_secret
             == 'local-development-agent-runtime-fingerprint-secret'
@@ -136,39 +155,55 @@ class Settings(BaseSettings):
             raise ValueError('non-disabled auto review requires a non-local fingerprint secret')
         return self
 
-    def require_auto_review_live_readiness(self) -> None:
+    def require_auto_review_live_readiness(
+        self,
+        *,
+        model: object | None = None,
+        http_hook: object | None = None,
+    ) -> None:
         """Reject an unsafe paid C.5 configuration before provider admission."""
         if self.auto_review_mode == 'disabled':
             return
+        self.require_c5_durable_key_ready()
         from langchain_core.globals import get_debug
 
         from backend.app.agent_runtime.auto_review_cost_policy import (
-            AUTO_REVIEW_EXTRACTION_INPUT_USD_PER_1M,
-            AUTO_REVIEW_EXTRACTION_OUTPUT_USD_PER_1M,
-            AUTO_REVIEW_VALIDATOR_INPUT_USD_PER_1M,
-            AUTO_REVIEW_VALIDATOR_OUTPUT_USD_PER_1M,
+            confirmation_prices_match_registry,
         )
 
-        confirmed_prices = (
-            self.auto_review_extraction_input_cost_per_1m_tokens,
-            self.auto_review_extraction_output_cost_per_1m_tokens,
-            self.auto_review_validator_input_cost_per_1m_tokens,
-            self.auto_review_validator_output_cost_per_1m_tokens,
-        )
-        immutable_prices = (
-            AUTO_REVIEW_EXTRACTION_INPUT_USD_PER_1M,
-            AUTO_REVIEW_EXTRACTION_OUTPUT_USD_PER_1M,
-            AUTO_REVIEW_VALIDATOR_INPUT_USD_PER_1M,
-            AUTO_REVIEW_VALIDATOR_OUTPUT_USD_PER_1M,
-        )
-        if confirmed_prices != immutable_prices:
+        if not confirmation_prices_match_registry(
+            extraction_input=self.auto_review_extraction_input_cost_per_1m_tokens,
+            extraction_output=self.auto_review_extraction_output_cost_per_1m_tokens,
+            validation_input=self.auto_review_validator_input_cost_per_1m_tokens,
+            validation_output=self.auto_review_validator_output_cost_per_1m_tokens,
+        ):
             raise ValueError('auto-review confirmation prices must match the registry')
         if not self.openai_api_key:
             raise ValueError('non-disabled auto review requires an OpenAI key')
+        if model is not None and bool(getattr(model, 'verbose', False)):
+            raise ValueError('non-disabled auto review requires verbose models disabled')
+        if http_hook is not None and not bool(
+            getattr(http_hook, '__paraworks_body_blind_fenced_send__', False)
+        ):
+            raise ValueError('non-disabled auto review rejects an unapproved HTTP hook')
         if get_debug() or os.getenv('OPENAI_LOG', '').lower() == 'debug':
             raise ValueError('non-disabled auto review requires debug logging disabled')
         if logging.getLogger('openai').getEffectiveLevel() <= logging.DEBUG:
             raise ValueError('non-disabled auto review requires the OpenAI logger above DEBUG')
+
+    def require_c5_durable_key_ready(self) -> None:
+        """Fail closed before any durable C.5 keyed row or PostgreSQL bootstrap."""
+        secret = self.agent_runtime_fingerprint_secret
+        if (
+            not self.agent_runtime_fingerprint_key_version.strip()
+            or secret == 'local-development-agent-runtime-fingerprint-secret'
+            or len(secret.encode('utf-8')) < 32
+        ):
+            raise ValueError('durable C.5 key requires a non-placeholder 32-byte secret and key version')
+
+    def allows_c5_process_local_sqlite_smoke(self) -> bool:
+        """Only the disabled in-memory smoke path may retain the local placeholder."""
+        return self.auto_review_mode == 'disabled'
 
     def resolved_database_url(self) -> str:
         if self.paraworks_demo_mode and self.paraworks_demo_database_url:

@@ -214,6 +214,21 @@ def test_non_disabled_mode_rejects_local_default_fingerprint_secret() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ('secret', 'key_version'), [('x', 'v1'), ('x' * 32, '')]
+)
+def test_non_disabled_readiness_rejects_short_secret_or_empty_key_version(
+    secret: str, key_version: str
+) -> None:
+    settings = _live_settings(
+        agent_runtime_fingerprint_secret=secret,
+        agent_runtime_fingerprint_key_version=key_version,
+    )
+
+    with pytest.raises(ValueError, match='durable C.5 key'):
+        settings.require_auto_review_live_readiness()
+
+
 def test_non_disabled_readiness_rejects_mismatched_confirmation_prices() -> None:
     from backend.app.core.config import Settings
 
@@ -329,3 +344,221 @@ def test_v20_models_keep_exact_json_field_sets() -> None:
         'checkpoint_resumable', 'resume_allowed', 'retry_allowed', 'created_at',
         'updated_at', 'error_code', 'resume_error_code',
     }
+
+
+def _timeline_candidate(*, duplicate_slot: bool = False) -> dict[str, object]:
+    return {
+        'item_type': 'timeline_event',
+        'title': '한국어 제목',
+        'summary': 'ASCII summary',
+        'result_summary': '한국어 결과',
+        'confidence_score': '0.9800',
+        'field_evidence_bindings': [
+            {'field_key': 'title', 'evidence_slot_id': 'S01'},
+            {'field_key': 'summary', 'evidence_slot_id': 'S01' if duplicate_slot else 'S02'},
+            {'field_key': 'result_summary', 'evidence_slot_id': 'S03'},
+        ],
+    }
+
+
+def test_extraction_no_candidate_reason_and_evidence_slots_are_exact_and_unique() -> None:
+    from backend.app.schemas.auto_review import TimelineExtractionResult
+
+    assert TimelineExtractionResult.model_validate(
+        {
+            'result_kind': 'no_candidate',
+            'candidate': None,
+            'no_candidate_reason': 'no_relevant_evidence',
+        }
+    ).no_candidate_reason == 'no_relevant_evidence'
+    with pytest.raises(ValidationError):
+        TimelineExtractionResult.model_validate(
+            {
+                'result_kind': 'no_candidate',
+                'candidate': None,
+                'no_candidate_reason': 'unbounded reason',
+            }
+        )
+    with pytest.raises(ValidationError):
+        TimelineExtractionResult.model_validate(
+            {'result_kind': 'candidate', 'candidate': _timeline_candidate(duplicate_slot=True)}
+        )
+
+
+def test_mail_document_extraction_is_explicitly_discriminated_and_uncertainty_is_optional() -> None:
+    from backend.app.schemas.auto_review import MailDocumentExtractionResult
+
+    payload = _timeline_candidate() | {'item_type': 'history_event', 'reason': '직접 근거'}
+    payload.pop('result_summary')
+    payload['field_evidence_bindings'][-1] = {
+        'field_key': 'reason', 'evidence_slot_id': 'S03'
+    }
+    result = MailDocumentExtractionResult.model_validate(
+        {'result_kind': 'candidate', 'candidate': payload}
+    )
+
+    assert type(result.candidate).__name__ == 'HistoryCandidate'
+    assert result.candidate.uncertainty_reason is None
+
+
+def _live_settings(**overrides: object):
+    from backend.app.core.config import Settings
+
+    defaults: dict[str, object] = {
+        'auto_review_mode': 'shadow',
+        'auto_review_enforce_percentage': 0,
+        'agent_runtime_fingerprint_secret': 'x' * 32,
+        'agent_runtime_fingerprint_key_version': 'v1',
+        'openai_api_key': 'test-key',
+        'auto_review_extraction_input_cost_per_1m_tokens': Decimal('0.750000'),
+        'auto_review_extraction_output_cost_per_1m_tokens': Decimal('4.500000'),
+        'auto_review_validator_input_cost_per_1m_tokens': Decimal('2.000000'),
+        'auto_review_validator_output_cost_per_1m_tokens': Decimal('12.000000'),
+    }
+    return Settings(_env_file=None, **(defaults | overrides))
+
+
+def test_non_disabled_readiness_rejects_langchain_global_debug_or_verbose_model() -> None:
+    from langchain_core.globals import set_debug
+
+    settings = _live_settings()
+    try:
+        set_debug(True)
+        with pytest.raises(ValueError, match='debug'):
+            settings.require_auto_review_live_readiness()
+    finally:
+        set_debug(False)
+    with pytest.raises(ValueError, match='verbose'):
+        settings.require_auto_review_live_readiness(
+            model=type('VerboseModel', (), {'verbose': True})()
+        )
+
+
+def test_non_disabled_readiness_rejects_openai_log_debug_effective_debug_logger_or_unapproved_http_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import logging
+
+    settings = _live_settings()
+    monkeypatch.setenv('OPENAI_LOG', 'DeBuG')
+    with pytest.raises(ValueError, match='debug'):
+        settings.require_auto_review_live_readiness()
+    monkeypatch.delenv('OPENAI_LOG')
+    logger = logging.getLogger('openai')
+    old_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        with pytest.raises(ValueError, match='logger'):
+            settings.require_auto_review_live_readiness()
+    finally:
+        logger.setLevel(old_level)
+    with pytest.raises(ValueError, match='HTTP hook'):
+        settings.require_auto_review_live_readiness(http_hook=object())
+
+
+@pytest.mark.parametrize(
+    ('secret', 'key_version'),
+    [
+        ('x' * 31, 'v1'),
+        ('x' * 32, ''),
+        ('local-development-agent-runtime-fingerprint-secret', 'v1'),
+    ],
+)
+def test_disabled_postgres_c5_bootstrap_rejects_placeholder_or_short_secret(
+    secret: str, key_version: str
+) -> None:
+    from backend.app.core.config import Settings
+
+    settings = Settings(
+        _env_file=None,
+        auto_review_mode='disabled',
+        agent_runtime_fingerprint_secret=secret,
+        agent_runtime_fingerprint_key_version=key_version,
+    )
+    with pytest.raises(ValueError, match='durable C.5 key'):
+        settings.require_c5_durable_key_ready()
+
+
+def test_disabled_sqlite_smoke_may_use_process_local_placeholder_without_durable_ready_state() -> None:
+    from backend.app.core.config import Settings
+
+    settings = Settings(_env_file=None, auto_review_mode='disabled')
+    assert settings.allows_c5_process_local_sqlite_smoke()
+    with pytest.raises(ValueError, match='durable C.5 key'):
+        settings.require_c5_durable_key_ready()
+
+
+def test_file_backed_sqlite_placeholder_refuses_every_c5_bound_durable_write() -> None:
+    from backend.app.core.config import Settings
+
+    with pytest.raises(ValueError, match='durable C.5 key'):
+        Settings(_env_file=None).require_c5_durable_key_ready()
+
+
+def test_each_extraction_schema_largest_accepted_korean_ascii_fixture_fits_2048_total_output_tokens() -> None:
+    from backend.app.schemas.auto_review import (
+        DecisionRecordExtractionResult,
+        HistoryExtractionResult,
+        MailDocumentExtractionResult,
+        TimelineExtractionResult,
+        TodoExtractionResult,
+    )
+
+    candidate = _timeline_candidate()
+    history = _timeline_candidate() | {'item_type': 'history_event', 'reason': '근거'}
+    history.pop('result_summary')
+    history['field_evidence_bindings'][-1] = {'field_key': 'reason', 'evidence_slot_id': 'S03'}
+    decision = _timeline_candidate() | {'item_type': 'decision_record', 'decision_summary': '결정'}
+    decision.pop('result_summary')
+    decision['field_evidence_bindings'][-1] = {'field_key': 'decision_summary', 'evidence_slot_id': 'S03'}
+    todo = _timeline_candidate() | {'item_type': 'todo', 'priority': 'high', 'priority_reason': '긴급'}
+    todo.pop('result_summary')
+    todo['field_evidence_bindings'][-1] = {'field_key': 'priority', 'evidence_slot_id': 'S03'}
+    todo['field_evidence_bindings'].append({'field_key': 'priority_reason', 'evidence_slot_id': 'S04'})
+    for model, value in (
+        (TimelineExtractionResult, candidate),
+        (HistoryExtractionResult, history),
+        (DecisionRecordExtractionResult, decision),
+        (TodoExtractionResult, todo),
+        (MailDocumentExtractionResult, candidate),
+    ):
+        parsed = model.model_validate({'result_kind': 'candidate', 'candidate': value})
+        assert parsed.canonical_token_count() <= 2_048
+    boundary = _timeline_candidate()
+    boundary['title'] = '가' * 160
+    boundary['summary'] = '가' * 800
+    boundary['result_summary'] = '가' * 800
+    boundary['uncertainty_reason'] = '가' * 195
+    assert TimelineExtractionResult.model_validate(
+        {'result_kind': 'candidate', 'candidate': boundary}
+    ).canonical_token_count() == 2_048
+
+
+def test_each_extraction_schema_rejects_individually_valid_fields_when_canonical_envelope_exceeds_2048_tokens() -> None:
+    import json
+
+    import tiktoken
+
+    from backend.app.schemas.auto_review import TimelineExtractionResult
+
+    candidate = _timeline_candidate()
+    candidate['title'] = '가' * 160
+    candidate['summary'] = '가' * 800
+    candidate['result_summary'] = '가' * 800
+    candidate['uncertainty_reason'] = '가' * 196
+    canonical = json.dumps(
+        {
+            'result_kind': 'candidate',
+            'candidate': candidate,
+            'no_candidate_reason': None,
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(',', ':'),
+    )
+    assert len(tiktoken.get_encoding('o200k_base').encode(canonical)) == 2_049
+    with pytest.raises(ValidationError, match='2048'):
+        TimelineExtractionResult.model_validate(
+            {'result_kind': 'candidate', 'candidate': candidate}
+        )

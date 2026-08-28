@@ -122,7 +122,7 @@ class ReviewWorkflowStatusResponse(BaseModel):
     review_item_count: int
     review_status_counts: dict[ReviewItemResolutionStatus, int]
     durable: bool
-    graph_version: Literal['company-memory-review-v2.0']
+    graph_version: str
     review_resolution_ready: bool
     checkpoint_resumable: bool
     resume_allowed: bool
@@ -218,11 +218,17 @@ class ReviewWorkflowStatusResponseV21(BaseModel):
     auto_review_fallback_count: int
 
 
+class ReviewWorkflowStatusResponseV20(ReviewWorkflowStatusResponse):
+    """V2.0-shaped discriminator alias; the original class stays unchanged."""
+
+    graph_version: Literal['company-memory-review-v2.0']
+
+
 ReviewWorkflowDryRunUnion = Annotated[
     ReviewWorkflowDryRunResponse | ReviewWorkflowDryRunResponseV21,
     Field(discriminator='graph_version'),
 ]
 ReviewWorkflowStatusUnion = Annotated[
-    ReviewWorkflowStatusResponse | ReviewWorkflowStatusResponseV21,
+    ReviewWorkflowStatusResponseV20 | ReviewWorkflowStatusResponseV21,
     Field(discriminator='graph_version'),
 ]

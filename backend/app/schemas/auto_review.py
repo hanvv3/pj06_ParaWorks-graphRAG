@@ -59,6 +59,12 @@ AutoReviewPolicyReasonCode = Literal[
 CandidateSlotId = Annotated[str, Field(pattern=r'^C0[1-4]$')]
 EvidenceSlotId = Annotated[str, Field(pattern=r'^E(?:0[1-9]|1[0-2])$')]
 ExtractionEvidenceSlotId = Annotated[str, Field(pattern=r'^S(?:0[1-9]|1[0-2])$')]
+NoCandidateReason = Literal[
+    'no_relevant_evidence',
+    'insufficient_direct_evidence',
+    'non_business_evidence',
+    'conflicting_evidence',
+]
 
 
 class FieldValidationResult(BaseModel):
@@ -112,7 +118,7 @@ class _ExtractionCandidateBase(BaseModel):
     confidence_score: Decimal = Field(
         ge=Decimal('0'), le=Decimal('1'), max_digits=5, decimal_places=4
     )
-    uncertainty_reason: str = Field(min_length=1, max_length=400)
+    uncertainty_reason: str | None = Field(default=None, min_length=1, max_length=400)
     field_evidence_bindings: list[FieldEvidenceBinding] = Field(
         min_length=1, max_length=10
     )
@@ -127,6 +133,9 @@ class _ExtractionCandidateBase(BaseModel):
         fields = [binding.field_key for binding in self.field_evidence_bindings]
         if len(fields) != len(set(fields)):
             raise ValueError('each candidate field requires exactly one evidence binding')
+        evidence_slots = [binding.evidence_slot_id for binding in self.field_evidence_bindings]
+        if len(evidence_slots) != len(set(evidence_slots)):
+            raise ValueError('candidate evidence slots must be unique')
         present = set(self._required_evidence_fields)
         for field_name in self.model_fields_set:
             if field_name in {'task_summary', 'assignee', 'due_date', 'evidence_reason', 'source_type', 'project_tag'} and getattr(self, field_name) is not None:
@@ -177,7 +186,7 @@ class _ExtractionEnvelopeBase(BaseModel):
 
     result_kind: Literal['candidate', 'no_candidate']
     candidate: _ExtractionCandidateBase | None
-    no_candidate_reason: str | None = Field(default=None, min_length=1, max_length=400)
+    no_candidate_reason: NoCandidateReason | None = None
 
     @model_validator(mode='after')
     def _validate_singular_result_and_token_budget(self) -> _ExtractionEnvelopeBase:
@@ -201,6 +210,13 @@ class _ExtractionEnvelopeBase(BaseModel):
     def canonical_bytes(self) -> bytes:
         return unicodedata.normalize('NFC', self.canonical_json()).encode('utf-8')
 
+    def canonical_token_count(self) -> int:
+        return len(
+            tiktoken.get_encoding(AUTO_REVIEW_TOKENIZER_ENCODING).encode(
+                self.canonical_json()
+            )
+        )
+
 
 class TimelineExtractionResult(_ExtractionEnvelopeBase):
     candidate: TimelineCandidate | None = None
@@ -218,8 +234,14 @@ class TodoExtractionResult(_ExtractionEnvelopeBase):
     candidate: TodoCandidate | None = None
 
 
+MailDocumentCandidate = Annotated[
+    TimelineCandidate | HistoryCandidate | DecisionRecordCandidate | TodoCandidate,
+    Field(discriminator='item_type'),
+]
+
+
 class MailDocumentExtractionResult(_ExtractionEnvelopeBase):
-    candidate: TimelineCandidate | HistoryCandidate | DecisionRecordCandidate | TodoCandidate | None = None
+    candidate: MailDocumentCandidate | None = None
 
 
 class AutoReviewAuditPublicSummary(BaseModel):
