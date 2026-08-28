@@ -8,6 +8,8 @@ APPROVED_MINOR_LINES = (
     ('langchain-openai', (1, 6, 0), (1, 7, 0)),
     ('langchain-google-genai', (4, 3, 5), (4, 4, 0)),
     ('langgraph-checkpoint-postgres', (3, 1, 2), (3, 2, 0)),
+    ('tiktoken', (0, 12, 0), (0, 13, 0)),
+    ('langsmith', (0, 8, 0), (0, 9, 0)),
 )
 
 

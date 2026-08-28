@@ -29,6 +29,19 @@ def test_checkpoint_state_accepts_the_declared_state_contract() -> None:
     validate_checkpoint_state(_valid_checkpoint_state())
 
 
+def test_v20_checkpoint_keeps_eight_keys_and_four_statuses() -> None:
+    state = _valid_checkpoint_state()
+
+    assert set(state) == {
+        'workflow_thread_id', 'graph_version', 'input_hash',
+        'evidence_version_hash', 'review_status_counts', 'phase',
+        'completed_nodes', 'error_codes',
+    }
+    assert set(state['review_status_counts']) == {
+        'pending_review', 'approved', 'rejected', 'needs_more_evidence'
+    }
+
+
 def test_completed_nodes_are_append_unique_and_bounded() -> None:
     current = [f'node-{index}' for index in range(64)]
     assert merge_completed_nodes(current, ['node-1', 'node-64']) == [

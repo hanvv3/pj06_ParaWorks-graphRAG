@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -39,6 +39,7 @@ ReviewWorkflowErrorCode = Literal[
     'budget_exceeded',
     'concurrent_resume',
     'invalid_state_transition',
+    'cost_preview_changed',
 ]
 
 
@@ -121,7 +122,7 @@ class ReviewWorkflowStatusResponse(BaseModel):
     review_item_count: int
     review_status_counts: dict[ReviewItemResolutionStatus, int]
     durable: bool
-    graph_version: str
+    graph_version: Literal['company-memory-review-v2.0']
     review_resolution_ready: bool
     checkpoint_resumable: bool
     resume_allowed: bool
@@ -130,3 +131,98 @@ class ReviewWorkflowStatusResponse(BaseModel):
     updated_at: datetime
     error_code: ReviewWorkflowErrorCode | None
     resume_error_code: ReviewWorkflowErrorCode | None
+
+
+class ReviewWorkflowRunRequestV21(ReviewWorkflowRunRequest):
+    launch_confirmation_token: str = Field(min_length=32, max_length=2048)
+
+
+class ReviewWorkflowDryRunResponseV21(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    workflow_name: Literal['company-memory-review']
+    graph_version: Literal['company-memory-review-v2.1-auto-review']
+    source_count: int
+    agent_names: list[str]
+    selection_policy_version: Literal['company-memory-review-selection:v1']
+    estimated_input_tokens: int
+    estimated_output_tokens: int
+    estimated_cost_usd: float
+    budget_limit_usd: float | None
+    budget_status: BudgetStatus
+    cache_hit: bool
+    requires_explicit_run: Literal[True]
+    auto_review_mode: Literal['shadow', 'enforce']
+    auto_review_policy_version: Literal['auto-review-policy:v1']
+    auto_review_validator_provider: Literal['openai']
+    auto_review_validator_model: Literal['gpt-5.6-terra']
+    auto_review_reasoning_effort: Literal['medium']
+    auto_review_validator_prompt_version: Literal['auto-review-validation:v1']
+    auto_review_validator_output_contract_version: Literal[
+        'candidate-validation-batch:v1'
+    ]
+    auto_review_cost_policy_version: Literal['auto-review-cost:v1']
+    auto_review_enforce_percentage: Literal[0, 10, 100]
+    auto_review_estimated_input_tokens: int
+    auto_review_estimated_output_tokens: int
+    auto_review_estimated_cost_usd: float
+    total_estimated_input_tokens: int
+    total_estimated_output_tokens: int
+    total_estimated_cost_usd: float
+    launch_confirmation_token: str = Field(min_length=32, max_length=2048)
+
+
+class ReviewStatusCountsV21(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    pending_review: int = Field(ge=0)
+    approved: int = Field(ge=0)
+    rejected: int = Field(ge=0)
+    needs_more_evidence: int = Field(ge=0)
+    revoked: int = Field(ge=0)
+
+
+class ReviewWorkflowStatusResponseV21(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    thread_id: str
+    status: Literal[
+        'created',
+        'drafting',
+        'checkpoint_pending',
+        'awaiting_human_review',
+        'resuming',
+        'completed',
+        'needs_more_evidence',
+        'checkpoint_failed',
+        'failed',
+        'cancelled',
+    ]
+    review_item_count: int
+    review_status_counts: ReviewStatusCountsV21
+    durable: bool
+    graph_version: Literal['company-memory-review-v2.1-auto-review']
+    review_resolution_ready: bool
+    checkpoint_resumable: bool
+    resume_allowed: bool
+    retry_allowed: bool
+    created_at: datetime
+    updated_at: datetime
+    error_code: ReviewWorkflowErrorCode | None
+    resume_error_code: ReviewWorkflowErrorCode | None
+    auto_review_mode: Literal['shadow', 'enforce']
+    auto_review_policy_version: Literal['auto-review-policy:v1']
+    auto_review_enforce_percentage: Literal[0, 10, 100]
+    auto_approved_count: int
+    human_review_required_count: int
+    auto_review_fallback_count: int
+
+
+ReviewWorkflowDryRunUnion = Annotated[
+    ReviewWorkflowDryRunResponse | ReviewWorkflowDryRunResponseV21,
+    Field(discriminator='graph_version'),
+]
+ReviewWorkflowStatusUnion = Annotated[
+    ReviewWorkflowStatusResponse | ReviewWorkflowStatusResponseV21,
+    Field(discriminator='graph_version'),
+]

@@ -912,6 +912,7 @@ def test_graph_has_no_rag_slack_neo4j_or_trusted_knowledge_node(
         for node_name in node_names
         for forbidden in ('rag', 'slack', 'neo4j', 'trusted_knowledge')
     )
+    assert not any('auto_review' in node_name.lower() for node_name in node_names)
     assert {
         (edge.source, edge.target, edge.conditional)
         for edge in graph.get_graph().edges

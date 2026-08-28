@@ -1,6 +1,10 @@
+import logging
+import os
+from decimal import Decimal
 from functools import lru_cache
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +24,36 @@ class Settings(BaseSettings):
         'local-development-agent-runtime-fingerprint-secret'
     )
     agent_runtime_fingerprint_key_version: str = 'v1'
+    auto_review_mode: Literal['disabled', 'shadow', 'enforce'] = 'disabled'
+    auto_review_enforce_percentage: Literal[0, 10, 100] = 0
+    auto_review_launch_confirmation_ttl_seconds: int = Field(
+        default=600, ge=60, le=3600
+    )
+    auto_review_provider_timeout_seconds: int = Field(default=60, ge=10, le=90)
+    auto_review_provider_send_start_window_seconds: int = Field(
+        default=5, ge=1, le=10
+    )
+    auto_review_provider_attempt_lease_seconds: int = Field(
+        default=120, ge=60, le=600
+    )
+    auto_review_provider_commit_grace_seconds: int = Field(
+        default=30, ge=10, le=120
+    )
+    auto_review_validator_input_cost_per_1m_tokens: Decimal | None = Field(
+        default=None, gt=0
+    )
+    auto_review_validator_output_cost_per_1m_tokens: Decimal | None = Field(
+        default=None, gt=0
+    )
+    auto_review_extraction_input_cost_per_1m_tokens: Decimal | None = Field(
+        default=None, gt=0
+    )
+    auto_review_extraction_output_cost_per_1m_tokens: Decimal | None = Field(
+        default=None, gt=0
+    )
+    auto_review_max_total_cost_usd: Decimal = Field(
+        default=Decimal('0.20'), gt=0, le=Decimal('0.20')
+    )
     agent_runtime_security_scope_id: str = 'default'
     auth_session_cookie_name: str = 'paraworks_session'
     auth_refresh_cookie_name: str = 'paraworks_refresh'
@@ -80,6 +114,61 @@ class Settings(BaseSettings):
     google_drive_sync_interval_seconds: int = 3600  # Default 1 hour
     gmail_sync_enabled: bool = True
     gmail_sync_interval_seconds: int = 10  # For testing, recommended 3600 for production
+
+    @model_validator(mode='after')
+    def _validate_auto_review_profile(self) -> 'Settings':
+        if self.auto_review_mode in {'disabled', 'shadow'}:
+            if self.auto_review_enforce_percentage != 0:
+                raise ValueError('disabled and shadow modes require enforce percentage 0')
+        elif self.auto_review_enforce_percentage not in {10, 100}:
+            raise ValueError('enforce mode requires percentage 10 or 100')
+        if self.auto_review_provider_attempt_lease_seconds <= (
+            self.auto_review_provider_send_start_window_seconds
+            + self.auto_review_provider_timeout_seconds
+            + self.auto_review_provider_commit_grace_seconds
+        ):
+            raise ValueError('provider attempt lease must exceed send window, timeout, and grace')
+        if (
+            self.auto_review_mode != 'disabled'
+            and self.agent_runtime_fingerprint_secret
+            == 'local-development-agent-runtime-fingerprint-secret'
+        ):
+            raise ValueError('non-disabled auto review requires a non-local fingerprint secret')
+        return self
+
+    def require_auto_review_live_readiness(self) -> None:
+        """Reject an unsafe paid C.5 configuration before provider admission."""
+        if self.auto_review_mode == 'disabled':
+            return
+        from langchain_core.globals import get_debug
+
+        from backend.app.agent_runtime.auto_review_cost_policy import (
+            AUTO_REVIEW_EXTRACTION_INPUT_USD_PER_1M,
+            AUTO_REVIEW_EXTRACTION_OUTPUT_USD_PER_1M,
+            AUTO_REVIEW_VALIDATOR_INPUT_USD_PER_1M,
+            AUTO_REVIEW_VALIDATOR_OUTPUT_USD_PER_1M,
+        )
+
+        confirmed_prices = (
+            self.auto_review_extraction_input_cost_per_1m_tokens,
+            self.auto_review_extraction_output_cost_per_1m_tokens,
+            self.auto_review_validator_input_cost_per_1m_tokens,
+            self.auto_review_validator_output_cost_per_1m_tokens,
+        )
+        immutable_prices = (
+            AUTO_REVIEW_EXTRACTION_INPUT_USD_PER_1M,
+            AUTO_REVIEW_EXTRACTION_OUTPUT_USD_PER_1M,
+            AUTO_REVIEW_VALIDATOR_INPUT_USD_PER_1M,
+            AUTO_REVIEW_VALIDATOR_OUTPUT_USD_PER_1M,
+        )
+        if confirmed_prices != immutable_prices:
+            raise ValueError('auto-review confirmation prices must match the registry')
+        if not self.openai_api_key:
+            raise ValueError('non-disabled auto review requires an OpenAI key')
+        if get_debug() or os.getenv('OPENAI_LOG', '').lower() == 'debug':
+            raise ValueError('non-disabled auto review requires debug logging disabled')
+        if logging.getLogger('openai').getEffectiveLevel() <= logging.DEBUG:
+            raise ValueError('non-disabled auto review requires the OpenAI logger above DEBUG')
 
     def resolved_database_url(self) -> str:
         if self.paraworks_demo_mode and self.paraworks_demo_database_url:
