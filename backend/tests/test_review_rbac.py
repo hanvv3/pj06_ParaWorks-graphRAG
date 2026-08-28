@@ -61,6 +61,51 @@ def test_approve_route_rechecks_exact_actor_permission_membership(client, db_ses
     assert db_session.get(ReviewItem, item.id).status == 'pending_review'
 
 
+def test_unauthorized_human_bulk_empty_preserves_http_200_compatibility(client) -> None:
+    response = client.post(
+        '/api/v1/review/bulk',
+        json={'action': 'reject', 'item_ids': []},
+        headers={'X-Demo-User': 'hanvv-employee'},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'action': 'reject',
+        'approved_count': 0,
+        'rejected_count': 0,
+        'failed_items': [],
+        'skipped_items': [],
+        'approved_item_ids': [],
+        'rejected_item_ids': [],
+        'replayed_items': [],
+        'cost_policy': {
+            'paid_llm_calls': False,
+            'embedding_calls': False,
+            'requires_human_review_state': True,
+        },
+    }
+
+
+def test_unauthorized_human_bulk_reports_per_item_failure_with_http_200(
+    client,
+    db_session: Session,
+) -> None:
+    item = _add_review_item(db_session, permission_level='internal')
+
+    response = client.post(
+        '/api/v1/review/bulk',
+        json={'action': 'reject', 'item_ids': [item.id]},
+        headers={'X-Demo-User': 'hanvv-employee'},
+    )
+
+    assert response.status_code == 200
+    assert response.json()['failed_items'] == [
+        {'id': item.id, 'detail': 'Review approval permission required.'}
+    ]
+    assert response.json()['rejected_count'] == 0
+    assert db_session.get(ReviewItem, item.id).status == 'pending_review'
+
+
 def test_review_list_hides_items_above_user_permission(client, db_session: Session) -> None:
     visible_item = _add_review_item(db_session, permission_level='internal')
     hidden_item = _add_review_item(db_session, permission_level='restricted')

@@ -18,8 +18,10 @@ from backend.app.knowledge.promotion import (
 )
 from backend.app.models import (
     AgentWorkflowEvidenceRef,
+    AgentWorkflowThread,
     AutoReviewValidation,
     Document,
+    DocumentVersion,
     ReviewItem,
     ReviewItemEvidenceRef,
     Source,
@@ -30,6 +32,8 @@ from backend.app.review.actors import (
     CreateNewPromotion,
     ReuseExistingPromotion,
     ReviewResolutionActor,
+    _assert_approval_directive,
+    _assert_review_resolution_actor,
 )
 from backend.app.schemas.auto_review import AUTO_REVIEW_POLICY_VERSION
 
@@ -76,6 +80,7 @@ class ReviewTransitionService:
         note: str | None = None,
         approval_directive: ApprovalDirective | None = None,
     ) -> ReviewTransitionResult:
+        _assert_review_resolution_actor(actor)
         preview = db.get(ReviewItem, item_id)
         if preview is None:
             raise ValueError('Review item not found')
@@ -106,7 +111,8 @@ class ReviewTransitionService:
         actor: ReviewResolutionActor,
         note: str | None = None,
     ) -> ReviewBatchTransitionResult:
-        if actor.actor_type != 'human' or 'human_review' not in actor.capabilities:
+        _assert_review_resolution_actor(actor)
+        if actor.actor_type != 'human':
             _raise_review_permission_denied()
         requested_ids = sorted(set(item_ids))
         items = self._load_items(db, requested_ids)
@@ -275,6 +281,9 @@ class ReviewTransitionService:
         actor: ReviewResolutionActor,
         approval_directive: ApprovalDirective | None,
     ) -> ApprovalDirective | None:
+        _assert_review_resolution_actor(actor)
+        if approval_directive is not None:
+            _assert_approval_directive(approval_directive)
         if item.permission_level not in actor.allowed_permission_levels:
             _raise_review_permission_denied()
         if actor.actor_type == 'human':
@@ -351,69 +360,157 @@ class ReviewTransitionService:
 
 
 class ReviewEvidenceStalenessResolver(Protocol):
-    def canonical_evidence_has_drifted(
+    def lock_item_and_resolve_drift(
         self,
         db: Session,
         *,
-        item: ReviewItem,
-    ) -> bool: ...
+        item_id: int,
+    ) -> tuple[ReviewItem, bool]: ...
 
 
 class CanonicalReviewEvidenceStalenessResolver:
-    def canonical_evidence_has_drifted(
+    def lock_item_and_resolve_drift(
         self,
         db: Session,
         *,
-        item: ReviewItem,
-    ) -> bool:
-        if item.workflow_thread_id is None:
-            return False
-        children = tuple(
+        item_id: int,
+    ) -> tuple[ReviewItem, bool]:
+        preview = db.scalar(
+            select(ReviewItem)
+            .where(ReviewItem.id == item_id)
+            .execution_options(populate_existing=True)
+        )
+        if preview is None:
+            raise ValueError('Review item not found')
+        if preview.workflow_thread_id is None:
+            item = self._lock_review_item(db, item_id=item_id)
+            return item, False
+        workflow_thread_id = preview.workflow_thread_id
+
+        locator_children = tuple(
             db.scalars(
                 select(ReviewItemEvidenceRef).where(
-                    ReviewItemEvidenceRef.review_item_id == item.id,
+                    ReviewItemEvidenceRef.review_item_id == item_id,
                     ReviewItemEvidenceRef.workflow_thread_id
-                    == item.workflow_thread_id,
+                    == workflow_thread_id,
                 )
             ).all()
         )
-        if not children:
-            return False
-        refs = tuple(
+        locator_ref_ids = tuple(
+            sorted(child.workflow_evidence_ref_id for child in locator_children)
+        )
+        locator_refs = tuple(
             db.scalars(
                 select(AgentWorkflowEvidenceRef).where(
                     AgentWorkflowEvidenceRef.workflow_thread_id
-                    == item.workflow_thread_id,
-                    AgentWorkflowEvidenceRef.id.in_(
-                        [child.workflow_evidence_ref_id for child in children]
-                    ),
+                    == workflow_thread_id,
+                    AgentWorkflowEvidenceRef.id.in_(locator_ref_ids),
                 )
             ).all()
         )
-        if len(refs) != len(children):
-            return True
-        source_statement = select(Source).where(
-            Source.id.in_([ref.canonical_row_id for ref in refs])
+        source_ids = tuple(
+            sorted({ref.canonical_row_id for ref in locator_refs})
+        )
+
+        source_statement = (
+            select(Source)
+            .where(Source.id.in_(source_ids))
+            .order_by(Source.id)
+            .execution_options(populate_existing=True)
         )
         if db.get_bind().dialect.name == 'postgresql':
-            source_statement = source_statement.with_for_update()
+            source_statement = source_statement.with_for_update(read=True)
         sources = {
             source.id: source for source in db.scalars(source_statement).all()
         }
-        documents = {
-            document.source_id: document
-            for document in db.scalars(
-                select(Document).where(
-                    Document.source_id.in_(
-                        [ref.canonical_row_id for ref in refs]
-                    )
-                )
-            ).all()
-        }
+
+        workflow_statement = (
+            select(AgentWorkflowThread)
+            .where(AgentWorkflowThread.thread_id == workflow_thread_id)
+            .execution_options(populate_existing=True)
+        )
+        if db.get_bind().dialect.name == 'postgresql':
+            workflow_statement = workflow_statement.with_for_update()
+        workflow = db.scalar(workflow_statement)
+        item = self._lock_review_item(db, item_id=item_id)
+        if workflow is None or item.workflow_thread_id != workflow_thread_id:
+            return item, True
+
+        child_statement = (
+            select(ReviewItemEvidenceRef)
+            .where(
+                ReviewItemEvidenceRef.review_item_id == item.id,
+                ReviewItemEvidenceRef.workflow_thread_id == workflow_thread_id,
+            )
+            .order_by(ReviewItemEvidenceRef.id)
+            .execution_options(populate_existing=True)
+        )
+        if db.get_bind().dialect.name == 'postgresql':
+            child_statement = child_statement.with_for_update()
+        children = tuple(db.scalars(child_statement).all())
+        locked_ref_ids = tuple(
+            sorted(child.workflow_evidence_ref_id for child in children)
+        )
+        ref_statement = (
+            select(AgentWorkflowEvidenceRef)
+            .where(
+                AgentWorkflowEvidenceRef.workflow_thread_id
+                == workflow_thread_id,
+                AgentWorkflowEvidenceRef.id.in_(locked_ref_ids),
+            )
+            .order_by(AgentWorkflowEvidenceRef.id)
+            .execution_options(populate_existing=True)
+        )
+        if db.get_bind().dialect.name == 'postgresql':
+            ref_statement = ref_statement.with_for_update()
+        refs = tuple(db.scalars(ref_statement).all())
+        locked_source_ids = tuple(
+            sorted({ref.canonical_row_id for ref in refs})
+        )
+        if locked_source_ids != source_ids:
+            raise ValueError('Canonical evidence changed during lock acquisition')
+
+        document_statement = (
+            select(Document)
+            .where(Document.source_id.in_(source_ids))
+            .order_by(Document.id)
+            .execution_options(populate_existing=True)
+        )
+        if db.get_bind().dialect.name == 'postgresql':
+            document_statement = document_statement.with_for_update()
+        locked_documents = tuple(db.scalars(document_statement).all())
+        current_version_ids = tuple(
+            sorted({
+                document.current_document_version_id
+                for document in locked_documents
+                if document.current_document_version_id is not None
+            } | {
+                ref.document_version_id
+                for ref in refs
+                if ref.document_version_id is not None
+            })
+        )
+        version_statement = (
+            select(DocumentVersion)
+            .where(DocumentVersion.id.in_(current_version_ids))
+            .order_by(DocumentVersion.id)
+            .execution_options(populate_existing=True)
+        )
+        if db.get_bind().dialect.name == 'postgresql':
+            version_statement = version_statement.with_for_update()
+        tuple(db.scalars(version_statement).all())
+
+        if not children:
+            return item, item.candidate_contract_version == 'c5-v1'
+        if locked_ref_ids != locator_ref_ids or len(refs) != len(children):
+            return item, True
+        documents_by_source: dict[int, list[Document]] = {}
+        for document in locked_documents:
+            documents_by_source.setdefault(document.source_id, []).append(document)
         for ref in refs:
             source = sources.get(ref.canonical_row_id)
             if source is None:
-                return True
+                return item, True
             if (
                 ref.canonical_table != 'sources'
                 or ref.canonical_source_type != source.source_type
@@ -421,14 +518,24 @@ class CanonicalReviewEvidenceStalenessResolver:
                 != 'server-source-content:v1'
                 or source.server_content_signature != ref.content_signature
             ):
-                return True
-            document = documents.get(source.id)
+                return item, True
+            source_documents = documents_by_source.get(source.id, [])
+            if len(source_documents) > 1:
+                return item, True
+            document = source_documents[0] if source_documents else None
             current_version_id = (
                 document.current_document_version_id if document is not None else None
             )
             if current_version_id != ref.document_version_id:
-                return True
-        return False
+                return item, True
+        return item, False
+
+    @staticmethod
+    def _lock_review_item(db: Session, *, item_id: int) -> ReviewItem:
+        items = ReviewTransitionService._load_items(db, [item_id])
+        if not items:
+            raise ValueError('Review item not found')
+        return items[0]
 
 
 class InternalReviewTransitionService:
@@ -445,19 +552,18 @@ class InternalReviewTransitionService:
         db: Session,
         item_id: int,
     ) -> ReviewTransitionResult:
-        items = ReviewTransitionService._load_items(db, [item_id])
-        if not items:
-            raise ValueError('Review item not found')
-        item = items[0]
+        item, evidence_has_drifted = (
+            self._evidence_staleness_resolver.lock_item_and_resolve_drift(
+                db,
+                item_id=item_id,
+            )
+        )
         if item.status != 'pending_review':
             raise InvalidReviewTransition(
                 action='needs_more_evidence',
                 status=item.status,
             )
-        if not self._evidence_staleness_resolver.canonical_evidence_has_drifted(
-            db,
-            item=item,
-        ):
+        if not evidence_has_drifted:
             raise ValueError('Review item canonical evidence is current')
         reviewed_at = datetime.now(UTC)
         item.status = 'needs_more_evidence'

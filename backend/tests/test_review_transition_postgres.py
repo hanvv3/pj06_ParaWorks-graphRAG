@@ -5,13 +5,14 @@ from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Barrier
+from time import monotonic, sleep
 from uuid import uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi import HTTPException
-from sqlalchemy import create_engine, delete, func, select, text
+from sqlalchemy import create_engine, delete, func, select, text, update
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session, sessionmaker
@@ -29,6 +30,8 @@ from backend.app.models import (
     AgentWorkflowThread,
     AuditLog,
     DecisionRecord,
+    Document,
+    DocumentVersion,
     HistoryEvent,
     ReviewItem,
     ReviewItemEvidenceRef,
@@ -37,7 +40,11 @@ from backend.app.models import (
     Todo,
 )
 from backend.app.review.actors import human_review_actor
-from backend.app.review.transitions import ReviewTransitionService
+from backend.app.review.transitions import (
+    CanonicalReviewEvidenceStalenessResolver,
+    InternalReviewTransitionService,
+    ReviewTransitionService,
+)
 from backend.app.schemas.review import ReviewEvidenceRequest
 
 _ISOLATED_DATABASE_ERROR = 'isolated PostgreSQL test database required'
@@ -106,6 +113,10 @@ class _TransitionHarness:
     settings: Settings
     workflow_thread_id: str
     workflow_evidence_ref_id: int
+    source_id: int
+    document_id: int
+    current_document_version_id: int
+    next_document_version_id: int
 
 
 @pytest.fixture
@@ -157,13 +168,34 @@ def postgres_transition_harness(
             )
             db.add_all([source, thread])
             db.flush()
+            document = Document(
+                source_id=source.id,
+                title='PostgreSQL transition evidence document',
+                current_version='v1',
+                current_document_version_id=None,
+            )
+            db.add(document)
+            db.flush()
+            current_version = DocumentVersion(
+                document_id=document.id,
+                version='v1',
+                body='Current PostgreSQL transition evidence.',
+            )
+            next_version = DocumentVersion(
+                document_id=document.id,
+                version='v2',
+                body='Changed PostgreSQL transition evidence.',
+            )
+            db.add_all([current_version, next_version])
+            db.flush()
+            document.current_document_version_id = current_version.id
             evidence_ref = AgentWorkflowEvidenceRef(
                 workflow_thread_id=workflow_thread_id,
                 ordinal=1,
                 canonical_source_type='drive',
                 canonical_table='sources',
                 canonical_row_id=source.id,
-                document_version_id=None,
+                document_version_id=current_version.id,
                 external_revision=None,
                 content_signature=source.server_content_signature,
                 permission_level_snapshot='internal',
@@ -183,6 +215,10 @@ def postgres_transition_harness(
             ),
             workflow_thread_id=workflow_thread_id,
             workflow_evidence_ref_id=evidence_ref_id,
+            source_id=source.id,
+            document_id=document.id,
+            current_document_version_id=current_version.id,
+            next_document_version_id=next_version.id,
         )
         try:
             yield harness
@@ -239,6 +275,17 @@ def _cleanup_exact_rows(harness: _TransitionHarness) -> None:
                 == harness.workflow_thread_id
             )
         )
+        db.execute(
+            update(Document)
+            .where(Document.id == harness.document_id)
+            .values(current_document_version_id=None)
+        )
+        db.execute(
+            delete(DocumentVersion).where(
+                DocumentVersion.document_id == harness.document_id
+            )
+        )
+        db.execute(delete(Document).where(Document.id == harness.document_id))
         db.execute(
             delete(Source).where(
                 Source.source_id == f'drive:{harness.workflow_thread_id}'
@@ -345,6 +392,116 @@ def _assert_promotion_matches_persisted(
     persisted: tuple[object, tuple[int, ...], tuple[int, ...]],
 ) -> None:
     assert returned == persisted
+
+
+def _wait_until_session_is_blocked_on_lock(
+    harness: _TransitionHarness,
+    *,
+    application_name: str,
+) -> None:
+    deadline = monotonic() + 10
+    while monotonic() < deadline:
+        with harness.engine.connect() as connection:
+            blocked = connection.scalar(
+                text(
+                    'SELECT EXISTS ('
+                    'SELECT 1 FROM pg_stat_activity '
+                    'WHERE application_name=:application_name '
+                    "AND wait_event_type='Lock')"
+                ),
+                {'application_name': application_name},
+            )
+            connection.rollback()
+        if blocked:
+            return
+        sleep(0.05)
+    raise AssertionError('stale-evidence resolver did not block on the leading Source lock')
+
+
+@pytest.mark.parametrize('mutation_kind', ['source', 'document_version', 'binding'])
+def test_stale_evidence_uses_source_first_complete_locked_snapshot_without_deadlock(
+    postgres_transition_harness: _TransitionHarness,
+    mutation_kind: str,
+) -> None:
+    harness = postgres_transition_harness
+    item_id = _seed_item(harness, item_type='history_event')
+    application_name = f'task4-stale-{mutation_kind}-{uuid4().hex}'
+
+    def mark_stale() -> str:
+        with harness.session_factory() as db:
+            db.execute(
+                text("SELECT set_config('application_name', :application_name, true)"),
+                {'application_name': application_name},
+            )
+            result = InternalReviewTransitionService(
+                evidence_staleness_resolver=(
+                    CanonicalReviewEvidenceStalenessResolver()
+                )
+            ).mark_evidence_stale(db=db, item_id=item_id)
+            db.commit()
+            return result.status
+
+    with harness.session_factory() as mutator, ThreadPoolExecutor(
+        max_workers=1
+    ) as executor:
+        mutator.scalar(
+            select(Source)
+            .where(Source.id == harness.source_id)
+            .with_for_update()
+        )
+        stale_future = executor.submit(mark_stale)
+        _wait_until_session_is_blocked_on_lock(
+            harness,
+            application_name=application_name,
+        )
+
+        mutator.scalar(
+            select(AgentWorkflowThread)
+            .where(
+                AgentWorkflowThread.thread_id == harness.workflow_thread_id
+            )
+            .with_for_update()
+        )
+        mutator.scalar(
+            select(ReviewItem)
+            .where(ReviewItem.id == item_id)
+            .with_for_update()
+        )
+        if mutation_kind == 'source':
+            source = mutator.get(Source, harness.source_id)
+            assert source is not None
+            source.server_content_signature = 'f' * 64
+        elif mutation_kind == 'document_version':
+            document = mutator.scalar(
+                select(Document)
+                .where(Document.id == harness.document_id)
+                .with_for_update()
+            )
+            assert document is not None
+            document.current_document_version_id = (
+                harness.next_document_version_id
+            )
+        else:
+            evidence_ref = mutator.scalar(
+                select(AgentWorkflowEvidenceRef)
+                .where(
+                    AgentWorkflowEvidenceRef.id
+                    == harness.workflow_evidence_ref_id
+                )
+                .with_for_update()
+            )
+            assert evidence_ref is not None
+            evidence_ref.content_signature = 'f' * 64
+        mutator.commit()
+        assert stale_future.result(timeout=20) == 'needs_more_evidence'
+
+    with harness.session_factory() as db:
+        item = db.get(ReviewItem, item_id)
+        assert item is not None
+        assert item.status == 'needs_more_evidence'
+        assert item.payload['needs_more_evidence']['reason_code'] == (
+            'evidence_version_changed'
+        )
 
 
 @pytest.mark.parametrize(

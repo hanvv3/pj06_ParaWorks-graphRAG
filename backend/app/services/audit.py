@@ -1,16 +1,26 @@
 from collections.abc import Mapping
 from decimal import Decimal
+from re import fullmatch
 
 from sqlalchemy.orm import Session
 
 from backend.app.core.demo_auth import DemoUser
+from backend.app.core.rbac import VALID_PERMISSION_LEVELS
 from backend.app.core.redaction import redact_secret_text
+from backend.app.knowledge.promotion import PROMOTABLE_REVIEW_TYPES
 from backend.app.models import AuditLog
 from backend.app.review.actors import (
     SYSTEM_AUTO_REVIEW_ACTOR_EMAIL,
     SYSTEM_AUTO_REVIEW_ACTOR_ID,
     SYSTEM_AUTO_REVIEW_ACTOR_ROLE,
     ReviewResolutionActor,
+    _assert_review_resolution_actor,
+    human_review_actor,
+)
+from backend.app.schemas.auto_review import (
+    AUTO_REVIEW_POLICY_VERSION,
+    AUTO_REVIEW_VALIDATOR_OUTPUT_CONTRACT_VERSION,
+    AUTO_REVIEW_VALIDATOR_PROMPT_VERSION,
 )
 
 _REVIEW_RESOLUTION_METADATA_KEYS = frozenset({
@@ -44,6 +54,30 @@ _REVIEW_RESOLUTION_COUNT_KEYS = frozenset({
     'validation_id',
 })
 _MAX_REVIEW_AUDIT_COUNT = 1_000_000_000
+_REVIEW_AUDIT_ACTIONS = frozenset({
+    'review.approve',
+    'review.auto_approve',
+    'review.reject',
+    'review.request_more_evidence',
+})
+_REVIEW_AUDIT_OUTCOMES = frozenset({
+    'approved',
+    'needs_more_evidence',
+    'rejected',
+})
+_REVIEW_AUDIT_TARGET_TYPES = frozenset({'review_item', 'review_workflow'})
+_REVIEW_AUDIT_STATUSES = frozenset({'failure', 'success'})
+_REVIEW_AUDIT_ENUM_VALUES = {
+    'item_type': frozenset(PROMOTABLE_REVIEW_TYPES),
+    'permission_level': VALID_PERMISSION_LEVELS,
+    'policy_version': frozenset({AUTO_REVIEW_POLICY_VERSION}),
+    'validator_output_contract_version': frozenset({
+        AUTO_REVIEW_VALIDATOR_OUTPUT_CONTRACT_VERSION
+    }),
+    'validator_prompt_version': frozenset({
+        AUTO_REVIEW_VALIDATOR_PROMPT_VERSION
+    }),
+}
 
 
 def record_audit_log(
@@ -83,9 +117,29 @@ def record_review_resolution_audit(
     target_id: str | int | None = None,
     status: str = 'success',
 ) -> AuditLog:
+    _assert_review_resolution_actor(actor)
+    _require_review_audit_enum('action', action, _REVIEW_AUDIT_ACTIONS)
+    _require_review_audit_enum('outcome', outcome, _REVIEW_AUDIT_OUTCOMES)
+    _require_review_audit_enum(
+        'target_type',
+        target_type,
+        _REVIEW_AUDIT_TARGET_TYPES,
+    )
+    _require_review_audit_enum('status', status, _REVIEW_AUDIT_STATUSES)
+    resolved_target_id = target_id if target_id is not None else review_item_id
+    if target_type == 'review_item':
+        if str(resolved_target_id) != str(review_item_id):
+            raise ValueError('Review audit target is outside the bounded schema')
+    elif not isinstance(resolved_target_id, str) or fullmatch(
+        r'[A-Za-z0-9_.:-]{1,64}',
+        resolved_target_id,
+    ) is None:
+        raise ValueError('Review audit target is outside the bounded schema')
     if actor.actor_type == 'human':
         if human_user is None or human_user.id != actor.subject_id:
             raise ValueError('Human review audit identity does not match actor')
+        if human_review_actor(human_user) != actor:
+            raise ValueError('Human review audit identity is not canonical')
         actor_id = human_user.id
         actor_email = human_user.email
         actor_role = human_user.role
@@ -112,17 +166,18 @@ def record_review_resolution_audit(
         elif key == 'estimated_cost_usd':
             if isinstance(value, Decimal) and value.is_finite() and value >= 0:
                 bounded_metadata[key] = format(value, 'f')
+        elif key in _REVIEW_AUDIT_ENUM_VALUES:
+            if isinstance(value, str) and value in _REVIEW_AUDIT_ENUM_VALUES[key]:
+                bounded_metadata[key] = value
         elif isinstance(value, bool):
             bounded_metadata[key] = value
-        elif isinstance(value, str):
-            bounded_metadata[key] = _bounded_review_audit_text(value)
     audit = AuditLog(
         actor_id=actor_id,
         actor_email=actor_email,
         actor_role=actor_role,
         action=_bounded_review_audit_text(action),
         target_type=_bounded_review_audit_text(target_type),
-        target_id=str(target_id if target_id is not None else review_item_id),
+        target_id=str(resolved_target_id),
         status=_bounded_review_audit_text(status),
         metadata_=bounded_metadata,
     )
@@ -162,3 +217,12 @@ def _bounded_review_audit_text(value: str) -> str:
     if not normalized or len(normalized) > 128:
         raise ValueError('Review audit text is outside the bounded schema')
     return normalized
+
+
+def _require_review_audit_enum(
+    field: str,
+    value: str,
+    allowed: frozenset[str],
+) -> None:
+    if value not in allowed:
+        raise ValueError(f'Review audit {field} is outside the bounded schema')

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from importlib import import_module
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.core.demo_auth import USERS
+from backend.app.core.demo_auth import USERS, DemoUser
 from backend.app.models import (
     AgentRun,
     AgentWorkflowEvidenceRef,
@@ -19,6 +20,7 @@ from backend.app.models import (
 )
 from backend.app.review.actors import (
     CreateNewPromotion,
+    ReuseExistingPromotion,
     ReviewResolutionActor,
     auto_review_actor,
     human_review_actor,
@@ -167,16 +169,150 @@ def test_human_adapter_preserves_exact_permission_levels() -> None:
     assert actor.policy_version is None
 
 
+@pytest.mark.parametrize(
+    'actor_fields',
+    [
+        {
+            'subject_id': 'forged-human',
+            'actor_type': 'human',
+            'allowed_permission_levels': ('restricted',),
+            'capabilities': frozenset({'human_review'}),
+        },
+        {
+            'subject_id': USERS['admin'].id,
+            'actor_type': 'human',
+            'allowed_permission_levels': ('public', 'root'),
+            'capabilities': frozenset({'human_review'}),
+        },
+        {
+            'subject_id': USERS['admin'].id,
+            'actor_type': 'human',
+            'allowed_permission_levels': ('public',),
+            'capabilities': frozenset({'human_review', 'superuser'}),
+        },
+        {
+            'subject_id': 'system:auto-review',
+            'actor_type': 'robot',
+            'allowed_permission_levels': ('public', 'internal'),
+            'capabilities': frozenset({'auto_review'}),
+            'policy_version': AUTO_REVIEW_POLICY_VERSION,
+        },
+        {
+            'subject_id': 'system:auto-review',
+            'actor_type': 'human',
+            'allowed_permission_levels': ('public', 'internal'),
+            'capabilities': frozenset({'human_review'}),
+        },
+    ],
+)
+def test_callers_cannot_construct_review_resolution_authority(
+    actor_fields: dict[str, object],
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        ReviewResolutionActor(**actor_fields)
+
+
+def test_human_adapter_rejects_forged_known_canonical_identity() -> None:
+    canonical = USERS['admin']
+    forged = DemoUser(
+        id=canonical.id,
+        email='forged-admin@example.invalid',
+        role=canonical.role,
+        permission_levels=set(canonical.permission_levels),
+        name=canonical.name,
+        title=canonical.title,
+        department=canonical.department,
+    )
+
+    with pytest.raises(ValueError, match='canonical'):
+        human_review_actor(forged)
+
+
+def test_review_package_root_does_not_export_authority_constructors() -> None:
+    review_package = import_module('backend.app.review')
+
+    for name in (
+        'ReviewResolutionActor',
+        'CreateNewPromotion',
+        'ReuseExistingPromotion',
+        'human_review_actor',
+        'auto_review_actor',
+    ):
+        assert not hasattr(review_package, name)
+
+
+def test_direct_forged_human_cannot_approve_restricted_item(
+    db_session: Session,
+) -> None:
+    item = _seed_item(db_session, permission_level='restricted')
+
+    with pytest.raises((TypeError, ValueError, HTTPException)):
+        actor = ReviewResolutionActor(
+            subject_id='forged-subject',
+            actor_type='human',
+            allowed_permission_levels=('restricted',),
+            capabilities=frozenset({'human_review'}),
+        )
+        ReviewTransitionService().transition(
+            db=db_session,
+            item_id=item.id,
+            action='approve',
+            actor=actor,
+        )
+
+    db_session.refresh(item)
+    assert item.status == 'pending_review'
+    assert item.reviewer_id is None
+
+
 def test_auto_actor_has_only_public_internal_and_auto_review() -> None:
     actor = auto_review_actor(policy_version=AUTO_REVIEW_POLICY_VERSION)
 
-    assert actor == ReviewResolutionActor(
-        subject_id='system:auto-review',
-        actor_type='auto_policy',
-        allowed_permission_levels=('public', 'internal'),
-        capabilities=frozenset({'auto_review'}),
-        policy_version=AUTO_REVIEW_POLICY_VERSION,
-    )
+    assert actor.subject_id == 'system:auto-review'
+    assert actor.actor_type == 'auto_policy'
+    assert actor.allowed_permission_levels == ('public', 'internal')
+    assert actor.capabilities == frozenset({'auto_review'})
+    assert actor.policy_version == AUTO_REVIEW_POLICY_VERSION
+
+
+def test_approval_directives_reject_kind_and_type_contradictions() -> None:
+    with pytest.raises(ValueError):
+        CreateNewPromotion(kind='reuse_existing')  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        ReuseExistingPromotion(
+            expected_type='decision_record',  # type: ignore[arg-type]
+            expected_id=1,
+            expected_claim_fingerprint='a' * 64,
+            expected_companion_id=None,
+            expected_companion_claim_fingerprint=None,
+        )
+    with pytest.raises(ValueError):
+        ReuseExistingPromotion(
+            expected_type='history_event',
+            expected_id=1,
+            expected_claim_fingerprint='a' * 64,
+            expected_companion_id=None,
+            expected_companion_claim_fingerprint=None,
+            kind='create_new',  # type: ignore[arg-type]
+        )
+
+
+def test_transition_rejects_unknown_approval_directive_runtime_type(
+    db_session: Session,
+) -> None:
+    item = _seed_item(db_session)
+
+    with pytest.raises((TypeError, ValueError)):
+        ReviewTransitionService().transition(
+            db=db_session,
+            item_id=item.id,
+            action='approve',
+            actor=human_review_actor(USERS['admin']),
+            approval_directive=object(),  # type: ignore[arg-type]
+        )
+
+    db_session.refresh(item)
+    assert item.status == 'pending_review'
 
 
 def test_public_request_cannot_supply_actor_type_capability_or_directive(
@@ -394,6 +530,80 @@ def test_audit_writer_does_not_log_raw_reason_or_source_content(
         'effect_count': 1,
         'estimated_cost_usd': '0.001234',
     }
+
+
+def test_audit_writer_rejects_raw_content_laundered_through_typed_fields(
+    db_session: Session,
+) -> None:
+    actor = human_review_actor(USERS['admin'])
+
+    record_review_resolution_audit(
+        db=db_session,
+        actor=actor,
+        human_user=USERS['admin'],
+        action='review.approve',
+        review_item_id=42,
+        outcome='approved',
+        metadata={
+            'item_type': 'raw model rationale: customer secret',
+            'policy_version': 'raw source evidence: private',
+            'permission_level': 'private customer transcript',
+            'validator_prompt_version': 'raw prompt: customer secret',
+        },
+    )
+    db_session.commit()
+
+    audit = db_session.scalars(select(AuditLog)).one()
+    serialized = repr(audit.metadata_)
+    assert 'customer secret' not in serialized
+    assert 'source evidence' not in serialized
+    assert 'customer transcript' not in serialized
+    assert 'raw prompt' not in serialized
+    assert audit.metadata_ == {
+        'actor_type': 'human',
+        'review_item_id': 42,
+        'outcome': 'approved',
+    }
+
+
+def test_review_audit_rejects_forged_human_projection_and_raw_target_id(
+    db_session: Session,
+) -> None:
+    actor = human_review_actor(USERS['admin'])
+    canonical = USERS['admin']
+    forged_projection = DemoUser(
+        id=canonical.id,
+        email='forged-audit@example.invalid',
+        role=canonical.role,
+        permission_levels=set(canonical.permission_levels),
+        name=canonical.name,
+        title=canonical.title,
+        department=canonical.department,
+    )
+
+    with pytest.raises(ValueError, match='canonical'):
+        record_review_resolution_audit(
+            db=db_session,
+            actor=actor,
+            human_user=forged_projection,
+            action='review.approve',
+            review_item_id=43,
+            outcome='approved',
+        )
+    with pytest.raises(ValueError, match='target'):
+        record_review_resolution_audit(
+            db=db_session,
+            actor=actor,
+            human_user=canonical,
+            action='review.approve',
+            review_item_id=43,
+            outcome='approved',
+            target_type='review_workflow',
+            target_id='raw source evidence: private',
+        )
+
+    db_session.flush()
+    assert db_session.scalars(select(AuditLog)).all() == []
 
 
 def test_system_resolution_audit_uses_fixed_schema_projection_without_fake_user(
