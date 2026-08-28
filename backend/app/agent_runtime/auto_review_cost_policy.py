@@ -43,6 +43,19 @@ AUTO_REVIEW_MAX_PROFILE_COST_USD = Decimal('0.181308')
 AUTO_REVIEW_MAX_WORKFLOW_COST_USD = Decimal('0.20')
 
 
+class ServerOwnedFencedSendHook:
+    """Opaque Task 1 identity reserved for Task 3's fenced send transport."""
+
+    __slots__ = ()
+
+
+_SERVER_OWNED_FENCED_SEND_HOOK = ServerOwnedFencedSendHook()
+
+
+def is_server_owned_fenced_send_hook(hook: object) -> bool:
+    return hook is _SERVER_OWNED_FENCED_SEND_HOOK
+
+
 @dataclass(frozen=True)
 class ValidationCostPolicy:
     cost_policy_version: str

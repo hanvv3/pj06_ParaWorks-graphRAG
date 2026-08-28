@@ -169,6 +169,7 @@ class Settings(BaseSettings):
 
         from backend.app.agent_runtime.auto_review_cost_policy import (
             confirmation_prices_match_registry,
+            is_server_owned_fenced_send_hook,
         )
 
         if not confirmation_prices_match_registry(
@@ -182,9 +183,7 @@ class Settings(BaseSettings):
             raise ValueError('non-disabled auto review requires an OpenAI key')
         if model is not None and bool(getattr(model, 'verbose', False)):
             raise ValueError('non-disabled auto review requires verbose models disabled')
-        if http_hook is not None and not bool(
-            getattr(http_hook, '__paraworks_body_blind_fenced_send__', False)
-        ):
+        if http_hook is not None and not is_server_owned_fenced_send_hook(http_hook):
             raise ValueError('non-disabled auto review rejects an unapproved HTTP hook')
         if get_debug() or os.getenv('OPENAI_LOG', '').lower() == 'debug':
             raise ValueError('non-disabled auto review requires debug logging disabled')
@@ -203,7 +202,15 @@ class Settings(BaseSettings):
 
     def allows_c5_process_local_sqlite_smoke(self) -> bool:
         """Only the disabled in-memory smoke path may retain the local placeholder."""
-        return self.auto_review_mode == 'disabled'
+        if self.auto_review_mode != 'disabled':
+            return False
+        from sqlalchemy.engine import make_url
+
+        try:
+            url = make_url(self.resolved_database_url())
+        except Exception:
+            return False
+        return url.get_backend_name() == 'sqlite' and url.database in {None, ':memory:'}
 
     def resolved_database_url(self) -> str:
         if self.paraworks_demo_mode and self.paraworks_demo_database_url:

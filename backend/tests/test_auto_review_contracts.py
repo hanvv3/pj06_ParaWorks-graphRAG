@@ -456,6 +456,15 @@ def test_non_disabled_readiness_rejects_openai_log_debug_effective_debug_logger_
         settings.require_auto_review_live_readiness(http_hook=object())
 
 
+def test_non_disabled_readiness_rejects_spoofed_truthy_fenced_send_marker() -> None:
+    spoofed_hook = type(
+        'SpoofedHook', (), {'__paraworks_body_blind_fenced_send__': True}
+    )()
+
+    with pytest.raises(ValueError, match='HTTP hook'):
+        _live_settings().require_auto_review_live_readiness(http_hook=spoofed_hook)
+
+
 @pytest.mark.parametrize(
     ('secret', 'key_version'),
     [
@@ -482,10 +491,42 @@ def test_disabled_postgres_c5_bootstrap_rejects_placeholder_or_short_secret(
 def test_disabled_sqlite_smoke_may_use_process_local_placeholder_without_durable_ready_state() -> None:
     from backend.app.core.config import Settings
 
-    settings = Settings(_env_file=None, auto_review_mode='disabled')
+    settings = Settings(
+        _env_file=None,
+        paraworks_demo_mode=False,
+        database_url='sqlite:///:memory:',
+        auto_review_mode='disabled',
+    )
     assert settings.allows_c5_process_local_sqlite_smoke()
     with pytest.raises(ValueError, match='durable C.5 key'):
         settings.require_c5_durable_key_ready()
+
+
+@pytest.mark.parametrize(
+    ('database_url', 'mode', 'expected'),
+    [
+        ('postgresql+psycopg://user:pass@localhost:5432/paraworks', 'disabled', False),
+        ('sqlite:///C:/tmp/paraworks.db', 'disabled', False),
+        ('sqlite:///:memory:', 'disabled', True),
+        ('sqlite:///:memory:', 'shadow', False),
+    ],
+)
+def test_process_local_sqlite_smoke_is_limited_to_disabled_in_memory_url(
+    database_url: str, mode: str, expected: bool
+) -> None:
+    from backend.app.core.config import Settings
+
+    settings = Settings(
+        _env_file=None,
+        paraworks_demo_mode=False,
+        database_url=database_url,
+        auto_review_mode=mode,
+        auto_review_enforce_percentage=0,
+        agent_runtime_fingerprint_secret='x' * 32,
+        agent_runtime_fingerprint_key_version='v1',
+    )
+
+    assert settings.allows_c5_process_local_sqlite_smoke() is expected
 
 
 def test_file_backed_sqlite_placeholder_refuses_every_c5_bound_durable_write() -> None:
