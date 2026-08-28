@@ -7,7 +7,7 @@ from math import ceil
 from typing import Any, cast
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.admin.auto_review_keys import (
@@ -161,11 +161,13 @@ class CandidateEvidenceBindingSet:
         agent_run_id: int,
         stored_agent_run_id: int | None,
         stored_refs: tuple[int, ...],
+        stored_bindings: tuple[CandidateEvidenceRefBinding, ...] | None = None,
     ) -> None:
         expected = tuple(row.workflow_evidence_ref_id for row in self.refs)
         if (
             stored_agent_run_id != agent_run_id
-            or tuple(sorted(stored_refs)) != expected
+            or stored_refs != expected
+            or (stored_bindings is not None and stored_bindings != self.refs)
         ):
             raise CandidateEvidenceBindingError(
                 'candidate evidence binding is immutable'
@@ -292,21 +294,35 @@ def build_candidate_evidence_bindings(
             for message in ordered
         ):
             raise CandidateEvidenceBindingError('candidate evidence ref is ambiguous')
+        permission_level = _strictest_permission(
+            *(message.permission_level for message in ordered)
+        )
         message_set_hmac = build_keyed_fingerprint(
-            [
-                {
-                    'stable_message_identity': message.metadata.get(
-                        'stable_message_identity'
-                    ),
-                    'text_fingerprint': build_keyed_fingerprint(
-                        message.text,
-                        settings=settings,
-                        schema_version='candidate-message-content:v1',
-                        policy_version='candidate-message-content:v1',
-                    ),
-                }
-                for message in ordered
-            ],
+            {
+                'canonical_source_kind': common[0],
+                'canonical_source_id': common[1],
+                'canonical_version_or_signature': common[2],
+                'content_fingerprint': common[3],
+                'permission_level': permission_level,
+                'fingerprint_key_version': key_version,
+                'fingerprint_key_material_verifier': (
+                    fingerprint_key_material_verifier
+                ),
+                'messages': [
+                    {
+                        'stable_message_identity': message.metadata.get(
+                            'stable_message_identity'
+                        ),
+                        'text_fingerprint': build_keyed_fingerprint(
+                            message.text,
+                            settings=settings,
+                            schema_version='candidate-message-content:v1',
+                            policy_version='candidate-message-content:v1',
+                        ),
+                    }
+                    for message in ordered
+                ],
+            },
             settings=settings,
             schema_version=CANDIDATE_MESSAGE_SET_SCHEMA,
             policy_version=CANDIDATE_MESSAGE_SET_POLICY,
@@ -320,7 +336,7 @@ def build_candidate_evidence_bindings(
                 canonical_version_or_signature=str(common[2]),
                 content_fingerprint=str(common[3]),
                 message_set_hmac=message_set_hmac,
-                permission_level=first.permission_level,
+                permission_level=permission_level,
                 fingerprint_key_version=key_version,
                 fingerprint_key_material_verifier=fingerprint_key_material_verifier,
             )
@@ -339,7 +355,40 @@ def build_candidate_evidence_bindings(
             start=1,
         )
     )
-    evidence_version_hash = build_keyed_fingerprint(
+    evidence_version_hash = derive_candidate_evidence_version_hash(
+        workflow_execution_hmac=workflow_execution_hmac,
+        security_scope_hmac=security_scope_hmac,
+        candidate_key=candidate_key,
+        refs=ordered_rows,
+        settings=settings,
+    )
+    result = CandidateEvidenceBindingSet(ordered_rows, evidence_version_hash)
+    if on_persist is not None:
+        on_persist(result)
+    del secret
+    return result
+
+
+def derive_candidate_evidence_version_hash(
+    *,
+    workflow_execution_hmac: str,
+    security_scope_hmac: str,
+    candidate_key: str,
+    refs: Sequence[CandidateEvidenceRefBinding],
+    settings: Settings,
+) -> str:
+    """Re-derive the immutable candidate evidence identity from relational rows."""
+    ordered_rows = tuple(
+        sorted(
+            refs,
+            key=lambda row: (
+                row.workflow_evidence_ref_id,
+                row.canonical_source_kind,
+                str(row.canonical_source_id),
+            ),
+        )
+    )
+    return build_keyed_fingerprint(
         {
             'workflow_execution_hmac': workflow_execution_hmac,
             'security_scope_hmac': security_scope_hmac,
@@ -363,11 +412,6 @@ def build_candidate_evidence_bindings(
         schema_version=CANDIDATE_EVIDENCE_STATE_SCHEMA,
         policy_version=CANDIDATE_EVIDENCE_STATE_POLICY,
     )
-    result = CandidateEvidenceBindingSet(ordered_rows, evidence_version_hash)
-    if on_persist is not None:
-        on_persist(result)
-    del secret
-    return result
 
 
 @dataclass(frozen=True)
@@ -652,7 +696,9 @@ class ReviewDraftService:
                 source_count=len(inputs.refs),
                 budget_limit_usd=self._settings.agent_llm_max_estimated_cost_usd,
             )
-            cached_ids = _cached_review_item_ids(db, plans, inputs.thread_id)
+            cached_ids = _cached_review_item_ids(
+                db, plans, inputs.thread_id, settings=self._settings
+            )
             db.rollback()
             return response, cached_ids
 
@@ -716,7 +762,9 @@ class ReviewDraftService:
             if preview.budget_status == 'over_budget':
                 db.rollback()
                 raise ReviewDraftError('budget_exceeded', 'review budget exceeded')
-            cached_ids = _cached_review_item_ids(db, plans, inputs.thread_id)
+            cached_ids = _cached_review_item_ids(
+                db, plans, inputs.thread_id, settings=self._settings
+            )
             pending_plans = tuple(
                 plan
                 for plan in plans
@@ -832,7 +880,12 @@ class ReviewDraftService:
                 existing = _find_agent_run(db, workflow_thread_id, plan.effect_key)
                 if existing is not None:
                     item_ids.extend(
-                        _review_item_ids_for_run(db, existing.id, workflow_thread_id)
+                        _review_item_ids_for_run(
+                            db,
+                            existing.id,
+                            workflow_thread_id,
+                            settings=self._settings,
+                        )
                     )
                     continue
                 agent_run, created = _insert_or_get_agent_run(
@@ -848,22 +901,44 @@ class ReviewDraftService:
                 )
                 if not created:
                     item_ids.extend(
-                        _review_item_ids_for_run(db, agent_run.id, workflow_thread_id)
+                        _review_item_ids_for_run(
+                            db,
+                            agent_run.id,
+                            workflow_thread_id,
+                            settings=self._settings,
+                        )
                     )
                     continue
-                for candidate in result.candidates:
-                    item, _ = _insert_or_get_review_item(
-                        db,
-                        thread=thread,
-                        agent_run=agent_run,
-                        plan=plan,
-                        result=result,
-                        candidate=candidate,
-                        packet=packet,
-                        settings=self._settings,
-                        now=now,
-                    )
-                    item_ids.append(item.id)
+                try:
+                    with db.begin_nested():
+                        for candidate in result.candidates:
+                            item, _ = _insert_or_get_review_item(
+                                db,
+                                thread=thread,
+                                agent_run=agent_run,
+                                plan=plan,
+                                result=result,
+                                candidate=candidate,
+                                packet=packet,
+                                settings=self._settings,
+                                now=now,
+                            )
+                            item_ids.append(item.id)
+                except ReviewDraftError as exc:
+                    if exc.code != 'evidence_binding_mismatch':
+                        raise
+                    agent_run.status = 'failed'
+                    agent_run.completed_at = now
+                    agent_run.metadata_ = {
+                        **(agent_run.metadata_ or {}),
+                        'failure_reason_code': 'evidence_binding_mismatch',
+                    }
+                    thread.status = lease.prior_status
+                    thread.lease_token = None
+                    thread.lease_expires_at = None
+                    thread.state_version += 1
+                    db.commit()
+                    raise
 
             thread.status = 'checkpoint_pending'
             thread.lease_token = None
@@ -1789,11 +1864,52 @@ def _insert_or_get_review_item(
             .where(ReviewItemEvidenceRef.review_item_id == item.id)
             .order_by(ReviewItemEvidenceRef.candidate_slot_ordinal)
         ).all()
+        workflow_refs = {
+            row.id: row
+            for row in db.scalars(
+                select(AgentWorkflowEvidenceRef).where(
+                    AgentWorkflowEvidenceRef.workflow_thread_id == thread.thread_id,
+                    AgentWorkflowEvidenceRef.id.in_(
+                        [row.workflow_evidence_ref_id for row in stored_refs]
+                    ),
+                )
+            ).all()
+        }
+        stored_bindings = tuple(
+            CandidateEvidenceRefBinding(
+                workflow_evidence_ref_id=row.workflow_evidence_ref_id,
+                ordinal=row.candidate_slot_ordinal,
+                canonical_source_kind=workflow_refs[
+                    row.workflow_evidence_ref_id
+                ].canonical_source_type,
+                canonical_source_id=workflow_refs[
+                    row.workflow_evidence_ref_id
+                ].canonical_row_id,
+                canonical_version_or_signature=(
+                    workflow_refs[row.workflow_evidence_ref_id].external_revision
+                    or workflow_refs[row.workflow_evidence_ref_id].content_signature
+                ),
+                content_fingerprint=workflow_refs[
+                    row.workflow_evidence_ref_id
+                ].content_fingerprint,
+                message_set_hmac=row.message_content_fingerprint,
+                permission_level=workflow_refs[
+                    row.workflow_evidence_ref_id
+                ].permission_level_snapshot,
+                fingerprint_key_version=row.fingerprint_key_version,
+                fingerprint_key_material_verifier=(
+                    row.fingerprint_key_material_verifier
+                ),
+            )
+            for row in stored_refs
+            if row.workflow_evidence_ref_id in workflow_refs
+        )
         try:
             binding_set.verify_replay(
                 agent_run_id=agent_run.id,
                 stored_agent_run_id=item.agent_run_id,
                 stored_refs=tuple(row.workflow_evidence_ref_id for row in stored_refs),
+                stored_bindings=stored_bindings,
             )
         except CandidateEvidenceBindingError:
             raise ReviewDraftError(
@@ -1904,7 +2020,19 @@ def _review_item_ids_for_run(
     db: Session,
     agent_run_id: int,
     workflow_thread_id: str,
+    *,
+    settings: Settings,
 ) -> tuple[int, ...]:
+    request = db.get(AgentWorkflowRequest, workflow_thread_id)
+    if request is None:
+        raise ReviewDraftError(
+            'invalid_state_transition',
+            'cached candidate provenance is incomplete',
+        )
+    _, expected_key_version = fingerprint_secret_bytes(settings)
+    expected_material_verifier = build_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
     items = db.scalars(
         select(ReviewItem).where(
             ReviewItem.workflow_thread_id == workflow_thread_id,
@@ -1917,15 +2045,40 @@ def _review_item_ids_for_run(
                 'invalid_state_transition',
                 'cached candidate provenance is incomplete',
             )
-        ref_count = len(
+        refs = tuple(
             db.scalars(
-                select(ReviewItemEvidenceRef).where(
+                select(ReviewItemEvidenceRef)
+                .where(
                     ReviewItemEvidenceRef.review_item_id == item.id,
                     ReviewItemEvidenceRef.workflow_thread_id == workflow_thread_id,
                 )
+                .order_by(ReviewItemEvidenceRef.candidate_slot_ordinal)
             ).all()
         )
-        if ref_count == 0:
+        workflow_ref_ids = tuple(ref.workflow_evidence_ref_id for ref in refs)
+        workflow_ref_count = db.scalar(
+            select(func.count())
+            .select_from(AgentWorkflowEvidenceRef)
+            .where(
+                AgentWorkflowEvidenceRef.workflow_thread_id == workflow_thread_id,
+                AgentWorkflowEvidenceRef.id.in_(workflow_ref_ids),
+            )
+        )
+        if (
+            item.candidate_key is None
+            or not refs
+            or tuple(ref.candidate_slot_ordinal for ref in refs)
+            != tuple(range(1, len(refs) + 1))
+            or len(set(workflow_ref_ids)) != len(refs)
+            or workflow_ref_count != len(refs)
+            or any(
+                    ref.fingerprint_key_version != expected_key_version
+                    or ref.fingerprint_key_material_verifier
+                    != expected_material_verifier
+                or len(ref.message_content_fingerprint) != 64
+                for ref in refs
+            )
+        ):
             raise ReviewDraftError(
                 'invalid_state_transition',
                 'cached candidate provenance is incomplete',
@@ -1937,6 +2090,8 @@ def _cached_review_item_ids(
     db: Session,
     plans: tuple[_AdapterPlan, ...],
     workflow_thread_id: str,
+    *,
+    settings: Settings,
 ) -> tuple[int, ...]:
     return tuple(
         sorted(
@@ -1948,6 +2103,7 @@ def _cached_review_item_ids(
                     db,
                     plan.cached_run_id,
                     workflow_thread_id,
+                    settings=settings,
                 )
             }
         )

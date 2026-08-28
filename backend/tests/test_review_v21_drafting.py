@@ -160,6 +160,54 @@ def test_two_messages_for_one_source_ref_use_one_sorted_aggregate_fingerprint():
     assert len(result.refs[0].message_set_hmac) == 64
 
 
+@pytest.mark.parametrize(
+    ('change', 'value'),
+    (
+        ('canonical_version_or_signature', 'version-changed'),
+        ('content_fingerprint', 'f' * 64),
+        ('permission_level', 'restricted'),
+    ),
+)
+def test_aggregate_message_set_binds_source_version_content_permission_and_key_identity(
+    change, value
+):
+    first = _message(1)
+    second = replace(
+        _message(2),
+        metadata={
+            **first.metadata,
+            'stable_message_identity': 'message-2',
+        },
+    )
+    baseline = _bindings(_candidate(first, second), _packet(first, second)).refs[0]
+    if change == 'permission_level':
+        changed_second = replace(second, permission_level=value)
+    else:
+        changed_second = replace(second, metadata={**second.metadata, change: value})
+    if change == 'permission_level':
+        changed = _bindings(
+            _candidate(first, changed_second), _packet(first, changed_second)
+        ).refs[0]
+        assert changed.permission_level == 'restricted'
+    else:
+        with pytest.raises(CandidateEvidenceBindingError, match='ambiguous'):
+            _bindings(_candidate(first, changed_second), _packet(first, changed_second))
+        return
+    assert changed.message_set_hmac != baseline.message_set_hmac
+
+
+def test_candidate_replay_compares_ordinals_hmac_permission_and_key_fields():
+    bindings = _bindings()
+    corrupted = replace(bindings.refs[0], ordinal=2, message_set_hmac='f' * 64)
+    with pytest.raises(CandidateEvidenceBindingError, match='immutable'):
+        bindings.verify_replay(
+            agent_run_id=2,
+            stored_agent_run_id=2,
+            stored_refs=(1, 2),
+            stored_bindings=(corrupted, bindings.refs[1]),
+        )
+
+
 def test_candidate_evidence_state_hash_is_ref_order_invariant():
     first, second = _message(1), _message(2)
     assert (

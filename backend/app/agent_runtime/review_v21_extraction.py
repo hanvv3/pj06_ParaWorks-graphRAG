@@ -4,12 +4,13 @@ import hashlib
 import hmac
 import json
 import unicodedata
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from threading import RLock
 from time import monotonic
+from types import MappingProxyType
 from typing import Any, TypeVar
 from uuid import uuid4
 
@@ -31,7 +32,15 @@ from backend.app.agent_runtime.auto_review_input_safety import (
 from backend.app.agent_runtime.canonical_sources import build_keyed_fingerprint
 from backend.app.agent_runtime.contracts import EvidencePacket
 from backend.app.agent_runtime.keyed_mutation_guard import KeyedMutationGuard
-from backend.app.agent_runtime.provider_send_fence import ProviderAttemptGrant
+from backend.app.agent_runtime.provider_send_fence import (
+    FencedOpenAITransport,
+    ProviderAttemptGrant,
+    _issue_provider_attempt_grant,
+)
+from backend.app.agent_runtime.review_v2_drafting import (
+    CandidateEvidenceRefBinding,
+    derive_candidate_evidence_version_hash,
+)
 from backend.app.core.config import Settings
 from backend.app.models.agent_runs import AgentRun
 from backend.app.models.agent_workflows import (
@@ -44,7 +53,9 @@ from backend.app.models.auto_review import (
     AutoReviewProviderSafetyEvent,
     AutoReviewProviderSafetyState,
     AutoReviewValidationCall,
+    ReviewItemEvidenceRef,
 )
+from backend.app.models.review import ReviewItem
 from backend.app.models.source import Source
 from backend.app.schemas.auto_review import (
     DecisionRecordExtractionResult,
@@ -94,7 +105,7 @@ class PreparedExtractionInvocation:
     max_output_tokens: int
     evidence_slot_ids: tuple[str, ...]
     output_schema: type[BaseModel]
-    provider_options: dict[str, Any]
+    provider_options: Mapping[str, Any]
 
     def __repr__(self) -> str:
         return (
@@ -171,6 +182,10 @@ class PreparedExtractionPlan:
             'prepared_character_count': self.invocation.character_count,
             'framed_input_tokens': self.invocation.framed_input_tokens,
             'reserved_cost_usd': format(self.reserved_cost_usd, 'f'),
+            'provider_options': {
+                key: list(value) if isinstance(value, tuple) else value
+                for key, value in sorted(self.invocation.provider_options.items())
+            },
         }
 
     def identity_hmac(self, settings: Settings) -> str:
@@ -293,14 +308,16 @@ def _render_invocation(
         max_output_tokens=policy.max_output_tokens,
         evidence_slot_ids=tuple(slots),
         output_schema=_OUTPUT_SCHEMAS[policy.agent_name],
-        provider_options={
-            'transport': 'responses',
-            'cache': False,
-            'max_retries': 0,
-            'callbacks': (),
-            'tracing': False,
-            'verbose': False,
-        },
+        provider_options=MappingProxyType(
+            {
+                'transport': 'responses',
+                'cache': False,
+                'max_retries': 0,
+                'callbacks': (),
+                'tracing': False,
+                'verbose': False,
+            }
+        ),
     )
 
 
@@ -324,6 +341,19 @@ def build_prepared_extraction_plan_set(
         (item.purpose, item.provider, item.model, item.reasoning_effort): item
         for item in safety_snapshots
     }
+    if len(safety_by_identity) != len(safety_snapshots):
+        raise ExtractionCallStateError('duplicate extraction safety snapshot')
+    selected_safety_identities = {
+        (
+            'extraction',
+            policies[name].provider,
+            policies[name].model,
+            policies[name].reasoning_effort,
+        )
+        for name in names
+    }
+    if set(safety_by_identity) != selected_safety_identities:
+        raise ExtractionCallStateError('unselected extraction safety snapshot')
     plans: list[PreparedExtractionPlan] = []
     for name in names:
         policy = policies[name]
@@ -375,10 +405,16 @@ def build_prepared_extraction_plan_set(
             input_usd_per_1m=policy.input_cost_per_1m_tokens,
             output_usd_per_1m=policy.output_cost_per_1m_tokens,
             provider_safety_state_version=safety.state_version,
-            provider_timeout_seconds=60,
-            provider_send_start_window_seconds=5,
-            provider_attempt_lease_seconds=120,
-            provider_commit_grace_seconds=30,
+            provider_timeout_seconds=settings.auto_review_provider_timeout_seconds,
+            provider_send_start_window_seconds=(
+                settings.auto_review_provider_send_start_window_seconds
+            ),
+            provider_attempt_lease_seconds=(
+                settings.auto_review_provider_attempt_lease_seconds
+            ),
+            provider_commit_grace_seconds=(
+                settings.auto_review_provider_commit_grace_seconds
+            ),
             invocation=invocation,
             reserved_cost_usd=_maximum_cost(policy),
             plan_hmac='',
@@ -456,13 +492,19 @@ _R = TypeVar('_R')
 
 def invoke_prepared_extraction(
     invocation: PreparedExtractionInvocation,
-    provider: Callable[[PreparedExtractionInvocation, ProviderAttemptGrant | None], _R],
+    provider: Callable[..., _R],
     *,
     grant: ProviderAttemptGrant | None,
 ) -> _R:
     if not provider_logging_is_safe():
         raise ExtractionCallStateError('provider logging controls are unsafe')
-    return provider(invocation, grant)
+    if grant is None:
+        raise ExtractionCallStateError('committed provider attempt grant is required')
+    transport: FencedOpenAITransport[_R] = FencedOpenAITransport(grant)
+    return transport.dispatch(
+        lambda *, timeout: provider(invocation, timeout=timeout),
+        request_body=invocation.canonical_bytes,
+    )
 
 
 @dataclass(frozen=True)
@@ -477,6 +519,8 @@ class ExtractionLockedContext:
     agent_name: str
     plan_hmac: str
     lease_token: str
+    owner_subject_id: str | None = None
+    allowed_permission_levels: tuple[str, ...] = ()
 
 
 @dataclass
@@ -640,7 +684,7 @@ class ExtractionCallLedger:
             attempt_id = hashlib.sha256(
                 f'{context.lease_token}:attempt:1'.encode()
             ).hexdigest()
-            grant = ProviderAttemptGrant.after_committed_marker(
+            grant = _issue_provider_attempt_grant(
                 attempt_id=attempt_id,
                 provider_timeout_seconds=state.plan.provider_timeout_seconds,
                 send_start_window_seconds=state.plan.provider_send_start_window_seconds,
@@ -864,6 +908,8 @@ class ExtractionCallStore:
         workflow_thread_id: str,
         plan: PreparedExtractionPlan,
         *,
+        actor_subject_id: str,
+        allowed_permission_levels: tuple[str, ...],
         validation_obligation: Decimal = Decimal('0'),
         expected_now: datetime | None = None,
     ) -> ExtractionLockedContext:
@@ -890,6 +936,8 @@ class ExtractionCallStore:
                     sources=sources,
                     safety=safety,
                     plan=plan,
+                    actor_subject_id=actor_subject_id,
+                    allowed_permission_levels=allowed_permission_levels,
                     validation_obligation=validation_obligation,
                     prospective_reserve=(
                         plan.reserved_cost_usd if existing is None else Decimal('0')
@@ -897,7 +945,21 @@ class ExtractionCallStore:
                 )
                 if existing is not None:
                     self._verify_existing_plan(existing, plan)
-                    return self._context(existing)
+                    if existing.status == 'failed':
+                        raise ExtractionCallStateError(
+                            'failed extraction call is not cacheable'
+                        )
+                    self._verify_completed_replay(
+                        db,
+                        thread=thread,
+                        request=request,
+                        call=existing,
+                    )
+                    return self._context(
+                        existing,
+                        owner_subject_id=actor_subject_id,
+                        allowed_permission_levels=allowed_permission_levels,
+                    )
                 permission = _strictest_permission(
                     tuple(ref.permission_level_snapshot for ref in refs)
                 )
@@ -987,7 +1049,11 @@ class ExtractionCallStore:
                 )
                 db.add(call)
                 db.flush()
-                return self._context(call)
+                return self._context(
+                    call,
+                    owner_subject_id=actor_subject_id,
+                    allowed_permission_levels=allowed_permission_levels,
+                )
         except IntegrityError:
             with self._session_factory() as db:
                 existing = db.scalar(
@@ -1000,7 +1066,11 @@ class ExtractionCallStore:
                 if existing is None:
                     raise
                 self._verify_existing_plan(existing, plan)
-                return self._context(existing)
+                return self._context(
+                    existing,
+                    owner_subject_id=actor_subject_id,
+                    allowed_permission_levels=allowed_permission_levels,
+                )
 
     def mark_attempt_started(
         self,
@@ -1033,6 +1103,8 @@ class ExtractionCallStore:
                         sources=sources,
                         safety=safety,
                         plan=plan,
+                        actor_subject_id=context.owner_subject_id,
+                        allowed_permission_levels=context.allowed_permission_levels,
                         validation_obligation=Decimal('0'),
                         prospective_reserve=Decimal('0'),
                     )
@@ -1078,7 +1150,7 @@ class ExtractionCallStore:
                     lease_expiry = call.lease_expires_at
             if refusal is not None:
                 raise ExtractionCallStateError(refusal)
-            return ProviderAttemptGrant.after_committed_marker(
+            return _issue_provider_attempt_grant(
                 attempt_id=attempt_id,
                 provider_timeout_seconds=timeout,
                 send_start_window_seconds=window,
@@ -1134,6 +1206,19 @@ class ExtractionCallStore:
                 sources=sources,
                 safety=safety,
                 plan=plan,
+            )
+            drifted = drifted or bool(
+                not self._runtime_key_matches(db, request)
+                or
+                context.owner_subject_id is None
+                or thread.owner_subject_id != context.owner_subject_id
+                or any(
+                    ref.permission_level_snapshot
+                    not in context.allowed_permission_levels
+                    for ref in refs
+                )
+                or call.lease_expires_at is None
+                or now >= call.lease_expires_at
             )
             charge = (
                 plan.reserved_cost_usd
@@ -1196,6 +1281,7 @@ class ExtractionCallStore:
             run.total_tokens = call.charged_input_tokens + call.charged_output_tokens
             run.estimated_cost_usd = float(charge)
             if overrun:
+                self._sql_fail(call, run, now=now)
                 self._open_overrun_breaker(
                     db, safety=safety['extraction'], call=call, now=now
                 )
@@ -1209,7 +1295,31 @@ class ExtractionCallStore:
                     raise ExtractionCallStateError(
                         'candidate evidence binding is missing'
                     )
-                pair = candidate_writer(db, run, plan, parsed)
+                # ``begin_nested`` flushes pending state before the savepoint.
+                # Keep that intermediate database-visible state terminal and
+                # non-cacheable until exact relational candidate proof passes.
+                self._sql_fail(call, run, now=now)
+                try:
+                    with db.begin_nested():
+                        pair = candidate_writer(db, run, plan, parsed)
+                        db.flush()
+                        verified_pair = self._candidate_pair_from_rows(
+                            db,
+                            thread=thread,
+                            request=request,
+                            call=call,
+                        )
+                        if pair != verified_pair:
+                            raise ExtractionCallStateError(
+                                'evidence_binding_mismatch'
+                            )
+                except (ExtractionCallStateError, IntegrityError):
+                    run.metadata_ = {
+                        **(run.metadata_ or {}),
+                        'failure_reason_code': 'evidence_binding_mismatch',
+                    }
+                    self._sql_fail(call, run, now=now)
+                    return
                 items = [pair]
                 result_kind = 'candidate'
             else:
@@ -1381,6 +1491,8 @@ class ExtractionCallStore:
         sources: dict[int, Source],
         safety: dict[str, AutoReviewProviderSafetyState],
         plan: PreparedExtractionPlan,
+        actor_subject_id: str | None,
+        allowed_permission_levels: tuple[str, ...],
         validation_obligation: Decimal,
         prospective_reserve: Decimal,
     ) -> None:
@@ -1389,6 +1501,14 @@ class ExtractionCallStore:
             or thread.cancelled_at is not None
         ):
             raise ExtractionCallStateError('extraction is disabled or cancelled')
+        if actor_subject_id is None or thread.owner_subject_id != actor_subject_id:
+            raise ExtractionCallStateError('workflow owner mismatch')
+        if not allowed_permission_levels or any(
+            ref.permission_level_snapshot not in allowed_permission_levels for ref in refs
+        ):
+            raise ExtractionCallStateError('workflow evidence permission denied')
+        if not self._runtime_key_matches(db, request):
+            raise ExtractionCallStateError('runtime fingerprint key changed')
         if not self._current_identity_matches(
             thread=thread,
             request=request,
@@ -1526,6 +1646,163 @@ class ExtractionCallStore:
             == Decimal(request.auto_review_validator_output_usd_per_1m)
         )
 
+    @staticmethod
+    def _runtime_key_matches(db: Session, request: AgentWorkflowRequest) -> bool:
+        runtime = KeyedMutationGuard.lock_runtime_key_state(db, for_update=False)
+        return bool(
+            runtime is not None
+            and runtime.ready
+            and runtime.fingerprint_key_version == request.fingerprint_key_version
+            and runtime.fingerprint_key_material_verifier
+            == request.fingerprint_key_material_verifier
+        )
+
+    def _candidate_pair_from_rows(
+        self,
+        db: Session,
+        *,
+        thread: AgentWorkflowThread,
+        request: AgentWorkflowRequest,
+        call: AutoReviewExtractionCall,
+    ) -> tuple[str, str]:
+        items = tuple(
+            db.scalars(
+                select(ReviewItem).where(
+                    ReviewItem.workflow_thread_id == thread.thread_id,
+                    ReviewItem.agent_run_id == call.agent_run_id,
+                )
+            ).all()
+        )
+        if len(items) != 1:
+            raise ExtractionCallStateError('evidence_binding_mismatch')
+        item = items[0]
+        if (
+            item.candidate_key is None
+            or item.candidate_contract_version != 'c5-v1'
+            or item.agent_run_id != call.agent_run_id
+        ):
+            raise ExtractionCallStateError('evidence_binding_mismatch')
+        children = tuple(
+            db.scalars(
+                select(ReviewItemEvidenceRef)
+                .where(
+                    ReviewItemEvidenceRef.review_item_id == item.id,
+                    ReviewItemEvidenceRef.workflow_thread_id == thread.thread_id,
+                )
+                .order_by(ReviewItemEvidenceRef.candidate_slot_ordinal)
+            ).all()
+        )
+        if not children or tuple(
+            child.candidate_slot_ordinal for child in children
+        ) != tuple(range(1, len(children) + 1)):
+            raise ExtractionCallStateError('evidence_binding_mismatch')
+        workflow_refs = {
+            row.id: row
+            for row in db.scalars(
+                select(AgentWorkflowEvidenceRef).where(
+                    AgentWorkflowEvidenceRef.workflow_thread_id == thread.thread_id,
+                    AgentWorkflowEvidenceRef.id.in_(
+                        [child.workflow_evidence_ref_id for child in children]
+                    ),
+                )
+            ).all()
+        }
+        if len(workflow_refs) != len(children):
+            raise ExtractionCallStateError('evidence_binding_mismatch')
+        bindings = tuple(
+            CandidateEvidenceRefBinding(
+                workflow_evidence_ref_id=child.workflow_evidence_ref_id,
+                ordinal=child.candidate_slot_ordinal,
+                canonical_source_kind=workflow_refs[
+                    child.workflow_evidence_ref_id
+                ].canonical_source_type,
+                canonical_source_id=workflow_refs[
+                    child.workflow_evidence_ref_id
+                ].canonical_row_id,
+                canonical_version_or_signature=(
+                    workflow_refs[child.workflow_evidence_ref_id].external_revision
+                    or workflow_refs[child.workflow_evidence_ref_id].content_signature
+                ),
+                content_fingerprint=workflow_refs[
+                    child.workflow_evidence_ref_id
+                ].content_fingerprint,
+                message_set_hmac=child.message_content_fingerprint,
+                permission_level=workflow_refs[
+                    child.workflow_evidence_ref_id
+                ].permission_level_snapshot,
+                fingerprint_key_version=child.fingerprint_key_version,
+                fingerprint_key_material_verifier=(
+                    child.fingerprint_key_material_verifier
+                ),
+            )
+            for child in children
+        )
+        if any(
+            binding.fingerprint_key_version != request.fingerprint_key_version
+            or binding.fingerprint_key_material_verifier
+            != request.fingerprint_key_material_verifier
+            for binding in bindings
+        ):
+            raise ExtractionCallStateError('evidence_binding_mismatch')
+        security_scope_hmac = build_keyed_fingerprint(
+            thread.security_scope_id,
+            settings=self._settings,
+            schema_version='candidate-security-scope:v1',
+            policy_version='candidate-security-scope:v1',
+        )
+        evidence_hmac = derive_candidate_evidence_version_hash(
+            workflow_execution_hmac=thread.input_hash,
+            security_scope_hmac=security_scope_hmac,
+            candidate_key=item.candidate_key,
+            refs=bindings,
+            settings=self._settings,
+        )
+        return item.candidate_key, evidence_hmac
+
+    def _verify_completed_replay(
+        self,
+        db: Session,
+        *,
+        thread: AgentWorkflowThread,
+        request: AgentWorkflowRequest,
+        call: AutoReviewExtractionCall,
+    ) -> None:
+        if call.status != 'completed':
+            return
+        run = db.get(AgentRun, call.agent_run_id)
+        if run is None or run.status != 'complete':
+            raise ExtractionCallStateError('completed extraction result is corrupt')
+        if call.result_kind == 'no_candidate':
+            item_count = db.scalar(
+                select(func.count())
+                .select_from(ReviewItem)
+                .where(
+                    ReviewItem.workflow_thread_id == thread.thread_id,
+                    ReviewItem.agent_run_id == call.agent_run_id,
+                )
+            )
+            expected = self._signed_result_set(())
+            valid = (
+                item_count == 0
+                and call.result_candidate_count == 0
+                and call.result_candidate_set_hmac == expected
+            )
+        elif call.result_kind == 'candidate':
+            pair = self._candidate_pair_from_rows(
+                db,
+                thread=thread,
+                request=request,
+                call=call,
+            )
+            valid = (
+                call.result_candidate_count == 1
+                and call.result_candidate_set_hmac == self._signed_result_set((pair,))
+            )
+        else:
+            valid = False
+        if not valid:
+            raise ExtractionCallStateError('completed extraction result is corrupt')
+
     def _locked_call(
         self,
         db: Session,
@@ -1572,7 +1849,12 @@ class ExtractionCallStore:
             raise ExtractionCallStateError('workflow agent already owns another plan')
 
     @staticmethod
-    def _context(call: AutoReviewExtractionCall) -> ExtractionLockedContext:
+    def _context(
+        call: AutoReviewExtractionCall,
+        *,
+        owner_subject_id: str | None = None,
+        allowed_permission_levels: tuple[str, ...] = (),
+    ) -> ExtractionLockedContext:
         if call.lease_token is None:
             raise ExtractionCallStateError('extraction call lease is missing')
         return ExtractionLockedContext(
@@ -1580,6 +1862,8 @@ class ExtractionCallStore:
             agent_name=call.agent_name,
             plan_hmac=call.extraction_plan_hmac,
             lease_token=call.lease_token,
+            owner_subject_id=owner_subject_id,
+            allowed_permission_levels=allowed_permission_levels,
         )
 
     @staticmethod

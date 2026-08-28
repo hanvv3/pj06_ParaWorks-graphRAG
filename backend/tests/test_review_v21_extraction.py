@@ -126,6 +126,19 @@ def test_v21_extraction_plan_binds_every_agent_route_prompt_output_contract_and_
     assert {p.reserved_cost_usd for p in plans.plans} == {Decimal('0.016716')}
 
 
+def test_extraction_safety_set_rejects_duplicate_or_unselected_snapshots():
+    safety = _safety()
+    with pytest.raises(ExtractionCallStateError, match='duplicate'):
+        _plans(safety=(safety, safety))
+    with pytest.raises(ExtractionCallStateError, match='unselected'):
+        _plans(
+            safety=(
+                safety,
+                replace(safety, model='unselected-model'),
+            )
+        )
+
+
 def test_v21_extraction_uses_exact_o200k_rendered_count_for_korean_not_len_div_four():
     invocation = _plans().plans[0].invocation
     assert invocation.framed_input_tokens != len(invocation.canonical_text) // 4
@@ -201,14 +214,19 @@ def test_v21_extraction_route_has_zero_sdk_retries_no_provider_fallback_and_cach
         'tracing': False,
         'verbose': False,
     }
+    with pytest.raises(TypeError):
+        dto['max_retries'] = 1
 
 
 def test_v21_extraction_prepares_once_and_invokes_same_object_without_open_db_session():
     invocation = _plans().plans[0].invocation
     seen = []
+    ledger = ExtractionCallLedger()
+    context = ledger.claim_or_replay('workflow', _plans().plans[0])
+    grant = ledger.mark_attempt_started(context)
     invoke_prepared_extraction(
         invocation,
-        lambda same, grant: (
+        lambda same, *, timeout: (
             seen.append(same)
             or {
                 'result_kind': 'no_candidate',
@@ -216,9 +234,22 @@ def test_v21_extraction_prepares_once_and_invokes_same_object_without_open_db_se
                 'no_candidate_reason': 'no_relevant_evidence',
             }
         ),
-        grant=None,
+        grant=grant,
     )
     assert seen == [invocation]
+
+
+def test_v21_extraction_rejects_missing_grant_before_provider_invocation():
+    called = False
+
+    def provider(invocation, *, timeout):
+        nonlocal called
+        called = True
+        return invocation, timeout
+
+    with pytest.raises(ExtractionCallStateError, match='grant'):
+        invoke_prepared_extraction(_plans().plans[0].invocation, provider, grant=None)
+    assert called is False
 
 
 def test_v21_extraction_provider_dto_contains_only_local_aliases_and_allowlisted_plaintext():

@@ -115,6 +115,7 @@ class PreparedReviewRequestV21:
 
     def stored_snapshot(self) -> dict[str, Any]:
         config = self.config
+        extraction = _uniform_extraction_snapshot(config)
         return {
             'auto_review_mode': config.configured_auto_review_mode,
             'auto_review_validator_provider': config.validator_provider,
@@ -124,9 +125,15 @@ class PreparedReviewRequestV21:
             'auto_review_validator_output_contract_version': config.validator_output_contract_version,
             'auto_review_policy_version': config.policy_version,
             'auto_review_cost_policy_version': config.cost_policy_version,
+            'auto_review_extraction_cost_policy_version': extraction[
+                'cost_policy_version'
+            ],
             'fingerprint_key_version': config.fingerprint_key_version,
             'fingerprint_key_material_verifier': config.fingerprint_key_material_verifier,
             'auto_review_token_estimator_version': config.token_estimator_version,
+            'auto_review_extraction_token_estimator_version': extraction[
+                'token_estimator_version'
+            ],
             'auto_review_tokenizer_encoding': config.tokenizer_encoding,
             'auto_review_max_input_tokens': config.max_input_tokens_per_batch,
             'auto_review_max_output_tokens': config.max_output_tokens_per_batch,
@@ -142,6 +149,16 @@ class PreparedReviewRequestV21:
             'auto_review_provider_commit_grace_seconds': config.provider_commit_grace_seconds,
             'auto_review_validator_input_usd_per_1m': config.validator_input_usd_per_1m,
             'auto_review_validator_output_usd_per_1m': config.validator_output_usd_per_1m,
+            'auto_review_extraction_input_usd_per_1m': Decimal(
+                str(extraction['input_usd_per_1m'])
+            ),
+            'auto_review_extraction_output_usd_per_1m': Decimal(
+                str(extraction['output_usd_per_1m'])
+            ),
+            'auto_review_extraction_provider': extraction['provider'],
+            'auto_review_extraction_model': extraction['model'],
+            'auto_review_extraction_reasoning_effort': extraction['reasoning_effort'],
+            'auto_review_extraction_route_version': extraction['route_version'],
             'auto_review_enforce_percentage': config.enforce_percentage,
             'authorized_percentage_at_launch': config.authorized_percentage_at_launch,
             'rollout_authorization_generation': config.rollout_authorization_generation,
@@ -149,6 +166,11 @@ class PreparedReviewRequestV21:
             'rollout_control_epoch': config.rollout_control_epoch,
             'extraction_plan_set_hmac': config.extraction_plan_set_hmac,
             'extraction_provider_safety_snapshot_set_hmac': config.extraction_provider_safety_snapshot_set_hmac,
+            'selected_extraction_agent_count': len(config.extraction_plan_identities),
+            'extraction_max_input_chars_per_agent': extraction['max_input_chars'],
+            'extraction_max_input_tokens_per_agent': extraction['max_input_tokens'],
+            'extraction_max_output_tokens_per_agent': extraction['max_output_tokens'],
+            'extraction_max_candidates_per_agent': extraction['max_candidates'],
             'confirmed_extraction_cost_ceiling_usd': config.confirmed_extraction_cost_ceiling_usd,
             'confirmed_validation_cost_ceiling_usd': config.confirmed_validation_cost_ceiling_usd,
             'confirmed_total_cost_ceiling_usd': config.confirmed_total_cost_ceiling_usd,
@@ -157,6 +179,47 @@ class PreparedReviewRequestV21:
 
     def matches_stored_snapshot(self, values: dict[str, Any]) -> bool:
         return values == self.stored_snapshot()
+
+
+def _uniform_extraction_snapshot(config: V21PreparedReviewConfig) -> dict[str, Any]:
+    if not config.extraction_plan_identities:
+        raise ValueError('V2.1 requires a non-empty extraction plan set')
+    fields = (
+        'provider',
+        'model',
+        'reasoning_effort',
+        'route_version',
+        'cost_policy_version',
+        'token_estimator_version',
+        'tokenizer_encoding',
+        'reply_priming_tokens',
+        'framing_safety_tokens',
+        'max_input_chars',
+        'max_input_tokens',
+        'max_output_tokens',
+        'max_candidates',
+        'max_provider_attempts',
+        'input_usd_per_1m',
+        'output_usd_per_1m',
+        'timing',
+    )
+    first = config.extraction_plan_identities[0]
+    if any(field not in first for field in fields):
+        raise ValueError('V2.1 extraction plan identity is incomplete')
+    expected = {field: first[field] for field in fields}
+    for identity in config.extraction_plan_identities[1:]:
+        if any(identity.get(field) != value for field, value in expected.items()):
+            raise ValueError(
+                'V2.1 extraction routes must share immutable policy values'
+            )
+    if tuple(expected['timing']) != (
+        config.provider_timeout_seconds,
+        config.provider_send_start_window_seconds,
+        config.provider_attempt_lease_seconds,
+        config.provider_commit_grace_seconds,
+    ):
+        raise ValueError('V2.1 extraction timing differs from prepared request')
+    return first
 
 
 def _json_identity(value: Any) -> Any:
@@ -180,6 +243,13 @@ def build_prepared_review_identity_v21(
 ) -> PreparedReviewRequestV21:
     if config.configured_auto_review_mode not in {'shadow', 'enforce'}:
         raise ValueError('V2.1 stores only shadow or enforce mode')
+    extraction = _uniform_extraction_snapshot(config)
+    if tuple(
+        sorted(item['agent_name'] for item in config.extraction_plan_identities)
+    ) != tuple(sorted(agent_names)):
+        raise ValueError('V2.1 extraction plan set differs from selected agents')
+    if extraction['max_provider_attempts'] != config.max_provider_attempts:
+        raise ValueError('V2.1 extraction attempt cap differs from prepared request')
     if (
         config.provider_timeout_seconds
         + config.provider_send_start_window_seconds
@@ -267,7 +337,8 @@ def prepare_review_request(
     actor: DemoUser,
     registry: AgentRegistry,
     settings: Settings,
-) -> PreparedReviewRequest:
+    v21_config: V21PreparedReviewConfig | None = None,
+) -> PreparedReviewRequest | PreparedReviewRequestV21:
     try:
         agent_names = normalize_agent_names(request.agent_names)
         source_refs = normalize_source_version_refs(request.source_refs)
@@ -298,6 +369,15 @@ def prepare_review_request(
         actor=actor,
         settings=settings,
     )
+    if v21_config is not None:
+        secret, _ = fingerprint_secret_bytes(settings)
+        return build_prepared_review_identity_v21(
+            source_refs=resolved_refs,
+            agent_names=agent_names,
+            security_scope_id=settings.agent_runtime_security_scope_id,
+            config=v21_config,
+            fingerprint_secret=secret,
+        )
     return build_prepared_review_identity(
         source_refs=resolved_refs,
         agent_names=agent_names,
@@ -313,7 +393,7 @@ def advisory_key_from_hmac(value: str) -> int:
 def create_or_reuse_review_thread(
     db: Session,
     *,
-    prepared: PreparedReviewRequest,
+    prepared: PreparedReviewRequest | PreparedReviewRequestV21,
     request: ReviewWorkflowRunRequest,
     actor: DemoUser,
     settings: Settings,
@@ -438,7 +518,7 @@ def _find_creator_thread(
 
 def _postgres_advisory_keys(
     *,
-    prepared: PreparedReviewRequest,
+    prepared: PreparedReviewRequest | PreparedReviewRequestV21,
     request: ReviewWorkflowRunRequest,
     actor: DemoUser,
     settings: Settings,
@@ -464,7 +544,7 @@ def _creator_replay_or_conflict(
     db: Session,
     *,
     thread: AgentWorkflowThread,
-    prepared: PreparedReviewRequest,
+    prepared: PreparedReviewRequest | PreparedReviewRequestV21,
     actor: DemoUser,
     settings: Settings,
 ) -> WorkflowPreflightResult:
@@ -494,7 +574,7 @@ def _creator_replay_or_conflict(
 def _find_shared_thread(
     db: Session,
     *,
-    prepared: PreparedReviewRequest,
+    prepared: PreparedReviewRequest | PreparedReviewRequestV21,
     settings: Settings,
 ) -> AgentWorkflowThread | None:
     candidates = db.scalars(
@@ -503,7 +583,12 @@ def _find_shared_thread(
             AgentWorkflowThread.security_scope_id
             == settings.agent_runtime_security_scope_id,
             AgentWorkflowThread.workflow_name == COMPANY_MEMORY_REVIEW_WORKFLOW,
-            AgentWorkflowThread.graph_version == COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+            AgentWorkflowThread.graph_version
+            == (
+                COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
+                if isinstance(prepared, PreparedReviewRequestV21)
+                else COMPANY_MEMORY_REVIEW_GRAPH_VERSION
+            ),
             AgentWorkflowThread.input_hash == prepared.input_hash,
             AgentWorkflowThread.evidence_version_hash == prepared.evidence_version_hash,
         )
@@ -527,7 +612,7 @@ def _find_shared_thread(
 def find_matching_review_thread(
     db: Session,
     *,
-    prepared: PreparedReviewRequest,
+    prepared: PreparedReviewRequest | PreparedReviewRequestV21,
     actor: DemoUser,
     settings: Settings,
 ) -> AgentWorkflowThread | None:
@@ -629,7 +714,7 @@ def _v21_thread_matches_prepared(
 def _ensure_prepared_is_current(
     db: Session,
     *,
-    prepared: PreparedReviewRequest,
+    prepared: PreparedReviewRequest | PreparedReviewRequestV21,
     actor: DemoUser,
     settings: Settings,
 ) -> None:
@@ -669,7 +754,7 @@ def _ensure_prepared_is_current(
 def _ensure_v2_waterline(
     db: Session,
     *,
-    prepared: PreparedReviewRequest,
+    prepared: PreparedReviewRequest | PreparedReviewRequestV21,
 ) -> None:
     source_ids = [ref.canonical_row_id for ref in prepared.source_refs]
     sources = db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
@@ -691,7 +776,7 @@ def _ensure_v2_waterline(
 def _create_thread_rows(
     db: Session,
     *,
-    prepared: PreparedReviewRequest,
+    prepared: PreparedReviewRequest | PreparedReviewRequestV21,
     request: ReviewWorkflowRunRequest,
     actor: DemoUser,
     settings: Settings,
@@ -699,11 +784,18 @@ def _create_thread_rows(
 ) -> AgentWorkflowThread:
     thread_id = uuid4().hex
     _, fingerprint_key_version = fingerprint_secret_bytes(settings)
+    is_v21 = isinstance(prepared, PreparedReviewRequestV21)
     thread = AgentWorkflowThread(
         thread_id=thread_id,
         workflow_name=COMPANY_MEMORY_REVIEW_WORKFLOW,
-        graph_version=COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
-        checkpoint_thread_id=f'review-v2:{uuid4().hex}',
+        graph_version=(
+            COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
+            if is_v21
+            else COMPANY_MEMORY_REVIEW_GRAPH_VERSION
+        ),
+        checkpoint_thread_id=(
+            f'review-v21:{uuid4().hex}' if is_v21 else f'review-v2:{uuid4().hex}'
+        ),
         checkpoint_store=checkpoint_store,
         owner_subject_id=actor.id,
         security_scope_id=settings.agent_runtime_security_scope_id,
@@ -711,6 +803,10 @@ def _create_thread_rows(
         input_hash=prepared.input_hash,
         evidence_version_hash=prepared.evidence_version_hash,
         status='created',
+    )
+    snapshot = prepared.stored_snapshot() if is_v21 else {}
+    fingerprint_key_version = str(
+        snapshot.pop('fingerprint_key_version', fingerprint_key_version)
     )
     stored_request = AgentWorkflowRequest(
         workflow_thread_id=thread_id,
@@ -720,6 +816,7 @@ def _create_thread_rows(
         selection_policy_version=prepared.selection_policy_version,
         input_hash=prepared.input_hash,
         fingerprint_key_version=fingerprint_key_version,
+        **snapshot,
     )
     evidence_rows = [
         AgentWorkflowEvidenceRef(

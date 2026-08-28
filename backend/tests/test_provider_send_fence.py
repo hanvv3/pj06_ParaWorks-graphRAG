@@ -10,6 +10,7 @@ from backend.app.agent_runtime.provider_send_fence import (
     FencedProviderSendPermit,
     ProviderAttemptGrant,
     ProviderSendFenceError,
+    _issue_provider_attempt_grant,
 )
 
 
@@ -22,16 +23,13 @@ class _Clock:
 
 
 def _grant(clock: _Clock, *, window: float = 5.0) -> ProviderAttemptGrant:
-    permit = FencedProviderSendPermit.issue(
+    return _issue_provider_attempt_grant(
         attempt_id='attempt-hmac',
-        send_start_window_seconds=window,
-        monotonic=clock,
-    )
-    return ProviderAttemptGrant(
-        attempt_id='attempt-hmac',
-        permit=permit,
         provider_timeout_seconds=60,
+        send_start_window_seconds=window,
         authoritative_lease_expires_at=datetime.now(UTC) + timedelta(seconds=120),
+        commit=lambda: None,
+        monotonic=clock,
     )
 
 
@@ -104,7 +102,7 @@ def test_attempt_grant_is_not_returned_before_marker_commit():
     def commit():
         events.append('commit')
 
-    grant = ProviderAttemptGrant.after_committed_marker(
+    grant = _issue_provider_attempt_grant(
         attempt_id='attempt-hmac',
         provider_timeout_seconds=60,
         send_start_window_seconds=5,
@@ -114,3 +112,32 @@ def test_attempt_grant_is_not_returned_before_marker_commit():
     )
     assert events == ['commit']
     assert grant.permit.attempt_id == 'attempt-hmac'
+
+
+def test_permit_and_grant_public_construction_copy_pickle_json_and_repr_are_closed():
+    with pytest.raises(TypeError):
+        ProviderAttemptGrant(  # type: ignore[call-arg]
+            attempt_id='forged',
+            permit=object(),
+            provider_timeout_seconds=60,
+            authoritative_lease_expires_at=datetime.now(UTC),
+        )
+    with pytest.raises((AttributeError, TypeError)):
+        FencedProviderSendPermit.issue(  # type: ignore[attr-defined]
+            attempt_id='forged', send_start_window_seconds=5
+        )
+    grant = _grant(_Clock())
+    for value in (grant, grant.permit):
+        assert 'attempt-hmac' not in repr(value)
+        for serializer in (copy.copy, copy.deepcopy, pickle.dumps, json.dumps):
+            with pytest.raises((TypeError, ValueError)):
+                serializer(value)
+
+
+def test_fenced_transport_uses_the_task1_server_owned_hook_identity():
+    from backend.app.agent_runtime.auto_review_cost_policy import (
+        is_server_owned_fenced_send_hook,
+    )
+
+    transport = FencedOpenAITransport(_grant(_Clock()))
+    assert is_server_owned_fenced_send_hook(transport.http_hook)

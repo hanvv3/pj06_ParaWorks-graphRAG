@@ -2,13 +2,55 @@ from dataclasses import replace
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 
+from backend.app.agent_runtime.contracts import AgentManifest
+from backend.app.agent_runtime.registry import AgentRegistry
 from backend.app.agent_runtime.review_v2_preflight import (
     PreparedReviewRequestV21,
     V21PreparedReviewConfig,
     build_prepared_review_identity_v21,
+    create_or_reuse_review_thread,
+    prepare_review_request,
+    review_thread_matches_prepared,
 )
+from backend.app.core.config import Settings
+from backend.app.core.demo_auth import DemoUser
+from backend.app.models.agent_workflows import AgentWorkflowRequest
+from backend.app.models.source import Source
 from backend.app.schemas.auto_review import COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
+from backend.app.schemas.review_workflow import ReviewWorkflowRunRequest
+
+
+def _plan_identity() -> dict[str, object]:
+    return {
+        'agent_name': 'mail_document_agent',
+        'provider': 'openai',
+        'model': 'gpt-5.4-mini-2026-03-17',
+        'reasoning_effort': 'none',
+        'route_version': 'auto-review-extraction-route:v1',
+        'prompt_version': 'mail-document-extraction:v1',
+        'output_contract_version': 'mail-document-extraction:v1',
+        'extraction_registry_version': 'auto-review-extraction-registry:v1',
+        'cost_policy_version': 'auto-review-extraction-cost:v1',
+        'token_estimator_version': 'openai-o200k-extraction:v1',
+        'tokenizer_encoding': 'o200k_base',
+        'reply_priming_tokens': 16,
+        'framing_safety_tokens': 512,
+        'max_input_chars': 24000,
+        'max_input_tokens': 10000,
+        'max_output_tokens': 2048,
+        'max_candidates': 1,
+        'max_provider_attempts': 1,
+        'input_usd_per_1m': '0.750000',
+        'output_usd_per_1m': '4.500000',
+        'provider_safety_state_version': 5,
+        'timing': [60, 5, 120, 30],
+        'prepared_content_hmac': 'e' * 64,
+        'prepared_character_count': 800,
+        'framed_input_tokens': 900,
+        'reserved_cost_usd': '0.016716',
+    }
 
 
 def _config() -> V21PreparedReviewConfig:
@@ -50,18 +92,31 @@ def _config() -> V21PreparedReviewConfig:
         confirmed_validation_cost_ceiling_usd=Decimal('0.048864'),
         confirmed_total_cost_ceiling_usd=Decimal('0.065580'),
         total_budget_limit_usd=Decimal('0.200000'),
+        extraction_plan_identities=(_plan_identity(),),
     )
 
 
 def _prepared(
     config: V21PreparedReviewConfig | None = None,
 ) -> PreparedReviewRequestV21:
+    config = config or _config()
+    identity = {
+        **config.extraction_plan_identities[0],
+        'max_provider_attempts': config.max_provider_attempts,
+        'timing': [
+            config.provider_timeout_seconds,
+            config.provider_send_start_window_seconds,
+            config.provider_attempt_lease_seconds,
+            config.provider_commit_grace_seconds,
+        ],
+    }
+    config = replace(config, extraction_plan_identities=(identity,))
     return build_prepared_review_identity_v21(
         source_refs=(),
         agent_names=('mail_document_agent',),
         evidence_version_hash='d' * 64,
         security_scope_id='scope-1',
-        config=config or _config(),
+        config=config,
         fingerprint_secret=b'test-secret-at-least-thirty-two-bytes',
     )
 
@@ -173,3 +228,101 @@ def test_v21_thread_replay_requires_every_stored_auto_review_field_to_match():
         assert not prepared.matches_stored_snapshot(
             {**prepared.stored_snapshot(), field: replacement}
         )
+
+
+def test_v21_create_persists_v21_graph_checkpoint_and_every_request_snapshot(
+    db_session,
+) -> None:
+    settings = Settings(
+        agent_runtime_security_scope_id='scope-1',
+        agent_runtime_fingerprint_secret='test-secret-at-least-thirty-two-bytes',
+        agent_runtime_fingerprint_key_version='test-v1',
+    )
+    actor = DemoUser(
+        id='owner',
+        email='owner@example.test',
+        role='employee',
+        permission_levels={'internal'},
+        name='Owner',
+        title='Tester',
+        department='Quality',
+    )
+    registry = AgentRegistry()
+    registry.register(
+        AgentManifest(
+            name='mail_document_agent',
+            owner='Developer B',
+            input_contract='EvidencePacket',
+            output_contract='AgentRunResult',
+            prompt_versions=('mail-document-extraction:v1',),
+            supported_permissions=('internal',),
+            capabilities=('review_draft',),
+        )
+    )
+    source = Source(
+        source_type='gmail',
+        source_id='gmail:v21-storage',
+        source_url='https://private.example/v21-storage',
+        title='private title',
+        permission_level='internal',
+        raw_metadata={'content_signature': 'v21-signature'},
+    )
+    db_session.add(source)
+    db_session.commit()
+    request = ReviewWorkflowRunRequest(
+        source_refs=[
+            {
+                'source_type': 'gmail',
+                'source_id': source.source_id,
+                'version_or_signature': 'v21-signature',
+            }
+        ],
+        agent_names=['mail_document_agent'],
+        client_request_id='v21-storage-key',
+    )
+    v20 = prepare_review_request(
+        db_session,
+        request=request,
+        actor=actor,
+        registry=registry,
+        settings=settings,
+    )
+    prepared = build_prepared_review_identity_v21(
+        source_refs=v20.source_refs,
+        agent_names=v20.agent_names,
+        security_scope_id='scope-1',
+        config=_config(),
+        fingerprint_secret=b'test-secret-at-least-thirty-two-bytes',
+    )
+
+    created = create_or_reuse_review_thread(
+        db_session,
+        prepared=prepared,
+        request=request,
+        actor=actor,
+        settings=settings,
+    )
+
+    stored = db_session.scalar(select(AgentWorkflowRequest))
+    assert created.thread.graph_version == COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
+    assert created.thread.checkpoint_thread_id.startswith('review-v21:')
+    assert stored is not None
+    assert {
+        field: getattr(stored, field) for field in prepared.stored_snapshot()
+    } == prepared.stored_snapshot()
+    assert stored.auto_review_extraction_provider == 'openai'
+    assert stored.auto_review_extraction_model == 'gpt-5.4-mini-2026-03-17'
+    assert stored.auto_review_extraction_reasoning_effort == 'none'
+    assert (
+        stored.auto_review_extraction_route_version == 'auto-review-extraction-route:v1'
+    )
+    assert stored.selected_extraction_agent_count == 1
+    assert stored.extraction_max_input_chars_per_agent == 24000
+    assert stored.extraction_max_input_tokens_per_agent == 10000
+    assert stored.extraction_max_output_tokens_per_agent == 2048
+    assert review_thread_matches_prepared(
+        db_session,
+        thread=created.thread,
+        prepared=prepared,
+        settings=settings,
+    )

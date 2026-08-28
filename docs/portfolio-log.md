@@ -4781,3 +4781,29 @@ Cost/security note:
   exact Task 2 index assertions, and finally-dropped PostgreSQL schemas:
   `176 passed` in the focused suite, including `87` PostgreSQL tests with zero
   skips; the Task 1 compatibility suite remains `118 passed`.
+
+## 2026-08-28 C.5 Task 3 immutable V2.1 extraction hardening
+
+- Production preflight now dispatches V2.0 and V2.1 explicitly. V2.1 stores
+  its own graph/checkpoint identity and the complete immutable extraction
+  registry, provider/model/reasoning/route, estimator/price, cap, timing,
+  rollout, safety, and aggregate plan snapshots.
+- Paid extraction uses a PostgreSQL-authoritative E1/E2/E3 ledger. Owner,
+  permission, runtime key, source/version, cancellation, lease, signed budget,
+  and provider-safety state are rechecked under the prescribed locks. Known
+  usage is charged exactly; unknown post-marker usage charges the reserve;
+  overruns open the extraction breaker atomically.
+- The provider grant is process-private, one-use, non-copyable,
+  non-pickleable, redacted, and consumed only by the body-blind Task 1 HTTP
+  hook. Provider options are deeply frozen and part of the signed identity;
+  retries, fallback, cache, callbacks, and tracing remain disabled for V2.1.
+- Candidate completion is callback-independent: E3 re-queries exactly one
+  same-workflow ReviewItem and its contiguous immutable evidence children,
+  re-derives the candidate evidence HMAC and terminal result-set HMAC, and
+  otherwise persists only bounded `evidence_binding_mismatch` failure state.
+- Alembic head `9d7f3a1c6e20` explicitly replaces the extraction lifecycle
+  constraint for databases already at `7c5a2e9f4b10`; empty downgrade/cycle
+  and retained-state refusal are covered on SQLite and PostgreSQL.
+- Verification used fake providers only: `188` shared Task 3 tests, `11` real
+  PostgreSQL lifecycle/concurrency/migration tests, `63` Task 3B adapter tests,
+  and `202` Task 1/2 model/guard/migration regressions, all with zero skips.

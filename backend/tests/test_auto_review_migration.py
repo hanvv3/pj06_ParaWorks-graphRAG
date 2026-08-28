@@ -47,7 +47,8 @@ from backend.app.models import (
     TrustedKnowledgeEvidenceLink,
 )
 
-REVISION = '7c5a2e9f4b10'
+REVISION = '9d7f3a1c6e20'
+TASK2_REVISION = '7c5a2e9f4b10'
 PREVIOUS_REVISION = '2f6a8b9c0d1e'
 PROVIDER_OVERRIDE_UNSET = object()
 
@@ -874,6 +875,36 @@ def test_auto_review_migration_has_exact_revision_chain() -> None:
     assert "revision = '7c5a2e9f4b10'" in migration
     assert "down_revision = '2f6a8b9c0d1e'" in migration
 
+    hardening = Path(
+        'backend/migrations/versions/'
+        '9d7f3a1c6e20_harden_extraction_call_lifecycle.py'
+    ).read_text(encoding='utf-8')
+    assert "revision = '9d7f3a1c6e20'" in hardening
+    assert f"down_revision = '{TASK2_REVISION}'" in hardening
+
+
+def test_extraction_lifecycle_migration_cycles_from_task2_revision(
+    migration_database,
+) -> None:
+    config, database_url = migration_database
+    _run(command.upgrade, config, TASK2_REVISION)
+    _run(command.upgrade, config, REVISION)
+
+    engine = create_engine(database_url)
+    lifecycle = {
+        row['name']: row['sqltext']
+        for row in inspect(engine).get_check_constraints(
+            'auto_review_extraction_calls'
+        )
+    }['ck_auto_review_extraction_calls_terminal_charge']
+    normalized = ' '.join(lifecycle.split())
+    assert 'provider_attempt_count = 1' in normalized
+    assert 'attempt_started_at IS NOT NULL' in normalized
+
+    _run(command.downgrade, config, TASK2_REVISION)
+    with engine.connect() as connection:
+        assert connection.scalar(text('SELECT version_num FROM alembic_version')) == TASK2_REVISION
+
 
 def test_auto_review_migration_preserves_legacy_rows_and_connector_signature_only(
     migration_database,
@@ -1036,7 +1067,7 @@ def test_populated_auto_review_schema_refuses_destructive_downgrade(
         _run(command.downgrade, config, PREVIOUS_REVISION)
 
     with engine.connect() as connection:
-        assert connection.scalar(text('SELECT version_num FROM alembic_version')) == REVISION
+        assert connection.scalar(text('SELECT version_num FROM alembic_version')) == TASK2_REVISION
 
 
 def test_auto_review_schema_exposes_named_provenance_constraints(

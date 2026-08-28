@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime
 from threading import Lock
 from time import monotonic as _monotonic
@@ -45,23 +44,6 @@ class FencedProviderSendPermit:
         self._invalidated = False
         self._lock = Lock()
 
-    @classmethod
-    def issue(
-        cls,
-        *,
-        attempt_id: str,
-        send_start_window_seconds: float,
-        monotonic: Callable[[], float] = _monotonic,
-    ) -> FencedProviderSendPermit:
-        if not attempt_id or send_start_window_seconds <= 0:
-            raise ValueError('attempt id and positive send-start window are required')
-        return cls(
-            _ISSUER,
-            attempt_id,
-            monotonic() + send_start_window_seconds,
-            monotonic,
-        )
-
     @property
     def attempt_id(self) -> str:
         return self._attempt_id
@@ -104,42 +86,100 @@ class FencedProviderSendPermit:
         return '<FencedProviderSendPermit opaque>'
 
 
-@dataclass(frozen=True)
 class ProviderAttemptGrant:
-    attempt_id: str
-    permit: FencedProviderSendPermit
-    provider_timeout_seconds: int
-    authoritative_lease_expires_at: datetime
+    """Opaque grant issued only after a call-store marker commit."""
+
+    __slots__ = (
+        '_attempt_id',
+        '_permit',
+        '_provider_timeout_seconds',
+        '_authoritative_lease_expires_at',
+    )
+
+    def __init__(
+        self,
+        issuer: object,
+        *,
+        attempt_id: str,
+        permit: FencedProviderSendPermit,
+        provider_timeout_seconds: int,
+        authoritative_lease_expires_at: datetime,
+    ) -> None:
+        if issuer is not _ISSUER:
+            raise TypeError(
+                'provider attempt grants can only be issued by the call store'
+            )
+        self._attempt_id = attempt_id
+        self._permit = permit
+        self._provider_timeout_seconds = provider_timeout_seconds
+        self._authoritative_lease_expires_at = authoritative_lease_expires_at
+
+    @property
+    def attempt_id(self) -> str:
+        return self._attempt_id
+
+    @property
+    def permit(self) -> FencedProviderSendPermit:
+        return self._permit
+
+    @property
+    def provider_timeout_seconds(self) -> int:
+        return self._provider_timeout_seconds
+
+    @property
+    def authoritative_lease_expires_at(self) -> datetime:
+        return self._authoritative_lease_expires_at
 
     @classmethod
     def from_marker(cls, **values: Any) -> ProviderAttemptGrant:
         del values
         raise TypeError('a durable attempt marker is not provider send authority')
 
-    @classmethod
-    def after_committed_marker(
-        cls,
-        *,
-        attempt_id: str,
-        provider_timeout_seconds: int,
-        send_start_window_seconds: int,
-        authoritative_lease_expires_at: datetime,
-        commit: Callable[[], None],
-        monotonic: Callable[[], float] = _monotonic,
-    ) -> ProviderAttemptGrant:
-        if provider_timeout_seconds <= 0:
-            raise ValueError('provider timeout must be positive')
-        commit()
-        return cls(
-            attempt_id=attempt_id,
-            permit=FencedProviderSendPermit.issue(
-                attempt_id=attempt_id,
-                send_start_window_seconds=send_start_window_seconds,
-                monotonic=monotonic,
-            ),
-            provider_timeout_seconds=provider_timeout_seconds,
-            authoritative_lease_expires_at=authoritative_lease_expires_at,
-        )
+    def __copy__(self):
+        raise TypeError('provider attempt grants cannot be copied')
+
+    def __deepcopy__(self, memo):
+        del memo
+        raise TypeError('provider attempt grants cannot be copied')
+
+    def __reduce_ex__(self, protocol):
+        del protocol
+        raise TypeError('provider attempt grants cannot be serialized')
+
+    def __repr__(self) -> str:
+        return '<ProviderAttemptGrant opaque>'
+
+
+def _issue_provider_attempt_grant(
+    *,
+    attempt_id: str,
+    provider_timeout_seconds: int,
+    send_start_window_seconds: int | float,
+    authoritative_lease_expires_at: datetime,
+    commit: Callable[[], None],
+    monotonic: Callable[[], float] = _monotonic,
+) -> ProviderAttemptGrant:
+    """Call-store-only factory; commit must return before authority exists."""
+    if (
+        not attempt_id
+        or provider_timeout_seconds <= 0
+        or send_start_window_seconds <= 0
+    ):
+        raise ValueError('attempt, timeout, and send-start window are required')
+    commit()
+    permit = FencedProviderSendPermit(
+        _ISSUER,
+        attempt_id,
+        monotonic() + send_start_window_seconds,
+        monotonic,
+    )
+    return ProviderAttemptGrant(
+        _ISSUER,
+        attempt_id=attempt_id,
+        permit=permit,
+        provider_timeout_seconds=provider_timeout_seconds,
+        authoritative_lease_expires_at=authoritative_lease_expires_at,
+    )
 
 
 _T = TypeVar('_T')
@@ -148,11 +188,20 @@ _T = TypeVar('_T')
 class FencedOpenAITransport(Generic[_T]):
     """Body-blind one-dispatch transport boundary."""
 
-    __slots__ = ('_grant', '_dispatched')
+    __slots__ = ('_grant', '_dispatched', '_http_hook')
 
     def __init__(self, grant: ProviderAttemptGrant) -> None:
+        from backend.app.agent_runtime.auto_review_cost_policy import (
+            _SERVER_OWNED_FENCED_SEND_HOOK,
+        )
+
         self._grant = grant
         self._dispatched = False
+        self._http_hook = _SERVER_OWNED_FENCED_SEND_HOOK
+
+    @property
+    def http_hook(self) -> object:
+        return self._http_hook
 
     def dispatch(
         self,
