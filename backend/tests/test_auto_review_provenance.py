@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 from collections.abc import Generator
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from threading import Event, Thread
 from uuid import uuid4
 
@@ -3282,6 +3286,76 @@ def test_key_admin_cli_never_accepts_or_logs_secret_material(capsys) -> None:
     captured = capsys.readouterr()
     assert 'forbidden' not in captured.out
     assert 'forbidden' not in captured.err
+
+
+@pytest.mark.parametrize(
+    ('expected_version', 'current_secret_matches', 'expected_code'),
+    (
+        ('wrong-version', True, 'key_version_mismatch'),
+        ('v1', False, 'old_key_identity_mismatch'),
+    ),
+)
+def test_key_admin_module_cli_bounds_projection_admin_errors(
+    auto_review_postgres: tuple[sessionmaker[Session], Settings],
+    expected_version: str,
+    current_secret_matches: bool,
+    expected_code: str,
+) -> None:
+    _, settings = auto_review_postgres
+    current_secret = ('t' if current_secret_matches else 'w') * 48
+    next_secret = 'u' * 48
+    reason = 'subprocess-negative-safety'
+    env = os.environ.copy()
+    env.update(
+        {
+            'PARAWORKS_DEMO_MODE': 'false',
+            'PARAWORKS_DATABASE_URL': settings.database_url,
+            'AGENT_RUNTIME_FINGERPRINT_KEY_VERSION': 'v1',
+            'AGENT_RUNTIME_FINGERPRINT_SECRET': current_secret,
+            'AUTO_REVIEW_MODE': 'disabled',
+            'PARAWORKS_AUTO_REVIEW_CURRENT_KEY_VERSION': 'v1',
+            'PARAWORKS_AUTO_REVIEW_CURRENT_KEY_SECRET': current_secret,
+            'PARAWORKS_AUTO_REVIEW_NEXT_KEY_VERSION': 'v2',
+            'PARAWORKS_AUTO_REVIEW_NEXT_KEY_SECRET': next_secret,
+        }
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            '-m',
+            'backend.app.admin.auto_review_keys',
+            'rotate',
+            '--expected-version',
+            expected_version,
+            '--next-version',
+            'v2',
+            '--reason',
+            reason,
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stderr == ''
+    assert json.loads(completed.stdout) == {'ok': False, 'code': expected_code}
+    assert set(json.loads(completed.stdout)) == {'ok', 'code'}
+    assert len(completed.stdout) < 120
+    combined_output = completed.stdout + completed.stderr
+    for forbidden in (
+        'Traceback',
+        current_secret,
+        next_secret,
+        expected_version,
+        reason,
+        'AutoReviewKeyAdminError',
+        'trusted_fingerprint_projection',
+    ):
+        assert forbidden not in combined_output
 
 
 def test_key_admin_status_exit_code_tracks_fresh_readiness_without_key_output(

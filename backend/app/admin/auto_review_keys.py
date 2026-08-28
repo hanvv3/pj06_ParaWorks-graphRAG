@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import sys
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -28,6 +29,10 @@ from backend.app.models.auto_review import (
     AutoReviewValidationCall,
     TrustedKnowledgeFingerprintProjectionState,
 )
+
+if __name__ == '__main__':
+    # Keep lazy canonical imports on the same module/class identity under ``-m``.
+    sys.modules.setdefault('backend.app.admin.auto_review_keys', sys.modules[__name__])
 
 AUTO_REVIEW_KEY_COMPONENT = 'auto_review_trust_promotion'
 TRUSTED_FINGERPRINT_PROJECTION_COMPONENT = 'trusted_knowledge_fingerprints'
