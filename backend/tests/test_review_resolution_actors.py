@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import copy
+import pickle
+from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
 from importlib import import_module
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.demo_auth import USERS, DemoUser
@@ -14,6 +17,7 @@ from backend.app.models import (
     AgentWorkflowEvidenceRef,
     AgentWorkflowThread,
     AuditLog,
+    HistoryEvent,
     ReviewItem,
     ReviewItemEvidenceRef,
     Source,
@@ -228,6 +232,24 @@ def test_human_adapter_rejects_forged_known_canonical_identity() -> None:
         human_review_actor(forged)
 
 
+def test_human_adapter_rejects_equal_value_clone_of_canonical_demo_user() -> None:
+    canonical = USERS['admin']
+    equal_value_clone = DemoUser(
+        id=canonical.id,
+        email=canonical.email,
+        role=canonical.role,
+        permission_levels=set(canonical.permission_levels),
+        name=canonical.name,
+        title=canonical.title,
+        department=canonical.department,
+        aliases=canonical.aliases,
+    )
+
+    assert equal_value_clone == canonical
+    with pytest.raises(ValueError, match='canonical'):
+        human_review_actor(equal_value_clone)
+
+
 def test_review_package_root_does_not_export_authority_constructors() -> None:
     review_package = import_module('backend.app.review')
 
@@ -263,6 +285,108 @@ def test_direct_forged_human_cannot_approve_restricted_item(
     db_session.refresh(item)
     assert item.status == 'pending_review'
     assert item.reviewer_id is None
+
+
+def test_canonical_actor_bearer_material_cannot_mint_restricted_authority(
+    db_session: Session,
+) -> None:
+    canonical_employee = human_review_actor(USERS['hanvv-employee'])
+    copied_authority = getattr(canonical_employee, '_authority', None)
+    item = _seed_item(db_session, permission_level='restricted')
+
+    with pytest.raises((TypeError, ValueError, HTTPException)):
+        forged_actor = ReviewResolutionActor(
+            subject_id='forged-subject',
+            actor_type='human',
+            allowed_permission_levels=('restricted',),
+            capabilities=frozenset({'human_review'}),
+            _authority=copied_authority,  # type: ignore[call-arg]
+        )
+        ReviewTransitionService().transition(
+            db=db_session,
+            item_id=item.id,
+            action='approve',
+            actor=forged_actor,
+        )
+
+    db_session.refresh(item)
+    assert item.status == 'pending_review'
+    assert item.reviewer_id is None
+    assert db_session.scalar(select(func.count()).select_from(HistoryEvent)) == 0
+
+
+def test_issued_actor_has_no_bearer_material_and_is_immutable_slotted() -> None:
+    actor = human_review_actor(USERS['admin'])
+
+    assert not hasattr(actor, '_authority')
+    assert not hasattr(actor, '__dict__')
+    with pytest.raises((AttributeError, FrozenInstanceError)):
+        actor.subject_id = 'forged-subject'  # type: ignore[misc]
+
+
+def test_object_new_same_value_clone_is_not_server_issued(
+    db_session: Session,
+) -> None:
+    canonical = human_review_actor(USERS['admin'])
+    clone = object.__new__(ReviewResolutionActor)
+    for field_name in (
+        'subject_id',
+        'actor_type',
+        'allowed_permission_levels',
+        'capabilities',
+        'policy_version',
+    ):
+        object.__setattr__(clone, field_name, getattr(canonical, field_name))
+    if hasattr(canonical, '_authority'):
+        object.__setattr__(clone, '_authority', canonical._authority)
+    item = _seed_item(db_session, permission_level='restricted')
+
+    with pytest.raises((TypeError, ValueError, HTTPException)):
+        ReviewTransitionService().transition(
+            db=db_session,
+            item_id=item.id,
+            action='approve',
+            actor=clone,
+        )
+
+    db_session.refresh(item)
+    assert item.status == 'pending_review'
+    assert db_session.scalar(select(func.count()).select_from(HistoryEvent)) == 0
+
+
+def test_server_issued_actor_rejects_object_setattr_claim_mutation(
+    db_session: Session,
+) -> None:
+    actor = human_review_actor(USERS['hanvv-employee'])
+    object.__setattr__(actor, 'subject_id', 'forged-subject')
+    object.__setattr__(actor, 'allowed_permission_levels', ('restricted',))
+    object.__setattr__(actor, 'capabilities', frozenset({'human_review'}))
+    item = _seed_item(db_session, permission_level='restricted')
+
+    with pytest.raises((TypeError, ValueError, HTTPException)):
+        ReviewTransitionService().transition(
+            db=db_session,
+            item_id=item.id,
+            action='approve',
+            actor=actor,
+        )
+
+    db_session.refresh(item)
+    assert item.status == 'pending_review'
+    assert db_session.scalar(select(func.count()).select_from(HistoryEvent)) == 0
+
+
+def test_actor_copy_deepcopy_replace_and_pickle_are_rejected() -> None:
+    actor = auto_review_actor(policy_version=AUTO_REVIEW_POLICY_VERSION)
+
+    with pytest.raises(TypeError):
+        copy.copy(actor)
+    with pytest.raises(TypeError):
+        copy.deepcopy(actor)
+    with pytest.raises(TypeError):
+        replace(actor)
+    with pytest.raises(TypeError):
+        pickle.dumps(actor)
 
 
 def test_auto_actor_has_only_public_internal_and_auto_review() -> None:

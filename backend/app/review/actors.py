@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Literal, TypeAlias, cast
+from collections.abc import Callable
+from dataclasses import dataclass
+from threading import RLock
+from typing import Literal, NoReturn, TypeAlias
+from weakref import ReferenceType, ref
 
 from backend.app.core.demo_auth import DemoUser, find_demo_user
 from backend.app.core.rbac import (
@@ -21,7 +24,6 @@ SYSTEM_AUTO_REVIEW_ACTOR_ID = 'system:auto-review'
 SYSTEM_AUTO_REVIEW_ACTOR_EMAIL = 'system:auto-review@paraworks.invalid'
 SYSTEM_AUTO_REVIEW_ACTOR_ROLE = 'system'
 
-_ACTOR_AUTHORITY = object()
 _VALID_ACTOR_TYPES = frozenset({'human', 'auto_policy'})
 _VALID_CAPABILITIES = frozenset({
     'human_review',
@@ -30,40 +32,108 @@ _VALID_CAPABILITIES = frozenset({
 })
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class ReviewResolutionActor:
     subject_id: str
     actor_type: ReviewResolutionActorType
     allowed_permission_levels: tuple[str, ...]
     capabilities: frozenset[ReviewResolutionCapability]
     policy_version: str | None = None
-    _authority: object = field(repr=False, compare=False)
 
-    def __init__(
-        self,
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise TypeError(
+            'Review resolution actors are minted only by server-owned adapters'
+        )
+
+    def __copy__(self) -> NoReturn:
+        raise TypeError('Review resolution actors cannot be copied')
+
+    def __deepcopy__(self, memo: dict[int, object]) -> NoReturn:
+        raise TypeError('Review resolution actors cannot be copied')
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError('Review resolution actors cannot be serialized')
+
+    def __reduce_ex__(self, protocol: int) -> NoReturn:
+        raise TypeError('Review resolution actors cannot be serialized')
+
+
+def _build_actor_issuer() -> tuple[
+    Callable[..., ReviewResolutionActor],
+    Callable[[ReviewResolutionActor], bool],
+]:
+    issued: dict[
+        int,
+        tuple[ReferenceType[ReviewResolutionActor], tuple[object, ...]],
+    ] = {}
+    lock = RLock()
+
+    def issue(
         *,
         subject_id: str,
         actor_type: ReviewResolutionActorType,
         allowed_permission_levels: tuple[str, ...],
         capabilities: frozenset[ReviewResolutionCapability],
         policy_version: str | None = None,
-        _authority: object | None = None,
-    ) -> None:
-        if _authority is not _ACTOR_AUTHORITY:
-            raise TypeError(
-                'Review resolution actors are minted only by server-owned adapters'
-            )
-        object.__setattr__(self, 'subject_id', subject_id)
-        object.__setattr__(self, 'actor_type', actor_type)
+    ) -> ReviewResolutionActor:
+        actor = object.__new__(ReviewResolutionActor)
+        object.__setattr__(actor, 'subject_id', subject_id)
+        object.__setattr__(actor, 'actor_type', actor_type)
         object.__setattr__(
-            self,
+            actor,
             'allowed_permission_levels',
             allowed_permission_levels,
         )
-        object.__setattr__(self, 'capabilities', capabilities)
-        object.__setattr__(self, 'policy_version', policy_version)
-        object.__setattr__(self, '_authority', _authority)
-        _assert_review_resolution_actor(self)
+        object.__setattr__(actor, 'capabilities', capabilities)
+        object.__setattr__(actor, 'policy_version', policy_version)
+        _assert_actor_shape(actor)
+        actor_id = id(actor)
+
+        def discard(
+            reference: ReferenceType[ReviewResolutionActor],
+            actor_identity: int = actor_id,
+        ) -> None:
+            with lock:
+                entry = issued.get(actor_identity)
+                if entry is not None and entry[0] is reference:
+                    issued.pop(actor_identity, None)
+
+        reference = ref(actor, discard)
+        snapshot: tuple[object, ...] = (
+            subject_id,
+            actor_type,
+            allowed_permission_levels,
+            capabilities,
+            policy_version,
+        )
+        with lock:
+            existing = issued.get(actor_id)
+            if existing is not None and existing[0]() is not None:
+                raise RuntimeError('Review actor identity registry collision')
+            issued[actor_id] = (reference, snapshot)
+        return actor
+
+    def is_issued(actor: ReviewResolutionActor) -> bool:
+        with lock:
+            entry = issued.get(id(actor))
+            if entry is None or entry[0]() is not actor:
+                return False
+            try:
+                current: tuple[object, ...] = (
+                    actor.subject_id,
+                    actor.actor_type,
+                    actor.allowed_permission_levels,
+                    actor.capabilities,
+                    actor.policy_version,
+                )
+            except AttributeError:
+                return False
+            return current == entry[1]
+
+    return issue, is_issued
+
+
+_issue_actor, _is_server_issued_actor = _build_actor_issuer()
 
 
 @dataclass(frozen=True)
@@ -131,12 +201,12 @@ def _assert_approval_directive(directive: ApprovalDirective) -> None:
 
 def human_review_actor(user: DemoUser) -> ReviewResolutionActor:
     _assert_known_demo_identity_is_canonical(user)
-    capabilities: set[str] = set()
+    capabilities: set[ReviewResolutionCapability] = set()
     if user.role in REVIEW_APPROVAL_PERMISSIONS:
         capabilities.add('human_review')
     if user.role == 'admin':
         capabilities.add('auto_review_rollout_admin')
-    return ReviewResolutionActor(
+    return _issue_actor(
         subject_id=user.id,
         actor_type='human',
         allowed_permission_levels=tuple(
@@ -145,30 +215,29 @@ def human_review_actor(user: DemoUser) -> ReviewResolutionActor:
                 key=lambda value: (PERMISSION_ORDER.get(value, 10_000), value),
             )
         ),
-        capabilities=cast(
-            'frozenset[ReviewResolutionCapability]',
-            frozenset(capabilities),
-        ),
-        _authority=_ACTOR_AUTHORITY,
+        capabilities=frozenset(capabilities),
     )
 
 
 def auto_review_actor(*, policy_version: str) -> ReviewResolutionActor:
-    return ReviewResolutionActor(
+    return _issue_actor(
         subject_id=SYSTEM_AUTO_REVIEW_ACTOR_ID,
         actor_type='auto_policy',
         allowed_permission_levels=('public', 'internal'),
         capabilities=frozenset({'auto_review'}),
         policy_version=policy_version,
-        _authority=_ACTOR_AUTHORITY,
     )
 
 
 def _assert_review_resolution_actor(actor: ReviewResolutionActor) -> None:
     if not isinstance(actor, ReviewResolutionActor):
         raise TypeError('Review resolution actor has an invalid type')
-    if getattr(actor, '_authority', None) is not _ACTOR_AUTHORITY:
-        raise TypeError('Review resolution actor authority is not server-owned')
+    if not _is_server_issued_actor(actor):
+        raise TypeError('Review resolution actor was not issued by the server')
+    _assert_actor_shape(actor)
+
+
+def _assert_actor_shape(actor: ReviewResolutionActor) -> None:
     if actor.actor_type not in _VALID_ACTOR_TYPES:
         raise ValueError('Review resolution actor type is unsupported')
     if not isinstance(actor.subject_id, str) or not actor.subject_id:
@@ -209,5 +278,5 @@ def _assert_known_demo_identity_is_canonical(user: DemoUser) -> None:
     if not isinstance(user, DemoUser):
         raise TypeError('Human review adapter requires an authenticated DemoUser')
     canonical = find_demo_user(user.id) or find_demo_user(user.email)
-    if canonical is not None and canonical != user:
+    if canonical is not None and canonical is not user:
         raise ValueError('Authenticated DemoUser does not match canonical identity')
