@@ -1,7 +1,12 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import AssistantConversation, AssistantMessage
+from backend.app.models import (
+    AssistantConversation,
+    AssistantMessage,
+    AssistantMessageEvidenceDependency,
+    AssistantMessageKnowledgeEvidenceRef,
+)
 
 
 def test_assistant_conversation_and_messages_persist(db_session: Session) -> None:
@@ -96,3 +101,37 @@ def test_assistant_conversation_messages_order_has_id_tie_breaker() -> None:
 
     assert AssistantMessage.created_at in order_by
     assert AssistantMessage.id in order_by
+
+
+def test_assistant_evidence_contract_columns_are_legacy_nullable() -> None:
+    assert AssistantMessage.__table__.c.evidence_contract_version.nullable is True
+    assert AssistantMessage.__table__.c.serving_dependency_count.nullable is True
+    checks = {
+        constraint.name
+        for constraint in AssistantMessage.__table__.constraints
+        if constraint.name is not None
+    }
+    assert 'ck_assistant_messages_evidence_contract' in checks
+    assert 'ck_assistant_messages_serving_dependency_count' in checks
+
+
+def test_assistant_evidence_dependencies_bind_exact_parent_and_effect() -> None:
+    parent_constraints = {
+        constraint.name
+        for constraint in AssistantMessageEvidenceDependency.__table__.constraints
+    }
+    child_constraints = {
+        constraint.name
+        for constraint in AssistantMessageKnowledgeEvidenceRef.__table__.constraints
+    }
+    assert {
+        'uq_assistant_message_dependency_ordinal',
+        'uq_assistant_message_dependency_serving_document',
+        'fk_assistant_message_dependency_raw_chunk_identity',
+        'fk_assistant_message_dependency_approval_target',
+    } <= parent_constraints
+    assert {
+        'uq_assistant_message_knowledge_evidence_ref',
+        'fk_assistant_knowledge_evidence_ref_same_dependency_effect',
+        'fk_assistant_knowledge_evidence_ref_same_approval_effect',
+    } <= child_constraints

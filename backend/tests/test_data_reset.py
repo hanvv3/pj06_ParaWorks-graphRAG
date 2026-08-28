@@ -6,6 +6,7 @@ from backend.app.models import (
     AgentRun,
     AssistantConversation,
     AuthUser,
+    AutoReviewRuntimeKeyState,
     Document,
     DocumentChunk,
     DocumentVersion,
@@ -130,3 +131,35 @@ def test_reset_connector_derived_data_deletes_sources_but_preserves_auth_and_int
     assert db_session.query(AssistantConversation).count() == 0
     assert db_session.query(AuthUser).count() == 1
     assert db_session.query(IntegrationConnection).count() == 1
+
+
+def test_reset_connector_derived_data_refuses_retained_c5_state(db_session) -> None:
+    _seed_reset_rows(db_session)
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version='v1',
+            fingerprint_key_material_verifier='a' * 64,
+            generation=1,
+            ready=False,
+        )
+    )
+    db_session.commit()
+
+    preview = reset_connector_derived_data(
+        db_session,
+        settings=Settings(paraworks_env='local'),
+        dry_run=True,
+    )
+    assert preview.retained_c5_state is True
+
+    with pytest.raises(ValueError, match='recreate.*disposable local database'):
+        reset_connector_derived_data(
+            db_session,
+            settings=Settings(paraworks_env='local'),
+            dry_run=False,
+            confirm=True,
+        )
+
+    assert db_session.query(Source).count() == 1
+    assert db_session.query(AutoReviewRuntimeKeyState).count() == 1

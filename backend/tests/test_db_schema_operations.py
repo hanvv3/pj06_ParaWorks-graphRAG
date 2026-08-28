@@ -17,6 +17,10 @@ def test_alembic_operational_files_exist() -> None:
         'backend/migrations/versions/'
         '2f6a8b9c0d1e_add_agent_workflow_runtime_foundation.py'
     ).is_file()
+    assert Path(
+        'backend/migrations/versions/'
+        '7c5a2e9f4b10_add_auto_review_trust_promotion.py'
+    ).is_file()
 
 
 def test_project_key_migration_is_idempotent_with_current_schema_baseline() -> None:

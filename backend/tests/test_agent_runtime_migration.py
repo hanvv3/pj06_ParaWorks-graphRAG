@@ -19,7 +19,8 @@ from sqlalchemy.engine import Engine
 
 from backend.app.core.config import get_settings
 
-REVISION = '2f6a8b9c0d1e'
+REVISION = '7c5a2e9f4b10'
+RUNTIME_REVISION = '2f6a8b9c0d1e'
 PREVIOUS_REVISION = 'b4b6d9f4d3e1'
 
 WORKFLOW_TABLE_COLUMNS = {
@@ -174,7 +175,7 @@ def _assert_runtime_schema(engine: Engine) -> None:
         column_names = {
             column['name'] for column in inspector.get_columns(table_name)
         }
-        assert expected_columns == column_names
+        assert expected_columns <= column_names
 
     for table_name, expected_columns in LEGACY_NEW_COLUMNS.items():
         column_names = {
@@ -219,6 +220,18 @@ def test_agent_runtime_migration_upgrades_fresh_schema(
 
     engine = create_engine(database_url)
     _assert_revision(engine, REVISION)
+    _assert_runtime_schema(engine)
+
+
+def test_runtime_foundation_revision_remains_independently_upgradeable(
+    migration_database: tuple[Config, str],
+) -> None:
+    config, database_url = migration_database
+
+    _run_alembic(command.upgrade, config, RUNTIME_REVISION)
+
+    engine = create_engine(database_url)
+    _assert_revision(engine, RUNTIME_REVISION)
     _assert_runtime_schema(engine)
 
 

@@ -5,6 +5,7 @@ from sqlalchemy import (
     DateTime,
     Index,
     Integer,
+    Numeric,
     String,
     UniqueConstraint,
     text,
@@ -80,6 +81,97 @@ class AgentWorkflowRequest(Base):
     selection_policy_version: Mapped[str] = mapped_column(String(64))
     input_hash: Mapped[str] = mapped_column(String(64))
     fingerprint_key_version: Mapped[str] = mapped_column(String(32))
+    fingerprint_key_material_verifier: Mapped[str | None] = mapped_column(
+        String(64)
+    )
+    auto_review_mode: Mapped[str | None] = mapped_column(String(32))
+    auto_review_validator_provider: Mapped[str | None] = mapped_column(String(120))
+    auto_review_validator_model: Mapped[str | None] = mapped_column(String(120))
+    auto_review_reasoning_effort: Mapped[str | None] = mapped_column(String(32))
+    auto_review_validator_prompt_version: Mapped[str | None] = mapped_column(
+        String(64)
+    )
+    auto_review_validator_output_contract_version: Mapped[str | None] = (
+        mapped_column(String(64))
+    )
+    auto_review_policy_version: Mapped[str | None] = mapped_column(String(64))
+    auto_review_cost_policy_version: Mapped[str | None] = mapped_column(String(64))
+    auto_review_extraction_cost_policy_version: Mapped[str | None] = mapped_column(
+        String(64)
+    )
+    auto_review_token_estimator_version: Mapped[str | None] = mapped_column(
+        String(64)
+    )
+    auto_review_extraction_token_estimator_version: Mapped[str | None] = (
+        mapped_column(String(64))
+    )
+    auto_review_tokenizer_encoding: Mapped[str | None] = mapped_column(String(64))
+    auto_review_reply_priming_tokens: Mapped[int | None] = mapped_column(Integer)
+    auto_review_framing_safety_tokens: Mapped[int | None] = mapped_column(Integer)
+    auto_review_max_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    auto_review_max_output_tokens: Mapped[int | None] = mapped_column(Integer)
+    auto_review_max_candidates_per_batch: Mapped[int | None] = mapped_column(Integer)
+    auto_review_max_batches_per_workflow: Mapped[int | None] = mapped_column(Integer)
+    auto_review_max_candidates_per_workflow: Mapped[int | None] = mapped_column(
+        Integer
+    )
+    auto_review_max_provider_attempts: Mapped[int | None] = mapped_column(Integer)
+    auto_review_provider_timeout_seconds: Mapped[int | None] = mapped_column(Integer)
+    auto_review_provider_send_start_window_seconds: Mapped[int | None] = (
+        mapped_column(Integer)
+    )
+    auto_review_provider_attempt_lease_seconds: Mapped[int | None] = mapped_column(
+        Integer
+    )
+    auto_review_provider_commit_grace_seconds: Mapped[int | None] = mapped_column(
+        Integer
+    )
+    auto_review_validator_input_usd_per_1m: Mapped[float | None] = mapped_column(
+        Numeric(12, 6)
+    )
+    auto_review_validator_output_usd_per_1m: Mapped[float | None] = mapped_column(
+        Numeric(12, 6)
+    )
+    auto_review_extraction_input_usd_per_1m: Mapped[float | None] = mapped_column(
+        Numeric(12, 6)
+    )
+    auto_review_extraction_output_usd_per_1m: Mapped[float | None] = mapped_column(
+        Numeric(12, 6)
+    )
+    auto_review_enforce_percentage: Mapped[int | None] = mapped_column(Integer)
+    authorized_percentage_at_launch: Mapped[int | None] = mapped_column(Integer)
+    rollout_authorization_generation: Mapped[int | None] = mapped_column(Integer)
+    validation_provider_safety_state_version: Mapped[int | None] = mapped_column(
+        Integer
+    )
+    extraction_provider_safety_snapshot_set_hmac: Mapped[str | None] = (
+        mapped_column(String(64))
+    )
+    rollout_control_epoch: Mapped[int | None] = mapped_column(Integer)
+    selected_extraction_agent_count: Mapped[int | None] = mapped_column(Integer)
+    extraction_plan_set_hmac: Mapped[str | None] = mapped_column(String(64))
+    extraction_max_input_chars_per_agent: Mapped[int | None] = mapped_column(Integer)
+    extraction_max_input_tokens_per_agent: Mapped[int | None] = mapped_column(
+        Integer
+    )
+    extraction_max_output_tokens_per_agent: Mapped[int | None] = mapped_column(
+        Integer
+    )
+    extraction_max_candidates_per_agent: Mapped[int | None] = mapped_column(
+        Integer
+    )
+    confirmed_extraction_cost_ceiling_usd: Mapped[float | None] = mapped_column(
+        Numeric(12, 6)
+    )
+    confirmed_validation_cost_ceiling_usd: Mapped[float | None] = mapped_column(
+        Numeric(12, 6)
+    )
+    confirmed_total_cost_ceiling_usd: Mapped[float | None] = mapped_column(
+        Numeric(12, 6)
+    )
+    auto_review_budget_limit_usd: Mapped[float | None] = mapped_column(
+        Numeric(12, 6)
+    )
 
 
 class AgentWorkflowEvidenceRef(Base):
@@ -89,6 +181,11 @@ class AgentWorkflowEvidenceRef(Base):
             'workflow_thread_id',
             'ordinal',
             name='uq_agent_workflow_evidence_ref_ordinal',
+        ),
+        UniqueConstraint(
+            'id',
+            'workflow_thread_id',
+            name='uq_agent_workflow_evidence_ref_id_workflow',
         ),
     )
 

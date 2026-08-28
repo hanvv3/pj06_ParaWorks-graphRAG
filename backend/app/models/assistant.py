@@ -1,6 +1,14 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,6 +39,17 @@ class AssistantConversation(Base):
 
 class AssistantMessage(Base):
     __tablename__ = 'assistant_messages'
+    __table_args__ = (
+        CheckConstraint(
+            "evidence_contract_version IS NULL OR evidence_contract_version IN "
+            "('none-v1', 'assistant-evidence:v1')",
+            name='ck_assistant_messages_evidence_contract',
+        ),
+        CheckConstraint(
+            'serving_dependency_count IS NULL OR serving_dependency_count >= 0',
+            name='ck_assistant_messages_serving_dependency_count',
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey('assistant_conversations.id'), index=True)
@@ -44,6 +63,8 @@ class AssistantMessage(Base):
     hidden_match_count: Mapped[int] = mapped_column(Integer, default=0)
     permission_notice: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    evidence_contract_version: Mapped[str | None] = mapped_column(String(32))
+    serving_dependency_count: Mapped[int | None] = mapped_column(Integer)
     metadata_: Mapped[dict] = mapped_column('metadata', MutableDict.as_mutable(JSON), default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

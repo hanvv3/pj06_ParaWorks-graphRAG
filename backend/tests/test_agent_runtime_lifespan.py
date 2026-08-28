@@ -6,6 +6,7 @@ from backend.app.agent_runtime.checkpointing import (
     CheckpointRuntime,
     CheckpointUnavailableError,
 )
+from backend.app.agent_runtime.model_router import ReviewModelUnavailableError
 from backend.app.core.config import Settings, get_settings
 from backend.app.main import create_app
 from backend.app.models.agent_workflows import AgentWorkflowThread
@@ -209,3 +210,41 @@ def test_missing_production_model_credentials_do_not_block_app_lifespan(
         get_settings.cache_clear()
 
     assert events == ['start:False', 'close']
+
+
+def test_lifespan_bootstraps_c5_keys_before_building_drafting_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    runtime = _FakeCheckpointRuntime(events)
+
+    def ensure_initialized(_self):
+        events.append('key_bootstrap')
+        return type(
+            'Result',
+            (),
+            {
+                'schema_available': True,
+                'initialized': False,
+                'ready': False,
+            },
+        )()
+
+    def build_catalog(_settings):
+        assert 'key_bootstrap' in events
+        events.append('catalog')
+        raise ReviewModelUnavailableError('unavailable')
+
+    monkeypatch.setattr(
+        'backend.app.main.AutoReviewKeyBootstrapService.ensure_initialized',
+        ensure_initialized,
+    )
+    monkeypatch.setattr('backend.app.main.build_review_agent_catalog', build_catalog)
+    app = create_app(
+        checkpoint_runtime_factory=lambda _settings: runtime,  # type: ignore[arg-type]
+    )
+
+    with TestClient(app):
+        pass
+
+    assert events == ['start:False', 'key_bootstrap', 'catalog', 'close']

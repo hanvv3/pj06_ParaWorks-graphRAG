@@ -13,6 +13,15 @@ class ReviewStatus(StrEnum):
     approved = 'approved'
     rejected = 'rejected'
     needs_more_evidence = 'needs_more_evidence'
+    revoked = 'revoked'
+
+
+class AutoReviewRevocationReason(StrEnum):
+    business_withdrawal = 'business_withdrawal'
+    incorrect_content = 'incorrect_content'
+    permission_violation = 'permission_violation'
+    wrong_source_version = 'wrong_source_version'
+    policy_violation = 'policy_violation'
 
 
 class KnowledgeType(StrEnum):

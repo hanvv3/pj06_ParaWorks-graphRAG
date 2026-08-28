@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from backend.app.admin.auto_review_keys import AutoReviewKeyBootstrapService
 from backend.app.agent_runtime.checkpointing import (
     CheckpointRuntime,
     build_checkpoint_runtime,
@@ -86,6 +87,14 @@ def create_app(
         checkpoint_runtime.start(
             preserve_existing_review_threads=preserve_existing_review_threads
         )
+        key_bootstrap_service = AutoReviewKeyBootstrapService(
+            session_factory=workflow_session_factory,
+            settings=settings,
+        )
+        try:
+            key_bootstrap_result = key_bootstrap_service.ensure_initialized()
+        except SQLAlchemyError:
+            key_bootstrap_result = None
         try:
             catalog = build_review_agent_catalog(settings)
             agent_registry = catalog.registry
@@ -120,6 +129,7 @@ def create_app(
         app.state.review_agent_registry = agent_registry
         app.state.review_model_readiness = model_readiness
         app.state.review_workflow_service = review_workflow_service
+        app.state.auto_review_key_bootstrap = key_bootstrap_result
         try:
             yield
         finally:

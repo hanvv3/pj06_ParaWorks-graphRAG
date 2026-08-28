@@ -258,6 +258,27 @@ def test_sync_returns_canonical_refs_after_ingestion_commit(
     assert ordering.index('source_reload') < ordering.index('canonical_refs')
 
 
+def test_source_event_semantic_timestamp_is_additive_and_optional() -> None:
+    event = source_event()
+
+    assert event.semantic_timestamp_raw is None
+
+    exact = SourceEvent(
+        source_type='gmail',
+        source_id='gmail:exact-time',
+        source_url='https://mail.google.com/mail/u/0/#all/exact-time',
+        title='Exact timestamp',
+        body='body',
+        author='owner@example.com',
+        participants=['owner@example.com'],
+        timestamp=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+        permission_level='internal',
+        raw_metadata={},
+        semantic_timestamp_raw='1777600800000',
+    )
+    assert exact.semantic_timestamp_raw == '1777600800000'
+
+
 def test_v2_sync_completion_rolls_back_job_identity_and_waterline_together(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,

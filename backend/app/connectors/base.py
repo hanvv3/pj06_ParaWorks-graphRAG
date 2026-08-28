@@ -15,6 +15,7 @@ class SourceEvent:
     timestamp: datetime
     permission_level: str
     raw_metadata: dict = field(default_factory=dict)
+    semantic_timestamp_raw: str | None = None
 
 
 @dataclass(frozen=True)
