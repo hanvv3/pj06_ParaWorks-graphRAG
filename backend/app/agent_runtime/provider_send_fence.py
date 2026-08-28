@@ -39,13 +39,14 @@ class FencedOpenAITransport(Generic[_T]):
     def http_hook(self) -> object:
         raise NotImplementedError
 
-    def dispatch(
+    def _consume_from_store(self) -> None:
+        raise NotImplementedError
+
+    def _dispatch_consumed(
         self,
         send: Callable[..., _T],
         *,
         request_body: Any = None,
-        is_redirect: bool = False,
-        is_retry: bool = False,
     ) -> _T:
         raise NotImplementedError
 
@@ -64,6 +65,3 @@ class ProviderAttemptGrant(Protocol, Generic[_T]):
 
     @property
     def authoritative_lease_expires_at(self) -> datetime: ...
-
-    @property
-    def transport(self) -> FencedOpenAITransport[_T]: ...

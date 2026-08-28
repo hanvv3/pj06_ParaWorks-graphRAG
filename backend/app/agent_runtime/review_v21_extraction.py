@@ -637,7 +637,9 @@ class ExtractionCallLedger:
         self._budget_limit = workflow_budget_limit
         self._permit_monotonic = permit_monotonic
         self._calls: dict[tuple[str, str], _CallState] = {}
-        self._permits: dict[tuple[str, str], ProviderAttemptGrant] = {}
+        self._permits: dict[
+            tuple[str, str], tuple[ProviderAttemptGrant, FencedOpenAITransport[Any]]
+        ] = {}
         self._lock = RLock()
         self.disabled = False
         self.validation_breaker_open = False
@@ -806,21 +808,33 @@ class ExtractionCallLedger:
                 def http_hook(self) -> object:
                     return self._http_hook
 
-                def dispatch(
-                    self,
-                    send: Callable[..., Any],
-                    *,
-                    request_body: Any = None,
-                    is_redirect: bool = False,
-                    is_retry: bool = False,
-                ) -> Any:
-                    del request_body
-                    if self._dispatched or is_redirect or is_retry:
+                def _consume_from_store(self) -> None:
+                    from backend.app.agent_runtime.auto_review_cost_policy import (
+                        is_server_owned_fenced_send_hook,
+                    )
+
+                    if not is_server_owned_fenced_send_hook(self._http_hook):
+                        raise ProviderSendFenceError(
+                            'server-owned provider send hook is required'
+                        )
+                    if self._dispatched:
                         raise ProviderSendFenceError(
                             'redirect, retry, or second dispatch is forbidden'
                         )
                     permit.consume_at_dispatch()
                     self._dispatched = True
+
+                def _dispatch_consumed(
+                    self,
+                    send: Callable[..., Any],
+                    *,
+                    request_body: Any = None,
+                ) -> Any:
+                    del request_body
+                    if not self._dispatched:
+                        raise ProviderSendFenceError(
+                            'store-owned dispatch authentication is required'
+                        )
                     return send(timeout=timeout)
 
             transport = _CommittedTransport()
@@ -844,10 +858,6 @@ class ExtractionCallLedger:
                 def authoritative_lease_expires_at(self) -> datetime:
                     return lease_expiry
 
-                @property
-                def transport(self) -> _CommittedTransport:
-                    return transport
-
                 def __copy__(self):
                     raise TypeError('provider attempt grants cannot be copied')
 
@@ -863,7 +873,10 @@ class ExtractionCallLedger:
                     return '<ProviderAttemptGrant opaque>'
 
             grant: ProviderAttemptGrant[Any] = _CommittedGrant()
-            self._permits[(context.workflow_thread_id, context.agent_name)] = grant
+            self._permits[(context.workflow_thread_id, context.agent_name)] = (
+                grant,
+                transport,
+            )
             return grant
 
     def dispatch_prepared_extraction(
@@ -875,25 +888,32 @@ class ExtractionCallLedger:
     ) -> _R:
         with self._lock:
             matches = [
-                state
+                (key, state, active[1])
                 for key, state in self._calls.items()
-                if self._permits.get(key) is grant
+                if (active := self._permits.get(key)) is not None
+                and active[0] is grant
             ]
             if len(matches) != 1:
                 raise ExtractionCallStateError(
                     'committed provider attempt grant is required'
                 )
-            state = matches[0]
+            key, state, transport = matches[0]
             if (
                 state.status != 'claimed'
                 or state.provider_attempt_count != 1
                 or state.plan.invocation is not invocation
+                or state.cancelled
+                or state.drifted
+                or self._db_clock() >= state.lease_expires_at
             ):
+                self._invalidate_permit(state.context)
                 raise ExtractionCallStateError('prepared extraction dispatch changed')
-            return grant.transport.dispatch(
-                lambda *, timeout: provider(invocation, timeout=timeout),
-                request_body=invocation.canonical_bytes,
-            )
+            transport._consume_from_store()
+            self._permits.pop(key, None)
+        return transport._dispatch_consumed(
+            lambda *, timeout: provider(invocation, timeout=timeout),
+            request_body=invocation.canonical_bytes,
+        )
 
     def complete(
         self,
@@ -975,12 +995,14 @@ class ExtractionCallLedger:
         with self._lock:
             state = self._state(context)
             state.cancelled = True
+            self._invalidate_permit(context)
             if state.provider_attempt_count == 0 and state.status == 'claimed':
                 self._terminal_fail(state, charge=False)
 
     def set_drift(self, context: ExtractionLockedContext) -> None:
         with self._lock:
             self._state(context).drifted = True
+            self._invalidate_permit(context)
 
     def recover_expired(self, context: ExtractionLockedContext) -> None:
         with self._lock:
@@ -1015,6 +1037,7 @@ class ExtractionCallLedger:
             state.provider_attempt_count = 1
             state.attempt_started_at = self._db_clock()
             state.terminal_at = self._db_clock()
+            self._invalidate_permit(context)
 
     def snapshot(self, context: ExtractionLockedContext) -> ExtractionCallSnapshot:
         with self._lock:
@@ -1075,11 +1098,11 @@ class ExtractionCallLedger:
         self._invalidate_permit(state.context)
 
     def _invalidate_permit(self, context: ExtractionLockedContext) -> None:
-        grant = self._permits.pop(
+        active = self._permits.pop(
             (context.workflow_thread_id, context.agent_name), None
         )
-        if grant is not None:
-            grant.permit._invalidate_from_store()
+        if active is not None:
+            active[0].permit._invalidate_from_store()
 
 
 class ExtractionCallStore:
@@ -1103,7 +1126,12 @@ class ExtractionCallStore:
         self._plans = {plan.agent_name: plan for plan in prepared_plan_set.plans}
         self._db_clock_override = db_clock
         self._active_grants: dict[
-            str, tuple[ProviderAttemptGrant, ExtractionLockedContext]
+            str,
+            tuple[
+                ProviderAttemptGrant,
+                ExtractionLockedContext,
+                FencedOpenAITransport[Any],
+            ],
         ] = {}
         self._grant_lock = RLock()
 
@@ -1258,6 +1286,13 @@ class ExtractionCallStore:
                     owner_subject_id=actor_subject_id,
                     allowed_permission_levels=allowed_permission_levels,
                 )
+        except ExtractionCallStateError as exc:
+            if str(exc) == 'evidence_binding_mismatch':
+                self._persist_replay_binding_failure(
+                    workflow_thread_id=workflow_thread_id,
+                    plan=plan,
+                )
+            raise
         except IntegrityError:
             with self._session_factory() as db:
                 existing = db.scalar(
@@ -1424,21 +1459,33 @@ class ExtractionCallStore:
                 def http_hook(self) -> object:
                     return self._http_hook
 
-                def dispatch(
-                    self,
-                    send: Callable[..., Any],
-                    *,
-                    request_body: Any = None,
-                    is_redirect: bool = False,
-                    is_retry: bool = False,
-                ) -> Any:
-                    del request_body
-                    if self._dispatched or is_redirect or is_retry:
+                def _consume_from_store(self) -> None:
+                    from backend.app.agent_runtime.auto_review_cost_policy import (
+                        is_server_owned_fenced_send_hook,
+                    )
+
+                    if not is_server_owned_fenced_send_hook(self._http_hook):
+                        raise ProviderSendFenceError(
+                            'server-owned provider send hook is required'
+                        )
+                    if self._dispatched:
                         raise ProviderSendFenceError(
                             'redirect, retry, or second dispatch is forbidden'
                         )
                     permit.consume_at_dispatch()
                     self._dispatched = True
+
+                def _dispatch_consumed(
+                    self,
+                    send: Callable[..., Any],
+                    *,
+                    request_body: Any = None,
+                ) -> Any:
+                    del request_body
+                    if not self._dispatched:
+                        raise ProviderSendFenceError(
+                            'store-owned dispatch authentication is required'
+                        )
                     return send(timeout=timeout)
 
             transport = _CommittedTransport()
@@ -1462,10 +1509,6 @@ class ExtractionCallStore:
                 def authoritative_lease_expires_at(self) -> datetime:
                     return lease_expiry
 
-                @property
-                def transport(self) -> _CommittedTransport:
-                    return transport
-
                 def __copy__(self):
                     raise TypeError('provider attempt grants cannot be copied')
 
@@ -1482,7 +1525,7 @@ class ExtractionCallStore:
 
             grant: ProviderAttemptGrant[Any] = _CommittedGrant()
             with self._grant_lock:
-                self._active_grants[grant.attempt_id] = (grant, context)
+                self._active_grants[grant.attempt_id] = (grant, context, transport)
             return grant
 
     def dispatch_prepared_extraction(
@@ -1492,16 +1535,25 @@ class ExtractionCallStore:
         provider: Callable[..., _R],
         grant: ProviderAttemptGrant,
     ) -> _R:
+        active: tuple[
+            ProviderAttemptGrant,
+            ExtractionLockedContext,
+            FencedOpenAITransport[Any],
+        ]
         with self._grant_lock:
-            active = self._active_grants.get(grant.attempt_id)
-            if active is None or active[0] is not grant:
+            found = self._active_grants.get(grant.attempt_id)
+            if found is None or found[0] is not grant:
                 raise ExtractionCallStateError(
                     'committed provider attempt grant is required'
                 )
-            context = active[1]
-            plan = self._plans[context.agent_name]
-            if plan.invocation is not invocation:
-                raise ExtractionCallStateError('prepared extraction dispatch changed')
+            active = found
+        context = active[1]
+        transport = active[2]
+        plan = self._plans[context.agent_name]
+        if plan.invocation is not invocation:
+            self._invalidate_active_grant(context)
+            raise ExtractionCallStateError('prepared extraction dispatch changed')
+        try:
             with self._session_factory() as db, db.begin():
                 thread, request, refs, sources, safety = self._lock_prefix(
                     db, workflow_thread_id=context.workflow_thread_id
@@ -1514,6 +1566,14 @@ class ExtractionCallStore:
                     or call.lease_expires_at is None
                     or now >= call.lease_expires_at
                     or thread.cancelled_at is not None
+                    or not self._runtime_key_matches(db, request)
+                    or context.owner_subject_id is None
+                    or thread.owner_subject_id != context.owner_subject_id
+                    or any(
+                        ref.permission_level_snapshot
+                        not in context.allowed_permission_levels
+                        for ref in refs
+                    )
                     or not self._current_identity_matches(
                         thread=thread,
                         request=request,
@@ -1523,13 +1583,34 @@ class ExtractionCallStore:
                         plan=plan,
                     )
                 ):
-                    raise ExtractionCallStateError(
-                        'committed provider attempt grant is not live'
-                    )
-                return grant.transport.dispatch(
-                    lambda *, timeout: provider(invocation, timeout=timeout),
-                    request_body=invocation.canonical_bytes,
+                    live = False
+                else:
+                    live = True
+        except Exception:
+            self._invalidate_active_grant(context)
+            raise
+        if not live:
+            self._invalidate_active_grant(context)
+            raise ExtractionCallStateError(
+                'committed provider attempt grant is not live'
+            )
+        with self._grant_lock:
+            current = self._active_grants.get(grant.attempt_id)
+            if current is not active or current[0] is not grant:
+                raise ExtractionCallStateError(
+                    'committed provider attempt grant is not live'
                 )
+            try:
+                transport._consume_from_store()
+            except Exception:
+                self._active_grants.pop(grant.attempt_id, None)
+                grant.permit._invalidate_from_store()
+                raise
+            self._active_grants.pop(grant.attempt_id, None)
+        return transport._dispatch_consumed(
+            lambda *, timeout: provider(invocation, timeout=timeout),
+            request_body=invocation.canonical_bytes,
+        )
 
     def complete(
         self,
@@ -1543,6 +1624,7 @@ class ExtractionCallStore:
         | None = None,
         native_truncated: bool = False,
     ) -> None:
+        self._invalidate_active_grant(context)
         plan = self._plans[context.agent_name]
         parsed: BaseModel | None = None
         parse_error = False
@@ -1713,6 +1795,7 @@ class ExtractionCallStore:
         reason_code: str,
         usage: ProviderUsage | None = None,
     ) -> None:
+        self._invalidate_active_grant(context)
         with self._session_factory() as db, db.begin():
             _thread, request, _refs, _sources, safety = self._lock_prefix(
                 db, workflow_thread_id=context.workflow_thread_id
@@ -1818,6 +1901,7 @@ class ExtractionCallStore:
         *,
         actor_subject_id: str,
     ) -> None:
+        cancelled = False
         with self._session_factory() as db, db.begin():
             thread, _request, _refs, _sources, _safety = self._lock_prefix(
                 db, workflow_thread_id=context.workflow_thread_id
@@ -1840,6 +1924,7 @@ class ExtractionCallStore:
             if thread.cancelled_at is None:
                 thread.cancelled_at = now
                 thread.cancelled_by_subject_id = actor_subject_id
+            cancelled = True
             if call.provider_attempt_count == 0:
                 call.charged_input_tokens = 0
                 call.charged_output_tokens = 0
@@ -1849,6 +1934,8 @@ class ExtractionCallStore:
                     'failure_reason_code': 'cancelled',
                 }
                 self._sql_fail(call, run, now=now)
+        if cancelled:
+            self._invalidate_active_grant(context)
 
     def recover_expired(
         self,
@@ -1930,7 +2017,9 @@ class ExtractionCallStore:
                     }
                     self._sql_fail(call, run, now=now)
             if refusal is not None:
+                self._invalidate_active_grant(context)
                 raise ExtractionCallStateError(refusal)
+            self._invalidate_active_grant(context)
             return recovered
 
     def _lock_prefix(
@@ -2313,6 +2402,7 @@ class ExtractionCallStore:
             }
             if not selected_slot_ids or not selected_slot_ids <= all_slot_ids:
                 raise ExtractionCallStateError('evidence_binding_mismatch')
+        selected_permissions: list[str] = []
         for binding in bindings:
             possible_slots = slots_by_ref[binding.workflow_evidence_ref_id]
             if selected_slot_ids is not None:
@@ -2328,16 +2418,27 @@ class ExtractionCallStore:
                     for count in range(1, len(possible_slots) + 1)
                     for subset in combinations(possible_slots, count)
                 )
-            valid_message_hmacs = {
-                self._message_set_hmac(
+            matching_sets = tuple(
+                slot_set
+                for slot_set in candidate_sets
+                if self._message_set_hmac(
                     ref=workflow_refs[binding.workflow_evidence_ref_id],
                     slots=slot_set,
                     request=request,
                 )
-                for slot_set in candidate_sets
-            }
-            if binding.message_set_hmac not in valid_message_hmacs:
+                == binding.message_set_hmac
+            )
+            if len(matching_sets) != 1:
                 raise ExtractionCallStateError('evidence_binding_mismatch')
+            selected_permissions.extend(
+                slot.permission_level for slot in matching_sets[0]
+            )
+        if (
+            not selected_permissions
+            or item.permission_level
+            != _strictest_permission(tuple(selected_permissions))
+        ):
+            raise ExtractionCallStateError('evidence_binding_mismatch')
         security_scope_hmac = build_keyed_fingerprint(
             thread.security_scope_id,
             settings=self._settings,
@@ -2438,6 +2539,68 @@ class ExtractionCallStore:
         if not valid:
             raise ExtractionCallStateError('completed extraction result is corrupt')
 
+    def _persist_replay_binding_failure(
+        self,
+        *,
+        workflow_thread_id: str,
+        plan: PreparedExtractionPlan,
+    ) -> None:
+        with self._session_factory() as db, db.begin():
+            self._lock_prefix(db, workflow_thread_id=workflow_thread_id)
+            call = db.scalar(
+                select(AutoReviewExtractionCall)
+                .where(
+                    AutoReviewExtractionCall.workflow_thread_id
+                    == workflow_thread_id,
+                    AutoReviewExtractionCall.agent_name == plan.agent_name,
+                )
+                .with_for_update()
+            )
+            if (
+                call is None
+                or call.status != 'completed'
+                or call.extraction_plan_hmac != plan.plan_hmac
+            ):
+                return
+            run = db.scalar(
+                select(AgentRun)
+                .where(AgentRun.id == call.agent_run_id)
+                .with_for_update()
+            )
+            if run is None:
+                return
+            items = tuple(
+                db.scalars(
+                    select(ReviewItem)
+                    .where(
+                        ReviewItem.workflow_thread_id == workflow_thread_id,
+                        ReviewItem.agent_run_id == call.agent_run_id,
+                    )
+                    .with_for_update()
+                ).all()
+            )
+            if items:
+                children = tuple(
+                    db.scalars(
+                        select(ReviewItemEvidenceRef)
+                        .where(
+                            ReviewItemEvidenceRef.review_item_id.in_(
+                                [item.id for item in items]
+                            )
+                        )
+                        .with_for_update()
+                    ).all()
+                )
+                for child in children:
+                    db.delete(child)
+                for item in items:
+                    db.delete(item)
+            run.metadata_ = {
+                **(run.metadata_ or {}),
+                'failure_reason_code': 'evidence_binding_mismatch',
+            }
+            self._sql_fail(call, run, now=self._db_now(db))
+
     def _locked_call(
         self,
         db: Session,
@@ -2469,6 +2632,22 @@ class ExtractionCallStore:
                 raise ExtractionCallStateError('database clock is unavailable')
             return value
         return datetime.now(UTC)
+
+    def _invalidate_active_grant(
+        self,
+        context: ExtractionLockedContext,
+    ) -> None:
+        with self._grant_lock:
+            attempt_ids = [
+                attempt_id
+                for attempt_id, active in self._active_grants.items()
+                if active[1].workflow_thread_id == context.workflow_thread_id
+                and active[1].agent_name == context.agent_name
+                and active[1].lease_token == context.lease_token
+            ]
+            for attempt_id in attempt_ids:
+                active = self._active_grants.pop(attempt_id)
+                active[0].permit._invalidate_from_store()
 
     def _require_signed_plan(self, plan: PreparedExtractionPlan) -> None:
         current = self._plans.get(plan.agent_name)

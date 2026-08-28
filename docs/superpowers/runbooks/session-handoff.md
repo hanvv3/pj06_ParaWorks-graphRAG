@@ -2949,19 +2949,25 @@ tests passed with 53 tests; ruff passed.
   requires a fresh query of exactly one same-run ReviewItem and its exact
   contiguous evidence children before the call and AgentRun become complete.
 - `ProviderAttemptGrant` cannot be constructed or issued by application code:
-  there is no importable issuer/factory. The committed store creates a private
+  there is no importable issuer/factory and no grant-visible transport or
+  public transport dispatch method. The committed store creates a private
   closure capability, authenticates its exact identity, rechecks the locked
-  live attempt, and dispatches once through `FencedOpenAITransport` and the
-  server-owned Task 1 hook. There is no `grant=None`, retry, fallback, cache,
-  callback, tracing, or mutable transport-option path in V2.1.
+  live attempt in a short transaction, closes that transaction, consumes the
+  permit under the store lock, releases the lock, and only then performs the
+  one provider I/O through `FencedOpenAITransport` and the server-owned Task 1
+  hook. Every terminal or authority-loss path invalidates retained grants.
 - Evidence replay recomputes the selected aggregate message set from prepared
   slot identities and locked current canonical refs, and binds source
   kind/id/version or signature, strictest permission, fingerprint key identities,
   workflow/scope/candidate identity, child ordinals, and the terminal result
-  set. Ambiguity persists bounded `evidence_binding_mismatch` only and creates
-  no ReviewItem or fake empty marker.
+  set. ReviewItem permission must equal the recomputed strictest selected
+  evidence permission; both broadened and inconsistently narrowed values fail.
+  Completion/replay ambiguity persists bounded `evidence_binding_mismatch`
+  only and leaves no ReviewItem or fake empty marker.
 - Required PostgreSQL verification uses a freshly empty disposable database
   at `127.0.0.1:55432`, fails rather than skips without its URL, creates a
-  unique schema per test, and drops it in `finally`. Round-two evidence is `28`
-  real store/authority/migration cases, `232` Task 3 union tests, `201` Task 1/2
-  regressions, and `97` service/API/integration tests, zero skips.
+  unique schema per test, and drops it in `finally`. Round-three evidence is
+  `47` real store/authority/concurrency cases, `147` core Task 3 unit/adapter
+  tests, `220` Task 1/2 regressions, `118` service/API/integration tests, and
+  `5` standalone migration tests, zero skips. Provider-blocking barriers cover
+  success, failure, and timeout while concurrent cancellation still commits.

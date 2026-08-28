@@ -4794,15 +4794,20 @@ Cost/security note:
   usage is charged exactly; unknown post-marker usage charges the reserve;
   overruns open the extraction breaker atomically.
 - The provider grant is a store-owned post-commit capability with no module
-  issuer/factory. The real store authenticates the exact live grant and
-  rechecks the locked attempt before its one body-blind Task 1 HTTP-hook
-  dispatch. Grants and permits are non-copyable, non-pickleable, redacted and
-  process-local; retry, fallback, cache, callbacks and tracing stay disabled.
+  issuer/factory or caller-visible transport. The real store authenticates the
+  exact live grant and rechecks the locked attempt in a short transaction,
+  commits and releases all database/grant locks, then consumes the permit
+  before its one body-blind Task 1 HTTP-hook dispatch. Grants and permits are
+  non-copyable, non-pickleable, redacted and process-local; retry, fallback,
+  cache, callbacks and tracing stay disabled. Terminal, cancellation, drift,
+  corruption, recovery, and lease-expiry paths revoke retained authority.
 - Candidate completion is callback-independent: E3 re-queries exactly one
   same-workflow ReviewItem and its contiguous immutable evidence children,
   recomputes the exact selected message-set HMAC from prepared slot identities
-  and current canonical refs, then re-derives candidate/terminal HMACs.
-  Mismatch persists only bounded `evidence_binding_mismatch` failure state.
+  and current canonical refs, requires the ReviewItem permission to equal the
+  recomputed strictest selected-evidence permission, then re-derives
+  candidate/terminal HMACs. Completion or replay mismatch persists only
+  bounded `evidence_binding_mismatch` failure state with no candidate.
 - Alembic head `9d7f3a1c6e20` conditionally replaces the extraction lifecycle
   constraint when the Task 2 table exists, so supported pinned legacy schemas
   remain upgradeable. Real `7c -> 9d`, empty downgrade/cycle, retained-row
@@ -4811,6 +4816,10 @@ Cost/security note:
   requires a supplied V2.1 launch authority, persists the exact V2.1 request,
   and remains in `created` until Task 12 registers the V2.1 graph. Missing or
   invalid authority fails bounded and performs no drafting/provider call.
-- Round-two verification used fake providers only: `232` Task 3 union tests,
-  `28` real PostgreSQL lifecycle/authority/migration cases, `201` proportional
-  Task 1/2 regressions, and `97` service/API/integration tests, zero skips.
+- Round-three verification used fake providers only: `147` core Task 3
+  unit/adapter tests, `47` real PostgreSQL lifecycle/authority/concurrency
+  cases, `220` proportional Task 1/2 regressions, `118`
+  service/API/integration tests, and `5` standalone migration tests, zero
+  skips. Barrier tests prove cancellation commits while success, failure, or
+  timeout provider I/O remains blocked, after which E3/failure accounting is
+  terminal and candidate-free.

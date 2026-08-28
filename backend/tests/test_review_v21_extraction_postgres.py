@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from threading import Event
 from uuid import uuid4
 
 import pytest
@@ -20,6 +21,7 @@ from backend.app.agent_runtime.contracts import (
     EvidencePacket,
     PermissionContext,
 )
+from backend.app.agent_runtime.provider_send_fence import ProviderSendFenceError
 from backend.app.agent_runtime.registry import AgentRegistry
 from backend.app.agent_runtime.review_v2_drafting import (
     CandidateEvidenceRefBinding,
@@ -105,12 +107,12 @@ def _settings(database_url: str) -> Settings:
     )
 
 
-def _actor() -> DemoUser:
+def _actor(*permission_levels: str) -> DemoUser:
     return DemoUser(
         id='task3-owner',
         email='task3-owner@example.test',
         role='employee',
-        permission_levels={'internal'},
+        permission_levels=set(permission_levels or ('internal',)),
         name='Task 3 Owner',
         title='Tester',
         department='Quality',
@@ -189,7 +191,7 @@ def _insert_provider_state(
     )
 
 
-def _seed_runtime(engine, database_url: str):
+def _seed_runtime(engine, database_url: str, *, permission_level: str = 'internal'):
     settings = _settings(database_url)
     with engine.begin() as connection:
         connection.execute(
@@ -229,7 +231,7 @@ def _seed_runtime(engine, database_url: str):
             source_id=f'gmail:task3:{uuid4().hex}',
             source_url='https://private.example/task3',
             title='private title',
-            permission_level='internal',
+            permission_level=permission_level,
             raw_metadata={
                 'content_signature': 'c' * 64,
                 'source_snippet': '검토 가능한 근거 문장',
@@ -259,14 +261,14 @@ def _seed_runtime(engine, database_url: str):
                 input_contract='EvidencePacket',
                 output_contract='AgentRunResult',
                 prompt_versions=('history-extraction:v1',),
-                supported_permissions=('internal',),
+                supported_permissions=('public', 'internal', 'restricted'),
                 capabilities=('history_generation',),
             )
         )
         prepare_review_request(
             db,
             request=request,
-            actor=_actor(),
+            actor=_actor(permission_level),
             registry=registry,
             settings=settings,
         )
@@ -280,7 +282,7 @@ def _seed_runtime(engine, database_url: str):
                     text='검토 가능한 근거 문장',
                     author='owner@example.test',
                     timestamp='2026-08-28T00:00:00Z',
-                    permission_level='internal',
+                    permission_level=permission_level,
                     source_snippet_override='검토 가능한 근거 문장',
                 )
                 for _ in range(3)
@@ -355,7 +357,7 @@ def _seed_runtime(engine, database_url: str):
         prepared = prepare_review_request(
             db,
             request=request,
-            actor=_actor(),
+            actor=_actor(permission_level),
             registry=registry,
             settings=settings,
             v21_config=config,
@@ -364,7 +366,7 @@ def _seed_runtime(engine, database_url: str):
             db,
             prepared=prepared,
             request=request,
-            actor=_actor(),
+            actor=_actor(permission_level),
             settings=settings,
         )
     store = ExtractionCallStore(
@@ -373,6 +375,120 @@ def _seed_runtime(engine, database_url: str):
         prepared_plan_set=plans,
     )
     return factory, store, preflight.thread.thread_id, plan
+
+
+def _candidate_result() -> dict[str, object]:
+    return {
+        'result_kind': 'candidate',
+        'candidate': {
+            'item_type': 'history_event',
+            'title': '제목',
+            'summary': '요약',
+            'reason': '직접 근거',
+            'confidence_score': '0.9800',
+            'uncertainty_reason': None,
+            'field_evidence_bindings': [
+                {'field_key': key, 'evidence_slot_id': f'S0{index}'}
+                for index, key in enumerate(('title', 'summary', 'reason'), start=1)
+            ],
+        },
+        'no_candidate_reason': None,
+    }
+
+
+def _exact_candidate_writer(
+    *,
+    thread_id: str,
+    settings: Settings,
+    item_permission: str,
+):
+    def writer(db, run, callback_plan, _parsed):
+        thread = db.get(AgentWorkflowThread, thread_id)
+        workflow_ref = db.scalar(
+            select(AgentWorkflowEvidenceRef).where(
+                AgentWorkflowEvidenceRef.workflow_thread_id == thread_id
+            )
+        )
+        assert thread is not None and workflow_ref is not None
+        candidate_key = 'e' * 64
+        item = ReviewItem(
+            item_type='history_event',
+            payload={'bounded': True},
+            source_links=['https://private.example/task3'],
+            source_snippets=['검토 가능한 근거 문장'],
+            confidence_score=0.98,
+            permission_level=item_permission,
+            status='pending_review',
+            workflow_thread_id=thread_id,
+            candidate_key=candidate_key,
+            agent_run_id=run.id,
+            candidate_contract_version='c5-v1',
+        )
+        db.add(item)
+        db.flush()
+        message_set_hmac = build_keyed_fingerprint(
+            {
+                'canonical_source_kind': workflow_ref.canonical_source_type,
+                'canonical_source_id': workflow_ref.canonical_row_id,
+                'canonical_version_or_signature': (
+                    workflow_ref.external_revision or workflow_ref.content_signature
+                ),
+                'content_fingerprint': workflow_ref.content_fingerprint,
+                'permission_level': workflow_ref.permission_level_snapshot,
+                'fingerprint_key_version': 'task3-key-v1',
+                'fingerprint_key_material_verifier': 'b' * 64,
+                'messages': [
+                    {
+                        'stable_message_identity': slot.stable_message_identity,
+                        'text_fingerprint': slot.text_fingerprint,
+                    }
+                    for slot in callback_plan.invocation.evidence_slot_identities
+                ],
+            },
+            settings=settings,
+            schema_version='candidate-message-set:v1',
+            policy_version='candidate-message-set:v1',
+        )
+        db.add(
+            ReviewItemEvidenceRef(
+                review_item_id=item.id,
+                workflow_thread_id=thread_id,
+                workflow_evidence_ref_id=workflow_ref.id,
+                candidate_slot_ordinal=1,
+                message_content_fingerprint=message_set_hmac,
+                fingerprint_key_version='task3-key-v1',
+                fingerprint_key_material_verifier='b' * 64,
+            )
+        )
+        binding = CandidateEvidenceRefBinding(
+            workflow_evidence_ref_id=workflow_ref.id,
+            ordinal=1,
+            canonical_source_kind=workflow_ref.canonical_source_type,
+            canonical_source_id=workflow_ref.canonical_row_id,
+            canonical_version_or_signature=(
+                workflow_ref.external_revision or workflow_ref.content_signature
+            ),
+            content_fingerprint=workflow_ref.content_fingerprint,
+            message_set_hmac=message_set_hmac,
+            permission_level=workflow_ref.permission_level_snapshot,
+            fingerprint_key_version='task3-key-v1',
+            fingerprint_key_material_verifier='b' * 64,
+        )
+        evidence_hmac = derive_candidate_evidence_version_hash(
+            workflow_execution_hmac=thread.input_hash,
+            security_scope_hmac=build_keyed_fingerprint(
+                thread.security_scope_id,
+                settings=settings,
+                schema_version='candidate-security-scope:v1',
+                policy_version='candidate-security-scope:v1',
+            ),
+            candidate_key=candidate_key,
+            refs=(binding,),
+            settings=settings,
+        )
+        return candidate_key, evidence_hmac
+
+    return writer
 
 
 def test_postgresql_store_concurrent_claim_marker_and_atomic_empty_completion(
@@ -1147,6 +1263,311 @@ def test_postgresql_candidate_proof_rejects_callback_invented_message_hmac(
         assert call.status == run.status == 'failed'
         assert run.metadata_['failure_reason_code'] == 'evidence_binding_mismatch'
         assert db.scalar(select(ReviewItem)) is None
+
+
+@pytest.mark.parametrize(
+    ('source_permission', 'item_permission', 'expected_status'),
+    (
+        ('internal', 'internal', 'completed'),
+        ('restricted', 'restricted', 'completed'),
+        ('internal', 'public', 'failed'),
+        ('restricted', 'internal', 'failed'),
+        ('restricted', 'public', 'failed'),
+        ('internal', 'restricted', 'failed'),
+    ),
+)
+def test_postgresql_candidate_completion_requires_exact_recomputed_permission(
+    postgres_runtime,
+    source_permission: str,
+    item_permission: str,
+    expected_status: str,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(
+        engine, database_url, permission_level=source_permission
+    )
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=(source_permission,),
+    )
+    store.mark_attempt_started(context)
+    store.complete(
+        context,
+        result=_candidate_result(),
+        usage=ProviderUsage(12, 12),
+        candidate_writer=_exact_candidate_writer(
+            thread_id=thread_id,
+            settings=_settings(database_url),
+            item_permission=item_permission,
+        ),
+    )
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        run = db.scalar(select(AgentRun))
+        item = db.scalar(select(ReviewItem))
+        assert call is not None and run is not None
+        assert call.status == expected_status
+        if expected_status == 'completed':
+            assert item is not None and item.permission_level == source_permission
+            replay = store.claim_or_replay(
+                thread_id,
+                plan,
+                actor_subject_id='task3-owner',
+                allowed_permission_levels=(source_permission,),
+            )
+            assert replay.workflow_thread_id == context.workflow_thread_id
+        else:
+            assert run.metadata_['failure_reason_code'] == 'evidence_binding_mismatch'
+            assert item is None
+
+
+@pytest.mark.parametrize(
+    ('source_permission', 'replayed_item_permission'),
+    (
+        ('internal', 'public'),
+        ('restricted', 'internal'),
+        ('restricted', 'public'),
+        ('internal', 'restricted'),
+    ),
+)
+def test_postgresql_candidate_replay_rejects_any_permission_inequality(
+    postgres_runtime,
+    source_permission: str,
+    replayed_item_permission: str,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(
+        engine, database_url, permission_level=source_permission
+    )
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=(source_permission,),
+    )
+    store.mark_attempt_started(context)
+    store.complete(
+        context,
+        result=_candidate_result(),
+        usage=ProviderUsage(12, 12),
+        candidate_writer=_exact_candidate_writer(
+            thread_id=thread_id,
+            settings=_settings(database_url),
+            item_permission=source_permission,
+        ),
+    )
+    with factory() as db, db.begin():
+        item = db.scalar(select(ReviewItem))
+        assert item is not None
+        item.permission_level = replayed_item_permission
+    with pytest.raises(ExtractionCallStateError, match='evidence_binding_mismatch'):
+        store.claim_or_replay(
+            thread_id,
+            plan,
+            actor_subject_id='task3-owner',
+            allowed_permission_levels=(source_permission,),
+        )
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        run = db.scalar(select(AgentRun))
+        assert call is not None and run is not None
+        assert call.status == run.status == 'failed'
+        assert run.metadata_['failure_reason_code'] == 'evidence_binding_mismatch'
+        assert db.scalar(select(ReviewItem)) is None
+
+
+def test_postgresql_provider_io_releases_locks_so_cancel_latches_before_e3(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    grant = store.mark_attempt_started(context)
+    provider_entered = Event()
+    release_provider = Event()
+
+    def blocked_provider(_invocation, *, timeout):
+        assert timeout == plan.provider_timeout_seconds
+        provider_entered.set()
+        assert release_provider.wait(5)
+        return {'provider': 'output'}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        provider_future = pool.submit(
+            invoke_prepared_extraction,
+            plan.invocation,
+            blocked_provider,
+            store=store,
+            grant=grant,
+        )
+        assert provider_entered.wait(5)
+        cancel_future = pool.submit(
+            store.cancel,
+            context,
+            actor_subject_id='task3-owner',
+        )
+        try:
+            assert cancel_future.result(timeout=2) is None
+        finally:
+            release_provider.set()
+        assert provider_future.result(timeout=5) == {'provider': 'output'}
+
+    store.complete(
+        context,
+        result={
+            'result_kind': 'no_candidate',
+            'candidate': None,
+            'no_candidate_reason': 'no_relevant_evidence',
+        },
+        usage=ProviderUsage(7, 5),
+    )
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        assert call is not None and call.status == 'failed'
+        assert call.charged_input_tokens == 7
+        assert call.charged_output_tokens == 5
+        assert db.scalar(select(ReviewItem)) is None
+    with pytest.raises(ExtractionCallStateError):
+        store.complete(
+            context,
+            result={'result_kind': 'no_candidate'},
+            usage=ProviderUsage(7, 5),
+        )
+
+
+@pytest.mark.parametrize(
+    ('provider_error', 'reason_code'),
+    ((RuntimeError('provider failed'), 'provider_failure'), (TimeoutError(), 'provider_timeout')),
+)
+def test_postgresql_blocked_provider_failure_or_timeout_releases_cancel_and_grant(
+    postgres_runtime,
+    provider_error: Exception,
+    reason_code: str,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    grant = store.mark_attempt_started(context)
+    provider_entered = Event()
+    release_provider = Event()
+
+    def blocked_provider(_invocation, *, timeout):
+        assert timeout == plan.provider_timeout_seconds
+        provider_entered.set()
+        assert release_provider.wait(5)
+        raise provider_error
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        provider_future = pool.submit(
+            invoke_prepared_extraction,
+            plan.invocation,
+            blocked_provider,
+            store=store,
+            grant=grant,
+        )
+        assert provider_entered.wait(5)
+        cancel_future = pool.submit(
+            store.cancel,
+            context,
+            actor_subject_id='task3-owner',
+        )
+        try:
+            assert cancel_future.result(timeout=2) is None
+        finally:
+            release_provider.set()
+        with pytest.raises(type(provider_error)):
+            provider_future.result(timeout=5)
+
+    with pytest.raises(ExtractionCallStateError, match='grant'):
+        invoke_prepared_extraction(
+            plan.invocation,
+            lambda *_args, **_kwargs: pytest.fail('provider called twice'),
+            store=store,
+            grant=grant,
+        )
+    store.fail(context, reason_code=reason_code, usage=None)
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        assert call is not None and call.status == 'failed'
+        assert call.charged_cost_usd == call.reserved_cost_usd
+        assert db.scalar(select(ReviewItem)) is None
+
+
+@pytest.mark.parametrize(
+    'authority_loss',
+    ('complete', 'fail', 'cancel', 'recovery', 'drift', 'lease_expiry'),
+)
+def test_postgresql_terminal_or_authority_loss_invalidates_store_dispatch_grant(
+    postgres_runtime,
+    authority_loss: str,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    grant = store.mark_attempt_started(context)
+    assert not hasattr(grant, 'transport')
+    if authority_loss == 'complete':
+        store.complete(
+            context,
+            result={
+                'result_kind': 'no_candidate',
+                'candidate': None,
+                'no_candidate_reason': 'no_relevant_evidence',
+            },
+            usage=ProviderUsage(1, 1),
+        )
+    elif authority_loss == 'fail':
+        store.fail(context, reason_code='provider_failure', usage=ProviderUsage(1, 1))
+    elif authority_loss == 'cancel':
+        store.cancel(context, actor_subject_id='task3-owner')
+    else:
+        with factory() as db, db.begin():
+            if authority_loss == 'drift':
+                db.execute(text("UPDATE sources SET permission_level='restricted'"))
+            else:
+                db.execute(
+                    text(
+                        "UPDATE auto_review_extraction_calls SET lease_expires_at="
+                        "clock_timestamp() - interval '1 second'"
+                    )
+                )
+        if authority_loss == 'recovery':
+            assert store.recover_expired(context) is None
+
+    called = False
+
+    def provider(_invocation, *, timeout):
+        nonlocal called
+        called = True
+        return timeout
+
+    with pytest.raises((ExtractionCallStateError, ProviderSendFenceError)):
+        invoke_prepared_extraction(
+            plan.invocation,
+            provider,
+            store=store,
+            grant=grant,
+        )
+    with pytest.raises(ProviderSendFenceError):
+        grant.permit.consume_at_dispatch()
+    assert called is False
 
 
 def test_postgresql_candidate_proof_rederives_exact_message_set_and_cached_replay(

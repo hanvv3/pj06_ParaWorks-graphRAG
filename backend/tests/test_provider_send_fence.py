@@ -1,7 +1,7 @@
 import copy
 import json
 import pickle
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -13,14 +13,18 @@ from backend.app.agent_runtime.contracts import (
     PermissionContext,
 )
 from backend.app.agent_runtime.provider_send_fence import (
+    FencedOpenAITransport,
     FencedProviderSendPermit,
     ProviderAttemptGrant,
     ProviderSendFenceError,
 )
 from backend.app.agent_runtime.review_v21_extraction import (
     ExtractionCallLedger,
+    ExtractionCallStateError,
     ExtractionProviderSafetySnapshot,
+    ProviderUsage,
     build_prepared_extraction_plan_set,
+    invoke_prepared_extraction,
 )
 from backend.app.core.config import Settings
 
@@ -33,7 +37,7 @@ class _Clock:
         return self.value
 
 
-def _grant(clock: _Clock, *, commit=None) -> ProviderAttemptGrant:
+def _attempt(clock: _Clock, *, commit=None, db_clock=None):
     settings = Settings(
         agent_runtime_fingerprint_secret='send-fence-test-secret-at-least-32-bytes',
         agent_runtime_fingerprint_key_version='send-fence-v1',
@@ -80,9 +84,14 @@ def _grant(clock: _Clock, *, commit=None) -> ProviderAttemptGrant:
         fingerprint_key_material_verifier='a' * 64,
         safety_snapshots=(safety,),
     ).plans[0]
-    ledger = ExtractionCallLedger(permit_monotonic=clock)
+    ledger = ExtractionCallLedger(permit_monotonic=clock, db_clock=db_clock)
     context = ledger.claim_or_replay('workflow', plan)
-    return ledger.mark_attempt_started(context, commit=commit)
+    grant = ledger.mark_attempt_started(context, commit=commit)
+    return ledger, context, plan, grant
+
+
+def _grant(clock: _Clock, *, commit=None) -> ProviderAttemptGrant:
+    return _attempt(clock, commit=commit)[3]
 
 
 def test_extraction_send_permit_is_one_use_nonserializable_and_expires_before_recovery():
@@ -106,36 +115,42 @@ def test_extraction_send_permit_is_one_use_nonserializable_and_expires_before_re
         late.permit.consume_at_dispatch()
 
 
-def test_fenced_transport_consumes_only_at_dispatch_and_never_reads_or_logs_body(
+def test_store_owned_fence_consumes_only_at_dispatch_and_never_exposes_transport(
     caplog,
 ):
     clock = _Clock()
-    grant = _grant(clock)
+    ledger, _context, plan, grant = _attempt(clock)
     calls = []
 
-    class _OpaqueBody:
-        def __str__(self):  # pragma: no cover - a read is a contract failure
-            raise AssertionError('transport inspected body')
-
-    transport = grant.transport
+    assert not hasattr(grant, 'transport')
     assert not grant.permit.consumed
-    result = transport.dispatch(
-        lambda *, timeout: calls.append(timeout) or 'ok',
-        request_body=_OpaqueBody(),
+    result = invoke_prepared_extraction(
+        plan.invocation,
+        lambda _invocation, *, timeout: calls.append(timeout) or 'ok',
+        store=ledger,
+        grant=grant,
     )
     assert result == 'ok'
     assert calls == [60]
     assert grant.permit.consumed
-    assert 'OpaqueBody' not in caplog.text
+    assert plan.invocation.canonical_text not in caplog.text
 
 
-def test_redirect_retry_or_second_dispatch_reuses_no_consumed_permit():
-    grant = _grant(_Clock())
-    transport = grant.transport
-    transport.dispatch(lambda *, timeout: timeout)
-    for kwargs in ({}, {'is_redirect': True}, {'is_retry': True}):
-        with pytest.raises(ProviderSendFenceError):
-            transport.dispatch(lambda *, timeout: timeout, **kwargs)
+def test_second_store_dispatch_reuses_no_consumed_permit():
+    ledger, _context, plan, grant = _attempt(_Clock())
+    invoke_prepared_extraction(
+        plan.invocation,
+        lambda _invocation, *, timeout: timeout,
+        store=ledger,
+        grant=grant,
+    )
+    with pytest.raises((ProviderSendFenceError, ExtractionCallStateError)):
+        invoke_prepared_extraction(
+            plan.invocation,
+            lambda _invocation, *, timeout: timeout,
+            store=ledger,
+            grant=grant,
+        )
 
 
 def test_restart_has_no_reconstructable_send_permit_and_marker_is_not_send_authority():
@@ -146,6 +161,7 @@ def test_restart_has_no_reconstructable_send_permit_and_marker_is_not_send_autho
             attempt_id='attempt-hmac',
             provider_timeout_seconds=60,
         )
+    assert not hasattr(FencedOpenAITransport, 'dispatch')
 
 
 def test_attempt_grant_is_not_returned_before_marker_commit():
@@ -179,15 +195,77 @@ def test_permit_and_grant_public_construction_copy_pickle_json_and_repr_are_clos
                 serializer(value)
 
 
-def test_fenced_transport_uses_the_task1_server_owned_hook_identity():
-    from backend.app.agent_runtime.auto_review_cost_policy import (
-        is_server_owned_fenced_send_hook,
-    )
-
-    transport = _grant(_Clock()).transport
-    assert is_server_owned_fenced_send_hook(transport.http_hook)
-
-
 def test_no_importable_callable_can_issue_a_provider_attempt_grant():
     issuer = getattr(fence_module, '_issue_provider_attempt_grant', None)
     assert issuer is None
+
+
+def test_store_dispatch_authenticates_task1_server_owned_hook(monkeypatch):
+    from backend.app.agent_runtime import auto_review_cost_policy
+
+    monkeypatch.setattr(
+        auto_review_cost_policy,
+        'is_server_owned_fenced_send_hook',
+        lambda _hook: False,
+    )
+    ledger, _context, plan, grant = _attempt(_Clock())
+    with pytest.raises(ProviderSendFenceError, match='server-owned'):
+        invoke_prepared_extraction(
+            plan.invocation,
+            lambda *_args, **_kwargs: pytest.fail('provider called'),
+            store=ledger,
+            grant=grant,
+        )
+
+
+@pytest.mark.parametrize(
+    'terminal_cause',
+    ('complete', 'fail', 'cancel', 'recovery', 'drift', 'lease_expiry', 'corruption'),
+)
+def test_every_terminal_or_authority_loss_removes_indirect_and_permit_dispatch(
+    terminal_cause: str,
+):
+    now = [datetime(2026, 8, 28, tzinfo=UTC)]
+    clock = _Clock()
+    ledger, context, plan, grant = _attempt(clock, db_clock=lambda: now[0])
+    if terminal_cause == 'complete':
+        ledger.complete(
+            context,
+            result={
+                'result_kind': 'no_candidate',
+                'candidate': None,
+                'no_candidate_reason': 'no_relevant_evidence',
+            },
+            usage=ProviderUsage(1, 1),
+        )
+    elif terminal_cause == 'fail':
+        ledger.fail(context, reason_code='provider_failure')
+    elif terminal_cause == 'cancel':
+        ledger.cancel(context)
+    elif terminal_cause == 'recovery':
+        now[0] += timedelta(seconds=121)
+        ledger.recover_expired(context)
+    elif terminal_cause == 'drift':
+        ledger.set_drift(context)
+    elif terminal_cause == 'lease_expiry':
+        now[0] += timedelta(seconds=121)
+    else:
+        ledger.force_corrupt_completed(context)
+
+    called = False
+
+    def provider(_invocation, *, timeout):
+        nonlocal called
+        called = True
+        return timeout
+
+    with pytest.raises((ExtractionCallStateError, ProviderSendFenceError)):
+        invoke_prepared_extraction(
+            plan.invocation,
+            provider,
+            store=ledger,
+            grant=grant,
+        )
+    with pytest.raises(ProviderSendFenceError):
+        grant.permit.consume_at_dispatch()
+    assert called is False

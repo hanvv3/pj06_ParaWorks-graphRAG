@@ -270,7 +270,6 @@ def test_v21_extraction_rejects_forged_wrapper_around_committed_grant():
         permit = committed.permit
         provider_timeout_seconds = committed.provider_timeout_seconds
         authoritative_lease_expires_at = committed.authoritative_lease_expires_at
-        transport = committed.transport
 
     with pytest.raises(ExtractionCallStateError, match='committed'):
         invoke_prepared_extraction(
@@ -379,11 +378,20 @@ def test_database_clock_owns_claim_attempt_and_lease_timestamps_despite_host_clo
 
 def test_cancel_between_extraction_marker_and_send_latches_without_premature_terminalization():
     ledger = ExtractionCallLedger()
-    context = ledger.claim_or_replay('workflow', _plans().plans[0])
+    plan = _plans().plans[0]
+    context = ledger.claim_or_replay('workflow', plan)
     grant = ledger.mark_attempt_started(context)
     ledger.cancel(context)
     assert ledger.snapshot(context).status == 'claimed'
-    grant.permit.consume_at_dispatch()
+    with pytest.raises((ExtractionCallStateError, ProviderSendFenceError)):
+        invoke_prepared_extraction(
+            plan.invocation,
+            lambda *_args, **_kwargs: pytest.fail('provider called'),
+            store=ledger,
+            grant=grant,
+        )
+    with pytest.raises(ProviderSendFenceError):
+        grant.permit.consume_at_dispatch()
 
 
 def test_terminal_extraction_call_can_never_send_after_lease_recovery():
