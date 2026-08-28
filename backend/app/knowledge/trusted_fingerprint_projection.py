@@ -4,7 +4,21 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Select, and_, delete, exists, or_, select
+from sqlalchemy import (
+    Integer,
+    Select,
+    String,
+    and_,
+    bindparam,
+    column,
+    delete,
+    exists,
+    func,
+    or_,
+    select,
+    tuple_,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
@@ -174,39 +188,111 @@ def build_hidden_collision_exists_statement(
 
 def build_missing_active_projection_exists_statement(
     *,
-    fingerprint_key_version: str,
-    fingerprint_key_material_verifier: str,
+    expected_rows: tuple[ProjectionRowSnapshot, ...],
     excluded_targets: tuple[tuple[str, int], ...] = (),
 ) -> Select:
-    def missing_for(knowledge_type: str, model: type) -> object:
-        matching_projection = exists().where(
-            TrustedKnowledgeFingerprint.knowledge_type == knowledge_type,
-            TrustedKnowledgeFingerprint.knowledge_id == model.id,
-            TrustedKnowledgeFingerprint.review_status == model.review_status,
-            TrustedKnowledgeFingerprint.permission_level == model.permission_level,
-            TrustedKnowledgeFingerprint.fingerprint_key_version
-            == fingerprint_key_version,
-            TrustedKnowledgeFingerprint.fingerprint_key_material_verifier
-            == fingerprint_key_material_verifier,
-        )
-        source_conditions = [
-            model.review_status == 'approved',
-            ~matching_projection,
-        ]
-        excluded_ids = tuple(
-            knowledge_id
-            for target_type, knowledge_id in excluded_targets
-            if target_type == knowledge_type
-        )
-        if excluded_ids:
-            source_conditions.append(model.id.not_in(excluded_ids))
-        return exists().where(*source_conditions)
+    excluded = frozenset(excluded_targets)
+    expected = tuple(
+        row
+        for row in expected_rows
+        if (row.knowledge_type, row.knowledge_id) not in excluded
+    )
 
-    return select(
-        or_(
-            missing_for('history_event', HistoryEvent),
-            missing_for('timeline_event', TimelineEvent),
+    projection_in_scope: object = True
+    if excluded:
+        projection_in_scope = tuple_(
+            TrustedKnowledgeFingerprint.knowledge_type,
+            TrustedKnowledgeFingerprint.knowledge_id,
+        ).not_in(tuple(sorted(excluded)))
+    if not expected:
+        return select(
+            select(TrustedKnowledgeFingerprint.id)
+            .where(projection_in_scope)
+            .exists()
         )
+    expected_payload = [
+        {
+            field: getattr(row, field)
+            for field in ProjectionRowSnapshot.__dataclass_fields__
+        }
+        for row in expected
+    ]
+    expected_values = (
+        func.jsonb_to_recordset(
+            bindparam(
+                'expected_projection_rows',
+                value=expected_payload,
+                type_=JSONB,
+            )
+        )
+        .table_valued(
+            column('knowledge_type', String()),
+            column('knowledge_id', Integer()),
+            column('scope_resolution', String()),
+            column('security_scope_id', String()),
+            column('project_scope_hmac', String()),
+            column('normalized_title_bucket_hmac', String()),
+            column('normalized_claim_fingerprint', String()),
+            column('permission_level', String()),
+            column('review_status', String()),
+            column('fingerprint_key_version', String()),
+            column('fingerprint_key_material_verifier', String()),
+        )
+        .render_derived(
+            name='expected_trusted_fingerprints',
+            with_types=True,
+        )
+    )
+    exact_match = and_(
+        TrustedKnowledgeFingerprint.knowledge_type
+        == expected_values.c.knowledge_type,
+        TrustedKnowledgeFingerprint.knowledge_id == expected_values.c.knowledge_id,
+        TrustedKnowledgeFingerprint.scope_resolution
+        == expected_values.c.scope_resolution,
+        TrustedKnowledgeFingerprint.security_scope_id.is_not_distinct_from(
+            expected_values.c.security_scope_id
+        ),
+        TrustedKnowledgeFingerprint.project_scope_hmac
+        == expected_values.c.project_scope_hmac,
+        TrustedKnowledgeFingerprint.normalized_title_bucket_hmac
+        == expected_values.c.normalized_title_bucket_hmac,
+        TrustedKnowledgeFingerprint.normalized_claim_fingerprint.is_not_distinct_from(
+            expected_values.c.normalized_claim_fingerprint
+        ),
+        TrustedKnowledgeFingerprint.permission_level
+        == expected_values.c.permission_level,
+        TrustedKnowledgeFingerprint.review_status == expected_values.c.review_status,
+        TrustedKnowledgeFingerprint.fingerprint_key_version
+        == expected_values.c.fingerprint_key_version,
+        TrustedKnowledgeFingerprint.fingerprint_key_material_verifier
+        == expected_values.c.fingerprint_key_material_verifier,
+    )
+    missing = (
+        select(expected_values.c.knowledge_id)
+        .where(~select(TrustedKnowledgeFingerprint.id).where(exact_match).exists())
+        .exists()
+    )
+    extra = (
+        select(TrustedKnowledgeFingerprint.id)
+        .where(
+            projection_in_scope,
+            ~select(expected_values.c.knowledge_id).where(exact_match).exists(),
+        )
+        .exists()
+    )
+    return select(or_(missing, extra))
+
+
+def source_projection_snapshots(
+    db: Session,
+    *,
+    settings: Settings,
+    fingerprint_key_material_verifier: str,
+) -> tuple[ProjectionRowSnapshot, ...]:
+    return _source_snapshots(
+        db,
+        settings=settings,
+        verifier=fingerprint_key_material_verifier,
     )
 
 
@@ -295,18 +381,25 @@ def project_approved_effects(
         else ()
     )
     missing_active_row = True
-    if runtime is not None:
-        missing_active_row = bool(
-            db.scalar(
-                build_missing_active_projection_exists_statement(
-                    fingerprint_key_version=runtime.fingerprint_key_version,
-                    fingerprint_key_material_verifier=(
-                        runtime.fingerprint_key_material_verifier
-                    ),
-                    excluded_targets=excluded_targets,
+    if runtime is not None and db.get_bind().dialect.name == 'postgresql':
+        try:
+            expected_rows = source_projection_snapshots(
+                db,
+                settings=settings,
+                fingerprint_key_material_verifier=(
+                    runtime.fingerprint_key_material_verifier
+                ),
+            )
+            missing_active_row = bool(
+                db.scalar(
+                    build_missing_active_projection_exists_statement(
+                        expected_rows=expected_rows,
+                        excluded_targets=excluded_targets,
+                    )
                 )
             )
-        )
+        except (TypeError, ValueError):
+            missing_active_row = True
     started_healthy = bool(
         db.get_bind().dialect.name == 'postgresql'
         and projection_identity_ready(
@@ -472,7 +565,11 @@ def rebuild_trusted_fingerprint_projection(
                 )
             ).all()
         )
-        expected = _source_snapshots(db, settings=settings, verifier=configured_verifier)
+        expected = source_projection_snapshots(
+            db,
+            settings=settings,
+            fingerprint_key_material_verifier=configured_verifier,
+        )
         expected_summary = summary_for_rows(expected, settings=settings)
         replayed = old_rows == expected
         db.execute(delete(TrustedKnowledgeFingerprint))
@@ -488,16 +585,15 @@ def rebuild_trusted_fingerprint_projection(
             ).all()
         )
         projected_summary = summary_for_rows(projected, settings=settings)
-        missing_active_row = bool(
-            db.scalar(
-                build_missing_active_projection_exists_statement(
-                    fingerprint_key_version=runtime.fingerprint_key_version,
-                    fingerprint_key_material_verifier=(
-                        runtime.fingerprint_key_material_verifier
-                    ),
+        missing_active_row = True
+        if db.get_bind().dialect.name == 'postgresql':
+            missing_active_row = bool(
+                db.scalar(
+                    build_missing_active_projection_exists_statement(
+                        expected_rows=expected,
+                    )
                 )
             )
-        )
         ready = bool(
             db.get_bind().dialect.name == 'postgresql'
             and runtime.ready
@@ -676,14 +772,18 @@ def _source_snapshots(
         ('timeline_event', TimelineEvent),
     ):
         targets = tuple(
-            db.scalars(
-                select(model)
+            db.execute(
+                select(model, AgentWorkflowThread.security_scope_id)
+                .outerjoin(ReviewItem, ReviewItem.id == model.source_review_item_id)
+                .outerjoin(
+                    AgentWorkflowThread,
+                    AgentWorkflowThread.thread_id == ReviewItem.workflow_thread_id,
+                )
                 .where(model.review_status == 'approved')
                 .order_by(model.id)
             ).all()
         )
-        for target in targets:
-            scope = _target_scope(db, target.source_review_item_id)
+        for target, scope in targets:
             exact = scope is not None
             fields = (
                 {'title': target.title, 'reason': target.reason}

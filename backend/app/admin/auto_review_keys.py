@@ -199,6 +199,7 @@ def _read_locked_status(db: Session, *, settings: Settings) -> AutoReviewKeyStat
     from backend.app.knowledge.trusted_fingerprint_projection import (
         build_missing_active_projection_exists_statement,
         projection_identity_ready,
+        source_projection_snapshots,
     )
 
     runtime = db.scalar(
@@ -233,13 +234,20 @@ def _read_locked_status(db: Session, *, settings: Settings) -> AutoReviewKeyStat
         and runtime.fingerprint_key_material_verifier == configured_verifier
     )
     missing_active_row = True
-    if runtime is not None and projection is not None:
+    if (
+        runtime is not None
+        and projection is not None
+        and db.get_bind().dialect.name == 'postgresql'
+    ):
         missing_active_row = bool(
             db.scalar(
                 build_missing_active_projection_exists_statement(
-                    fingerprint_key_version=runtime.fingerprint_key_version,
-                    fingerprint_key_material_verifier=(
-                        runtime.fingerprint_key_material_verifier
+                    expected_rows=source_projection_snapshots(
+                        db,
+                        settings=settings,
+                        fingerprint_key_material_verifier=(
+                            runtime.fingerprint_key_material_verifier
+                        ),
                     ),
                 )
             )

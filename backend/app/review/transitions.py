@@ -41,6 +41,7 @@ from backend.app.knowledge.trusted_fingerprint_projection import (
     demote_trusted_fingerprint_projection,
     project_approved_effects,
     projection_identity_ready,
+    source_projection_snapshots,
 )
 from backend.app.knowledge.trusted_provenance import (
     TrustedPromotionBundle,
@@ -83,6 +84,13 @@ from backend.app.schemas.review_workflow import (
 )
 
 ReviewAction = Literal['approve', 'reject', 'needs_more_evidence']
+
+
+class CurrentPermissionResolver(Protocol):
+    def __call__(
+        self,
+        subject_id: str,
+    ) -> tuple[str, Sequence[str]] | None: ...
 
 
 @dataclass(frozen=True)
@@ -156,8 +164,14 @@ class CanonicalEvidenceDrift(ValueError):  # noqa: N818 - policy outcome
 
 
 class ReviewTransitionService:
-    def __init__(self, *, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        settings: Settings | None = None,
+        current_permission_resolver: CurrentPermissionResolver | None = None,
+    ) -> None:
         self._settings = settings or get_settings()
+        self._current_permission_resolver = current_permission_resolver
 
     def transition(
         self,
@@ -223,6 +237,11 @@ class ReviewTransitionService:
                     self._require_auto_validation_multiplicity_after_item_lock(
                         db,
                         locator=auto_locator,
+                    )
+                    self._require_current_owner_permissions(
+                        db,
+                        item=item,
+                        actor=actor,
                     )
                 return self._transition_item(
                     db=db,
@@ -296,7 +315,11 @@ class ReviewTransitionService:
         *,
         context: KeyGenerationLockedContext | None,
     ) -> None:
-        if self._settings.auto_review_mode != 'enforce' or context is None:
+        if (
+            self._settings.auto_review_mode != 'enforce'
+            or context is None
+            or db.get_bind().dialect.name != 'postgresql'
+        ):
             raise AutoReviewAdmissionNotReady('Automatic review admission is not ready')
         configured_verifier = fingerprint_key_material_verifier(
             self._settings.agent_runtime_fingerprint_secret
@@ -324,8 +347,11 @@ class ReviewTransitionService:
         missing_active_row = bool(
             db.scalar(
                 build_missing_active_projection_exists_statement(
-                    fingerprint_key_version=context.key_version,
-                    fingerprint_key_material_verifier=context.material_verifier,
+                    expected_rows=source_projection_snapshots(
+                        db,
+                        settings=self._settings,
+                        fingerprint_key_material_verifier=context.material_verifier,
+                    ),
                 )
             )
         )
@@ -780,6 +806,90 @@ class ReviewTransitionService:
         if validation_ids != (locator.validation_id,):
             raise AutoReviewAdmissionNotReady(
                 'Automatic review validation multiplicity changed'
+            )
+
+    def _require_current_owner_permissions(
+        self,
+        db: Session,
+        *,
+        item: ReviewItem,
+        actor: ReviewResolutionActor,
+    ) -> None:
+        if (
+            self._current_permission_resolver is None
+            or item.workflow_thread_id is None
+        ):
+            raise AutoReviewAdmissionNotReady(
+                'Automatic review current owner permissions are unavailable'
+            )
+        workflow = db.scalar(
+            select(AgentWorkflowThread)
+            .where(AgentWorkflowThread.thread_id == item.workflow_thread_id)
+            .execution_options(populate_existing=True)
+        )
+        if workflow is None:
+            raise AutoReviewAdmissionNotReady(
+                'Automatic review current owner is unavailable'
+            )
+        resolved = self._current_permission_resolver(workflow.owner_subject_id)
+        if resolved is None or not isinstance(resolved, tuple) or len(resolved) != 2:
+            raise AutoReviewAdmissionNotReady(
+                'Automatic review current owner is unavailable'
+            )
+        resolved_subject_id, raw_levels = resolved
+        if (
+            resolved_subject_id != workflow.owner_subject_id
+            or isinstance(raw_levels, (str, bytes))
+        ):
+            raise AutoReviewAdmissionNotReady(
+                'Automatic review current owner identity is stale'
+            )
+        current_levels = tuple(raw_levels)
+        if any(level not in PERMISSION_ORDER for level in current_levels):
+            raise AutoReviewAdmissionNotReady(
+                'Automatic review current owner permissions are invalid'
+            )
+        effective_levels = frozenset(current_levels).intersection(
+            actor.allowed_permission_levels
+        )
+        if item.permission_level not in effective_levels:
+            raise AutoReviewAdmissionNotReady(
+                'Automatic review item permission is no longer authorized'
+            )
+        source_ids = tuple(
+            sorted(
+                set(
+                    db.scalars(
+                        select(AgentWorkflowEvidenceRef.canonical_row_id)
+                        .join(
+                            ReviewItemEvidenceRef,
+                            ReviewItemEvidenceRef.workflow_evidence_ref_id
+                            == AgentWorkflowEvidenceRef.id,
+                        )
+                        .where(
+                            ReviewItemEvidenceRef.review_item_id == item.id,
+                            AgentWorkflowEvidenceRef.workflow_thread_id
+                            == item.workflow_thread_id,
+                        )
+                    ).all()
+                )
+            )
+        )
+        sources = tuple(
+            db.scalars(
+                select(Source)
+                .where(Source.id.in_(source_ids))
+                .order_by(Source.id)
+                .execution_options(populate_existing=True)
+            ).all()
+        )
+        if (
+            not source_ids
+            or tuple(source.id for source in sources) != source_ids
+            or any(source.permission_level not in effective_levels for source in sources)
+        ):
+            raise AutoReviewAdmissionNotReady(
+                'Automatic review source permission is no longer authorized'
             )
 
     def transition_many(

@@ -12,7 +12,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from pydantic import SecretStr
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, event, insert, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
@@ -50,6 +50,7 @@ from backend.app.knowledge.trusted_fingerprint_projection import (
     projection_identity_ready,
     projection_row_digest,
     rebuild_trusted_fingerprint_projection,
+    source_projection_snapshots,
 )
 from backend.app.knowledge.trusted_provenance import (
     TrustedProvenanceMismatch,
@@ -285,6 +286,78 @@ def _snapshot(*, knowledge_id: int = 1, claim: str = 'a' * 64) -> ProjectionRowS
         fingerprint_key_version='v1',
         fingerprint_key_material_verifier='d' * 64,
     )
+
+
+def _current_permission_resolver(
+    *,
+    levels: tuple[str, ...] = ('public', 'internal'),
+    resolved_subject_id: str | None = None,
+):
+    def resolve(requested_subject_id: str):
+        return (
+            resolved_subject_id or requested_subject_id,
+            levels,
+        )
+
+    return resolve
+
+
+def _auto_resolution_service(settings: Settings) -> AutoReviewResolutionService:
+    return AutoReviewResolutionService(
+        settings=settings,
+        current_permission_resolver=_current_permission_resolver(),
+    )
+
+
+def _corrupt_projection_identity(
+    db: Session,
+    *,
+    drift_kind: str,
+    knowledge_type: str,
+    knowledge_id: int,
+) -> None:
+    row = db.scalar(
+        select(TrustedKnowledgeFingerprint).where(
+            TrustedKnowledgeFingerprint.knowledge_type == knowledge_type,
+            TrustedKnowledgeFingerprint.knowledge_id == knowledge_id,
+        )
+    )
+    assert row is not None
+    if drift_kind == 'title':
+        row.normalized_title_bucket_hmac = '9' * 64
+    elif drift_kind == 'claim':
+        row.normalized_claim_fingerprint = '8' * 64
+    elif drift_kind == 'project':
+        row.project_scope_hmac = '7' * 64
+    elif drift_kind == 'exact_scope':
+        row.scope_resolution = 'legacy_unknown'
+        row.security_scope_id = None
+        row.normalized_claim_fingerprint = None
+    elif drift_kind == 'legacy_scope':
+        row.scope_resolution = 'exact'
+        row.security_scope_id = 'scope-a'
+        row.normalized_claim_fingerprint = '6' * 64
+    elif drift_kind == 'extra':
+        db.add(
+            TrustedKnowledgeFingerprint(
+                knowledge_type=row.knowledge_type,
+                knowledge_id=2_000_000 + row.id,
+                scope_resolution=row.scope_resolution,
+                security_scope_id=row.security_scope_id,
+                project_scope_hmac=row.project_scope_hmac,
+                normalized_title_bucket_hmac=row.normalized_title_bucket_hmac,
+                normalized_claim_fingerprint=row.normalized_claim_fingerprint,
+                permission_level=row.permission_level,
+                review_status=row.review_status,
+                fingerprint_key_version=row.fingerprint_key_version,
+                fingerprint_key_material_verifier=(
+                    row.fingerprint_key_material_verifier
+                ),
+            )
+        )
+    else:
+        raise AssertionError(f'unsupported projection drift: {drift_kind}')
+    db.flush()
 
 
 def _seed_c5_item(
@@ -991,6 +1064,28 @@ def _reuse_directive_for_item(
     )
 
 
+def _prepare_exact_auto_reaffirmation(
+    db: Session,
+    *,
+    settings: Settings,
+) -> tuple[ReviewItem, ReviewItem, ReuseExistingPromotion]:
+    canonical = _seed_c5_item(db)
+    ReviewTransitionService(settings=settings).transition(
+        db=db,
+        item_id=canonical.id,
+        action='approve',
+        actor=human_review_actor(USERS['admin']),
+    )
+    directive = _reuse_directive_for_item(db, canonical)
+    candidate = _seed_c5_item(
+        db,
+        graph_version='company-memory-review-v2.1-auto-review',
+        payload=dict(canonical.payload),
+    )
+    _seed_completed_validation(db, candidate, settings=settings)
+    return canonical, candidate, directive
+
+
 def test_timeline_fingerprint_uses_only_title_and_result_summary() -> None:
     settings = _settings()
     left = _item('timeline_event')
@@ -1241,7 +1336,7 @@ def test_exact_reaffirmation_reuses_canonical_ids_and_adds_own_links(
         expected_companion_id=companion_link.knowledge_id,
         expected_companion_claim_fingerprint=companion_link.claim_fingerprint,
     )
-    reaffirmed = AutoReviewResolutionService(settings=settings).resolve(
+    reaffirmed = _auto_resolution_service(settings).resolve(
         db=db_session,
         item_id=second_item.id,
         directive=directive,
@@ -1314,7 +1409,7 @@ def test_reaffirmation_replay_returns_same_canonical_result(
         expected_companion_id=companion.knowledge_id,
         expected_companion_claim_fingerprint=companion.claim_fingerprint,
     )
-    service = AutoReviewResolutionService(settings=settings)
+    service = _auto_resolution_service(settings)
     first = service.resolve(db=db_session, item_id=second_item.id, directive=directive)
     replay = service.resolve(db=db_session, item_id=second_item.id, directive=directive)
     assert replay.replayed is True
@@ -1374,7 +1469,7 @@ def test_auto_approval_is_human_only_when_admission_is_not_fresh(
     db.commit()
 
     with pytest.raises(AutoReviewHumanOnly):
-        AutoReviewResolutionService(settings=effective_settings).resolve(
+        _auto_resolution_service(effective_settings).resolve(
             db=db,
             item_id=candidate.id,
             directive=directive,
@@ -1430,7 +1525,7 @@ def test_auto_approval_rechecks_provider_and_rollout_control_snapshots(
     db.commit()
 
     with pytest.raises(AutoReviewHumanOnly):
-        AutoReviewResolutionService(settings=settings).resolve(
+        _auto_resolution_service(settings).resolve(
             db=db,
             item_id=candidate.id,
             directive=directive,
@@ -1474,7 +1569,7 @@ def test_auto_reaffirmation_rechecks_visible_and_hidden_title_collisions(
     _seed_completed_validation(db, candidate, settings=settings)
 
     with pytest.raises(AutoReviewHumanOnly):
-        AutoReviewResolutionService(settings=settings).resolve(
+        _auto_resolution_service(settings).resolve(
             db=db,
             item_id=candidate.id,
             directive=directive,
@@ -1520,6 +1615,416 @@ def test_key_admin_status_rechecks_projection_identity_and_server_side_coverage(
     assert status.runtime_ready is True
     assert status.projection_ready is False
     assert status.projection_rebuild_required is True
+
+
+def test_empty_source_and_projection_are_ready_at_rebuild_status_and_auto_preflight(
+    auto_review_postgres: tuple[sessionmaker[Session], Settings],
+) -> None:
+    base_factory, settings = auto_review_postgres
+    connection = base_factory.kw['bind'].connect()
+    outer_transaction = connection.begin()
+    factory = sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode='create_savepoint',
+    )
+    try:
+        connection.execute(
+            text(
+                'TRUNCATE TABLE history_events, timeline_events, '
+                'trusted_knowledge_fingerprints CASCADE'
+            )
+        )
+        rebuilt = rebuild_trusted_fingerprint_projection(
+            session_factory=factory,
+            settings=settings,
+        )
+        assert rebuilt.ready is True
+        assert rebuilt.source_count == rebuilt.projected_count == 0
+        status = AutoReviewKeyAdminService(
+            session_factory=factory,
+            settings=settings,
+        ).status()
+        assert status.projection_ready is True
+        assert status.projection_rebuild_required is False
+        with factory() as db:
+            candidate = _seed_c5_item(
+                db,
+                graph_version='company-memory-review-v2.1-auto-review',
+            )
+            _seed_completed_validation(db, candidate, settings=settings)
+            directive = ReuseExistingPromotion(
+                expected_type='history_event',
+                expected_id=999_999,
+                expected_claim_fingerprint='a' * 64,
+                expected_companion_id=999_998,
+                expected_companion_claim_fingerprint='b' * 64,
+            )
+            with pytest.raises(AutoReviewHumanOnly) as exc_info:
+                _auto_resolution_service(settings).resolve(
+                    db=db,
+                    item_id=candidate.id,
+                    directive=directive,
+                )
+            assert str(exc_info.value.__cause__) == (
+                'Automatic review candidate claim is not exact'
+            )
+            assert db.scalar(select(TrustedKnowledgeFingerprint.id)) is None
+    finally:
+        outer_transaction.rollback()
+        connection.close()
+
+
+def test_large_projection_rebuild_status_and_auto_preflight_use_bounded_parameters(
+    auto_review_postgres: tuple[sessionmaker[Session], Settings],
+) -> None:
+    base_factory, settings = auto_review_postgres
+    connection = base_factory.kw['bind'].connect()
+    outer_transaction = connection.begin()
+    factory = sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode='create_savepoint',
+    )
+    expected_count = 7_282
+    projection_parameter_counts: list[int] = []
+
+    def observe_projection_parameters(
+        _connection,
+        _cursor,
+        statement: str,
+        parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if 'expected_trusted_fingerprints' in statement:
+            projection_parameter_counts.append(len(parameters))
+
+    event.listen(
+        base_factory.kw['bind'],
+        'before_cursor_execute',
+        observe_projection_parameters,
+    )
+    try:
+        connection.execute(
+            text(
+                'TRUNCATE TABLE history_events, timeline_events, '
+                'trusted_knowledge_fingerprints CASCADE'
+            )
+        )
+        with factory() as db:
+            for start in range(0, expected_count, 500):
+                db.execute(
+                    insert(TimelineEvent),
+                    [
+                        {
+                            'project_key': None,
+                            'title': f'bounded projection {ordinal}',
+                            'result_summary': f'exact result {ordinal}',
+                            'source_links': ['https://example.test/large'],
+                            'source_snippets': ['bounded evidence'],
+                            'confidence_score': 1.0,
+                            'permission_level': 'internal',
+                            'review_status': 'approved',
+                            'source_review_item_id': None,
+                        }
+                        for ordinal in range(start, min(start + 500, expected_count))
+                    ],
+                )
+            db.commit()
+        rebuilt = rebuild_trusted_fingerprint_projection(
+            session_factory=factory,
+            settings=settings,
+        )
+        assert rebuilt.ready is True
+        assert rebuilt.source_count == rebuilt.projected_count == expected_count
+        status = AutoReviewKeyAdminService(
+            session_factory=factory,
+            settings=settings,
+        ).status()
+        assert status.projection_ready is True
+        assert status.projection_rebuild_required is False
+        with factory() as db:
+            candidate = _seed_c5_item(
+                db,
+                graph_version='company-memory-review-v2.1-auto-review',
+            )
+            _seed_completed_validation(db, candidate, settings=settings)
+            directive = ReuseExistingPromotion(
+                expected_type='history_event',
+                expected_id=999_999,
+                expected_claim_fingerprint='a' * 64,
+                expected_companion_id=999_998,
+                expected_companion_claim_fingerprint='b' * 64,
+            )
+            with pytest.raises(AutoReviewHumanOnly) as exc_info:
+                _auto_resolution_service(settings).resolve(
+                    db=db,
+                    item_id=candidate.id,
+                    directive=directive,
+                )
+            assert str(exc_info.value.__cause__) == (
+                'Automatic review candidate claim is not exact'
+            )
+        assert projection_parameter_counts
+        assert max(projection_parameter_counts) <= 3
+    finally:
+        event.remove(
+            base_factory.kw['bind'],
+            'before_cursor_execute',
+            observe_projection_parameters,
+        )
+        outer_transaction.rollback()
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    'drift_kind',
+    ['title', 'claim', 'project', 'exact_scope', 'legacy_scope', 'extra'],
+)
+def test_complete_projection_drift_disables_status_and_auto_admission(
+    auto_review_db_session: tuple[Session, Settings],
+    drift_kind: str,
+) -> None:
+    db, settings = auto_review_db_session
+    canonical, candidate, directive = _prepare_exact_auto_reaffirmation(
+        db,
+        settings=settings,
+    )
+    knowledge_type = directive.expected_type
+    knowledge_id = directive.expected_id
+    if drift_kind == 'legacy_scope':
+        legacy = HistoryEvent(
+            title=f'legacy projection {uuid4().hex}',
+            reason='scope is intentionally unavailable',
+            project_key=None,
+            source_links=['https://example.test/legacy'],
+            source_snippets=['legacy evidence'],
+            confidence_score=1.0,
+            permission_level='internal',
+            review_status='approved',
+            source_review_item_id=None,
+        )
+        db.add(legacy)
+        db.commit()
+        rebuilt = rebuild_trusted_fingerprint_projection(
+            session_factory=sessionmaker(bind=db.get_bind(), expire_on_commit=False),
+            settings=settings,
+        )
+        assert rebuilt.ready is True
+        knowledge_type = 'history_event'
+        knowledge_id = legacy.id
+    _corrupt_projection_identity(
+        db,
+        drift_kind=drift_kind,
+        knowledge_type=knowledge_type,
+        knowledge_id=knowledge_id,
+    )
+    db.commit()
+
+    factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
+    status = AutoReviewKeyAdminService(
+        session_factory=factory,
+        settings=settings,
+    ).status()
+    assert status.projection_ready is False
+    assert status.projection_rebuild_required is True
+
+    with pytest.raises(AutoReviewHumanOnly) as exc_info:
+        _auto_resolution_service(settings).resolve(
+            db=db,
+            item_id=candidate.id,
+            directive=directive,
+        )
+    assert str(exc_info.value.__cause__) == 'Automatic review projection is not ready'
+    assert db.get(ReviewItem, candidate.id).status == 'pending_review'
+
+
+@pytest.mark.parametrize(
+    'drift_kind',
+    ['title', 'claim', 'project', 'exact_scope', 'legacy_scope', 'extra'],
+)
+def test_rebuild_finalization_rejects_complete_projection_drift(
+    auto_review_postgres: tuple[sessionmaker[Session], Settings],
+    drift_kind: str,
+) -> None:
+    factory, settings = auto_review_postgres
+    with factory() as setup:
+        canonical = _seed_c5_item(setup)
+        ReviewTransitionService(settings=settings).transition(
+            db=setup,
+            item_id=canonical.id,
+            action='approve',
+            actor=human_review_actor(USERS['admin']),
+        )
+        directive = _reuse_directive_for_item(setup, canonical)
+        knowledge_type = directive.expected_type
+        knowledge_id = directive.expected_id
+        if drift_kind == 'legacy_scope':
+            legacy = HistoryEvent(
+                title=f'legacy rebuild {uuid4().hex}',
+                reason='scope is intentionally unavailable',
+                project_key=None,
+                source_links=['https://example.test/legacy'],
+                source_snippets=['legacy evidence'],
+                confidence_score=1.0,
+                permission_level='internal',
+                review_status='approved',
+                source_review_item_id=None,
+            )
+            setup.add(legacy)
+            setup.flush()
+            knowledge_type = 'history_event'
+            knowledge_id = legacy.id
+        setup.commit()
+
+    class CorruptingProjectionSession(Session):
+        def execute(self, statement, *args, **kwargs):  # type: ignore[no-untyped-def]
+            result = super().execute(statement, *args, **kwargs)
+            table = getattr(statement, 'table', None)
+            if (
+                statement.__class__.__name__ == 'Delete'
+                and getattr(table, 'name', None) == 'trusted_knowledge_fingerprints'
+            ):
+                self.info['projection_replaced'] = True
+            return result
+
+        def scalar(self, statement, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if self.info.get('projection_replaced') and not self.info.get(
+                'projection_corrupted'
+            ):
+                self.info['projection_corrupted'] = True
+                _corrupt_projection_identity(
+                    self,
+                    drift_kind=drift_kind,
+                    knowledge_type=knowledge_type,
+                    knowledge_id=knowledge_id,
+                )
+            return super().scalar(statement, *args, **kwargs)
+
+    corrupting_factory = sessionmaker(
+        bind=factory.kw['bind'],
+        class_=CorruptingProjectionSession,
+        expire_on_commit=False,
+    )
+    result = rebuild_trusted_fingerprint_projection(
+        session_factory=corrupting_factory,
+        settings=settings,
+    )
+    assert result.ready is False
+    status = AutoReviewKeyAdminService(
+        session_factory=factory,
+        settings=settings,
+    ).status()
+    assert status.projection_ready is False
+    assert status.projection_rebuild_required is True
+
+
+@pytest.mark.parametrize('owner_failure', ['unknown', 'identity_mismatch'])
+def test_auto_resolution_is_human_only_when_current_owner_is_not_exact(
+    auto_review_db_session: tuple[Session, Settings],
+    owner_failure: str,
+) -> None:
+    db, settings = auto_review_db_session
+    _, candidate, directive = _prepare_exact_auto_reaffirmation(
+        db,
+        settings=settings,
+    )
+    service = AutoReviewResolutionService(
+        settings=settings,
+        current_permission_resolver=(
+            (lambda _subject_id: None)
+            if owner_failure == 'unknown'
+            else _current_permission_resolver(resolved_subject_id='different-owner')
+        ),
+    )
+    with pytest.raises(AutoReviewHumanOnly):
+        service.resolve(db=db, item_id=candidate.id, directive=directive)
+    assert db.get(ReviewItem, candidate.id).status == 'pending_review'
+
+
+def test_auto_resolution_rechecks_concurrent_owner_permission_removal(
+    auto_review_postgres: tuple[sessionmaker[Session], Settings],
+) -> None:
+    factory, settings = auto_review_postgres
+    rebuilt = rebuild_trusted_fingerprint_projection(
+        session_factory=factory,
+        settings=settings,
+    )
+    assert rebuilt.ready is True
+    with factory() as setup:
+        _, candidate, directive = _prepare_exact_auto_reaffirmation(
+            setup,
+            settings=settings,
+        )
+        candidate_id = candidate.id
+        source_id = setup.scalar(
+            select(AgentWorkflowEvidenceRef.canonical_row_id)
+            .where(
+                AgentWorkflowEvidenceRef.workflow_thread_id
+                == candidate.workflow_thread_id
+            )
+            .order_by(AgentWorkflowEvidenceRef.ordinal)
+        )
+        assert source_id is not None
+
+    current_levels = ['public', 'internal']
+    completed = Event()
+    source_lock_attempted = Event()
+    outcomes: list[str] = []
+
+    def observe_source_lock(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if 'FROM sources' in statement and 'FOR SHARE' in statement:
+            source_lock_attempted.set()
+
+    def current_permission_resolver(subject_id: str):
+        return subject_id, tuple(current_levels)
+
+    def resolve_after_source_lock() -> None:
+        with factory() as worker:
+            try:
+                AutoReviewResolutionService(
+                    settings=settings,
+                    current_permission_resolver=current_permission_resolver,
+                ).resolve(
+                    db=worker,
+                    item_id=candidate_id,
+                    directive=directive,
+                )
+                outcomes.append('approved')
+            except AutoReviewHumanOnly:
+                outcomes.append('human_only')
+                worker.rollback()
+            finally:
+                completed.set()
+
+    event.listen(factory.kw['bind'], 'before_cursor_execute', observe_source_lock)
+    try:
+        with factory() as source_writer:
+            source_writer.scalar(
+                select(Source).where(Source.id == source_id).with_for_update()
+            )
+            worker_thread = Thread(target=resolve_after_source_lock)
+            worker_thread.start()
+            assert source_lock_attempted.wait(5)
+            assert completed.is_set() is False
+            current_levels[:] = ['public']
+            source_writer.rollback()
+            worker_thread.join(5)
+    finally:
+        event.remove(factory.kw['bind'], 'before_cursor_execute', observe_source_lock)
+
+    assert completed.is_set()
+    assert outcomes == ['human_only']
+    with factory() as check:
+        assert check.get(ReviewItem, candidate_id).status == 'pending_review'
 
 
 @pytest.mark.parametrize(
@@ -1570,7 +2075,7 @@ def test_auto_approval_rechecks_concurrent_canonical_drift_after_total_order_loc
     def approve_after_lock() -> None:
         with factory() as worker:
             try:
-                AutoReviewResolutionService(settings=settings).resolve(
+                _auto_resolution_service(settings).resolve(
                     db=worker,
                     item_id=candidate_id,
                     directive=directive,
@@ -1766,7 +2271,7 @@ def test_auto_call_locks_precede_review_item_lock(
     def approve() -> None:
         with factory() as worker:
             try:
-                result = AutoReviewResolutionService(settings=settings).resolve(
+                result = _auto_resolution_service(settings).resolve(
                     db=worker,
                     item_id=item_id,
                     directive=directive,
@@ -1846,7 +2351,7 @@ def test_auto_approval_rechecks_completed_validation_multiplicity_after_locator(
     def approve() -> None:
         with factory() as worker:
             try:
-                AutoReviewResolutionService(settings=settings).resolve(
+                _auto_resolution_service(settings).resolve(
                     db=worker,
                     item_id=item_id,
                     directive=directive,
@@ -1931,7 +2436,7 @@ def test_auto_approval_rechecks_validation_phantom_after_initial_call_locks(
     def approve() -> None:
         with factory() as worker:
             try:
-                AutoReviewResolutionService(settings=settings).resolve(
+                _auto_resolution_service(settings).resolve(
                     db=worker,
                     item_id=item_id,
                     directive=directive,
@@ -1963,7 +2468,10 @@ def test_auto_approval_rechecks_validation_phantom_after_initial_call_locks(
 
 def test_reuse_target_lock_precedes_current_document_lock(
     auto_review_postgres: tuple[sessionmaker[Session], Settings],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from backend.app.knowledge import trusted_provenance
+
     factory, settings = auto_review_postgres
     rebuild_trusted_fingerprint_projection(session_factory=factory, settings=settings)
     with factory() as setup:
@@ -1999,12 +2507,30 @@ def test_reuse_target_lock_precedes_current_document_lock(
         document_id = document.id
 
     completed = Event()
+    target_locked = Event()
     outcomes: list[str] = []
+    original_effect_from_target = trusted_provenance._effect_from_target
+
+    def observe_target_lock(*args, **kwargs):  # type: ignore[no-untyped-def]
+        effect = original_effect_from_target(*args, **kwargs)
+        if (
+            kwargs.get('knowledge_type') == directive.expected_type
+            and kwargs.get('knowledge_id') == directive.expected_id
+            and kwargs.get('lock') is True
+        ):
+            target_locked.set()
+        return effect
+
+    monkeypatch.setattr(
+        trusted_provenance,
+        '_effect_from_target',
+        observe_target_lock,
+    )
 
     def approve() -> None:
         with factory() as worker:
             try:
-                result = AutoReviewResolutionService(settings=settings).resolve(
+                result = _auto_resolution_service(settings).resolve(
                     db=worker,
                     item_id=item_id,
                     directive=directive,
@@ -2022,7 +2548,8 @@ def test_reuse_target_lock_precedes_current_document_lock(
         )
         worker_thread = Thread(target=approve)
         worker_thread.start()
-        assert completed.wait(0.15) is False
+        assert target_locked.wait(5)
+        assert completed.is_set() is False
         with factory() as probe:
             with pytest.raises(DBAPIError, match='could not obtain lock'):
                 probe.scalar(
@@ -2241,28 +2768,13 @@ def test_missing_or_stale_projection_disables_auto_review_until_rebuilt() -> Non
 
 
 def test_unprojected_hidden_row_barrier_forces_zero_call_human_only(
-    db_session: Session,
+    auto_review_db_session: tuple[Session, Settings],
 ) -> None:
-    runtime = AutoReviewRuntimeKeyState(
-        component='auto_review_trust_promotion',
-        fingerprint_key_version='v1',
-        fingerprint_key_material_verifier='a' * 64,
-        generation=1,
-        ready=True,
-    )
-    projection = TrustedKnowledgeFingerprintProjectionState(
-        component='trusted_knowledge_fingerprints',
-        projection_schema_version='trusted-fingerprint-projection:v1',
-        fingerprint_key_version='v1',
-        fingerprint_key_material_verifier='a' * 64,
-        generation=1,
-        ready=True,
-        rebuild_required=False,
-        source_active_count=1,
-        projected_active_count=1,
-        source_checksum='a' * 64,
-        projected_checksum='a' * 64,
-    )
+    db_session, settings = auto_review_db_session
+    runtime = db_session.scalars(select(AutoReviewRuntimeKeyState)).one()
+    projection = db_session.scalars(
+        select(TrustedKnowledgeFingerprintProjectionState)
+    ).one()
     db_session.add(
         HistoryEvent(
             title='unprojected',
@@ -2280,8 +2792,13 @@ def test_unprojected_hidden_row_barrier_forces_zero_call_human_only(
     missing = bool(
         db_session.scalar(
             build_missing_active_projection_exists_statement(
-                fingerprint_key_version='v1',
-                fingerprint_key_material_verifier='a' * 64,
+                expected_rows=source_projection_snapshots(
+                    db_session,
+                    settings=settings,
+                    fingerprint_key_material_verifier=(
+                        runtime.fingerprint_key_material_verifier
+                    ),
+                ),
             )
         )
     )
@@ -2685,7 +3202,7 @@ def test_missing_ambiguous_or_mismatched_companion_is_human_only(
     )
     _seed_completed_validation(db_session, second_item, settings=settings)
     with pytest.raises(AutoReviewHumanOnly):
-        AutoReviewResolutionService(settings=settings).resolve(
+        _auto_resolution_service(settings).resolve(
             db=db_session,
             item_id=second_item.id,
             directive=ReuseExistingPromotion(
@@ -2717,7 +3234,7 @@ def test_reaffirmed_bundle_revoke_is_atomic_for_primary_and_companion(
         payload=dict(first_item.payload),
     )
     _seed_completed_validation(db, reaffirming_item, settings=settings)
-    result = AutoReviewResolutionService(settings=settings).resolve(
+    result = _auto_resolution_service(settings).resolve(
         db=db,
         item_id=reaffirming_item.id,
         directive=directive,
@@ -2953,7 +3470,7 @@ def test_disabled_only_rotation_waits_for_old_generation_and_rebuilds_new_projec
                 settings=v2_settings,
             )
             _seed_completed_validation(db, candidate, settings=v2_settings)
-            reaffirmed = AutoReviewResolutionService(settings=v2_settings).resolve(
+            reaffirmed = _auto_resolution_service(v2_settings).resolve(
                 db=db,
                 item_id=candidate.id,
                 directive=ReuseExistingPromotion(

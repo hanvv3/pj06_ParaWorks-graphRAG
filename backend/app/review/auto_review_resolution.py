@@ -8,6 +8,7 @@ from backend.app.review.actors import ReuseExistingPromotion, auto_review_actor
 from backend.app.review.transitions import (
     AutoReviewAdmissionNotReady,
     CanonicalEvidenceDrift,
+    CurrentPermissionResolver,
     ReviewTransitionResult,
     ReviewTransitionService,
 )
@@ -19,8 +20,16 @@ class AutoReviewHumanOnly(ValueError):  # noqa: N818 - policy outcome contract
 
 
 class AutoReviewResolutionService:
-    def __init__(self, *, settings: Settings) -> None:
-        self._transitions = ReviewTransitionService(settings=settings)
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        current_permission_resolver: CurrentPermissionResolver,
+    ) -> None:
+        self._transitions = ReviewTransitionService(
+            settings=settings,
+            current_permission_resolver=current_permission_resolver,
+        )
 
     def resolve(
         self,
