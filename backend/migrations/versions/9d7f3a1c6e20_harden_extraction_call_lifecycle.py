@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import inspect
 
 revision = '9d7f3a1c6e20'
 down_revision = '7c5a2e9f4b10'
@@ -56,10 +57,14 @@ _TASK2 = (
 
 
 def upgrade() -> None:
+    if not _table_exists():
+        return
     _replace_constraint(_HARDENED)
 
 
 def downgrade() -> None:
+    if not _table_exists():
+        return
     connection = op.get_bind()
     retained = connection.scalar(sa.text(f'SELECT count(*) FROM {_TABLE}'))
     if retained:
@@ -77,3 +82,7 @@ def _replace_constraint(expression: str) -> None:
         return
     op.drop_constraint(_CONSTRAINT, _TABLE, type_='check')
     op.create_check_constraint(_CONSTRAINT, _TABLE, expression)
+
+
+def _table_exists() -> bool:
+    return _TABLE in inspect(op.get_bind()).get_table_names()

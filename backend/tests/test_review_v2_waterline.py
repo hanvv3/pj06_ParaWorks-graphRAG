@@ -21,6 +21,7 @@ from backend.app.api.v1 import integrations
 from backend.app.connectors.base import ConnectorManifest, SourceEvent
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.demo_auth import USERS
+from backend.app.ingestion.source_versions import SourceVersionRef
 from backend.app.models import AgentWorkflowThread, AuditLog, ReviewItem, Source
 from backend.app.schemas.review_workflow import (
     DEFAULT_REVIEW_AGENT_NAMES,
@@ -82,6 +83,48 @@ def _settings(*, v2_enabled: bool) -> Settings:
         agent_runtime_fingerprint_secret='waterline-test-secret',
         agent_runtime_fingerprint_key_version='waterline-test-v1',
     )
+
+
+def test_integration_review_batch_shadow_requires_v21_launch_authority(
+    db_session,
+) -> None:
+    settings = _settings(v2_enabled=True).model_copy(
+        update={'auto_review_mode': 'shadow'}
+    )
+    with pytest.raises(ReviewWorkflowPreflightError) as captured:
+        integrations._prepare_default_review_batch(
+            db=db_session,
+            user=USERS['admin'],
+            settings=settings,
+            refs=[SourceVersionRef('gmail', 'gmail:one', 'v1')],
+        )
+    assert captured.value.code == 'cost_preview_changed'
+
+
+def test_integration_review_batch_dispatches_supplied_v21_snapshot(
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(v2_enabled=True).model_copy(
+        update={'auto_review_mode': 'shadow'}
+    )
+    supplied = object()
+    captured = {}
+
+    def fake_prepare(*_args, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(integrations, 'prepare_review_request', fake_prepare)
+    _request_value, prepared = integrations._prepare_default_review_batch(
+        db=db_session,
+        user=USERS['admin'],
+        settings=settings,
+        refs=[SourceVersionRef('gmail', 'gmail:one', 'v1')],
+        v21_config=supplied,
+    )
+    assert prepared is not None
+    assert captured['v21_config'] is supplied
 
 
 def _registry() -> AgentRegistry:

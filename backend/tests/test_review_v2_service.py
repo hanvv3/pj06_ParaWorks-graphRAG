@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +29,10 @@ from backend.app.agent_runtime.review_v2_drafting import (
     ReviewDraftError,
     ReviewDraftResult,
 )
+from backend.app.agent_runtime.review_v2_preflight import (
+    PreparedReviewRequestV21,
+    V21PreparedReviewConfig,
+)
 from backend.app.agent_runtime.review_v2_service import (
     ReviewModelReadiness,
     ReviewWorkflowService,
@@ -37,6 +42,7 @@ from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
 from backend.app.models.agent_runs import AgentRun
 from backend.app.models.agent_workflows import (
+    AgentWorkflowRequest,
     AgentWorkflowThread,
 )
 from backend.app.models.review import ReviewItem
@@ -46,6 +52,7 @@ from backend.app.models.source import (
     DocumentVersion,
     Source,
 )
+from backend.app.schemas.auto_review import COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
     COMPANY_MEMORY_REVIEW_WORKFLOW,
@@ -184,6 +191,8 @@ class _FakeDraftService:
     budget_status: str = 'within_budget'
     model_failures_remaining: int = 0
     draft_calls: int = 0
+    preview_calls: int = 0
+    last_prepared: object | None = None
 
     def preview_prepared(
         self,
@@ -193,6 +202,8 @@ class _FakeDraftService:
         allowed_permission_levels: Sequence[str],
     ) -> ReviewWorkflowDryRunResponse:
         del actor_subject_id, allowed_permission_levels
+        self.preview_calls += 1
+        self.last_prepared = prepared
         return ReviewWorkflowDryRunResponse(
             workflow_name=COMPANY_MEMORY_REVIEW_WORKFLOW,
             graph_version=COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
@@ -470,6 +481,7 @@ def _service(
     runtime: object | None = None,
     settings: Settings | None = None,
     model_readiness: object | None = None,
+    v21_launch_authority: object | None = None,
 ) -> ReviewWorkflowService:
     base_settings, base_runtime, registry, agent_registry, base_draft = service_parts
     extra = (
@@ -484,8 +496,88 @@ def _service(
         graph_registry=registry,
         agent_registry=agent_registry,
         draft_service=draft or base_draft,
+        v21_launch_authority=v21_launch_authority,
         **extra,
     )
+
+
+def _v21_config() -> V21PreparedReviewConfig:
+    plan = {
+        'agent_name': 'mail_document_agent',
+        'provider': 'openai',
+        'model': 'gpt-5.4-mini-2026-03-17',
+        'reasoning_effort': 'none',
+        'route_version': 'auto-review-extraction-route:v1',
+        'prompt_version': 'mail-document-extraction:v1',
+        'output_contract_version': 'mail-document-extraction:v1',
+        'extraction_registry_version': 'auto-review-extraction-registry:v1',
+        'cost_policy_version': 'auto-review-extraction-cost:v1',
+        'token_estimator_version': 'openai-o200k-extraction:v1',
+        'tokenizer_encoding': 'o200k_base',
+        'reply_priming_tokens': 16,
+        'framing_safety_tokens': 512,
+        'max_input_chars': 24000,
+        'max_input_tokens': 10000,
+        'max_output_tokens': 2048,
+        'max_candidates': 1,
+        'max_provider_attempts': 1,
+        'input_usd_per_1m': '0.750000',
+        'output_usd_per_1m': '4.500000',
+        'provider_safety_state_version': 1,
+        'timing': [60, 5, 120, 30],
+        'prepared_content_hmac': 'e' * 64,
+        'prepared_character_count': 800,
+        'framed_input_tokens': 900,
+        'reserved_cost_usd': '0.016716',
+    }
+    return V21PreparedReviewConfig(
+        configured_auto_review_mode='shadow',
+        validator_provider='openai',
+        validator_model='gpt-5.6-terra',
+        validator_reasoning_effort='medium',
+        validator_prompt_version='auto-review-validation:v1',
+        validator_output_contract_version='candidate-validation-batch:v1',
+        policy_version='auto-review-policy:v1',
+        cost_policy_version='auto-review-cost:v1',
+        fingerprint_key_version='test-v1',
+        fingerprint_key_material_verifier='a' * 64,
+        token_estimator_version='openai-o200k-chat:v1',
+        tokenizer_encoding='o200k_base',
+        max_input_tokens_per_batch=6000,
+        max_output_tokens_per_batch=3072,
+        reply_priming_tokens=16,
+        framing_safety_tokens=512,
+        max_validation_batches_per_workflow=2,
+        max_validation_candidates_per_batch=4,
+        max_validation_candidates_per_workflow=5,
+        max_provider_attempts=1,
+        provider_timeout_seconds=60,
+        provider_send_start_window_seconds=5,
+        provider_attempt_lease_seconds=120,
+        provider_commit_grace_seconds=30,
+        validator_input_usd_per_1m=Decimal('2.000000'),
+        validator_output_usd_per_1m=Decimal('12.000000'),
+        enforce_percentage=0,
+        authorized_percentage_at_launch=0,
+        rollout_authorization_generation=1,
+        validation_provider_safety_state_version=1,
+        rollout_control_epoch=1,
+        extraction_plan_set_hmac='b' * 64,
+        extraction_provider_safety_snapshot_set_hmac='c' * 64,
+        confirmed_extraction_cost_ceiling_usd=Decimal('0.016716'),
+        confirmed_validation_cost_ceiling_usd=Decimal('0.048864'),
+        confirmed_total_cost_ceiling_usd=Decimal('0.065580'),
+        total_budget_limit_usd=Decimal('0.200000'),
+        extraction_plan_identities=(plan,),
+    )
+
+
+@dataclass(frozen=True)
+class _V21Authority:
+    config: V21PreparedReviewConfig
+
+    def resolve_v21_config(self, **_kwargs) -> V21PreparedReviewConfig:
+        return self.config
 
 
 def _start(
@@ -522,6 +614,84 @@ def _set_item_statuses(
         for item, status in zip(items, statuses, strict=True):
             item.status = status
         db.commit()
+
+
+def test_shadow_service_dispatches_dry_run_through_supplied_v21_authority(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+) -> None:
+    draft = _FakeDraftService(application_session_factory)
+    service = _service(
+        application_session_factory,
+        service_parts,
+        draft=draft,
+        settings=_settings(auto_review_mode='shadow'),
+        v21_launch_authority=_V21Authority(_v21_config()),
+    )
+    source = _seed_source(db_session)
+    db_session.commit()
+
+    service.dry_run(actor=_actor(), request=_request(source))
+
+    assert draft.preview_calls == 1
+    assert isinstance(draft.last_prepared, PreparedReviewRequestV21)
+    assert draft.last_prepared.config == _v21_config()
+
+
+def test_shadow_service_without_launch_authority_is_zero_call_fail_closed(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+) -> None:
+    draft = _FakeDraftService(application_session_factory)
+    service = _service(
+        application_session_factory,
+        service_parts,
+        draft=draft,
+        settings=_settings(auto_review_mode='shadow'),
+    )
+    source = _seed_source(db_session)
+    db_session.commit()
+
+    with pytest.raises(ReviewWorkflowServiceError) as captured:
+        service.dry_run(actor=_actor(), request=_request(source))
+
+    assert captured.value.code == 'cost_preview_changed'
+    assert draft.preview_calls == 0
+    assert db_session.scalar(
+        select(func.count()).select_from(AgentWorkflowThread)
+    ) == 0
+
+
+def test_shadow_service_start_persists_v21_snapshot_without_running_future_graph(
+    db_session: Session,
+    application_session_factory,
+    service_parts,
+) -> None:
+    draft = _FakeDraftService(application_session_factory)
+    service = _service(
+        application_session_factory,
+        service_parts,
+        draft=draft,
+        settings=_settings(auto_review_mode='shadow'),
+        v21_launch_authority=_V21Authority(_v21_config()),
+    )
+    source = _seed_source(db_session)
+    db_session.commit()
+
+    status = service.start(actor=_actor(), request=_request(source))
+
+    db_session.expire_all()
+    thread = db_session.get(AgentWorkflowThread, status.thread_id)
+    request_row = db_session.get(AgentWorkflowRequest, status.thread_id)
+    assert status.status == 'created'
+    assert thread is not None and request_row is not None
+    assert thread.graph_version == COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
+    assert request_row.auto_review_mode == 'shadow'
+    assert request_row.auto_review_extraction_provider == 'openai'
+    assert request_row.selected_extraction_agent_count == 1
+    assert draft.draft_calls == 0
 
 
 def test_model_readiness_blocks_only_new_work_and_preserves_checkpoint_mode(

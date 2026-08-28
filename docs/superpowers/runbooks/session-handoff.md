@@ -2938,21 +2938,30 @@ tests passed with 53 tests; ruff passed.
 - V2.1 request creation must go through the explicit V2.1 preflight dispatch;
   stored graph/checkpoint identity and every extraction snapshot field are
   immutable replay inputs. V2.0 keeps its legacy graph/HMAC/checkpoint path.
+- `ReviewWorkflowService` requires a supplied V2.1 launch authority in
+  shadow/enforce, stores the exact V2.1 request, and returns the durable
+  `created` thread without entering the V2.0 graph. Task 12 owns V2.1 graph
+  registration/execution. Missing or invalid authority fails zero-call with
+  bounded `cost_preview_changed`; disabled mode remains exact V2.0.
 - `ExtractionCallStore` is the PostgreSQL E1/E2/E3 authority. Callers must
   supply the current owner subject and allowed permission set. A callback
   return value is never terminal evidence: successful candidate completion
   requires a fresh query of exactly one same-run ReviewItem and its exact
   contiguous evidence children before the call and AgentRun become complete.
-- `ProviderAttemptGrant` cannot be constructed by application code. Only the
-  committed store marker issues it; dispatch must use `FencedOpenAITransport`
-  and the server-owned Task 1 hook. There is no `grant=None`, retry, fallback,
-  cache, callback, tracing, or mutable transport-option path in V2.1.
-- Evidence replay binds source kind/id/version or signature, aggregate message
-  set, strictest permission, fingerprint key version/material verifier,
+- `ProviderAttemptGrant` cannot be constructed or issued by application code:
+  there is no importable issuer/factory. The committed store creates a private
+  closure capability, authenticates its exact identity, rechecks the locked
+  live attempt, and dispatches once through `FencedOpenAITransport` and the
+  server-owned Task 1 hook. There is no `grant=None`, retry, fallback, cache,
+  callback, tracing, or mutable transport-option path in V2.1.
+- Evidence replay recomputes the selected aggregate message set from prepared
+  slot identities and locked current canonical refs, and binds source
+  kind/id/version or signature, strictest permission, fingerprint key identities,
   workflow/scope/candidate identity, child ordinals, and the terminal result
   set. Ambiguity persists bounded `evidence_binding_mismatch` only and creates
   no ReviewItem or fake empty marker.
 - Required PostgreSQL verification uses a freshly empty disposable database
   at `127.0.0.1:55432`, fails rather than skips without its URL, creates a
-  unique schema per test, and drops it in `finally`. Current evidence is `11`
-  real store/migration tests plus `202` Task 1/2 regressions, zero skips.
+  unique schema per test, and drops it in `finally`. Round-two evidence is `28`
+  real store/authority/migration cases, `232` Task 3 union tests, `201` Task 1/2
+  regressions, and `97` service/API/integration tests, zero skips.

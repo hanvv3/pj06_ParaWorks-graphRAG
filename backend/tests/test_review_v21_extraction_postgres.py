@@ -1,5 +1,6 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -12,6 +13,7 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import sessionmaker
 
 import backend.app.models  # noqa: F401
+from backend.app.agent_runtime.canonical_sources import build_keyed_fingerprint
 from backend.app.agent_runtime.contracts import (
     AgentManifest,
     EvidenceMessage,
@@ -19,6 +21,10 @@ from backend.app.agent_runtime.contracts import (
     PermissionContext,
 )
 from backend.app.agent_runtime.registry import AgentRegistry
+from backend.app.agent_runtime.review_v2_drafting import (
+    CandidateEvidenceRefBinding,
+    derive_candidate_evidence_version_hash,
+)
 from backend.app.agent_runtime.review_v2_preflight import (
     V21PreparedReviewConfig,
     create_or_reuse_review_thread,
@@ -30,14 +36,19 @@ from backend.app.agent_runtime.review_v21_extraction import (
     ExtractionProviderSafetySnapshot,
     ProviderUsage,
     build_prepared_extraction_plan_set,
+    invoke_prepared_extraction,
 )
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.demo_auth import DemoUser
 from backend.app.models import (
     AgentRun,
+    AgentWorkflowEvidenceRef,
+    AgentWorkflowRequest,
+    AgentWorkflowThread,
     AutoReviewExtractionCall,
     AutoReviewProviderSafetyState,
     ReviewItem,
+    ReviewItemEvidenceRef,
 )
 from backend.app.models.source import Source
 from backend.app.schemas.review_workflow import ReviewWorkflowRunRequest
@@ -272,6 +283,7 @@ def _seed_runtime(engine, database_url: str):
                     permission_level='internal',
                     source_snippet_override='검토 가능한 근거 문장',
                 )
+                for _ in range(3)
             ],
             permission_context=PermissionContext('task3-owner', 'employee'),
         )
@@ -383,6 +395,14 @@ def test_postgresql_store_concurrent_claim_marker_and_atomic_empty_completion(
     assert contexts[0] == contexts[1]
     grant = store.mark_attempt_started(contexts[0])
     assert grant.authoritative_lease_expires_at > datetime.now(UTC)
+    seen = []
+    invoke_prepared_extraction(
+        plan.invocation,
+        lambda invocation, *, timeout: seen.append((invocation, timeout)) or {},
+        store=store,
+        grant=grant,
+    )
+    assert seen == [(plan.invocation, plan.provider_timeout_seconds)]
     store.complete(
         contexts[0],
         result={
@@ -422,6 +442,35 @@ def test_postgresql_migration_cycles_task2_to_hardened_head(
     assert 'provider_attempt_count = 1' in definition
     assert 'attempt_started_at IS NOT NULL' in definition
     assert revision == '9d7f3a1c6e20'
+
+
+def test_postgresql_migration_7c_to_9d_retains_existing_extraction_call(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    config = Config('alembic.ini')
+    command.downgrade(config, '7c5a2e9f4b10')
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    with factory() as db:
+        before = db.scalar(select(AutoReviewExtractionCall))
+        assert before is not None
+        identity = (before.id, before.extraction_plan_hmac, before.status)
+    command.upgrade(config, 'head')
+    with factory() as db:
+        retained = db.get(AutoReviewExtractionCall, identity[0])
+        assert retained is not None
+        assert (retained.id, retained.extraction_plan_hmac, retained.status) == identity
+        assert retained.lease_token == context.lease_token
+    with pytest.raises(RuntimeError, match='retained'):
+        command.downgrade(config, '7c5a2e9f4b10')
+    with factory() as db:
+        assert db.get(AutoReviewExtractionCall, identity[0]) is not None
 
 
 def test_postgresql_store_cancel_before_marker_is_zero_charge_terminal(
@@ -740,3 +789,508 @@ def test_postgresql_candidate_callback_requires_committed_exact_child_proof(
         assert call.result_kind is None
         assert run.metadata_['failure_reason_code'] == 'evidence_binding_mismatch'
         assert db.scalar(select(ReviewItem)) is None
+
+
+def test_postgresql_attempt_zero_recovery_rechecks_cancel_and_does_not_reclaim(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    with factory() as db, db.begin():
+        db.execute(
+            text(
+                'UPDATE agent_workflow_threads SET cancelled_at=clock_timestamp(), '
+                "cancelled_by_subject_id='task3-owner' WHERE thread_id=:thread_id"
+            ),
+            {'thread_id': thread_id},
+        )
+        db.execute(
+            text(
+                "UPDATE auto_review_extraction_calls SET lease_expires_at="
+                "clock_timestamp() - interval '1 second' WHERE workflow_thread_id=:id"
+            ),
+            {'id': thread_id},
+        )
+    with pytest.raises(ExtractionCallStateError, match='cancel'):
+        store.recover_expired(context)
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        assert call is not None
+        assert call.status == 'failed'
+        assert call.provider_attempt_count == 0
+        assert call.charged_cost_usd == Decimal('0.000000')
+
+
+def test_postgresql_attempt_zero_recovery_preserves_owner_permission_authority(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    with factory() as db, db.begin():
+        db.execute(
+            text(
+                "UPDATE auto_review_extraction_calls SET lease_expires_at="
+                "clock_timestamp() - interval '1 second' WHERE workflow_thread_id=:id"
+            ),
+            {'id': thread_id},
+        )
+    recovered = store.recover_expired(context)
+    assert recovered is not None
+    assert recovered.lease_token != context.lease_token
+    assert recovered.owner_subject_id == 'task3-owner'
+    assert recovered.allowed_permission_levels == ('internal',)
+    store.mark_attempt_started(recovered)
+
+
+@pytest.mark.parametrize(
+    'drift_kind',
+    ('global_mode', 'runtime_key', 'owner', 'permission', 'source', 'plan', 'safety', 'timing'),
+)
+def test_postgresql_attempt_zero_recovery_rechecks_every_launch_authority(
+    postgres_runtime,
+    drift_kind: str,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    with factory() as db, db.begin():
+        db.execute(
+            text(
+                "UPDATE auto_review_extraction_calls SET lease_expires_at="
+                "clock_timestamp() - interval '1 second' WHERE workflow_thread_id=:id"
+            ),
+            {'id': thread_id},
+        )
+        if drift_kind == 'runtime_key':
+            db.execute(
+                text(
+                    "UPDATE auto_review_runtime_key_states SET "
+                    "fingerprint_key_version='task3-key-v2'"
+                )
+            )
+        elif drift_kind == 'owner':
+            db.execute(
+                text(
+                    "UPDATE agent_workflow_threads SET owner_subject_id='other-owner' "
+                    'WHERE thread_id=:id'
+                ),
+                {'id': thread_id},
+            )
+        elif drift_kind == 'source':
+            db.execute(text("UPDATE sources SET permission_level='restricted'"))
+        elif drift_kind == 'plan':
+            db.execute(
+                text(
+                    "UPDATE agent_workflow_requests SET extraction_plan_set_hmac=:value"
+                ),
+                {'value': 'd' * 64},
+            )
+        elif drift_kind == 'safety':
+            db.execute(
+                text(
+                    'UPDATE agent_workflow_requests SET '
+                    'extraction_provider_safety_snapshot_set_hmac=:value'
+                ),
+                {'value': 'e' * 64},
+            )
+        elif drift_kind == 'timing':
+            db.execute(
+                text(
+                    'UPDATE agent_workflow_requests SET '
+                    'auto_review_provider_timeout_seconds=61'
+                )
+            )
+    if drift_kind == 'global_mode':
+        store._settings = store._settings.model_copy(
+            update={'auto_review_mode': 'disabled'}
+        )
+    elif drift_kind == 'permission':
+        context = replace(context, allowed_permission_levels=('public',))
+    with pytest.raises(ExtractionCallStateError):
+        store.recover_expired(context)
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        assert call is not None
+        assert call.status == 'failed'
+        assert call.provider_attempt_count == 0
+        assert call.charged_cost_usd == Decimal('0.000000')
+
+
+def test_postgresql_locked_cancel_terminalizes_attempt_zero_only(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    store.cancel(context, actor_subject_id='task3-owner')
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        thread = db.get(AgentWorkflowThread, thread_id)
+        assert call is not None and thread is not None
+        assert thread.cancelled_by_subject_id == 'task3-owner'
+        assert call.status == 'failed'
+        assert call.provider_attempt_count == 0
+        assert call.charged_cost_usd == Decimal('0.000000')
+
+
+def test_postgresql_locked_cancel_after_marker_latches_then_charges_completion(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    store.mark_attempt_started(context)
+    store.cancel(context, actor_subject_id='task3-owner')
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        assert call is not None and call.status == 'claimed'
+    store.complete(
+        context,
+        result={
+            'result_kind': 'no_candidate',
+            'candidate': None,
+            'no_candidate_reason': 'no_relevant_evidence',
+        },
+        usage=ProviderUsage(7, 5),
+    )
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        assert call is not None and call.status == 'failed'
+        assert call.charged_input_tokens == 7
+        assert call.charged_output_tokens == 5
+        assert db.scalar(select(ReviewItem)) is None
+
+
+def test_postgresql_unknown_usage_failure_after_marker_charges_full_reserve(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    store.mark_attempt_started(context)
+    store.fail(context, reason_code='provider_timeout', usage=None)
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        assert call is not None and call.status == 'failed'
+        assert call.charged_input_tokens == call.reserved_input_tokens
+        assert call.charged_output_tokens == call.reserved_output_tokens
+        assert call.charged_cost_usd == call.reserved_cost_usd
+
+
+def test_postgresql_fail_known_overrun_opens_breaker_like_complete(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    store.mark_attempt_started(context)
+    store.fail(
+        context,
+        reason_code='provider_failure',
+        usage=ProviderUsage(plan.max_input_tokens + 1, plan.max_output_tokens),
+    )
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        safety = db.scalar(
+            select(AutoReviewProviderSafetyState).where(
+                AutoReviewProviderSafetyState.purpose == 'extraction'
+            )
+        )
+        assert call is not None and safety is not None
+        assert call.status == 'failed'
+        assert call.budget_overrun is True
+        assert call.charged_input_tokens == plan.max_input_tokens + 1
+        assert safety.breaker_open is True
+
+
+def test_postgresql_candidate_proof_rejects_callback_invented_message_hmac(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    settings = _settings(database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    store.mark_attempt_started(context)
+
+    def forged_writer(db, run, _plan, _parsed):
+        thread = db.get(AgentWorkflowThread, thread_id)
+        workflow_ref = db.scalar(
+            select(AgentWorkflowEvidenceRef).where(
+                AgentWorkflowEvidenceRef.workflow_thread_id == thread_id
+            )
+        )
+        assert thread is not None and workflow_ref is not None
+        item = ReviewItem(
+            item_type='history_event',
+            payload={'bounded': True},
+            source_links=['https://private.example/task3'],
+            source_snippets=['검토 가능한 근거 문장'],
+            confidence_score=0.98,
+            permission_level='internal',
+            status='pending_review',
+            workflow_thread_id=thread_id,
+            candidate_key='e' * 64,
+            agent_run_id=run.id,
+            candidate_contract_version='c5-v1',
+        )
+        db.add(item)
+        db.flush()
+        db.add(
+            ReviewItemEvidenceRef(
+                review_item_id=item.id,
+                workflow_thread_id=thread_id,
+                workflow_evidence_ref_id=workflow_ref.id,
+                candidate_slot_ordinal=1,
+                message_content_fingerprint='f' * 64,
+                fingerprint_key_version='task3-key-v1',
+                fingerprint_key_material_verifier='b' * 64,
+            )
+        )
+        db.flush()
+        binding = CandidateEvidenceRefBinding(
+            workflow_evidence_ref_id=workflow_ref.id,
+            ordinal=1,
+            canonical_source_kind=workflow_ref.canonical_source_type,
+            canonical_source_id=workflow_ref.canonical_row_id,
+            canonical_version_or_signature=(
+                workflow_ref.external_revision or workflow_ref.content_signature
+            ),
+            content_fingerprint=workflow_ref.content_fingerprint,
+            message_set_hmac='f' * 64,
+            permission_level=workflow_ref.permission_level_snapshot,
+            fingerprint_key_version='task3-key-v1',
+            fingerprint_key_material_verifier='b' * 64,
+        )
+        scope_hmac = build_keyed_fingerprint(
+            thread.security_scope_id,
+            settings=settings,
+            schema_version='candidate-security-scope:v1',
+            policy_version='candidate-security-scope:v1',
+        )
+        evidence_hmac = derive_candidate_evidence_version_hash(
+            workflow_execution_hmac=thread.input_hash,
+            security_scope_hmac=scope_hmac,
+            candidate_key=item.candidate_key,
+            refs=(binding,),
+            settings=settings,
+        )
+        return item.candidate_key, evidence_hmac
+
+    store.complete(
+        context,
+        result={
+            'result_kind': 'candidate',
+            'candidate': {
+                'item_type': 'history_event',
+                'title': '제목',
+                'summary': '요약',
+                'reason': '직접 근거',
+                'confidence_score': '0.9800',
+                'uncertainty_reason': None,
+                'field_evidence_bindings': [
+                    {'field_key': 'title', 'evidence_slot_id': 'S01'},
+                    {'field_key': 'summary', 'evidence_slot_id': 'S02'},
+                    {'field_key': 'reason', 'evidence_slot_id': 'S03'},
+                ],
+            },
+            'no_candidate_reason': None,
+        },
+        usage=ProviderUsage(12, 12),
+        candidate_writer=forged_writer,
+    )
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        run = db.scalar(select(AgentRun))
+        assert call is not None and run is not None
+        assert call.status == run.status == 'failed'
+        assert run.metadata_['failure_reason_code'] == 'evidence_binding_mismatch'
+        assert db.scalar(select(ReviewItem)) is None
+
+
+def test_postgresql_candidate_proof_rederives_exact_message_set_and_cached_replay(
+    postgres_runtime,
+) -> None:
+    engine, database_url = postgres_runtime
+    factory, store, thread_id, plan = _seed_runtime(engine, database_url)
+    settings = _settings(database_url)
+    context = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    store.mark_attempt_started(context)
+
+    def exact_writer(db, run, callback_plan, _parsed):
+        thread = db.get(AgentWorkflowThread, thread_id)
+        workflow_ref = db.scalar(
+            select(AgentWorkflowEvidenceRef).where(
+                AgentWorkflowEvidenceRef.workflow_thread_id == thread_id
+            )
+        )
+        source = db.get(Source, workflow_ref.canonical_row_id)
+        assert thread is not None and workflow_ref is not None and source is not None
+        candidate_key = 'e' * 64
+        item = ReviewItem(
+            item_type='history_event',
+            payload={'bounded': True},
+            source_links=['https://private.example/task3'],
+            source_snippets=['검토 가능한 근거 문장'],
+            confidence_score=0.98,
+            permission_level='internal',
+            status='pending_review',
+            workflow_thread_id=thread_id,
+            candidate_key=candidate_key,
+            agent_run_id=run.id,
+            candidate_contract_version='c5-v1',
+        )
+        db.add(item)
+        db.flush()
+        message_set_hmac = build_keyed_fingerprint(
+            {
+                'canonical_source_kind': workflow_ref.canonical_source_type,
+                'canonical_source_id': workflow_ref.canonical_row_id,
+                'canonical_version_or_signature': (
+                    workflow_ref.external_revision or workflow_ref.content_signature
+                ),
+                'content_fingerprint': workflow_ref.content_fingerprint,
+                'permission_level': workflow_ref.permission_level_snapshot,
+                'fingerprint_key_version': 'task3-key-v1',
+                'fingerprint_key_material_verifier': 'b' * 64,
+                'messages': [
+                    {
+                        'stable_message_identity': slot.stable_message_identity,
+                        'text_fingerprint': slot.text_fingerprint,
+                    }
+                    for slot in callback_plan.invocation.evidence_slot_identities
+                ],
+            },
+            settings=settings,
+            schema_version='candidate-message-set:v1',
+            policy_version='candidate-message-set:v1',
+        )
+        db.add(
+            ReviewItemEvidenceRef(
+                review_item_id=item.id,
+                workflow_thread_id=thread_id,
+                workflow_evidence_ref_id=workflow_ref.id,
+                candidate_slot_ordinal=1,
+                message_content_fingerprint=message_set_hmac,
+                fingerprint_key_version='task3-key-v1',
+                fingerprint_key_material_verifier='b' * 64,
+            )
+        )
+        binding = CandidateEvidenceRefBinding(
+            workflow_evidence_ref_id=workflow_ref.id,
+            ordinal=1,
+            canonical_source_kind=workflow_ref.canonical_source_type,
+            canonical_source_id=workflow_ref.canonical_row_id,
+            canonical_version_or_signature=(
+                workflow_ref.external_revision or workflow_ref.content_signature
+            ),
+            content_fingerprint=workflow_ref.content_fingerprint,
+            message_set_hmac=message_set_hmac,
+            permission_level=workflow_ref.permission_level_snapshot,
+            fingerprint_key_version='task3-key-v1',
+            fingerprint_key_material_verifier='b' * 64,
+        )
+        evidence_hmac = derive_candidate_evidence_version_hash(
+            workflow_execution_hmac=thread.input_hash,
+            security_scope_hmac=build_keyed_fingerprint(
+                thread.security_scope_id,
+                settings=settings,
+                schema_version='candidate-security-scope:v1',
+                policy_version='candidate-security-scope:v1',
+            ),
+            candidate_key=candidate_key,
+            refs=(binding,),
+            settings=settings,
+        )
+        request_row = db.get(AgentWorkflowRequest, thread_id)
+        call = db.scalar(select(AutoReviewExtractionCall))
+        assert request_row is not None and call is not None
+        assert store._candidate_pair_from_rows(
+            db,
+            thread=thread,
+            request=request_row,
+            call=call,
+            parsed=_parsed,
+        ) == (candidate_key, evidence_hmac)
+        return candidate_key, evidence_hmac
+
+    store.complete(
+        context,
+        result={
+            'result_kind': 'candidate',
+            'candidate': {
+                'item_type': 'history_event',
+                'title': '제목',
+                'summary': '요약',
+                'reason': '직접 근거',
+                'confidence_score': '0.9800',
+                'uncertainty_reason': None,
+                'field_evidence_bindings': [
+                    {'field_key': key, 'evidence_slot_id': f'S0{index}'}
+                    for index, key in enumerate(
+                        ('title', 'summary', 'reason'), start=1
+                    )
+                ],
+            },
+            'no_candidate_reason': None,
+        },
+        usage=ProviderUsage(12, 12),
+        candidate_writer=exact_writer,
+    )
+    replay = store.claim_or_replay(
+        thread_id,
+        plan,
+        actor_subject_id='task3-owner',
+        allowed_permission_levels=('internal',),
+    )
+    assert replay.workflow_thread_id == context.workflow_thread_id
+    with factory() as db:
+        call = db.scalar(select(AutoReviewExtractionCall))
+        assert call is not None and call.status == 'completed'
+        assert call.result_candidate_count == 1

@@ -8,7 +8,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
-from threading import RLock
+from itertools import combinations
+from threading import Lock, RLock
 from time import monotonic
 from types import MappingProxyType
 from typing import Any, TypeVar
@@ -35,7 +36,7 @@ from backend.app.agent_runtime.keyed_mutation_guard import KeyedMutationGuard
 from backend.app.agent_runtime.provider_send_fence import (
     FencedOpenAITransport,
     ProviderAttemptGrant,
-    _issue_provider_attempt_grant,
+    ProviderSendFenceError,
 )
 from backend.app.agent_runtime.review_v2_drafting import (
     CandidateEvidenceRefBinding,
@@ -94,6 +95,15 @@ class ExtractionProviderSafetySnapshot:
 
 
 @dataclass(frozen=True)
+class PreparedEvidenceSlotIdentity:
+    slot_id: str
+    source_id: str
+    stable_message_identity: str
+    text_fingerprint: str
+    permission_level: str
+
+
+@dataclass(frozen=True)
 class PreparedExtractionInvocation:
     agent_name: str
     canonical_text: str
@@ -104,6 +114,8 @@ class PreparedExtractionInvocation:
     framed_input_tokens: int
     max_output_tokens: int
     evidence_slot_ids: tuple[str, ...]
+    evidence_slot_identities: tuple[PreparedEvidenceSlotIdentity, ...]
+    evidence_slot_set_hmac: str
     output_schema: type[BaseModel]
     provider_options: Mapping[str, Any]
 
@@ -182,6 +194,7 @@ class PreparedExtractionPlan:
             'prepared_character_count': self.invocation.character_count,
             'framed_input_tokens': self.invocation.framed_input_tokens,
             'reserved_cost_usd': format(self.reserved_cost_usd, 'f'),
+            'evidence_slot_set_hmac': self.invocation.evidence_slot_set_hmac,
             'provider_options': {
                 key: list(value) if isinstance(value, tuple) else value
                 for key, value in sorted(self.invocation.provider_options.items())
@@ -249,11 +262,30 @@ def _render_invocation(
         raise ExtractionCallStateError('sensitive input detected')
     evidence = []
     slots: list[str] = []
+    slot_identities: list[PreparedEvidenceSlotIdentity] = []
     for index, message in enumerate(packet.messages, start=1):
         if index > 12:
             break
         slot = f'S{index:02d}'
         slots.append(slot)
+        stable_identity = str(
+            message.metadata.get('stable_message_identity')
+            or f'{message.source_id}:{message.timestamp}:{index}'
+        )
+        slot_identities.append(
+            PreparedEvidenceSlotIdentity(
+                slot_id=slot,
+                source_id=message.source_id,
+                stable_message_identity=stable_identity,
+                text_fingerprint=build_keyed_fingerprint(
+                    message.text,
+                    settings=settings,
+                    schema_version='candidate-message-content:v1',
+                    policy_version='candidate-message-content:v1',
+                ),
+                permission_level=message.permission_level,
+            )
+        )
         evidence.append(
             {
                 'slot_id': slot,
@@ -307,6 +339,13 @@ def _render_invocation(
         framed_input_tokens=framed,
         max_output_tokens=policy.max_output_tokens,
         evidence_slot_ids=tuple(slots),
+        evidence_slot_identities=tuple(slot_identities),
+        evidence_slot_set_hmac=build_keyed_fingerprint(
+            [asdict(slot) for slot in slot_identities],
+            settings=settings,
+            schema_version='auto-review-extraction-evidence-slots:v1',
+            policy_version='auto-review-extraction-evidence-slots:v1',
+        ),
         output_schema=_OUTPUT_SCHEMAS[policy.agent_name],
         provider_options=MappingProxyType(
             {
@@ -494,16 +533,20 @@ def invoke_prepared_extraction(
     invocation: PreparedExtractionInvocation,
     provider: Callable[..., _R],
     *,
+    store: Any,
     grant: ProviderAttemptGrant | None,
 ) -> _R:
     if not provider_logging_is_safe():
         raise ExtractionCallStateError('provider logging controls are unsafe')
     if grant is None:
         raise ExtractionCallStateError('committed provider attempt grant is required')
-    transport: FencedOpenAITransport[_R] = FencedOpenAITransport(grant)
-    return transport.dispatch(
-        lambda *, timeout: provider(invocation, timeout=timeout),
-        request_body=invocation.canonical_bytes,
+    dispatcher = getattr(store, 'dispatch_prepared_extraction', None)
+    if not callable(dispatcher):
+        raise ExtractionCallStateError('committed provider attempt store is required')
+    return dispatcher(
+        invocation=invocation,
+        provider=provider,
+        grant=grant,
     )
 
 
@@ -588,9 +631,11 @@ class ExtractionCallLedger:
         *,
         db_clock: Callable[[], datetime] | None = None,
         workflow_budget_limit: Decimal = AUTO_REVIEW_MAX_WORKFLOW_COST_USD,
+        permit_monotonic: Callable[[], float] = monotonic,
     ) -> None:
         self._db_clock = db_clock or (lambda: datetime.now(UTC))
         self._budget_limit = workflow_budget_limit
+        self._permit_monotonic = permit_monotonic
         self._calls: dict[tuple[str, str], _CallState] = {}
         self._permits: dict[tuple[str, str], ProviderAttemptGrant] = {}
         self._lock = RLock()
@@ -684,16 +729,171 @@ class ExtractionCallLedger:
             attempt_id = hashlib.sha256(
                 f'{context.lease_token}:attempt:1'.encode()
             ).hexdigest()
-            grant = _issue_provider_attempt_grant(
-                attempt_id=attempt_id,
-                provider_timeout_seconds=state.plan.provider_timeout_seconds,
-                send_start_window_seconds=state.plan.provider_send_start_window_seconds,
-                authoritative_lease_expires_at=state.lease_expires_at,
-                commit=commit or (lambda: None),
-                monotonic=monotonic,
+            (commit or (lambda: None))()
+            deadline = (
+                self._permit_monotonic()
+                + state.plan.provider_send_start_window_seconds
             )
+            timeout = state.plan.provider_timeout_seconds
+            lease_expiry = state.lease_expires_at
+            clock = self._permit_monotonic
+
+            class _CommittedPermit:
+                __slots__ = ('_consumed', '_invalidated', '_lock')
+
+                def __init__(self) -> None:
+                    self._consumed = False
+                    self._invalidated = False
+                    self._lock = Lock()
+
+                @property
+                def attempt_id(self) -> str:
+                    return attempt_id
+
+                @property
+                def send_start_deadline_monotonic(self) -> float:
+                    return deadline
+
+                @property
+                def consumed(self) -> bool:
+                    with self._lock:
+                        return self._consumed
+
+                def consume_at_dispatch(self) -> None:
+                    with self._lock:
+                        if self._consumed:
+                            raise ProviderSendFenceError(
+                                'provider send permit was already consumed'
+                            )
+                        if self._invalidated or clock() >= deadline:
+                            raise ProviderSendFenceError(
+                                'provider send permit expired'
+                            )
+                        self._consumed = True
+
+                def _invalidate_from_store(self) -> None:
+                    with self._lock:
+                        self._invalidated = True
+
+                def __copy__(self):
+                    raise TypeError('provider send permits cannot be copied')
+
+                def __deepcopy__(self, memo):
+                    del memo
+                    raise TypeError('provider send permits cannot be copied')
+
+                def __reduce_ex__(self, protocol):
+                    del protocol
+                    raise TypeError('provider send permits cannot be serialized')
+
+                def __repr__(self) -> str:
+                    return '<FencedProviderSendPermit opaque>'
+
+            permit = _CommittedPermit()
+
+            class _CommittedTransport(FencedOpenAITransport[Any]):
+                __slots__ = ('_dispatched', '_http_hook')
+
+                def __init__(self) -> None:
+                    from backend.app.agent_runtime.auto_review_cost_policy import (
+                        _SERVER_OWNED_FENCED_SEND_HOOK,
+                    )
+
+                    self._dispatched = False
+                    self._http_hook = _SERVER_OWNED_FENCED_SEND_HOOK
+
+                @property
+                def http_hook(self) -> object:
+                    return self._http_hook
+
+                def dispatch(
+                    self,
+                    send: Callable[..., Any],
+                    *,
+                    request_body: Any = None,
+                    is_redirect: bool = False,
+                    is_retry: bool = False,
+                ) -> Any:
+                    del request_body
+                    if self._dispatched or is_redirect or is_retry:
+                        raise ProviderSendFenceError(
+                            'redirect, retry, or second dispatch is forbidden'
+                        )
+                    permit.consume_at_dispatch()
+                    self._dispatched = True
+                    return send(timeout=timeout)
+
+            transport = _CommittedTransport()
+
+            class _CommittedGrant:
+                __slots__ = ()
+
+                @property
+                def attempt_id(self) -> str:
+                    return attempt_id
+
+                @property
+                def permit(self) -> _CommittedPermit:
+                    return permit
+
+                @property
+                def provider_timeout_seconds(self) -> int:
+                    return timeout
+
+                @property
+                def authoritative_lease_expires_at(self) -> datetime:
+                    return lease_expiry
+
+                @property
+                def transport(self) -> _CommittedTransport:
+                    return transport
+
+                def __copy__(self):
+                    raise TypeError('provider attempt grants cannot be copied')
+
+                def __deepcopy__(self, memo):
+                    del memo
+                    raise TypeError('provider attempt grants cannot be copied')
+
+                def __reduce_ex__(self, protocol):
+                    del protocol
+                    raise TypeError('provider attempt grants cannot be serialized')
+
+                def __repr__(self) -> str:
+                    return '<ProviderAttemptGrant opaque>'
+
+            grant: ProviderAttemptGrant[Any] = _CommittedGrant()
             self._permits[(context.workflow_thread_id, context.agent_name)] = grant
             return grant
+
+    def dispatch_prepared_extraction(
+        self,
+        *,
+        invocation: PreparedExtractionInvocation,
+        provider: Callable[..., _R],
+        grant: ProviderAttemptGrant,
+    ) -> _R:
+        with self._lock:
+            matches = [
+                state
+                for key, state in self._calls.items()
+                if self._permits.get(key) is grant
+            ]
+            if len(matches) != 1:
+                raise ExtractionCallStateError(
+                    'committed provider attempt grant is required'
+                )
+            state = matches[0]
+            if (
+                state.status != 'claimed'
+                or state.provider_attempt_count != 1
+                or state.plan.invocation is not invocation
+            ):
+                raise ExtractionCallStateError('prepared extraction dispatch changed')
+            return grant.transport.dispatch(
+                lambda *, timeout: provider(invocation, timeout=timeout),
+                request_body=invocation.canonical_bytes,
+            )
 
     def complete(
         self,
@@ -902,6 +1102,10 @@ class ExtractionCallStore:
         self._plan_set = prepared_plan_set
         self._plans = {plan.agent_name: plan for plan in prepared_plan_set.plans}
         self._db_clock_override = db_clock
+        self._active_grants: dict[
+            str, tuple[ProviderAttemptGrant, ExtractionLockedContext]
+        ] = {}
+        self._grant_lock = RLock()
 
     def claim_or_replay(
         self,
@@ -1150,14 +1354,182 @@ class ExtractionCallStore:
                     lease_expiry = call.lease_expires_at
             if refusal is not None:
                 raise ExtractionCallStateError(refusal)
-            return _issue_provider_attempt_grant(
-                attempt_id=attempt_id,
-                provider_timeout_seconds=timeout,
-                send_start_window_seconds=window,
-                authoritative_lease_expires_at=lease_expiry,
-                commit=lambda: None,
-                monotonic=monotonic,
-            )
+            deadline = monotonic() + window
+
+            class _CommittedPermit:
+                __slots__ = ('_consumed', '_invalidated', '_lock')
+
+                def __init__(self) -> None:
+                    self._consumed = False
+                    self._invalidated = False
+                    self._lock = Lock()
+
+                @property
+                def attempt_id(self) -> str:
+                    return attempt_id
+
+                @property
+                def send_start_deadline_monotonic(self) -> float:
+                    return deadline
+
+                @property
+                def consumed(self) -> bool:
+                    with self._lock:
+                        return self._consumed
+
+                def consume_at_dispatch(self) -> None:
+                    with self._lock:
+                        if self._consumed:
+                            raise ProviderSendFenceError(
+                                'provider send permit was already consumed'
+                            )
+                        if self._invalidated or monotonic() >= deadline:
+                            raise ProviderSendFenceError(
+                                'provider send permit expired'
+                            )
+                        self._consumed = True
+
+                def _invalidate_from_store(self) -> None:
+                    with self._lock:
+                        self._invalidated = True
+
+                def __copy__(self):
+                    raise TypeError('provider send permits cannot be copied')
+
+                def __deepcopy__(self, memo):
+                    del memo
+                    raise TypeError('provider send permits cannot be copied')
+
+                def __reduce_ex__(self, protocol):
+                    del protocol
+                    raise TypeError('provider send permits cannot be serialized')
+
+                def __repr__(self) -> str:
+                    return '<FencedProviderSendPermit opaque>'
+
+            permit = _CommittedPermit()
+
+            class _CommittedTransport(FencedOpenAITransport[Any]):
+                __slots__ = ('_dispatched', '_http_hook')
+
+                def __init__(self) -> None:
+                    from backend.app.agent_runtime.auto_review_cost_policy import (
+                        _SERVER_OWNED_FENCED_SEND_HOOK,
+                    )
+
+                    self._dispatched = False
+                    self._http_hook = _SERVER_OWNED_FENCED_SEND_HOOK
+
+                @property
+                def http_hook(self) -> object:
+                    return self._http_hook
+
+                def dispatch(
+                    self,
+                    send: Callable[..., Any],
+                    *,
+                    request_body: Any = None,
+                    is_redirect: bool = False,
+                    is_retry: bool = False,
+                ) -> Any:
+                    del request_body
+                    if self._dispatched or is_redirect or is_retry:
+                        raise ProviderSendFenceError(
+                            'redirect, retry, or second dispatch is forbidden'
+                        )
+                    permit.consume_at_dispatch()
+                    self._dispatched = True
+                    return send(timeout=timeout)
+
+            transport = _CommittedTransport()
+
+            class _CommittedGrant:
+                __slots__ = ()
+
+                @property
+                def attempt_id(self) -> str:
+                    return attempt_id
+
+                @property
+                def permit(self) -> _CommittedPermit:
+                    return permit
+
+                @property
+                def provider_timeout_seconds(self) -> int:
+                    return timeout
+
+                @property
+                def authoritative_lease_expires_at(self) -> datetime:
+                    return lease_expiry
+
+                @property
+                def transport(self) -> _CommittedTransport:
+                    return transport
+
+                def __copy__(self):
+                    raise TypeError('provider attempt grants cannot be copied')
+
+                def __deepcopy__(self, memo):
+                    del memo
+                    raise TypeError('provider attempt grants cannot be copied')
+
+                def __reduce_ex__(self, protocol):
+                    del protocol
+                    raise TypeError('provider attempt grants cannot be serialized')
+
+                def __repr__(self) -> str:
+                    return '<ProviderAttemptGrant opaque>'
+
+            grant: ProviderAttemptGrant[Any] = _CommittedGrant()
+            with self._grant_lock:
+                self._active_grants[grant.attempt_id] = (grant, context)
+            return grant
+
+    def dispatch_prepared_extraction(
+        self,
+        *,
+        invocation: PreparedExtractionInvocation,
+        provider: Callable[..., _R],
+        grant: ProviderAttemptGrant,
+    ) -> _R:
+        with self._grant_lock:
+            active = self._active_grants.get(grant.attempt_id)
+            if active is None or active[0] is not grant:
+                raise ExtractionCallStateError(
+                    'committed provider attempt grant is required'
+                )
+            context = active[1]
+            plan = self._plans[context.agent_name]
+            if plan.invocation is not invocation:
+                raise ExtractionCallStateError('prepared extraction dispatch changed')
+            with self._session_factory() as db, db.begin():
+                thread, request, refs, sources, safety = self._lock_prefix(
+                    db, workflow_thread_id=context.workflow_thread_id
+                )
+                call = self._locked_call(db, context)
+                now = self._db_now(db)
+                if (
+                    call.status != 'claimed'
+                    or call.provider_attempt_count != 1
+                    or call.lease_expires_at is None
+                    or now >= call.lease_expires_at
+                    or thread.cancelled_at is not None
+                    or not self._current_identity_matches(
+                        thread=thread,
+                        request=request,
+                        refs=refs,
+                        sources=sources,
+                        safety=safety,
+                        plan=plan,
+                    )
+                ):
+                    raise ExtractionCallStateError(
+                        'committed provider attempt grant is not live'
+                    )
+                return grant.transport.dispatch(
+                    lambda *, timeout: provider(invocation, timeout=timeout),
+                    request_body=invocation.canonical_bytes,
+                )
 
     def complete(
         self,
@@ -1308,6 +1680,7 @@ class ExtractionCallStore:
                             thread=thread,
                             request=request,
                             call=call,
+                            parsed=parsed,
                         )
                         if pair != verified_pair:
                             raise ExtractionCallStateError(
@@ -1340,9 +1713,10 @@ class ExtractionCallStore:
         reason_code: str,
         usage: ProviderUsage | None = None,
     ) -> None:
-        del reason_code
         with self._session_factory() as db, db.begin():
-            self._lock_prefix(db, workflow_thread_id=context.workflow_thread_id)
+            _thread, request, _refs, _sources, safety = self._lock_prefix(
+                db, workflow_thread_id=context.workflow_thread_id
+            )
             call = self._locked_call(db, context)
             run = db.scalar(
                 select(AgentRun)
@@ -1352,6 +1726,7 @@ class ExtractionCallStore:
             if run is None or call.status != 'claimed':
                 raise ExtractionCallStateError('extraction call is not failable')
             now = self._db_now(db)
+            overrun = False
             if call.provider_attempt_count == 0:
                 call.charged_input_tokens = 0
                 call.charged_output_tokens = 0
@@ -1365,15 +1740,94 @@ class ExtractionCallStore:
                 call.charged_input_tokens = max(usage.input_tokens, 0)
                 call.charged_output_tokens = max(usage.output_tokens, 0)
                 call.charged_cost_usd = ExtractionCallLedger._usage_cost(plan, usage)
+                overrun = (
+                    call.charged_input_tokens > plan.max_input_tokens
+                    or call.charged_output_tokens > plan.max_output_tokens
+                    or Decimal(call.charged_cost_usd) > plan.reserved_cost_usd
+                )
+            if call.provider_attempt_count == 1:
+                with db.no_autoflush:
+                    other_extraction = sum(
+                        (
+                            Decimal(row.charged_cost_usd)
+                            if row.status in {'completed', 'failed'}
+                            else Decimal(row.reserved_cost_usd)
+                        )
+                        for row in db.scalars(
+                            select(AutoReviewExtractionCall).where(
+                                AutoReviewExtractionCall.workflow_thread_id
+                                == context.workflow_thread_id,
+                                AutoReviewExtractionCall.id != call.id,
+                            )
+                        ).all()
+                    )
+                    validation_spend = sum(
+                        (
+                            Decimal(row.charged_cost_usd)
+                            if row.status in {'completed', 'failed'}
+                            else Decimal(row.reserved_cost_usd)
+                        )
+                        for row in db.scalars(
+                            select(AutoReviewValidationCall).where(
+                                AutoReviewValidationCall.workflow_thread_id
+                                == context.workflow_thread_id
+                            )
+                        ).all()
+                    )
+                charge = Decimal(call.charged_cost_usd)
+                overrun = overrun or (
+                    other_extraction + charge
+                    > Decimal(request.confirmed_extraction_cost_ceiling_usd)
+                    or other_extraction + charge + validation_spend
+                    > Decimal(request.confirmed_total_cost_ceiling_usd)
+                )
+                call.budget_overrun = overrun
+                call.budget_overrun_cost_usd = max(
+                    charge - Decimal(call.reserved_cost_usd), Decimal('0')
+                )
+            run.input_tokens = call.charged_input_tokens
+            run.output_tokens = call.charged_output_tokens
+            run.total_tokens = call.charged_input_tokens + call.charged_output_tokens
+            run.estimated_cost_usd = float(call.charged_cost_usd)
+            bounded_reason = (
+                reason_code
+                if reason_code
+                in {
+                    'provider_failure',
+                    'provider_timeout',
+                    'provider_response_invalid',
+                    'evidence_binding_mismatch',
+                    'cancelled',
+                    'lease_expired',
+                }
+                else 'provider_failure'
+            )
+            run.metadata_ = {
+                **(run.metadata_ or {}),
+                'failure_reason_code': bounded_reason,
+            }
             self._sql_fail(call, run, now=now)
+            if overrun:
+                self._open_overrun_breaker(
+                    db, safety=safety['extraction'], call=call, now=now
+                )
 
-    def recover_expired(
+    def cancel(
         self,
         context: ExtractionLockedContext,
-    ) -> ExtractionLockedContext | None:
-        """Reclaim an unsent claim or conservatively finalize a sent attempt."""
+        *,
+        actor_subject_id: str,
+    ) -> None:
         with self._session_factory() as db, db.begin():
-            self._lock_prefix(db, workflow_thread_id=context.workflow_thread_id)
+            thread, _request, _refs, _sources, _safety = self._lock_prefix(
+                db, workflow_thread_id=context.workflow_thread_id
+            )
+            if (
+                context.owner_subject_id is None
+                or actor_subject_id != context.owner_subject_id
+                or thread.owner_subject_id != actor_subject_id
+            ):
+                raise ExtractionCallStateError('workflow owner mismatch')
             call = self._locked_call(db, context)
             run = db.scalar(
                 select(AgentRun)
@@ -1381,26 +1835,103 @@ class ExtractionCallStore:
                 .with_for_update()
             )
             if run is None or call.status != 'claimed':
-                raise ExtractionCallStateError('extraction call is not recoverable')
+                raise ExtractionCallStateError('extraction call is not cancellable')
             now = self._db_now(db)
-            if call.lease_expires_at is None or now < call.lease_expires_at:
-                raise ExtractionCallStateError('extraction lease has not expired')
+            if thread.cancelled_at is None:
+                thread.cancelled_at = now
+                thread.cancelled_by_subject_id = actor_subject_id
             if call.provider_attempt_count == 0:
-                call.lease_token = uuid4().hex
-                call.claimed_at = now
-                call.lease_expires_at = now + timedelta(
-                    seconds=call.provider_attempt_lease_seconds
+                call.charged_input_tokens = 0
+                call.charged_output_tokens = 0
+                call.charged_cost_usd = Decimal('0')
+                run.metadata_ = {
+                    **(run.metadata_ or {}),
+                    'failure_reason_code': 'cancelled',
+                }
+                self._sql_fail(call, run, now=now)
+
+    def recover_expired(
+        self,
+        context: ExtractionLockedContext,
+    ) -> ExtractionLockedContext | None:
+        """Reclaim an unsent claim or conservatively finalize a sent attempt."""
+        refusal: str | None = None
+        recovered: ExtractionLockedContext | None = None
+        with self._session_factory() as db:
+            with db.begin():
+                thread, request, refs, sources, safety = self._lock_prefix(
+                    db, workflow_thread_id=context.workflow_thread_id
                 )
-                return self._context(call)
-            call.charged_input_tokens = call.reserved_input_tokens
-            call.charged_output_tokens = call.reserved_output_tokens
-            call.charged_cost_usd = call.reserved_cost_usd
-            run.input_tokens = call.reserved_input_tokens
-            run.output_tokens = call.reserved_output_tokens
-            run.total_tokens = call.reserved_input_tokens + call.reserved_output_tokens
-            run.estimated_cost_usd = float(call.reserved_cost_usd)
-            self._sql_fail(call, run, now=now)
-            return None
+                call = self._locked_call(db, context)
+                run = db.scalar(
+                    select(AgentRun)
+                    .where(AgentRun.id == call.agent_run_id)
+                    .with_for_update()
+                )
+                if run is None or call.status != 'claimed':
+                    raise ExtractionCallStateError('extraction call is not recoverable')
+                now = self._db_now(db)
+                if call.lease_expires_at is None or now < call.lease_expires_at:
+                    raise ExtractionCallStateError('extraction lease has not expired')
+                if call.provider_attempt_count == 0:
+                    plan = self._plans[context.agent_name]
+                    try:
+                        self._ensure_claim_ready(
+                            db=db,
+                            thread=thread,
+                            request=request,
+                            refs=refs,
+                            sources=sources,
+                            safety=safety,
+                            plan=plan,
+                            actor_subject_id=context.owner_subject_id,
+                            allowed_permission_levels=(
+                                context.allowed_permission_levels
+                            ),
+                            validation_obligation=Decimal('0'),
+                            prospective_reserve=Decimal('0'),
+                        )
+                    except ExtractionCallStateError as exc:
+                        refusal = str(exc)
+                        call.charged_input_tokens = 0
+                        call.charged_output_tokens = 0
+                        call.charged_cost_usd = Decimal('0')
+                        run.metadata_ = {
+                            **(run.metadata_ or {}),
+                            'failure_reason_code': 'lease_expired',
+                        }
+                        self._sql_fail(call, run, now=now)
+                    if refusal is None:
+                        call.lease_token = uuid4().hex
+                        call.claimed_at = now
+                        call.lease_expires_at = now + timedelta(
+                            seconds=call.provider_attempt_lease_seconds
+                        )
+                        recovered = self._context(
+                            call,
+                            owner_subject_id=context.owner_subject_id,
+                            allowed_permission_levels=(
+                                context.allowed_permission_levels
+                            ),
+                        )
+                else:
+                    call.charged_input_tokens = call.reserved_input_tokens
+                    call.charged_output_tokens = call.reserved_output_tokens
+                    call.charged_cost_usd = call.reserved_cost_usd
+                    run.input_tokens = call.reserved_input_tokens
+                    run.output_tokens = call.reserved_output_tokens
+                    run.total_tokens = (
+                        call.reserved_input_tokens + call.reserved_output_tokens
+                    )
+                    run.estimated_cost_usd = float(call.reserved_cost_usd)
+                    run.metadata_ = {
+                        **(run.metadata_ or {}),
+                        'failure_reason_code': 'lease_expired',
+                    }
+                    self._sql_fail(call, run, now=now)
+            if refusal is not None:
+                raise ExtractionCallStateError(refusal)
+            return recovered
 
     def _lock_prefix(
         self,
@@ -1664,6 +2195,7 @@ class ExtractionCallStore:
         thread: AgentWorkflowThread,
         request: AgentWorkflowRequest,
         call: AutoReviewExtractionCall,
+        parsed: BaseModel | None = None,
     ) -> tuple[str, str]:
         items = tuple(
             db.scalars(
@@ -1744,6 +2276,68 @@ class ExtractionCallStore:
             for binding in bindings
         ):
             raise ExtractionCallStateError('evidence_binding_mismatch')
+        plan = self._plans.get(call.agent_name)
+        if plan is None:
+            raise ExtractionCallStateError('evidence_binding_mismatch')
+        source_rows = {
+            row.id: row
+            for row in db.scalars(
+                select(Source).where(
+                    Source.id.in_(
+                        [ref.canonical_row_id for ref in workflow_refs.values()]
+                    )
+                )
+            ).all()
+        }
+        slots_by_ref: dict[int, tuple[PreparedEvidenceSlotIdentity, ...]] = {}
+        for ref_id, ref in workflow_refs.items():
+            source = source_rows.get(ref.canonical_row_id)
+            if source is None or source.source_id == '':
+                raise ExtractionCallStateError('evidence_binding_mismatch')
+            slots_by_ref[ref_id] = tuple(
+                slot
+                for slot in plan.invocation.evidence_slot_identities
+                if slot.source_id == source.source_id
+            )
+            if not slots_by_ref[ref_id]:
+                raise ExtractionCallStateError('evidence_binding_mismatch')
+        selected_slot_ids: set[str] | None = None
+        if parsed is not None:
+            candidate = getattr(parsed, 'candidate', None)
+            field_bindings = getattr(candidate, 'field_evidence_bindings', ())
+            selected_slot_ids = {
+                str(binding.evidence_slot_id) for binding in field_bindings
+            }
+            all_slot_ids = {
+                slot.slot_id for slot in plan.invocation.evidence_slot_identities
+            }
+            if not selected_slot_ids or not selected_slot_ids <= all_slot_ids:
+                raise ExtractionCallStateError('evidence_binding_mismatch')
+        for binding in bindings:
+            possible_slots = slots_by_ref[binding.workflow_evidence_ref_id]
+            if selected_slot_ids is not None:
+                selected = tuple(
+                    slot
+                    for slot in possible_slots
+                    if slot.slot_id in selected_slot_ids
+                )
+                candidate_sets = (selected,) if selected else ()
+            else:
+                candidate_sets = tuple(
+                    subset
+                    for count in range(1, len(possible_slots) + 1)
+                    for subset in combinations(possible_slots, count)
+                )
+            valid_message_hmacs = {
+                self._message_set_hmac(
+                    ref=workflow_refs[binding.workflow_evidence_ref_id],
+                    slots=slot_set,
+                    request=request,
+                )
+                for slot_set in candidate_sets
+            }
+            if binding.message_set_hmac not in valid_message_hmacs:
+                raise ExtractionCallStateError('evidence_binding_mismatch')
         security_scope_hmac = build_keyed_fingerprint(
             thread.security_scope_id,
             settings=self._settings,
@@ -1758,6 +2352,47 @@ class ExtractionCallStore:
             settings=self._settings,
         )
         return item.candidate_key, evidence_hmac
+
+    def _message_set_hmac(
+        self,
+        *,
+        ref: AgentWorkflowEvidenceRef,
+        slots: Sequence[PreparedEvidenceSlotIdentity],
+        request: AgentWorkflowRequest,
+    ) -> str:
+        ordered = tuple(sorted(slots, key=lambda item: item.stable_message_identity))
+        if not ordered:
+            raise ExtractionCallStateError('evidence_binding_mismatch')
+        permission = _strictest_permission(
+            tuple(slot.permission_level for slot in ordered)
+        )
+        if permission != ref.permission_level_snapshot:
+            raise ExtractionCallStateError('evidence_binding_mismatch')
+        return build_keyed_fingerprint(
+            {
+                'canonical_source_kind': ref.canonical_source_type,
+                'canonical_source_id': ref.canonical_row_id,
+                'canonical_version_or_signature': (
+                    ref.external_revision or ref.content_signature
+                ),
+                'content_fingerprint': ref.content_fingerprint,
+                'permission_level': permission,
+                'fingerprint_key_version': request.fingerprint_key_version,
+                'fingerprint_key_material_verifier': (
+                    request.fingerprint_key_material_verifier
+                ),
+                'messages': [
+                    {
+                        'stable_message_identity': slot.stable_message_identity,
+                        'text_fingerprint': slot.text_fingerprint,
+                    }
+                    for slot in ordered
+                ],
+            },
+            settings=self._settings,
+            schema_version='candidate-message-set:v1',
+            policy_version='candidate-message-set:v1',
+        )
 
     def _verify_completed_replay(
         self,

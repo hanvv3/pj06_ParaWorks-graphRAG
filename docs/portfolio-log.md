@@ -4793,17 +4793,24 @@ Cost/security note:
   and provider-safety state are rechecked under the prescribed locks. Known
   usage is charged exactly; unknown post-marker usage charges the reserve;
   overruns open the extraction breaker atomically.
-- The provider grant is process-private, one-use, non-copyable,
-  non-pickleable, redacted, and consumed only by the body-blind Task 1 HTTP
-  hook. Provider options are deeply frozen and part of the signed identity;
-  retries, fallback, cache, callbacks, and tracing remain disabled for V2.1.
+- The provider grant is a store-owned post-commit capability with no module
+  issuer/factory. The real store authenticates the exact live grant and
+  rechecks the locked attempt before its one body-blind Task 1 HTTP-hook
+  dispatch. Grants and permits are non-copyable, non-pickleable, redacted and
+  process-local; retry, fallback, cache, callbacks and tracing stay disabled.
 - Candidate completion is callback-independent: E3 re-queries exactly one
   same-workflow ReviewItem and its contiguous immutable evidence children,
-  re-derives the candidate evidence HMAC and terminal result-set HMAC, and
-  otherwise persists only bounded `evidence_binding_mismatch` failure state.
-- Alembic head `9d7f3a1c6e20` explicitly replaces the extraction lifecycle
-  constraint for databases already at `7c5a2e9f4b10`; empty downgrade/cycle
-  and retained-state refusal are covered on SQLite and PostgreSQL.
-- Verification used fake providers only: `188` shared Task 3 tests, `11` real
-  PostgreSQL lifecycle/concurrency/migration tests, `63` Task 3B adapter tests,
-  and `202` Task 1/2 model/guard/migration regressions, all with zero skips.
+  recomputes the exact selected message-set HMAC from prepared slot identities
+  and current canonical refs, then re-derives candidate/terminal HMACs.
+  Mismatch persists only bounded `evidence_binding_mismatch` failure state.
+- Alembic head `9d7f3a1c6e20` conditionally replaces the extraction lifecycle
+  constraint when the Task 2 table exists, so supported pinned legacy schemas
+  remain upgradeable. Real `7c -> 9d`, empty downgrade/cycle, retained-row
+  upgrade, and retained-state downgrade refusal are covered.
+- The product service keeps disabled mode on exact V2.0. Shadow/enforce
+  requires a supplied V2.1 launch authority, persists the exact V2.1 request,
+  and remains in `created` until Task 12 registers the V2.1 graph. Missing or
+  invalid authority fails bounded and performs no drafting/provider call.
+- Round-two verification used fake providers only: `232` Task 3 union tests,
+  `28` real PostgreSQL lifecycle/authority/migration cases, `201` proportional
+  Task 1/2 regressions, and `97` service/API/integration tests, zero skips.

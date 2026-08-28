@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import RLock
-from typing import cast
+from typing import Protocol, cast
 from uuid import uuid4
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -36,6 +36,9 @@ from backend.app.agent_runtime.review_v2_drafting import (
     ReviewDraftResult,
 )
 from backend.app.agent_runtime.review_v2_preflight import (
+    PreparedReviewRequest,
+    PreparedReviewRequestV21,
+    V21PreparedReviewConfig,
     create_or_reuse_review_thread,
     prepare_review_request,
 )
@@ -121,9 +124,23 @@ _PUBLIC_ERROR_CODES = frozenset({
     'runtime_version_unavailable',
     'model_unavailable',
     'budget_exceeded',
+    'cost_preview_changed',
     'concurrent_resume',
     'invalid_state_transition',
 })
+
+
+class ReviewV21LaunchAuthority(Protocol):
+    """Task-11-compatible boundary for resolving a signed V2.1 launch snapshot."""
+
+    def resolve_v21_config(
+        self,
+        *,
+        db: Session,
+        actor: DemoUser,
+        request: ReviewWorkflowRunRequest,
+        operation: str,
+    ) -> V21PreparedReviewConfig: ...
 
 
 class ReviewWorkflowServiceError(RuntimeError):
@@ -314,6 +331,7 @@ class ReviewWorkflowService:
         agent_registry: AgentRegistry,
         draft_service: object,
         model_readiness: ReviewModelReadiness | None = None,
+        v21_launch_authority: ReviewV21LaunchAuthority | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -325,8 +343,56 @@ class ReviewWorkflowService:
         self._model_readiness = model_readiness or ReviewModelReadiness(
             ready=True
         )
+        self._v21_launch_authority = v21_launch_authority
         self._now = now or (lambda: datetime.now(UTC))
         self._lifecycle_lock = RLock()
+
+    def _prepare_request(
+        self,
+        *,
+        db: Session,
+        actor: DemoUser,
+        request: ReviewWorkflowRunRequest,
+        operation: str,
+    ) -> PreparedReviewRequest | PreparedReviewRequestV21:
+        v21_config: V21PreparedReviewConfig | None = None
+        if self._settings.auto_review_mode != 'disabled':
+            authority = self._v21_launch_authority
+            if authority is None:
+                raise ReviewWorkflowPreflightError(
+                    'cost_preview_changed',
+                    'V2.1 launch authority is unavailable',
+                )
+            try:
+                v21_config = authority.resolve_v21_config(
+                    db=db,
+                    actor=actor,
+                    request=request,
+                    operation=operation,
+                )
+            except ReviewWorkflowPreflightError:
+                raise
+            except Exception:
+                raise ReviewWorkflowPreflightError(
+                    'cost_preview_changed',
+                    'V2.1 launch authority is invalid',
+                ) from None
+            if (
+                v21_config.configured_auto_review_mode
+                != self._settings.auto_review_mode
+            ):
+                raise ReviewWorkflowPreflightError(
+                    'cost_preview_changed',
+                    'V2.1 launch mode changed',
+                )
+        return prepare_review_request(
+            db,
+            request=request,
+            actor=actor,
+            registry=self._agent_registry,
+            settings=self._settings,
+            v21_config=v21_config,
+        )
 
     def diagnostic(self) -> ReviewWorkflowDiagnosticResponse:
         if not self._settings.langgraph_review_v2_enabled:
@@ -369,12 +435,8 @@ class ReviewWorkflowService:
         self._require_new_run_availability()
         try:
             with self._session_factory() as db:
-                prepared = prepare_review_request(
-                    db,
-                    request=request,
-                    actor=actor,
-                    registry=self._agent_registry,
-                    settings=self._settings,
+                prepared = self._prepare_request(
+                    db=db, actor=actor, request=request, operation='dry_run'
                 )
                 db.rollback()
             return self._draft_service.preview_prepared(
@@ -398,12 +460,8 @@ class ReviewWorkflowService:
             self._require_new_run_availability()
             try:
                 with self._session_factory() as db:
-                    prepared = prepare_review_request(
-                        db,
-                        request=request,
-                        actor=actor,
-                        registry=self._agent_registry,
-                        settings=self._settings,
+                    prepared = self._prepare_request(
+                        db=db, actor=actor, request=request, operation='start'
                     )
                     db.rollback()
                 preview = self._draft_service.preview_prepared(
@@ -428,6 +486,15 @@ class ReviewWorkflowService:
 
             if not preflight.created:
                 return self.status(actor=actor, thread_id=preflight.thread.thread_id)
+
+            # Task 3 owns immutable V2.1 launch/storage only. The V2.1 graph is
+            # registered and executed by Task 12; until then, retain the exact
+            # durable request in ``created`` without entering the V2.0 graph.
+            if isinstance(prepared, PreparedReviewRequestV21):
+                return self.status(
+                    actor=actor,
+                    thread_id=preflight.thread.thread_id,
+                )
 
             thread_id = preflight.thread.thread_id
             draft_result = self._draft_with_bounded_retry(

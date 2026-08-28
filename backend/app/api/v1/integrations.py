@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from backend.app.agent_runtime import AgentRegistry, EvidencePacket, PermissionContext
 from backend.app.agent_runtime.canonical_sources import ReviewWorkflowPreflightError
 from backend.app.agent_runtime.review_v2_preflight import (
+    V21PreparedReviewConfig,
     find_matching_review_thread,
     prepare_review_request,
 )
@@ -622,7 +623,13 @@ def _prepare_default_review_batch(
     user: DemoUser,
     settings: Settings,
     refs: list[SourceVersionRef],
+    v21_config: V21PreparedReviewConfig | None = None,
 ):
+    if settings.auto_review_mode != 'disabled' and v21_config is None:
+        raise ReviewWorkflowPreflightError(
+            'cost_preview_changed',
+            'V2.1 launch authority is unavailable',
+        )
     request = ReviewWorkflowRunRequest(
         source_refs=[asdict(ref) for ref in refs],
         agent_names=list(DEFAULT_REVIEW_AGENT_NAMES),
@@ -633,6 +640,7 @@ def _prepare_default_review_batch(
         actor=user,
         registry=_default_review_registry(),
         settings=settings,
+        v21_config=v21_config,
     )
     return request, prepared
 

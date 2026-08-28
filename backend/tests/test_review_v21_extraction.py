@@ -219,10 +219,11 @@ def test_v21_extraction_route_has_zero_sdk_retries_no_provider_fallback_and_cach
 
 
 def test_v21_extraction_prepares_once_and_invokes_same_object_without_open_db_session():
-    invocation = _plans().plans[0].invocation
+    plan = _plans().plans[0]
+    invocation = plan.invocation
     seen = []
     ledger = ExtractionCallLedger()
-    context = ledger.claim_or_replay('workflow', _plans().plans[0])
+    context = ledger.claim_or_replay('workflow', plan)
     grant = ledger.mark_attempt_started(context)
     invoke_prepared_extraction(
         invocation,
@@ -234,6 +235,7 @@ def test_v21_extraction_prepares_once_and_invokes_same_object_without_open_db_se
                 'no_candidate_reason': 'no_relevant_evidence',
             }
         ),
+        store=ledger,
         grant=grant,
     )
     assert seen == [invocation]
@@ -248,8 +250,35 @@ def test_v21_extraction_rejects_missing_grant_before_provider_invocation():
         return invocation, timeout
 
     with pytest.raises(ExtractionCallStateError, match='grant'):
-        invoke_prepared_extraction(_plans().plans[0].invocation, provider, grant=None)
+        invoke_prepared_extraction(
+            _plans().plans[0].invocation,
+            provider,
+            store=ExtractionCallLedger(),
+            grant=None,
+        )
     assert called is False
+
+
+def test_v21_extraction_rejects_forged_wrapper_around_committed_grant():
+    plan = _plans().plans[0]
+    ledger = ExtractionCallLedger()
+    context = ledger.claim_or_replay('workflow', plan)
+    committed = ledger.mark_attempt_started(context)
+
+    class _ForgedGrant:
+        attempt_id = committed.attempt_id
+        permit = committed.permit
+        provider_timeout_seconds = committed.provider_timeout_seconds
+        authoritative_lease_expires_at = committed.authoritative_lease_expires_at
+        transport = committed.transport
+
+    with pytest.raises(ExtractionCallStateError, match='committed'):
+        invoke_prepared_extraction(
+            plan.invocation,
+            lambda *_args, **_kwargs: pytest.fail('provider called'),
+            store=ledger,
+            grant=_ForgedGrant(),
+        )
 
 
 def test_v21_extraction_provider_dto_contains_only_local_aliases_and_allowlisted_plaintext():
@@ -276,7 +305,10 @@ def test_v21_extraction_global_debug_or_verbose_is_zero_call_and_writes_no_promp
     monkeypatch.setenv('OPENAI_LOG', 'debug')
     with pytest.raises(ExtractionCallStateError):
         invoke_prepared_extraction(
-            _plans().plans[0].invocation, lambda *_: pytest.fail('called'), grant=None
+            _plans().plans[0].invocation,
+            lambda *_: pytest.fail('called'),
+            store=ExtractionCallLedger(),
+            grant=None,
         )
     assert '직접 확인된' not in caplog.text
 
@@ -290,6 +322,7 @@ def test_v21_extraction_openai_sdk_debug_logging_is_zero_call_and_caplog_receive
             invoke_prepared_extraction(
                 _plans().plans[0].invocation,
                 lambda *_: pytest.fail('called'),
+                store=ExtractionCallLedger(),
                 grant=None,
             )
         assert '직접 확인된' not in caplog.text
