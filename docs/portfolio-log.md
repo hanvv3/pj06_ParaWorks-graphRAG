@@ -4777,7 +4777,7 @@ Cost/security note:
   data: null authority/lineage cannot be attached later by UPDATE.
 - Slack remains outside C.5 automatic eligibility. Verification uses local
   SQLite and isolated PostgreSQL/pgvector only, with no live provider calls.
-- Round-3 verification used a pinned manual `2f6a8b9c0d1e` schema fixture,
+- Round-4 verification used a pinned manual `2f6a8b9c0d1e` schema fixture,
   exact Task 2 index assertions, and finally-dropped PostgreSQL schemas:
   `176 passed` in the focused suite, including `87` PostgreSQL tests with zero
   skips; the Task 1 compatibility suite remains `118 passed`.
