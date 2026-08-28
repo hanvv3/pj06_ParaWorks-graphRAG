@@ -26,7 +26,6 @@ from backend.app.admin.auto_review_keys import (
     AutoReviewKeyAdminError,
     AutoReviewKeyAdminService,
     FingerprintKeyRing,
-    build_cli_parser,
     fingerprint_key_material_verifier,
 )
 from backend.app.agent_runtime.canonical_sources import build_keyed_fingerprint
@@ -3267,25 +3266,145 @@ def test_reaffirmed_bundle_revoke_is_atomic_for_primary_and_companion(
     )
 
 
-def test_key_admin_cli_never_accepts_or_logs_secret_material(capsys) -> None:
-    parser = build_cli_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(
-            [
-                'rotate',
-                '--expected-version',
-                'v1',
-                '--next-version',
-                'v2',
-                '--reason',
-                'bounded',
-                '--secret',
-                'forbidden',
-            ]
+def _run_key_admin_module_cli(
+    *args: str,
+    env_updates: dict[str, str] | None = None,
+    env_removals: tuple[str, ...] = (),
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.update(env_updates or {})
+    for name in env_removals:
+        env.pop(name, None)
+    return subprocess.run(
+        [sys.executable, '-m', 'backend.app.admin.auto_review_keys', *args],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
+def _assert_bounded_cli_error(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    code: str,
+    exit_code: int,
+    forbidden: tuple[str, ...] = (),
+) -> None:
+    expected = json.dumps(
+        {'ok': False, 'code': code},
+        separators=(',', ':'),
+    )
+    assert completed.returncode == exit_code
+    assert completed.stdout == f'{expected}\n'
+    assert completed.stderr == ''
+    assert json.loads(completed.stdout) == {'ok': False, 'code': code}
+    assert set(json.loads(completed.stdout)) == {'ok', 'code'}
+    assert len(completed.stdout) < 120
+    combined_output = completed.stdout + completed.stderr
+    for value in (
+        'Traceback',
+        'usage:',
+        'input_value',
+        'ValidationError',
+        'AutoReviewKeyAdminError',
+        'trusted_fingerprint_projection',
+        str(Path(__file__).resolve().parents[2]),
+        *forbidden,
+    ):
+        assert value not in combined_output
+
+
+@pytest.mark.parametrize('unknown_option', ('--secret', '--definitely-unknown'))
+def test_key_admin_module_cli_bounds_forbidden_and_unknown_arguments(
+    unknown_option: str,
+) -> None:
+    supplied_value = 'forbidden-controller-value'
+    completed = _run_key_admin_module_cli(
+        'status',
+        unknown_option,
+        supplied_value,
+        env_updates={'AUTO_REVIEW_MODE': 'disabled'},
+    )
+
+    _assert_bounded_cli_error(
+        completed,
+        code='configuration_refused',
+        exit_code=2,
+        forbidden=(unknown_option, supplied_value, 'error:'),
+    )
+
+
+def test_key_admin_module_cli_bounds_malformed_settings_before_initialization() -> None:
+    fake_secret = 'm' * 48
+    completed = _run_key_admin_module_cli(
+        'status',
+        env_updates={
+            'AUTO_REVIEW_MODE': 'enforce',
+            'AGENT_RUNTIME_FINGERPRINT_SECRET': fake_secret,
+        },
+        env_removals=('AUTO_REVIEW_ENFORCE_PERCENTAGE',),
+    )
+
+    _assert_bounded_cli_error(
+        completed,
+        code='configuration_refused',
+        exit_code=2,
+        forbidden=(fake_secret, 'enforce mode requires percentage'),
+    )
+
+
+def test_key_admin_module_cli_bounds_storage_initialization_failure() -> None:
+    invalid_database_url = 'not-a-storage-url-sensitive'
+    completed = _run_key_admin_module_cli(
+        'status',
+        env_updates={
+            'AUTO_REVIEW_MODE': 'disabled',
+            'PARAWORKS_DEMO_MODE': 'false',
+            'PARAWORKS_DATABASE_URL': invalid_database_url,
+            'DATABASE_URL': invalid_database_url,
+        },
+        env_removals=('PARAWORKS_DEMO_DATABASE_URL',),
+    )
+
+    _assert_bounded_cli_error(
+        completed,
+        code='storage_unavailable',
+        exit_code=3,
+        forbidden=(invalid_database_url, 'Could not parse SQLAlchemy URL'),
+    )
+
+
+def test_key_admin_module_cli_bounds_lazy_rebuild_refusal(
+    auto_review_postgres: tuple[sessionmaker[Session], Settings],
+) -> None:
+    factory, settings = auto_review_postgres
+    mismatched_secret = 'w' * 48
+    completed = _run_key_admin_module_cli(
+        'rebuild',
+        env_updates={
+            'PARAWORKS_DEMO_MODE': 'false',
+            'PARAWORKS_DATABASE_URL': settings.database_url,
+            'DATABASE_URL': settings.database_url,
+            'AGENT_RUNTIME_FINGERPRINT_KEY_VERSION': 'v1',
+            'AGENT_RUNTIME_FINGERPRINT_SECRET': mismatched_secret,
+            'AUTO_REVIEW_MODE': 'disabled',
+        },
+    )
+    try:
+        _assert_bounded_cli_error(
+            completed,
+            code='runtime_key_identity_mismatch',
+            exit_code=2,
+            forbidden=(mismatched_secret,),
         )
-    captured = capsys.readouterr()
-    assert 'forbidden' not in captured.out
-    assert 'forbidden' not in captured.err
+    finally:
+        rebuild_trusted_fingerprint_projection(
+            session_factory=factory,
+            settings=settings,
+        )
 
 
 @pytest.mark.parametrize(
@@ -3319,43 +3438,55 @@ def test_key_admin_module_cli_bounds_projection_admin_errors(
             'PARAWORKS_AUTO_REVIEW_NEXT_KEY_SECRET': next_secret,
         }
     )
+    completed = _run_key_admin_module_cli(
+        'rotate',
+        '--expected-version',
+        expected_version,
+        '--next-version',
+        'v2',
+        '--reason',
+        reason,
+        env_updates=env,
+    )
+
+    _assert_bounded_cli_error(
+        completed,
+        code=expected_code,
+        exit_code=2,
+        forbidden=(current_secret, next_secret, expected_version, reason),
+    )
+
+
+@pytest.mark.parametrize(
+    'module_name',
+    (
+        'backend.app.knowledge.claim_fingerprints',
+        'backend.app.knowledge.trusted_fingerprint_projection',
+        'backend.app.knowledge.trusted_provenance',
+        'backend.app.review.auto_review_resolution',
+    ),
+)
+@pytest.mark.parametrize('application_first', (False, True))
+def test_task5_modules_import_in_isolated_direct_and_application_orders(
+    module_name: str,
+    application_first: bool,
+) -> None:
+    statements = ['import importlib']
+    if application_first:
+        statements.append("importlib.import_module('backend.app.main')")
+    statements.append(f'importlib.import_module({module_name!r})')
     completed = subprocess.run(
-        [
-            sys.executable,
-            '-m',
-            'backend.app.admin.auto_review_keys',
-            'rotate',
-            '--expected-version',
-            expected_version,
-            '--next-version',
-            'v2',
-            '--reason',
-            reason,
-        ],
+        [sys.executable, '-c', ';'.join(statements)],
         cwd=Path(__file__).resolve().parents[2],
-        env=env,
         check=False,
         capture_output=True,
         text=True,
         timeout=15,
     )
 
-    assert completed.returncode == 2
+    assert completed.returncode == 0
+    assert completed.stdout == ''
     assert completed.stderr == ''
-    assert json.loads(completed.stdout) == {'ok': False, 'code': expected_code}
-    assert set(json.loads(completed.stdout)) == {'ok', 'code'}
-    assert len(completed.stdout) < 120
-    combined_output = completed.stdout + completed.stderr
-    for forbidden in (
-        'Traceback',
-        current_secret,
-        next_secret,
-        expected_version,
-        reason,
-        'AutoReviewKeyAdminError',
-        'trusted_fingerprint_projection',
-    ):
-        assert forbidden not in combined_output
 
 
 def test_key_admin_status_exit_code_tracks_fresh_readiness_without_key_output(

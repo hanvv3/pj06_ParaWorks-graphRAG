@@ -38,6 +38,27 @@ AUTO_REVIEW_KEY_COMPONENT = 'auto_review_trust_promotion'
 TRUSTED_FINGERPRINT_PROJECTION_COMPONENT = 'trusted_knowledge_fingerprints'
 TRUSTED_FINGERPRINT_PROJECTION_SCHEMA = 'trusted-fingerprint-projection:v1'
 KEY_MATERIAL_VERIFIER_MARKER = b'paraworks:auto-review-key-material-verifier:v1'
+_CLI_ADMIN_ERROR_CODES = frozenset(
+    {
+        'auto_review_not_disabled',
+        'durable_key_not_ready',
+        'incomplete_c5_schema',
+        'key_material_unchanged',
+        'key_ring_unavailable',
+        'key_state_missing',
+        'key_version_mismatch',
+        'nonterminal_provider_calls',
+        'old_key_identity_mismatch',
+        'operator_identity_invalid',
+        'postgresql_required',
+        'projection_key_identity_mismatch',
+        'projection_state_missing',
+        'reason_invalid',
+        'retained_keyed_state_without_runtime_identity',
+        'runtime_key_identity_mismatch',
+        'runtime_key_state_missing',
+    }
+)
 
 
 class AutoReviewKeyBootstrapError(RuntimeError):
@@ -420,11 +441,13 @@ def _require_projection_identity(
         )
 
 
+class _CliArgumentError(ValueError):
+    pass
+
+
 class _BoundedArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
-        if message.startswith('unrecognized arguments:'):
-            message = 'unrecognized arguments were provided'
-        super().error(message)
+        raise _CliArgumentError('command arguments were refused')
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -547,63 +570,68 @@ def _default_service(
 
 
 def main(argv: list[str] | None = None) -> int:
-    from backend.app.db.session import SessionLocal
+    try:
+        return _run_cli(argv)
+    except SQLAlchemyError:
+        return _emit_cli_error(code='storage_unavailable', exit_code=3)
+    except (AutoReviewKeyAdminError, AutoReviewKeyBootstrapError, ValueError) as exc:
+        code = getattr(exc, 'code', None)
+        bounded_code = code if code in _CLI_ADMIN_ERROR_CODES else 'configuration_refused'
+        return _emit_cli_error(code=bounded_code, exit_code=2)
+    except Exception:
+        return _emit_cli_error(code='configuration_refused', exit_code=2)
 
+
+def _run_cli(argv: list[str] | None) -> int:
     args = build_cli_parser().parse_args(argv)
     settings = Settings()
+    from backend.app.db.session import SessionLocal
+
     service = AutoReviewKeyAdminService(
         session_factory=SessionLocal,
         settings=settings,
         key_ring_source=_EnvironmentKeyRingSource(),
     )
-    try:
-        if args.command == 'status':
-            result = service.status()
-            payload = {
-                'runtime_generation': result.runtime_generation,
-                'runtime_version': result.runtime_version,
-                'runtime_ready': result.runtime_ready,
-                'projection_ready': result.projection_ready,
-                'projection_rebuild_required': result.projection_rebuild_required,
-                'nonterminal_extraction_count': result.nonterminal_extraction_count,
-                'nonterminal_validation_count': result.nonterminal_validation_count,
-            }
-            ready = result.runtime_ready and result.projection_ready
-        elif args.command == 'bootstrap':
-            result = service.bootstrap()
-            payload = {
-                'schema_available': result.schema_available,
-                'initialized': result.initialized,
-                'ready': result.ready,
-            }
-            ready = result.ready
-        elif args.command == 'rebuild':
-            result = service.rebuild_trusted_fingerprint_projection()
-            payload = _rebuild_payload(result)
-            ready = result.ready
-        else:
-            result = service.rotate_fingerprint_key(
-                expected_version=args.expected_version,
-                next_version=args.next_version,
-                reason=args.reason,
-                principal='system:local-auto-review-key-admin',
-            )
-            payload = _rebuild_payload(result)
-            ready = result.ready
-    except (AutoReviewKeyAdminError, AutoReviewKeyBootstrapError, ValueError) as exc:
-        code = getattr(exc, 'code', 'configuration_refused')
-        print(json.dumps({'ok': False, 'code': code}, separators=(',', ':')))
-        return 2
-    except SQLAlchemyError:
-        print(
-            json.dumps(
-                {'ok': False, 'code': 'storage_unavailable'},
-                separators=(',', ':'),
-            )
+    if args.command == 'status':
+        result = service.status()
+        payload = {
+            'runtime_generation': result.runtime_generation,
+            'runtime_version': result.runtime_version,
+            'runtime_ready': result.runtime_ready,
+            'projection_ready': result.projection_ready,
+            'projection_rebuild_required': result.projection_rebuild_required,
+            'nonterminal_extraction_count': result.nonterminal_extraction_count,
+            'nonterminal_validation_count': result.nonterminal_validation_count,
+        }
+        ready = result.runtime_ready and result.projection_ready
+    elif args.command == 'bootstrap':
+        result = service.bootstrap()
+        payload = {
+            'schema_available': result.schema_available,
+            'initialized': result.initialized,
+            'ready': result.ready,
+        }
+        ready = result.ready
+    elif args.command == 'rebuild':
+        result = service.rebuild_trusted_fingerprint_projection()
+        payload = _rebuild_payload(result)
+        ready = result.ready
+    else:
+        result = service.rotate_fingerprint_key(
+            expected_version=args.expected_version,
+            next_version=args.next_version,
+            reason=args.reason,
+            principal='system:local-auto-review-key-admin',
         )
-        return 3
+        payload = _rebuild_payload(result)
+        ready = result.ready
     print(json.dumps(payload, separators=(',', ':'), sort_keys=True))
     return 0 if ready else 3
+
+
+def _emit_cli_error(*, code: str, exit_code: int) -> int:
+    print(json.dumps({'ok': False, 'code': code}, separators=(',', ':')))
+    return exit_code
 
 
 def _rebuild_payload(result: ProjectionRebuildResult) -> dict[str, object]:

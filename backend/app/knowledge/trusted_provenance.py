@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -29,7 +29,9 @@ from backend.app.models import (
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
 )
-from backend.app.review.actors import ReuseExistingPromotion
+
+if TYPE_CHECKING:
+    from backend.app.review.actors import ReuseExistingPromotion
 
 
 class TrustedProvenanceMismatch(ValueError):  # noqa: N818 - bounded public sentinel
