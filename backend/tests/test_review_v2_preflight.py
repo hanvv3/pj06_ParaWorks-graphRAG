@@ -218,7 +218,7 @@ def test_same_owner_exact_client_key_replays_and_closes_transaction(
     assert replay.thread.thread_id == first.thread.thread_id
 
 
-def test_shared_input_hmac_uses_exact_fields_and_excludes_owner_and_client_key(
+def test_v20_prepared_identity_is_unchanged(
     db_session,
 ) -> None:
     source = _seed_source(db_session, 1)
@@ -294,14 +294,17 @@ def test_cross_owner_shared_reuse_does_not_bind_caller_client_key(
     )
 
     assert shared.thread.thread_id == first.thread.thread_id
-    assert db_session.scalar(
-        select(func.count())
-        .select_from(AgentWorkflowThread)
-        .where(
-            AgentWorkflowThread.owner_subject_id == 'owner-2',
-            AgentWorkflowThread.client_request_id == 'caller-key',
+    assert (
+        db_session.scalar(
+            select(func.count())
+            .select_from(AgentWorkflowThread)
+            .where(
+                AgentWorkflowThread.owner_subject_id == 'owner-2',
+                AgentWorkflowThread.client_request_id == 'caller-key',
+            )
         )
-    ) == 0
+        == 0
+    )
 
     _, independent = _launch(
         db_session,
@@ -396,7 +399,9 @@ def test_shared_lookup_compares_every_stored_request_and_evidence_identity_field
         registry=registry,
         settings=settings,
     )
-    model = AgentWorkflowRequest if record_type == 'request' else AgentWorkflowEvidenceRef
+    model = (
+        AgentWorkflowRequest if record_type == 'request' else AgentWorkflowEvidenceRef
+    )
     stored_record = db_session.scalar(
         select(model).where(
             (
@@ -634,11 +639,7 @@ class FakePostgresSession:
             self.session.rollback()
         finally:
             self._finish_transaction()
-        if (
-            starting_epoch == 0
-            and not had_locks
-            and self._prelock_barrier is not None
-        ):
+        if starting_epoch == 0 and not had_locks and self._prelock_barrier is not None:
             self._prelock_barrier.wait()
 
     @property
@@ -720,7 +721,7 @@ def test_postgres_concurrent_same_creator_key_different_batches_is_typed_conflic
     tmp_path,
 ) -> None:
     engine = create_engine(
-        f"sqlite:///{tmp_path / 'postgres-contract.sqlite3'}",
+        f'sqlite:///{tmp_path / "postgres-contract.sqlite3"}',
         connect_args={'check_same_thread': False, 'timeout': 10},
     )
     Base.metadata.create_all(bind=engine)
@@ -728,7 +729,11 @@ def test_postgres_concurrent_same_creator_key_different_batches_is_typed_conflic
     with session_local() as seed_session:
         sources = [_seed_source(seed_session, sequence) for sequence in (1, 2)]
         refs = [
-            (source.source_type, source.source_id, source.raw_metadata['content_signature'])
+            (
+                source.source_type,
+                source.source_id,
+                source.raw_metadata['content_signature'],
+            )
             for source in sources
         ]
         seed_session.commit()
@@ -786,7 +791,7 @@ def test_postgres_concurrent_same_creator_key_different_batches_is_typed_conflic
 
 def test_sqlite_preflight_process_lock_serializes_exact_batch(tmp_path) -> None:
     engine = create_engine(
-        f"sqlite:///{tmp_path / 'preflight.sqlite3'}",
+        f'sqlite:///{tmp_path / "preflight.sqlite3"}',
         connect_args={'check_same_thread': False, 'timeout': 10},
     )
     Base.metadata.create_all(bind=engine)
@@ -837,6 +842,8 @@ def test_sqlite_preflight_process_lock_serializes_exact_batch(tmp_path) -> None:
     with session_local() as db:
         assert db.scalar(select(func.count()).select_from(AgentWorkflowThread)) == 1
         assert db.scalar(select(func.count()).select_from(AgentWorkflowRequest)) == 1
-        assert db.scalar(select(func.count()).select_from(AgentWorkflowEvidenceRef)) == 1
+        assert (
+            db.scalar(select(func.count()).select_from(AgentWorkflowEvidenceRef)) == 1
+        )
     assert len({thread_id for thread_id, _ in results}) == 1
     assert sorted(created for _, created in results) == [False, True]

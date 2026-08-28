@@ -1,6 +1,8 @@
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
+from decimal import Decimal
 from threading import RLock
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select, text
@@ -12,7 +14,10 @@ from backend.app.agent_runtime.canonical_sources import (
     build_keyed_fingerprint,
     resolve_source_versions,
 )
-from backend.app.agent_runtime.fingerprints import fingerprint_secret_bytes
+from backend.app.agent_runtime.fingerprints import (
+    fingerprint_secret_bytes,
+    keyed_fingerprint,
+)
 from backend.app.agent_runtime.registry import AgentRegistry
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
@@ -27,6 +32,7 @@ from backend.app.models.agent_workflows import (
     AgentWorkflowThread,
 )
 from backend.app.models.source import Source
+from backend.app.schemas.auto_review import COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_INPUT_SCHEMA_VERSION,
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
@@ -53,6 +59,164 @@ class PreparedReviewRequest:
     input_hash: str
     evidence_version_hash: str
     selection_policy_version: str
+
+
+@dataclass(frozen=True)
+class V21PreparedReviewConfig:
+    configured_auto_review_mode: str
+    validator_provider: str
+    validator_model: str
+    validator_reasoning_effort: str
+    validator_prompt_version: str
+    validator_output_contract_version: str
+    policy_version: str
+    cost_policy_version: str
+    fingerprint_key_version: str
+    fingerprint_key_material_verifier: str
+    token_estimator_version: str
+    tokenizer_encoding: str
+    max_input_tokens_per_batch: int
+    max_output_tokens_per_batch: int
+    reply_priming_tokens: int
+    framing_safety_tokens: int
+    max_validation_batches_per_workflow: int
+    max_validation_candidates_per_batch: int
+    max_validation_candidates_per_workflow: int
+    max_provider_attempts: int
+    provider_timeout_seconds: int
+    provider_send_start_window_seconds: int
+    provider_attempt_lease_seconds: int
+    provider_commit_grace_seconds: int
+    validator_input_usd_per_1m: Decimal
+    validator_output_usd_per_1m: Decimal
+    enforce_percentage: int
+    authorized_percentage_at_launch: int
+    rollout_authorization_generation: int
+    validation_provider_safety_state_version: int
+    rollout_control_epoch: int
+    extraction_plan_set_hmac: str
+    extraction_provider_safety_snapshot_set_hmac: str
+    confirmed_extraction_cost_ceiling_usd: Decimal
+    confirmed_validation_cost_ceiling_usd: Decimal
+    confirmed_total_cost_ceiling_usd: Decimal
+    total_budget_limit_usd: Decimal
+    extraction_plan_identities: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
+class PreparedReviewRequestV21:
+    source_refs: tuple[ResolvedSourceVersion, ...]
+    agent_names: tuple[str, ...]
+    input_hash: str
+    evidence_version_hash: str
+    selection_policy_version: str
+    config: V21PreparedReviewConfig
+    graph_version: str = COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
+
+    def stored_snapshot(self) -> dict[str, Any]:
+        config = self.config
+        return {
+            'auto_review_mode': config.configured_auto_review_mode,
+            'auto_review_validator_provider': config.validator_provider,
+            'auto_review_validator_model': config.validator_model,
+            'auto_review_reasoning_effort': config.validator_reasoning_effort,
+            'auto_review_validator_prompt_version': config.validator_prompt_version,
+            'auto_review_validator_output_contract_version': config.validator_output_contract_version,
+            'auto_review_policy_version': config.policy_version,
+            'auto_review_cost_policy_version': config.cost_policy_version,
+            'fingerprint_key_version': config.fingerprint_key_version,
+            'fingerprint_key_material_verifier': config.fingerprint_key_material_verifier,
+            'auto_review_token_estimator_version': config.token_estimator_version,
+            'auto_review_tokenizer_encoding': config.tokenizer_encoding,
+            'auto_review_max_input_tokens': config.max_input_tokens_per_batch,
+            'auto_review_max_output_tokens': config.max_output_tokens_per_batch,
+            'auto_review_reply_priming_tokens': config.reply_priming_tokens,
+            'auto_review_framing_safety_tokens': config.framing_safety_tokens,
+            'auto_review_max_batches_per_workflow': config.max_validation_batches_per_workflow,
+            'auto_review_max_candidates_per_batch': config.max_validation_candidates_per_batch,
+            'auto_review_max_candidates_per_workflow': config.max_validation_candidates_per_workflow,
+            'auto_review_max_provider_attempts': config.max_provider_attempts,
+            'auto_review_provider_timeout_seconds': config.provider_timeout_seconds,
+            'auto_review_provider_send_start_window_seconds': config.provider_send_start_window_seconds,
+            'auto_review_provider_attempt_lease_seconds': config.provider_attempt_lease_seconds,
+            'auto_review_provider_commit_grace_seconds': config.provider_commit_grace_seconds,
+            'auto_review_validator_input_usd_per_1m': config.validator_input_usd_per_1m,
+            'auto_review_validator_output_usd_per_1m': config.validator_output_usd_per_1m,
+            'auto_review_enforce_percentage': config.enforce_percentage,
+            'authorized_percentage_at_launch': config.authorized_percentage_at_launch,
+            'rollout_authorization_generation': config.rollout_authorization_generation,
+            'validation_provider_safety_state_version': config.validation_provider_safety_state_version,
+            'rollout_control_epoch': config.rollout_control_epoch,
+            'extraction_plan_set_hmac': config.extraction_plan_set_hmac,
+            'extraction_provider_safety_snapshot_set_hmac': config.extraction_provider_safety_snapshot_set_hmac,
+            'confirmed_extraction_cost_ceiling_usd': config.confirmed_extraction_cost_ceiling_usd,
+            'confirmed_validation_cost_ceiling_usd': config.confirmed_validation_cost_ceiling_usd,
+            'confirmed_total_cost_ceiling_usd': config.confirmed_total_cost_ceiling_usd,
+            'auto_review_budget_limit_usd': config.total_budget_limit_usd,
+        }
+
+    def matches_stored_snapshot(self, values: dict[str, Any]) -> bool:
+        return values == self.stored_snapshot()
+
+
+def _json_identity(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return format(value, 'f')
+    if isinstance(value, dict):
+        return {key: _json_identity(item) for key, item in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_json_identity(item) for item in value]
+    return value
+
+
+def build_prepared_review_identity_v21(
+    *,
+    source_refs: tuple[ResolvedSourceVersion, ...],
+    agent_names: tuple[str, ...],
+    security_scope_id: str,
+    config: V21PreparedReviewConfig,
+    fingerprint_secret: bytes,
+    evidence_version_hash: str | None = None,
+) -> PreparedReviewRequestV21:
+    if config.configured_auto_review_mode not in {'shadow', 'enforce'}:
+        raise ValueError('V2.1 stores only shadow or enforce mode')
+    if (
+        config.provider_timeout_seconds
+        + config.provider_send_start_window_seconds
+        + config.provider_commit_grace_seconds
+        >= config.provider_attempt_lease_seconds
+    ):
+        raise ValueError('provider lease must exceed send, timeout, and commit grace')
+    if evidence_version_hash is None:
+        evidence_version_hash = keyed_fingerprint(
+            [asdict(ref) for ref in source_refs],
+            secret=fingerprint_secret,
+            schema_version='review-evidence-versions:v1',
+            policy_version=COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+        )
+    identity = {
+        'security_scope_id': security_scope_id,
+        'workflow_name': COMPANY_MEMORY_REVIEW_WORKFLOW,
+        'graph_version': COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21,
+        'evidence_version_hash': evidence_version_hash,
+        'agent_names': sorted(agent_names),
+        'selection_policy_version': COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+        'config': _json_identity(asdict(config)),
+    }
+    input_hash = keyed_fingerprint(
+        identity,
+        secret=fingerprint_secret,
+        schema_version='company-memory-review-v2.1-input:v1',
+        policy_version='review-workflow-batch:v2.1',
+    )
+    return PreparedReviewRequestV21(
+        source_refs=source_refs,
+        agent_names=tuple(sorted(agent_names)),
+        input_hash=input_hash,
+        evidence_version_hash=evidence_version_hash,
+        selection_policy_version=COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+        config=config,
+    )
 
 
 @dataclass(frozen=True)
@@ -341,8 +505,7 @@ def _find_shared_thread(
             AgentWorkflowThread.workflow_name == COMPANY_MEMORY_REVIEW_WORKFLOW,
             AgentWorkflowThread.graph_version == COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
             AgentWorkflowThread.input_hash == prepared.input_hash,
-            AgentWorkflowThread.evidence_version_hash
-            == prepared.evidence_version_hash,
+            AgentWorkflowThread.evidence_version_hash == prepared.evidence_version_hash,
         )
         .order_by(AgentWorkflowThread.created_at, AgentWorkflowThread.thread_id)
     ).all()
@@ -381,9 +544,13 @@ def review_thread_matches_prepared(
     db: Session,
     *,
     thread: AgentWorkflowThread,
-    prepared: PreparedReviewRequest,
+    prepared: PreparedReviewRequest | PreparedReviewRequestV21,
     settings: Settings,
 ) -> bool:
+    if isinstance(prepared, PreparedReviewRequestV21):
+        return _v21_thread_matches_prepared(
+            db, thread=thread, prepared=prepared, settings=settings
+        )
     if (
         thread.security_scope_id != settings.agent_runtime_security_scope_id
         or thread.workflow_name != COMPANY_MEMORY_REVIEW_WORKFLOW
@@ -402,10 +569,50 @@ def review_thread_matches_prepared(
         stored_request.input_schema_version != COMPANY_MEMORY_INPUT_SCHEMA_VERSION
         or stored_request.request_kind != 'review_source_versions'
         or tuple(stored_request.agent_names) != prepared.agent_names
-        or stored_request.selection_policy_version
-        != prepared.selection_policy_version
+        or stored_request.selection_policy_version != prepared.selection_policy_version
         or stored_request.input_hash != prepared.input_hash
         or stored_request.fingerprint_key_version != fingerprint_key_version
+    ):
+        return False
+    stored_refs = db.scalars(
+        select(AgentWorkflowEvidenceRef)
+        .where(AgentWorkflowEvidenceRef.workflow_thread_id == thread.thread_id)
+        .order_by(AgentWorkflowEvidenceRef.ordinal)
+    ).all()
+    return tuple(_stored_evidence_values(ref) for ref in stored_refs) == tuple(
+        _resolved_evidence_values(ordinal, ref)
+        for ordinal, ref in enumerate(prepared.source_refs)
+    )
+
+
+def _v21_thread_matches_prepared(
+    db: Session,
+    *,
+    thread: AgentWorkflowThread,
+    prepared: PreparedReviewRequestV21,
+    settings: Settings,
+) -> bool:
+    if (
+        thread.security_scope_id != settings.agent_runtime_security_scope_id
+        or thread.workflow_name != COMPANY_MEMORY_REVIEW_WORKFLOW
+        or thread.graph_version != COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
+        or thread.input_hash != prepared.input_hash
+        or thread.evidence_version_hash != prepared.evidence_version_hash
+    ):
+        return False
+    stored_request = db.get(AgentWorkflowRequest, thread.thread_id)
+    if stored_request is None:
+        return False
+    actual = {
+        field: getattr(stored_request, field) for field in prepared.stored_snapshot()
+    }
+    if not prepared.matches_stored_snapshot(actual):
+        return False
+    if (
+        stored_request.request_kind != 'review_source_versions'
+        or tuple(stored_request.agent_names) != prepared.agent_names
+        or stored_request.selection_policy_version != prepared.selection_policy_version
+        or stored_request.input_hash != prepared.input_hash
     ):
         return False
     stored_refs = db.scalars(

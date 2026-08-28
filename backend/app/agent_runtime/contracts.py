@@ -78,7 +78,9 @@ class LangChainInvocationPayload:
                 None,
             )
             if not callable(schema_renderer):
-                raise TypeError('structured output schema must expose model_json_schema')
+                raise TypeError(
+                    'structured output schema must expose model_json_schema'
+                )
             schema_description = schema_renderer()
         return json.dumps(
             {
@@ -149,6 +151,10 @@ class AgentRunResult:
     candidates: list[ReviewCandidate]
     cost: AgentRunCost
     cache_key: str
+    model_provider: str | None = None
+    model_reasoning_effort: str | None = None
+    route_version: str | None = None
+    output_contract_version: str | None = None
 
 
 @dataclass(frozen=True)

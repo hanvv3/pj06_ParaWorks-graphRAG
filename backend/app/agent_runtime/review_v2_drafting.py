@@ -10,6 +10,9 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.admin.auto_review_keys import (
+    fingerprint_key_material_verifier as build_key_material_verifier,
+)
 from backend.app.agent_runtime.canonical_sources import (
     ResolvedSourceVersion,
     ReviewWorkflowPreflightError,
@@ -24,6 +27,7 @@ from backend.app.agent_runtime.contracts import (
     PermissionContext,
     ReviewCandidate,
 )
+from backend.app.agent_runtime.fingerprints import fingerprint_secret_bytes
 from backend.app.agent_runtime.review_v2_agents import (
     ReviewAgentAdapter,
     ReviewAgentCatalog,
@@ -43,6 +47,7 @@ from backend.app.models.agent_workflows import (
     AgentWorkflowRequest,
     AgentWorkflowThread,
 )
+from backend.app.models.auto_review import ReviewItemEvidenceRef
 from backend.app.models.review import ReviewItem
 from backend.app.models.source import (
     DocumentChunk,
@@ -67,6 +72,13 @@ PACKET_FINGERPRINT_SCHEMA = 'review-evidence-packet:v1'
 PACKET_FINGERPRINT_POLICY = 'review-evidence-selection:v1'
 CANDIDATE_KEY_SCHEMA = 'review-agent-candidate:v1'
 CANDIDATE_KEY_POLICY = 'review-agent-candidate-key:v1'
+CANDIDATE_CONTRACT_VERSION = 'c5-v1'
+CANDIDATE_MESSAGE_SET_SCHEMA = 'candidate-message-set:v1'
+CANDIDATE_MESSAGE_SET_POLICY = 'candidate-message-set:v1'
+CANDIDATE_EVIDENCE_STATE_SCHEMA = 'candidate-evidence-state:v1'
+CANDIDATE_EVIDENCE_STATE_POLICY = 'candidate-evidence-state:v1'
+CANDIDATE_GENERATION_SCHEMA = 'candidate-generation:v1'
+CANDIDATE_GENERATION_POLICY = 'candidate-generation:v1'
 DEFAULT_LEASE_TTL_SECONDS = 120
 MAX_PROVIDER_ROUTES = 3
 MAX_ATTEMPTS_PER_PROVIDER = 2
@@ -78,16 +90,284 @@ REVIEW_STATUSES: tuple[ReviewItemResolutionStatus, ...] = (
     'needs_more_evidence',
 )
 _PERMISSION_RANK = {'public': 0, 'internal': 1, 'restricted': 2}
-_DRAFTABLE_STATUSES = frozenset({
-    'created',
-    'drafting',
-    'checkpoint_pending',
-    'checkpoint_failed',
-})
+_DRAFTABLE_STATUSES = frozenset(
+    {
+        'created',
+        'drafting',
+        'checkpoint_pending',
+        'checkpoint_failed',
+    }
+)
 
 
 class ReviewDraftError(ReviewWorkflowPreflightError):
     pass
+
+
+class CandidateEvidenceBindingError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class GenerationIdentity:
+    agent_name: str
+    provider: str | None
+    model: str
+    reasoning_effort: str | None
+    prompt_version: str
+    route_version: str | None
+    output_contract_version: str | None
+
+
+@dataclass(frozen=True)
+class CandidateEvidenceRefBinding:
+    workflow_evidence_ref_id: int
+    ordinal: int
+    canonical_source_kind: str
+    canonical_source_id: int | str
+    canonical_version_or_signature: str
+    content_fingerprint: str
+    message_set_hmac: str
+    permission_level: str
+    fingerprint_key_version: str
+    fingerprint_key_material_verifier: str
+
+
+@dataclass(frozen=True)
+class _CandidateParentRow:
+    candidate_contract_version: str
+
+
+@dataclass(frozen=True)
+class CandidateEvidenceBindingSet:
+    refs: tuple[CandidateEvidenceRefBinding, ...]
+    evidence_version_hash: str
+    candidate_contract_version: str = CANDIDATE_CONTRACT_VERSION
+
+    def assert_same_workflow_agent_run(
+        self,
+        *,
+        workflow_thread_id: str,
+        agent_run_workflow_thread_id: str,
+    ) -> None:
+        if workflow_thread_id != agent_run_workflow_thread_id:
+            raise CandidateEvidenceBindingError(
+                'agent run must belong to the same workflow'
+            )
+
+    def verify_replay(
+        self,
+        *,
+        agent_run_id: int,
+        stored_agent_run_id: int | None,
+        stored_refs: tuple[int, ...],
+    ) -> None:
+        expected = tuple(row.workflow_evidence_ref_id for row in self.refs)
+        if (
+            stored_agent_run_id != agent_run_id
+            or tuple(sorted(stored_refs)) != expected
+        ):
+            raise CandidateEvidenceBindingError(
+                'candidate evidence binding is immutable'
+            )
+
+    def is_auto_review_eligible(self, graph_version: str) -> bool:
+        return graph_version == 'company-memory-review-v2.1-auto-review'
+
+    def atomic_rows(
+        self,
+    ) -> tuple[_CandidateParentRow, tuple[CandidateEvidenceRefBinding, ...]]:
+        return _CandidateParentRow(self.candidate_contract_version), self.refs
+
+
+def build_candidate_generation_fingerprint(
+    identity: GenerationIdentity,
+    *,
+    settings: Settings,
+    fingerprint_key_material_verifier: str,
+) -> str:
+    _, key_version = fingerprint_secret_bytes(settings)
+    return build_keyed_fingerprint(
+        {
+            'agent_name': identity.agent_name,
+            'generation_provider': identity.provider,
+            'model_name': identity.model,
+            'generation_reasoning_effort': identity.reasoning_effort,
+            'prompt_version': identity.prompt_version,
+            'generation_route_version': identity.route_version,
+            'generation_output_contract_version': identity.output_contract_version,
+            'fingerprint_key_version': key_version,
+            'fingerprint_key_material_verifier': fingerprint_key_material_verifier,
+        },
+        settings=settings,
+        schema_version=CANDIDATE_GENERATION_SCHEMA,
+        policy_version=CANDIDATE_GENERATION_POLICY,
+    )
+
+
+def generation_identity_is_auto_eligible(
+    identity: GenerationIdentity,
+    *,
+    validator_provider: str,
+    validator_model: str,
+) -> bool:
+    return bool(
+        identity.provider in {'openai', 'azure_openai', 'gemini'}
+        and identity.reasoning_effort == 'none'
+        and identity.route_version
+        and identity.output_contract_version
+        and (identity.provider, identity.model) != (validator_provider, validator_model)
+    )
+
+
+def build_candidate_evidence_bindings(
+    *,
+    candidate: ReviewCandidate,
+    packet: EvidencePacket,
+    workflow_execution_hmac: str,
+    security_scope_hmac: str,
+    candidate_key: str,
+    settings: Settings,
+    fingerprint_key_material_verifier: str,
+    workflow_thread_id: str | None = None,
+    on_persist: Callable[[CandidateEvidenceBindingSet], None] | None = None,
+) -> CandidateEvidenceBindingSet:
+    if len(candidate.source_links) != len(candidate.source_snippets):
+        raise CandidateEvidenceBindingError('candidate evidence mapping is ambiguous')
+    selected: list[EvidenceMessage] = []
+    for link, snippet in zip(
+        candidate.source_links, candidate.source_snippets, strict=True
+    ):
+        matches = [
+            message
+            for message in packet.messages
+            if message.source_url == link and message.source_snippet == snippet
+        ]
+        if len(matches) != 1:
+            raise CandidateEvidenceBindingError(
+                'candidate evidence mapping is ambiguous'
+            )
+        if matches[0] not in selected:
+            selected.append(matches[0])
+    if not selected:
+        raise CandidateEvidenceBindingError('candidate evidence mapping is empty')
+    secret, key_version = fingerprint_secret_bytes(settings)
+    groups: dict[int, list[EvidenceMessage]] = {}
+    for message in selected:
+        metadata = message.metadata
+        ref_id = metadata.get('workflow_evidence_ref_id')
+        if not isinstance(ref_id, int):
+            raise CandidateEvidenceBindingError(
+                'candidate evidence lacks an exact workflow ref'
+            )
+        message_workflow = metadata.get('workflow_thread_id')
+        if (
+            workflow_thread_id
+            and message_workflow
+            and message_workflow != workflow_thread_id
+        ):
+            raise CandidateEvidenceBindingError(
+                'candidate evidence ref must belong to the same workflow'
+            )
+        groups.setdefault(ref_id, []).append(message)
+    rows: list[CandidateEvidenceRefBinding] = []
+    for ref_id, messages in groups.items():
+        ordered = sorted(
+            messages,
+            key=lambda item: str(item.metadata.get('stable_message_identity') or ''),
+        )
+        first = ordered[0]
+        metadata = first.metadata
+        required = (
+            'canonical_source_kind',
+            'canonical_source_id',
+            'canonical_version_or_signature',
+            'content_fingerprint',
+        )
+        if any(metadata.get(key) in {None, ''} for key in required):
+            raise CandidateEvidenceBindingError('candidate evidence ref is incomplete')
+        common = tuple(metadata.get(key) for key in required)
+        if any(
+            tuple(message.metadata.get(key) for key in required) != common
+            for message in ordered
+        ):
+            raise CandidateEvidenceBindingError('candidate evidence ref is ambiguous')
+        message_set_hmac = build_keyed_fingerprint(
+            [
+                {
+                    'stable_message_identity': message.metadata.get(
+                        'stable_message_identity'
+                    ),
+                    'text_fingerprint': build_keyed_fingerprint(
+                        message.text,
+                        settings=settings,
+                        schema_version='candidate-message-content:v1',
+                        policy_version='candidate-message-content:v1',
+                    ),
+                }
+                for message in ordered
+            ],
+            settings=settings,
+            schema_version=CANDIDATE_MESSAGE_SET_SCHEMA,
+            policy_version=CANDIDATE_MESSAGE_SET_POLICY,
+        )
+        rows.append(
+            CandidateEvidenceRefBinding(
+                workflow_evidence_ref_id=ref_id,
+                ordinal=0,
+                canonical_source_kind=str(common[0]),
+                canonical_source_id=cast(int | str, common[1]),
+                canonical_version_or_signature=str(common[2]),
+                content_fingerprint=str(common[3]),
+                message_set_hmac=message_set_hmac,
+                permission_level=first.permission_level,
+                fingerprint_key_version=key_version,
+                fingerprint_key_material_verifier=fingerprint_key_material_verifier,
+            )
+        )
+    ordered_rows = tuple(
+        replace(row, ordinal=index)
+        for index, row in enumerate(
+            sorted(
+                rows,
+                key=lambda row: (
+                    row.workflow_evidence_ref_id,
+                    row.canonical_source_kind,
+                    str(row.canonical_source_id),
+                ),
+            ),
+            start=1,
+        )
+    )
+    evidence_version_hash = build_keyed_fingerprint(
+        {
+            'workflow_execution_hmac': workflow_execution_hmac,
+            'security_scope_hmac': security_scope_hmac,
+            'candidate_key': candidate_key,
+            'refs': [
+                {
+                    'workflow_evidence_ref_id': row.workflow_evidence_ref_id,
+                    'canonical_source_kind': row.canonical_source_kind,
+                    'canonical_source_id': row.canonical_source_id,
+                    'canonical_version_or_signature': row.canonical_version_or_signature,
+                    'content_fingerprint': row.content_fingerprint,
+                    'aggregate_message_set_hmac': row.message_set_hmac,
+                    'permission_level': row.permission_level,
+                    'fingerprint_key_version': row.fingerprint_key_version,
+                    'fingerprint_key_material_verifier': row.fingerprint_key_material_verifier,
+                }
+                for row in ordered_rows
+            ],
+        },
+        settings=settings,
+        schema_version=CANDIDATE_EVIDENCE_STATE_SCHEMA,
+        policy_version=CANDIDATE_EVIDENCE_STATE_POLICY,
+    )
+    result = CandidateEvidenceBindingSet(ordered_rows, evidence_version_hash)
+    if on_persist is not None:
+        on_persist(result)
+    del secret
+    return result
 
 
 @dataclass(frozen=True)
@@ -184,6 +464,7 @@ class ReviewDraftService:
             packet = _build_exact_packet(
                 db,
                 refs=prepared.source_refs,
+                workflow_thread_id=None,
                 actor_subject_id=actor_subject_id,
                 allowed_permission_levels=permission_levels,
                 settings=self._settings,
@@ -259,6 +540,7 @@ class ReviewDraftService:
                 packet = _build_exact_packet(
                     db,
                     refs=inputs.refs,
+                    workflow_thread_id=inputs.thread_id,
                     actor_subject_id=actor_subject_id,
                     allowed_permission_levels=permission_levels,
                     settings=self._settings,
@@ -344,6 +626,7 @@ class ReviewDraftService:
             packet = _build_exact_packet(
                 db,
                 refs=inputs.refs,
+                workflow_thread_id=inputs.thread_id,
                 actor_subject_id=actor_subject_id,
                 allowed_permission_levels=permission_levels,
                 settings=self._settings,
@@ -387,18 +670,23 @@ class ReviewDraftService:
             _ensure_thread_state(inputs.status)
             now = self._now()
             if thread.cancelled_at is not None or thread.status == 'cancelled':
-                raise ReviewDraftError('invalid_state_transition', 'workflow is cancelled')
+                raise ReviewDraftError(
+                    'invalid_state_transition', 'workflow is cancelled'
+                )
             if (
                 thread.lease_token
                 and thread.lease_expires_at is not None
                 and not _lease_expired(thread.lease_expires_at, now)
             ):
-                raise ReviewDraftError('concurrent_resume', 'workflow is already drafting')
+                raise ReviewDraftError(
+                    'concurrent_resume', 'workflow is already drafting'
+                )
             prior_status = _lease_restore_status(thread.status)
 
             packet = _build_exact_packet(
                 db,
                 refs=inputs.refs,
+                workflow_thread_id=inputs.thread_id,
                 actor_subject_id=actor_subject_id,
                 allowed_permission_levels=permission_levels,
                 settings=self._settings,
@@ -432,7 +720,8 @@ class ReviewDraftService:
             pending_plans = tuple(
                 plan
                 for plan in plans
-                if plan.cached_run_id is None and plan.decision.budget_status != 'no_input'
+                if plan.cached_run_id is None
+                and plan.decision.budget_status != 'no_input'
             )
             if not pending_plans:
                 db.rollback()
@@ -493,10 +782,14 @@ class ReviewDraftService:
                 or _lease_expired(thread.lease_expires_at, now)
             ):
                 db.rollback()
-                raise ReviewDraftError('concurrent_resume', 'draft lease is no longer valid')
+                raise ReviewDraftError(
+                    'concurrent_resume', 'draft lease is no longer valid'
+                )
             if thread.cancelled_at is not None:
                 db.rollback()
-                raise ReviewDraftError('invalid_state_transition', 'workflow is cancelled')
+                raise ReviewDraftError(
+                    'invalid_state_transition', 'workflow is cancelled'
+                )
 
             inputs = _draft_inputs_for_thread(db, thread, settings=self._settings)
             _ensure_thread_scope(inputs, self._settings)
@@ -515,6 +808,7 @@ class ReviewDraftService:
             packet = _build_exact_packet(
                 db,
                 refs=inputs.refs,
+                workflow_thread_id=inputs.thread_id,
                 actor_subject_id=actor_subject_id,
                 allowed_permission_levels=permission_levels,
                 settings=self._settings,
@@ -529,7 +823,9 @@ class ReviewDraftService:
             )
             if permission_fingerprint != lease.permission_fingerprint:
                 db.rollback()
-                raise ReviewDraftError('permission_denied', 'permission context changed')
+                raise ReviewDraftError(
+                    'permission_denied', 'permission context changed'
+                )
 
             item_ids = list(lease.cached_review_item_ids)
             for plan, result in results:
@@ -556,19 +852,18 @@ class ReviewDraftService:
                     )
                     continue
                 for candidate in result.candidates:
-                    item_ids.append(
-                        _insert_or_get_review_item(
-                            db,
-                            thread=thread,
-                            agent_run=agent_run,
-                            plan=plan,
-                            result=result,
-                            candidate=candidate,
-                            packet=packet,
-                            settings=self._settings,
-                            now=now,
-                        ).id
+                    item, _ = _insert_or_get_review_item(
+                        db,
+                        thread=thread,
+                        agent_run=agent_run,
+                        plan=plan,
+                        result=result,
+                        candidate=candidate,
+                        packet=packet,
+                        settings=self._settings,
+                        now=now,
                     )
+                    item_ids.append(item.id)
 
             thread.status = 'checkpoint_pending'
             thread.lease_token = None
@@ -767,8 +1062,10 @@ def _aggregate_preview(
         budget_status = 'cached'
     else:
         budget_status = 'within_budget'
-    cache_hit = bool(statuses) and any(status == 'cached' for status in statuses) and all(
-        status in {'cached', 'no_input'} for status in statuses
+    cache_hit = (
+        bool(statuses)
+        and any(status == 'cached' for status in statuses)
+        and all(status in {'cached', 'no_input'} for status in statuses)
     )
     return ReviewWorkflowDryRunResponse(
         workflow_name=COMPANY_MEMORY_REVIEW_WORKFLOW,
@@ -797,7 +1094,9 @@ def _load_draft_inputs(
     lock: bool,
     settings: Settings,
 ) -> _DraftInputs:
-    query = select(AgentWorkflowThread).where(AgentWorkflowThread.thread_id == thread_id)
+    query = select(AgentWorkflowThread).where(
+        AgentWorkflowThread.thread_id == thread_id
+    )
     if lock:
         query = query.with_for_update()
     thread = db.scalar(query)
@@ -910,6 +1209,7 @@ def _build_exact_packet(
     db: Session,
     *,
     refs: tuple[ResolvedSourceVersion, ...],
+    workflow_thread_id: str | None,
     actor_subject_id: str,
     allowed_permission_levels: tuple[str, ...],
     settings: Settings,
@@ -922,6 +1222,14 @@ def _build_exact_packet(
         settings=settings,
     )
     ranked: list[tuple[int, float, int, str, int, EvidenceMessage]] = []
+    workflow_refs_by_source: dict[int, AgentWorkflowEvidenceRef] = {}
+    if workflow_thread_id is not None:
+        workflow_rows = db.scalars(
+            select(AgentWorkflowEvidenceRef).where(
+                AgentWorkflowEvidenceRef.workflow_thread_id == workflow_thread_id
+            )
+        ).all()
+        workflow_refs_by_source = {row.canonical_row_id: row for row in workflow_rows}
     for ref in current_refs:
         source = sources[ref.canonical_row_id]
         parser_metadata = _authoritative_parser_metadata(
@@ -938,11 +1246,21 @@ def _build_exact_packet(
         has_non_empty_chunk = False
         for chunk in chunks:
             if chunk.permission_level not in allowed_permission_levels:
-                raise ReviewDraftError('permission_denied', 'evidence permission changed')
+                raise ReviewDraftError(
+                    'permission_denied', 'evidence permission changed'
+                )
             if not chunk.text.strip():
                 continue
             has_non_empty_chunk = True
-            message = _message_from_chunk(source, chunk, parser_metadata=parser_metadata)
+            message = _message_from_chunk(
+                source, chunk, parser_metadata=parser_metadata
+            )
+            message = _bind_message_to_workflow_ref(
+                message,
+                workflow_thread_id=workflow_thread_id,
+                workflow_ref=workflow_refs_by_source.get(source.id),
+                stable_message_identity=f'chunk:{chunk.id}',
+            )
             ranked.append(
                 (
                     _importance_score(message.text, source.source_type),
@@ -962,14 +1280,20 @@ def _build_exact_packet(
             parser_metadata=parser_metadata,
         )
         if fallback is not None:
+            fallback = _bind_message_to_workflow_ref(
+                fallback,
+                workflow_thread_id=workflow_thread_id,
+                workflow_ref=workflow_refs_by_source.get(source.id),
+                stable_message_identity=f'source:{source.id}:fallback',
+            )
             ranked.append(
                 (
                     _importance_score(fallback.text, source.source_type),
-                        _source_timestamp(source),
-                        0,
-                        source.source_id,
-                        0,
-                        fallback,
+                    _source_timestamp(source),
+                    0,
+                    source.source_id,
+                    0,
+                    fallback,
                 )
             )
 
@@ -1142,6 +1466,36 @@ def _message_from_chunk(
     )
 
 
+def _bind_message_to_workflow_ref(
+    message: EvidenceMessage,
+    *,
+    workflow_thread_id: str | None,
+    workflow_ref: AgentWorkflowEvidenceRef | None,
+    stable_message_identity: str,
+) -> EvidenceMessage:
+    if workflow_thread_id is None:
+        return message
+    if workflow_ref is None:
+        raise ReviewDraftError(
+            'invalid_state_transition', 'workflow evidence is incomplete'
+        )
+    return replace(
+        message,
+        metadata={
+            **message.metadata,
+            'workflow_thread_id': workflow_thread_id,
+            'workflow_evidence_ref_id': workflow_ref.id,
+            'canonical_source_kind': workflow_ref.canonical_source_type,
+            'canonical_source_id': workflow_ref.canonical_row_id,
+            'canonical_version_or_signature': (
+                workflow_ref.external_revision or workflow_ref.content_signature
+            ),
+            'content_fingerprint': workflow_ref.content_fingerprint,
+            'stable_message_identity': stable_message_identity,
+        },
+    )
+
+
 def _fallback_message(
     db: Session,
     *,
@@ -1230,10 +1584,9 @@ def _validated_result(
                 'invalid_input',
                 'review candidate requires source evidence',
             ) from None
-        if (
-            not set(candidate.source_links).issubset(packet_links)
-            or not set(candidate.source_snippets).issubset(packet_snippets)
-        ):
+        if not set(candidate.source_links).issubset(packet_links) or not set(
+            candidate.source_snippets
+        ).issubset(packet_snippets):
             raise ReviewDraftError('invalid_input', 'candidate evidence is not bound')
         if not 0.0 <= candidate.confidence_score <= 1.0:
             raise ReviewDraftError('invalid_input', 'candidate confidence is invalid')
@@ -1268,6 +1621,10 @@ def _insert_or_get_agent_run(
         'source_window': packet.source_window,
         'cache_key': plan.effect_key,
         'model_name': result.cost.model_name,
+        'generation_provider': result.model_provider,
+        'generation_reasoning_effort': result.model_reasoning_effort,
+        'generation_route_version': result.route_version,
+        'generation_output_contract_version': result.output_contract_version,
         'input_tokens': result.cost.token_usage.input_tokens,
         'output_tokens': result.cost.token_usage.output_tokens,
         'total_tokens': result.cost.token_usage.total_tokens,
@@ -1309,7 +1666,7 @@ def _insert_or_get_review_item(
     packet: EvidencePacket,
     settings: Settings,
     now: datetime,
-) -> ReviewItem:
+) -> tuple[ReviewItem, bool]:
     candidate_key = build_keyed_fingerprint(
         {
             'effect_key': plan.effect_key,
@@ -1331,6 +1688,31 @@ def _insert_or_get_review_item(
         item_type=candidate.item_type,
         source_ids=source_ids,
     )
+    material_verifier = build_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    security_scope_hmac = build_keyed_fingerprint(
+        thread.security_scope_id,
+        settings=settings,
+        schema_version='candidate-security-scope:v1',
+        policy_version='candidate-security-scope:v1',
+    )
+    try:
+        binding_set = build_candidate_evidence_bindings(
+            candidate=candidate,
+            packet=packet,
+            workflow_execution_hmac=thread.input_hash,
+            security_scope_hmac=security_scope_hmac,
+            candidate_key=candidate_key,
+            settings=settings,
+            fingerprint_key_material_verifier=material_verifier,
+            workflow_thread_id=thread.thread_id,
+        )
+    except CandidateEvidenceBindingError:
+        raise ReviewDraftError(
+            'evidence_binding_mismatch',
+            'candidate evidence does not map exactly to workflow evidence',
+        ) from None
     payload = {
         **candidate.payload_fields,
         'title': candidate.title,
@@ -1366,6 +1748,8 @@ def _insert_or_get_review_item(
         'workflow_thread_id': thread.thread_id,
         'candidate_key': candidate_key,
         'predecessor_review_item_id': predecessor_id,
+        'agent_run_id': agent_run.id,
+        'candidate_contract_version': CANDIDATE_CONTRACT_VERSION,
         'created_at': now,
     }
     inserted_id = _insert_do_nothing(db, ReviewItem, values)
@@ -1381,7 +1765,42 @@ def _insert_or_get_review_item(
     )
     if item is None:
         raise ReviewDraftError('concurrent_resume', 'review candidate insert was lost')
-    return item
+    created = inserted_id is not None
+    if created:
+        for binding in binding_set.refs:
+            db.add(
+                ReviewItemEvidenceRef(
+                    review_item_id=item.id,
+                    workflow_thread_id=thread.thread_id,
+                    workflow_evidence_ref_id=binding.workflow_evidence_ref_id,
+                    candidate_slot_ordinal=binding.ordinal,
+                    message_content_fingerprint=binding.message_set_hmac,
+                    fingerprint_key_version=binding.fingerprint_key_version,
+                    fingerprint_key_material_verifier=(
+                        binding.fingerprint_key_material_verifier
+                    ),
+                    created_at=now,
+                )
+            )
+        db.flush()
+    else:
+        stored_refs = db.scalars(
+            select(ReviewItemEvidenceRef)
+            .where(ReviewItemEvidenceRef.review_item_id == item.id)
+            .order_by(ReviewItemEvidenceRef.candidate_slot_ordinal)
+        ).all()
+        try:
+            binding_set.verify_replay(
+                agent_run_id=agent_run.id,
+                stored_agent_run_id=item.agent_run_id,
+                stored_refs=tuple(row.workflow_evidence_ref_id for row in stored_refs),
+            )
+        except CandidateEvidenceBindingError:
+            raise ReviewDraftError(
+                'invalid_state_transition',
+                'candidate evidence binding changed',
+            ) from None
+    return item, created
 
 
 def _insert_do_nothing(db: Session, model: type, values: dict[str, Any]) -> int | None:
@@ -1395,7 +1814,9 @@ def _insert_do_nothing(db: Session, model: type, values: dict[str, Any]) -> int 
         db.add(instance)
         db.flush()
         return cast(int, instance.id)
-    statement = insert(model).values(**values).on_conflict_do_nothing().returning(model.id)
+    statement = (
+        insert(model).values(**values).on_conflict_do_nothing().returning(model.id)
+    )
     return db.execute(statement).scalar_one_or_none()
 
 
@@ -1440,7 +1861,10 @@ def _find_predecessor_id(
     for item in candidates:
         if item.payload.get('agent_name') != agent_name:
             continue
-        if _normalized_source_id_set(item.payload.get('source_ids')) == expected_sources:
+        if (
+            _normalized_source_id_set(item.payload.get('source_ids'))
+            == expected_sources
+        ):
             return item.id
     return None
 
@@ -1484,15 +1908,29 @@ def _review_item_ids_for_run(
     items = db.scalars(
         select(ReviewItem).where(
             ReviewItem.workflow_thread_id == workflow_thread_id,
+            ReviewItem.agent_run_id == agent_run_id,
         )
     ).all()
-    return tuple(
-        sorted(
-            item.id
-            for item in items
-            if item.payload.get('agent_run_id') == agent_run_id
+    for item in items:
+        if item.candidate_contract_version != CANDIDATE_CONTRACT_VERSION:
+            raise ReviewDraftError(
+                'invalid_state_transition',
+                'cached candidate provenance is incomplete',
+            )
+        ref_count = len(
+            db.scalars(
+                select(ReviewItemEvidenceRef).where(
+                    ReviewItemEvidenceRef.review_item_id == item.id,
+                    ReviewItemEvidenceRef.workflow_thread_id == workflow_thread_id,
+                )
+            ).all()
         )
-    )
+        if ref_count == 0:
+            raise ReviewDraftError(
+                'invalid_state_transition',
+                'cached candidate provenance is incomplete',
+            )
+    return tuple(sorted(item.id for item in items))
 
 
 def _cached_review_item_ids(
@@ -1501,16 +1939,18 @@ def _cached_review_item_ids(
     workflow_thread_id: str,
 ) -> tuple[int, ...]:
     return tuple(
-        sorted({
-            item_id
-            for plan in plans
-            if plan.cached_run_id is not None
-            for item_id in _review_item_ids_for_run(
-                db,
-                plan.cached_run_id,
-                workflow_thread_id,
-            )
-        })
+        sorted(
+            {
+                item_id
+                for plan in plans
+                if plan.cached_run_id is not None
+                for item_id in _review_item_ids_for_run(
+                    db,
+                    plan.cached_run_id,
+                    workflow_thread_id,
+                )
+            }
+        )
     )
 
 
@@ -1526,7 +1966,9 @@ def _draft_result_from_db(
         ).all()
     )
     if len(statuses) != len(review_item_ids):
-        raise ReviewDraftError('concurrent_resume', 'review candidate replay is incomplete')
+        raise ReviewDraftError(
+            'concurrent_resume', 'review candidate replay is incomplete'
+        )
     return _draft_result(review_item_ids, statuses)
 
 
@@ -1537,7 +1979,9 @@ def _draft_result(
     counts: dict[ReviewItemResolutionStatus, int] = dict.fromkeys(REVIEW_STATUSES, 0)
     for status in statuses:
         if status not in counts:
-            raise ReviewDraftError('invalid_state_transition', 'review status is invalid')
+            raise ReviewDraftError(
+                'invalid_state_transition', 'review status is invalid'
+            )
         counts[cast(ReviewItemResolutionStatus, status)] += 1
     return ReviewDraftResult(
         review_item_ids=review_item_ids,
@@ -1568,15 +2012,23 @@ def _strictest_permission(*levels: str) -> str:
     try:
         return max(levels, key=lambda level: _PERMISSION_RANK[level])
     except KeyError:
-        raise ReviewDraftError('permission_denied', 'permission level is invalid') from None
+        raise ReviewDraftError(
+            'permission_denied', 'permission level is invalid'
+        ) from None
 
 
 def _importance_score(text: str, source_type: str) -> int:
     lowered = text.lower()
     score = 0
-    if any(value in lowered for value in ('decision', 'decided', 'approved', '결정', '승인')):
+    if any(
+        value in lowered
+        for value in ('decision', 'decided', 'approved', '결정', '승인')
+    ):
         score += 50
-    if any(value in lowered for value in ('todo', 'due', 'deadline', '검토', '준비', '배포')):
+    if any(
+        value in lowered
+        for value in ('todo', 'due', 'deadline', '검토', '준비', '배포')
+    ):
         score += 35
     if source_type == 'gmail':
         score += 10

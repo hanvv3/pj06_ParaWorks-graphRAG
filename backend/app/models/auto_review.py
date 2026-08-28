@@ -43,7 +43,9 @@ class AutoReviewRuntimeKeyState(Base):
     fingerprint_key_material_verifier: Mapped[str] = mapped_column(String(64))
     generation: Mapped[int] = mapped_column(Integer)
     ready: Mapped[bool] = mapped_column(Boolean, default=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class AutoReviewProviderSafetyState(Base):
@@ -64,9 +66,7 @@ class AutoReviewProviderSafetyState(Base):
             'reasoning_effort',
             name='uq_auto_review_provider_safety_parent_identity',
         ),
-        UniqueConstraint(
-            'id', name='uq_auto_review_provider_safety_state_id'
-        ),
+        UniqueConstraint('id', name='uq_auto_review_provider_safety_state_id'),
         CheckConstraint(
             "purpose IN ('extraction', 'validation')",
             name='ck_auto_review_provider_safety_purpose',
@@ -122,8 +122,12 @@ class AutoReviewProviderSafetyState(Base):
     cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_event_sequence: Mapped[int] = mapped_column(Integer, default=0)
     last_event_id: Mapped[int | None] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class AutoReviewProviderSafetyEvent(Base):
@@ -158,8 +162,7 @@ class AutoReviewProviderSafetyEvent(Base):
             ondelete='RESTRICT',
         ),
         CheckConstraint(
-            "event_kind IN ('initial_authorized', 'budget_overrun', "
-            "'breaker_cleared')",
+            "event_kind IN ('initial_authorized', 'budget_overrun', 'breaker_cleared')",
             name='ck_auto_review_provider_safety_events_kind',
         ),
         CheckConstraint(
@@ -206,7 +209,9 @@ class AutoReviewProviderSafetyEvent(Base):
     call_hmac: Mapped[str | None] = mapped_column(String(64))
     fingerprint_key_version: Mapped[str] = mapped_column(String(64))
     fingerprint_key_material_verifier: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class TrustedKnowledgeFingerprintProjectionState(Base):
@@ -242,7 +247,9 @@ class TrustedKnowledgeFingerprintProjectionState(Base):
     projected_checksum: Mapped[str | None] = mapped_column(String(64))
     rebuild_required: Mapped[bool] = mapped_column(Boolean, default=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class TrustedKnowledgeFingerprint(Base):
@@ -280,8 +287,12 @@ class TrustedKnowledgeFingerprint(Base):
     fingerprint_key_material_verifier: Mapped[str] = mapped_column(String(64))
     permission_level: Mapped[str] = mapped_column(String(32))
     review_status: Mapped[str] = mapped_column(String(32))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class ReviewItemEvidenceRef(Base):
@@ -329,7 +340,9 @@ class ReviewItemEvidenceRef(Base):
     message_content_fingerprint: Mapped[str] = mapped_column(String(64))
     fingerprint_key_version: Mapped[str] = mapped_column(String(64))
     fingerprint_key_material_verifier: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class AutoReviewExtractionCall(Base):
@@ -376,7 +389,8 @@ class AutoReviewExtractionCall(Base):
         ),
         CheckConstraint(
             "(status = 'claimed' AND terminal_at IS NULL AND "
-            'provider_attempt_count = 0 AND attempt_started_at IS NULL AND '
+            '((provider_attempt_count = 0 AND attempt_started_at IS NULL) OR '
+            '(provider_attempt_count = 1 AND attempt_started_at IS NOT NULL)) AND '
             'charged_input_tokens IS NULL AND charged_output_tokens IS NULL AND '
             'charged_cost_usd = 0 AND budget_overrun = false) OR '
             "(status = 'completed' AND provider_attempt_count = 1 AND "
@@ -455,13 +469,13 @@ class AutoReviewExtractionCall(Base):
     charged_output_tokens: Mapped[int | None] = mapped_column(Integer)
     charged_cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=0)
     budget_overrun: Mapped[bool] = mapped_column(Boolean, default=False)
-    budget_overrun_cost_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 6), default=0
-    )
+    budget_overrun_cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=0)
     result_kind: Mapped[str | None] = mapped_column(String(32))
     result_candidate_count: Mapped[int | None] = mapped_column(Integer)
     result_candidate_set_hmac: Mapped[str | None] = mapped_column(String(64))
-    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    claimed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
     terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -558,10 +572,10 @@ class AutoReviewValidationCall(Base):
     lease_token: Mapped[str | None] = mapped_column(String(64))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     budget_overrun: Mapped[bool] = mapped_column(Boolean, default=False)
-    budget_overrun_cost_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 6), default=0
+    budget_overrun_cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=0)
+    claimed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
     )
-    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -621,7 +635,9 @@ class AutoReviewValidation(Base):
     confirmed_validation_cost_ceiling_usd: Mapped[Decimal] = mapped_column(
         Numeric(12, 6)
     )
-    claim_results: Mapped[list] = mapped_column(MutableList.as_mutable(JSON), default=list)
+    claim_results: Mapped[list] = mapped_column(
+        MutableList.as_mutable(JSON), default=list
+    )
     minimum_entailment_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     uncertainty_codes: Mapped[list] = mapped_column(
         MutableList.as_mutable(JSON), default=list
@@ -641,7 +657,9 @@ class AutoReviewValidation(Base):
     shadow_human_resolution: Mapped[str | None] = mapped_column(String(32))
     shadow_exclusion_code: Mapped[str | None] = mapped_column(String(64))
     shadow_compared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -676,7 +694,9 @@ class TrustedKnowledgeApprovalLink(Base):
     fingerprint_key_material_verifier: Mapped[str] = mapped_column(String(64))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class TrustedKnowledgeEvidenceLink(Base):
@@ -707,7 +727,9 @@ class TrustedKnowledgeEvidenceLink(Base):
     evidence_hash: Mapped[str] = mapped_column(String(64))
     fingerprint_key_version: Mapped[str] = mapped_column(String(64))
     fingerprint_key_material_verifier: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class AssistantMessageEvidenceDependency(Base):
@@ -763,7 +785,7 @@ class AssistantMessageEvidenceDependency(Base):
         CheckConstraint(
             "(dependency_kind = 'raw_chunk' AND document_chunk_id IS NOT NULL AND "
             'document_version_id IS NOT NULL AND source_id IS NOT NULL AND '
-            "parser_run_id IS NOT NULL AND server_content_signature_schema = "
+            'parser_run_id IS NOT NULL AND server_content_signature_schema = '
             "'server-source-content:v1' AND length(server_content_signature) = 64 "
             'AND knowledge_type IS NULL AND knowledge_id IS NULL AND '
             'approval_link_id IS NULL AND legacy_human_base = false) OR '
@@ -807,7 +829,9 @@ class AssistantMessageEvidenceDependency(Base):
     legacy_source_review_item_id: Mapped[int | None] = mapped_column(
         ForeignKey('review_items.id', ondelete='RESTRICT')
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class AssistantMessageKnowledgeEvidenceRef(Base):
@@ -842,7 +866,9 @@ class AssistantMessageKnowledgeEvidenceRef(Base):
     assistant_message_id: Mapped[int] = mapped_column(Integer)
     approval_link_id: Mapped[int] = mapped_column(Integer)
     trusted_knowledge_evidence_link_id: Mapped[int] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class AutoReviewRolloutState(Base):
@@ -929,8 +955,12 @@ class AutoReviewRolloutState(Base):
     regression_gate_reference: Mapped[str | None] = mapped_column(String(120))
     last_event_sequence: Mapped[int] = mapped_column(Integer, default=0)
     last_event_id: Mapped[int | None] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class AutoReviewRolloutControlEvent(Base):
@@ -989,7 +1019,9 @@ class AutoReviewRolloutControlEvent(Base):
     actor_subject_hmac: Mapped[str] = mapped_column(String(64))
     fingerprint_key_version: Mapped[str] = mapped_column(String(64))
     fingerprint_key_material_verifier: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class AutoReviewPromotionDecision(Base):
@@ -1014,8 +1046,7 @@ class AutoReviewPromotionDecision(Base):
             name='fk_auto_review_promotion_rollout_scope',
         ),
         CheckConstraint(
-            "selection_result IN ('first_50', 'sample_10', 'sample_2', "
-            "'not_selected')",
+            "selection_result IN ('first_50', 'sample_10', 'sample_2', 'not_selected')",
             name='ck_auto_review_promotion_selection_result',
         ),
     )
@@ -1034,7 +1065,9 @@ class AutoReviewPromotionDecision(Base):
     selection_result: Mapped[str] = mapped_column(String(32))
     fingerprint_key_version: Mapped[str] = mapped_column(String(64))
     fingerprint_key_material_verifier: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class AutoReviewPostAudit(Base):
@@ -1114,7 +1147,9 @@ class AutoReviewPostAudit(Base):
         String(64)
     )
     audit_reason: Mapped[str | None] = mapped_column(String(500))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
     audited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -1149,7 +1184,9 @@ class AutoReviewRevocationAssessment(Base):
     actor_subject_hmac: Mapped[str] = mapped_column(String(64))
     actor_fingerprint_key_version: Mapped[str] = mapped_column(String(64))
     actor_fingerprint_key_material_verifier: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
 
 
 class AutoReviewAuditCorrection(Base):
@@ -1204,7 +1241,9 @@ class AutoReviewAuditCorrection(Base):
     actor_subject_hmac: Mapped[str] = mapped_column(String(64))
     actor_fingerprint_key_version: Mapped[str] = mapped_column(String(64))
     actor_fingerprint_key_material_verifier: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -1218,4 +1257,6 @@ class VectorServingTombstone(Base):
     document_id: Mapped[str] = mapped_column(String(160))
     source_review_item_id: Mapped[int] = mapped_column(ForeignKey('review_items.id'))
     reason_code: Mapped[str] = mapped_column(String(64))
-    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    revoked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now
+    )
