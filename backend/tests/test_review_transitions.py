@@ -24,6 +24,7 @@ from backend.app.models import (
     TimelineEvent,
     Todo,
 )
+from backend.app.review.actors import human_review_actor
 from backend.app.review.transitions import (
     InvalidReviewTransition,
     ReviewTransitionService,
@@ -47,6 +48,10 @@ def two_session_factory(tmp_path: Path) -> Generator[sessionmaker[Session], None
 
 def _service() -> ReviewTransitionService:
     return ReviewTransitionService()
+
+
+def _actor(user: DemoUser):
+    return human_review_actor(user)
 
 
 def _seed_item(
@@ -109,7 +114,7 @@ def _valid_payload(item_type: str) -> dict:
 def test_pending_approve_promotes_with_source_review_item_provenance(db_session: Session) -> None:
     item = _seed_item(db_session)
 
-    result = _service().transition(db=db_session, item_id=item.id, action='approve', actor=USERS['admin'])
+    result = _service().transition(db=db_session, item_id=item.id, action='approve', actor=_actor(USERS['admin']))
 
     decision = db_session.scalars(select(DecisionRecord)).one()
     timeline = db_session.scalars(select(TimelineEvent)).one()
@@ -124,9 +129,9 @@ def test_pending_approve_promotes_with_source_review_item_provenance(db_session:
 def test_approve_replay_returns_existing_canonical_effect_ids(db_session: Session) -> None:
     item = _seed_item(db_session)
     service = _service()
-    first = service.transition(db=db_session, item_id=item.id, action='approve', actor=USERS['admin'])
+    first = service.transition(db=db_session, item_id=item.id, action='approve', actor=_actor(USERS['admin']))
 
-    replay = service.transition(db=db_session, item_id=item.id, action='approve', actor=USERS['admin'])
+    replay = service.transition(db=db_session, item_id=item.id, action='approve', actor=_actor(USERS['admin']))
 
     assert replay.replayed is True
     assert replay.promotion == first.promotion
@@ -139,7 +144,7 @@ def test_terminal_review_transition_is_rejected(db_session: Session, terminal_st
     item = _seed_item(db_session, status=terminal_status)
 
     with pytest.raises(InvalidReviewTransition) as exc_info:
-        _service().transition(db=db_session, item_id=item.id, action='approve', actor=USERS['admin'])
+        _service().transition(db=db_session, item_id=item.id, action='approve', actor=_actor(USERS['admin']))
 
     assert exc_info.value.code == 'invalid_state_transition'
     assert db_session.get(ReviewItem, item.id).status == terminal_status
@@ -153,7 +158,7 @@ def test_needs_more_evidence_is_terminal_and_never_promotes(db_session: Session)
         db=db_session,
         item_id=item.id,
         action='needs_more_evidence',
-        actor=USERS['admin'],
+        actor=_actor(USERS['admin']),
         note='Please add the owner statement.',
     )
 
@@ -165,13 +170,13 @@ def test_needs_more_evidence_is_terminal_and_never_promotes(db_session: Session)
     assert item.payload['needs_more_evidence']['note'] == 'Please add the owner statement.'
     assert db_session.scalars(select(DecisionRecord)).all() == []
     with pytest.raises(InvalidReviewTransition):
-        service.transition(db=db_session, item_id=item.id, action='reject', actor=USERS['admin'])
+        service.transition(db=db_session, item_id=item.id, action='reject', actor=_actor(USERS['admin']))
 
 
 def test_reject_records_reviewer_and_reviewed_at(db_session: Session) -> None:
     item = _seed_item(db_session)
 
-    result = _service().transition(db=db_session, item_id=item.id, action='reject', actor=USERS['viewer'])
+    result = _service().transition(db=db_session, item_id=item.id, action='reject', actor=_actor(USERS['viewer']))
 
     db_session.refresh(item)
     assert result.status == 'rejected'
@@ -186,7 +191,7 @@ def test_bulk_transition_processes_ids_in_ascending_order(db_session: Session) -
         db=db_session,
         item_ids=[items[2].id, items[0].id, items[1].id],
         action='reject',
-        actor=USERS['viewer'],
+        actor=_actor(USERS['viewer']),
     )
 
     assert [row.item_id for row in result.results] == sorted(item.id for item in items)
@@ -197,13 +202,13 @@ def test_bulk_transition_processes_ids_in_ascending_order(db_session: Session) -
 def test_bulk_and_single_approve_create_effects_exactly_once(db_session: Session) -> None:
     item = _seed_item(db_session, item_type='todo')
     service = _service()
-    first = service.transition(db=db_session, item_id=item.id, action='approve', actor=USERS['admin'])
+    first = service.transition(db=db_session, item_id=item.id, action='approve', actor=_actor(USERS['admin']))
 
     batch = service.transition_many(
         db=db_session,
         item_ids=[item.id],
         action='approve',
-        actor=USERS['admin'],
+        actor=_actor(USERS['admin']),
     )
 
     assert batch.results[0].replayed is True
@@ -228,8 +233,8 @@ def test_companion_timeline_provenance_is_exactly_once(
     item = _seed_item(db_session, item_type=item_type)
     service = _service()
 
-    service.transition(db=db_session, item_id=item.id, action='approve', actor=USERS['admin'])
-    replay = service.transition(db=db_session, item_id=item.id, action='approve', actor=USERS['admin'])
+    service.transition(db=db_session, item_id=item.id, action='approve', actor=_actor(USERS['admin']))
+    replay = service.transition(db=db_session, item_id=item.id, action='approve', actor=_actor(USERS['admin']))
 
     record = db_session.scalars(select(record_model)).one()
     timeline = db_session.scalars(select(TimelineEvent)).one()
@@ -256,7 +261,7 @@ def test_transition_rechecks_exact_actor_permission_levels(db_session: Session) 
             db=db_session,
             item_id=item.id,
             action='approve',
-            actor=restricted_blind_admin,
+            actor=_actor(restricted_blind_admin),
         )
 
     assert exc_info.value.status_code == 403
@@ -281,11 +286,11 @@ def test_transition_preserves_employee_reviewer_admin_rbac(
     item = _seed_item(db_session, permission_level=permission_level)
 
     if allowed:
-        result = _service().transition(db=db_session, item_id=item.id, action='reject', actor=actor)
+        result = _service().transition(db=db_session, item_id=item.id, action='reject', actor=_actor(actor))
         assert result.status == 'rejected'
     else:
         with pytest.raises(HTTPException) as exc_info:
-            _service().transition(db=db_session, item_id=item.id, action='reject', actor=actor)
+            _service().transition(db=db_session, item_id=item.id, action='reject', actor=_actor(actor))
         assert exc_info.value.status_code == 403
         assert db_session.get(ReviewItem, item.id).status == 'pending_review'
 
@@ -302,7 +307,7 @@ def test_transition_rechecks_evidence_before_approval(
     item = _seed_item(db_session, source_links=source_links, source_snippets=source_snippets)
 
     with pytest.raises(ValueError, match='Review item requires source evidence'):
-        _service().transition(db=db_session, item_id=item.id, action='approve', actor=USERS['admin'])
+        _service().transition(db=db_session, item_id=item.id, action='approve', actor=_actor(USERS['admin']))
 
     assert db_session.get(ReviewItem, item.id).status == 'pending_review'
 
@@ -310,7 +315,7 @@ def test_transition_rechecks_evidence_before_approval(
 def test_project_assignment_approval_has_no_knowledge_effect(db_session: Session) -> None:
     item = _seed_item(db_session, item_type='project_assignment')
 
-    result = _service().transition(db=db_session, item_id=item.id, action='approve', actor=USERS['admin'])
+    result = _service().transition(db=db_session, item_id=item.id, action='approve', actor=_actor(USERS['admin']))
 
     assert result.status == 'approved'
     assert result.promotion.target_type is None
@@ -323,7 +328,7 @@ def test_project_assignment_approval_has_no_knowledge_effect(db_session: Session
 def test_legacy_approved_item_without_provenance_replays_without_new_effect(db_session: Session) -> None:
     item = _seed_item(db_session, status='approved')
 
-    result = _service().transition(db=db_session, item_id=item.id, action='approve', actor=USERS['admin'])
+    result = _service().transition(db=db_session, item_id=item.id, action='approve', actor=_actor(USERS['admin']))
 
     assert result.replayed is True
     assert result.promotion is None
@@ -334,7 +339,7 @@ def test_legacy_approved_item_without_provenance_replays_without_new_effect(db_s
 def test_transition_flushes_without_committing(db_session: Session) -> None:
     item = _seed_item(db_session, item_type='timeline_event')
 
-    _service().transition(db=db_session, item_id=item.id, action='approve', actor=USERS['admin'])
+    _service().transition(db=db_session, item_id=item.id, action='approve', actor=_actor(USERS['admin']))
 
     assert db_session.in_transaction() is True
 
@@ -346,7 +351,7 @@ def test_transition_many_reports_typed_terminal_failures(db_session: Session) ->
         db=db_session,
         item_ids=[item.id],
         action='approve',
-        actor=USERS['admin'],
+        actor=_actor(USERS['admin']),
     )
 
     assert result.results == ()
@@ -510,7 +515,7 @@ def test_partial_provenance_conflict_rolls_back_only_failed_bulk_item(
         db=db_session,
         item_ids=[successful.id, incomplete.id],
         action='approve',
-        actor=USERS['admin'],
+        actor=_actor(USERS['admin']),
     )
 
     assert [row.item_id for row in result.results] == [successful.id]
@@ -544,7 +549,7 @@ def test_legacy_approved_no_effect_item_replays_without_promotion(
         db=db_session,
         item_id=item.id,
         action='approve',
-        actor=USERS['admin'],
+        actor=_actor(USERS['admin']),
     )
 
     assert result.replayed is True

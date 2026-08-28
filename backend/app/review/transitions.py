@@ -3,22 +3,35 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, Protocol
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from backend.app.core.demo_auth import DemoUser
-from backend.app.core.rbac import ensure_can_review_permission
 from backend.app.knowledge.promotion import (
     IncompleteReviewPromotionError,
     find_review_item_promotion,
     promote_review_item,
     validate_review_item_for_approval,
 )
-from backend.app.models import ReviewItem
+from backend.app.models import (
+    AgentWorkflowEvidenceRef,
+    AutoReviewValidation,
+    Document,
+    ReviewItem,
+    ReviewItemEvidenceRef,
+    Source,
+)
+from backend.app.review.actors import (
+    SYSTEM_AUTO_REVIEW_ACTOR_ID,
+    ApprovalDirective,
+    CreateNewPromotion,
+    ReuseExistingPromotion,
+    ReviewResolutionActor,
+)
+from backend.app.schemas.auto_review import AUTO_REVIEW_POLICY_VERSION
 
 ReviewAction = Literal['approve', 'reject', 'needs_more_evidence']
 
@@ -59,9 +72,19 @@ class ReviewTransitionService:
         db: Session,
         item_id: int,
         action: ReviewAction,
-        actor: DemoUser,
+        actor: ReviewResolutionActor,
         note: str | None = None,
+        approval_directive: ApprovalDirective | None = None,
     ) -> ReviewTransitionResult:
+        preview = db.get(ReviewItem, item_id)
+        if preview is None:
+            raise ValueError('Review item not found')
+        directive = self._authorize_action(
+            item=preview,
+            action=action,
+            actor=actor,
+            approval_directive=approval_directive,
+        )
         items = self._load_items(db, [item_id])
         if not items:
             raise ValueError('Review item not found')
@@ -71,6 +94,7 @@ class ReviewTransitionService:
             action=action,
             actor=actor,
             note=note,
+            approval_directive=directive,
         )
 
     def transition_many(
@@ -79,9 +103,11 @@ class ReviewTransitionService:
         db: Session,
         item_ids: Sequence[int],
         action: ReviewAction,
-        actor: DemoUser,
+        actor: ReviewResolutionActor,
         note: str | None = None,
     ) -> ReviewBatchTransitionResult:
+        if actor.actor_type != 'human' or 'human_review' not in actor.capabilities:
+            _raise_review_permission_denied()
         requested_ids = sorted(set(item_ids))
         items = self._load_items(db, requested_ids)
         items_by_id = {item.id: item for item in items}
@@ -105,6 +131,12 @@ class ReviewTransitionService:
                         action=action,
                         actor=actor,
                         note=note,
+                        approval_directive=self._authorize_action(
+                            item=item,
+                            action=action,
+                            actor=actor,
+                            approval_directive=None,
+                        ),
                     )
                 results.append(result)
             except InvalidReviewTransition as exc:
@@ -153,12 +185,16 @@ class ReviewTransitionService:
         db: Session,
         item: ReviewItem,
         action: ReviewAction,
-        actor: DemoUser,
+        actor: ReviewResolutionActor,
         note: str | None,
+        approval_directive: ApprovalDirective | None,
     ) -> ReviewTransitionResult:
-        ensure_can_review_permission(actor, item.permission_level)
-        if item.permission_level not in actor.permission_levels:
-            raise HTTPException(status_code=403, detail='Review approval permission required.')
+        directive = self._authorize_action(
+            item=item,
+            action=action,
+            actor=actor,
+            approval_directive=approval_directive,
+        )
 
         if item.status == 'approved' and action == 'approve':
             return ReviewTransitionResult(
@@ -172,27 +208,48 @@ class ReviewTransitionService:
 
         reviewed_at = datetime.now(UTC)
         if action == 'approve':
+            if directive is None:
+                raise RuntimeError('Approval directive is required')
             _validate_source_evidence(item)
             validate_review_item_for_approval(item)
+            validation_id = self._validation_id_for_actor(db, item=item, actor=actor)
+            if isinstance(directive, ReuseExistingPromotion):
+                raise ValueError(
+                    'Existing promotion reuse requires the trusted provenance service'
+                )
             item.status = 'approved'
-            item.reviewer_id = actor.id
+            item.reviewer_id = actor.subject_id
             item.reviewed_at = reviewed_at
+            if actor.actor_type == 'human':
+                item.resolution_source = 'human'
+                item.resolution_policy_version = None
+                item.auto_validation_id = None
+            else:
+                item.resolution_source = 'auto_policy'
+                item.resolution_policy_version = actor.policy_version
+                item.auto_validation_id = validation_id
             db.flush([item])
-            promotion = self._promote_exactly_once(db, item)
+            promotion = self._promote_with_directive(db, item, directive)
         elif action == 'reject':
             item.status = 'rejected'
-            item.reviewer_id = actor.id
+            item.reviewer_id = actor.subject_id
             item.reviewed_at = reviewed_at
+            item.resolution_source = 'human'
+            item.resolution_policy_version = None
+            item.auto_validation_id = None
             db.flush([item])
             promotion = None
         elif action == 'needs_more_evidence':
             item.status = 'needs_more_evidence'
-            item.reviewer_id = actor.id
+            item.reviewer_id = actor.subject_id
             item.reviewed_at = reviewed_at
+            item.resolution_source = 'human'
+            item.resolution_policy_version = None
+            item.auto_validation_id = None
             payload = dict(item.payload or {})
             payload['needs_more_evidence'] = {
                 'requested_at': reviewed_at.isoformat(),
-                'requested_by': actor.id,
+                'requested_by': actor.subject_id,
                 'note': (note or '').strip(),
                 'source_count': len(item.source_snippets or []),
                 'previous_status': 'pending_review',
@@ -211,6 +268,70 @@ class ReviewTransitionService:
         )
 
     @staticmethod
+    def _authorize_action(
+        *,
+        item: ReviewItem,
+        action: ReviewAction,
+        actor: ReviewResolutionActor,
+        approval_directive: ApprovalDirective | None,
+    ) -> ApprovalDirective | None:
+        if item.permission_level not in actor.allowed_permission_levels:
+            _raise_review_permission_denied()
+        if actor.actor_type == 'human':
+            if 'human_review' not in actor.capabilities:
+                _raise_review_permission_denied()
+            if isinstance(approval_directive, ReuseExistingPromotion):
+                _raise_review_permission_denied()
+            if action == 'approve':
+                return approval_directive or CreateNewPromotion()
+            if approval_directive is not None:
+                raise ValueError('Approval directive is valid only for approval')
+            return None
+        if (
+            actor.subject_id != SYSTEM_AUTO_REVIEW_ACTOR_ID
+            or 'auto_review' not in actor.capabilities
+            or actor.policy_version != AUTO_REVIEW_POLICY_VERSION
+            or action != 'approve'
+            or approval_directive is None
+        ):
+            _raise_review_permission_denied()
+        return approval_directive
+
+    @staticmethod
+    def _validation_id_for_actor(
+        db: Session,
+        *,
+        item: ReviewItem,
+        actor: ReviewResolutionActor,
+    ) -> int | None:
+        if actor.actor_type == 'human':
+            return None
+        statement = select(AutoReviewValidation).where(
+            AutoReviewValidation.review_item_id == item.id,
+            AutoReviewValidation.workflow_thread_id == item.workflow_thread_id,
+            AutoReviewValidation.status == 'completed',
+            AutoReviewValidation.policy_version == actor.policy_version,
+        )
+        if db.get_bind().dialect.name == 'postgresql':
+            statement = statement.with_for_update()
+        validations = tuple(db.scalars(statement).all())
+        if len(validations) != 1:
+            raise ValueError('Auto approval requires one matching completed validation')
+        return validations[0].id
+
+    def _promote_with_directive(
+        self,
+        db: Session,
+        item: ReviewItem,
+        directive: ApprovalDirective,
+    ) -> PromotionResult:
+        if isinstance(directive, ReuseExistingPromotion):
+            raise ValueError(
+                'Existing promotion reuse requires the trusted provenance service'
+            )
+        return self._promote_exactly_once(db, item)
+
+    @staticmethod
     def _promote_exactly_once(db: Session, item: ReviewItem) -> PromotionResult:
         try:
             with db.begin_nested():
@@ -227,6 +348,146 @@ class ReviewTransitionService:
         if result is None:
             raise RuntimeError('Approved review item has no promotion result')
         return result
+
+
+class ReviewEvidenceStalenessResolver(Protocol):
+    def canonical_evidence_has_drifted(
+        self,
+        db: Session,
+        *,
+        item: ReviewItem,
+    ) -> bool: ...
+
+
+class CanonicalReviewEvidenceStalenessResolver:
+    def canonical_evidence_has_drifted(
+        self,
+        db: Session,
+        *,
+        item: ReviewItem,
+    ) -> bool:
+        if item.workflow_thread_id is None:
+            return False
+        children = tuple(
+            db.scalars(
+                select(ReviewItemEvidenceRef).where(
+                    ReviewItemEvidenceRef.review_item_id == item.id,
+                    ReviewItemEvidenceRef.workflow_thread_id
+                    == item.workflow_thread_id,
+                )
+            ).all()
+        )
+        if not children:
+            return False
+        refs = tuple(
+            db.scalars(
+                select(AgentWorkflowEvidenceRef).where(
+                    AgentWorkflowEvidenceRef.workflow_thread_id
+                    == item.workflow_thread_id,
+                    AgentWorkflowEvidenceRef.id.in_(
+                        [child.workflow_evidence_ref_id for child in children]
+                    ),
+                )
+            ).all()
+        )
+        if len(refs) != len(children):
+            return True
+        source_statement = select(Source).where(
+            Source.id.in_([ref.canonical_row_id for ref in refs])
+        )
+        if db.get_bind().dialect.name == 'postgresql':
+            source_statement = source_statement.with_for_update()
+        sources = {
+            source.id: source for source in db.scalars(source_statement).all()
+        }
+        documents = {
+            document.source_id: document
+            for document in db.scalars(
+                select(Document).where(
+                    Document.source_id.in_(
+                        [ref.canonical_row_id for ref in refs]
+                    )
+                )
+            ).all()
+        }
+        for ref in refs:
+            source = sources.get(ref.canonical_row_id)
+            if source is None:
+                return True
+            if (
+                ref.canonical_table != 'sources'
+                or ref.canonical_source_type != source.source_type
+                or source.server_content_signature_schema
+                != 'server-source-content:v1'
+                or source.server_content_signature != ref.content_signature
+            ):
+                return True
+            document = documents.get(source.id)
+            current_version_id = (
+                document.current_document_version_id if document is not None else None
+            )
+            if current_version_id != ref.document_version_id:
+                return True
+        return False
+
+
+class InternalReviewTransitionService:
+    def __init__(
+        self,
+        *,
+        evidence_staleness_resolver: ReviewEvidenceStalenessResolver,
+    ) -> None:
+        self._evidence_staleness_resolver = evidence_staleness_resolver
+
+    def mark_evidence_stale(
+        self,
+        *,
+        db: Session,
+        item_id: int,
+    ) -> ReviewTransitionResult:
+        items = ReviewTransitionService._load_items(db, [item_id])
+        if not items:
+            raise ValueError('Review item not found')
+        item = items[0]
+        if item.status != 'pending_review':
+            raise InvalidReviewTransition(
+                action='needs_more_evidence',
+                status=item.status,
+            )
+        if not self._evidence_staleness_resolver.canonical_evidence_has_drifted(
+            db,
+            item=item,
+        ):
+            raise ValueError('Review item canonical evidence is current')
+        reviewed_at = datetime.now(UTC)
+        item.status = 'needs_more_evidence'
+        item.reviewer_id = SYSTEM_AUTO_REVIEW_ACTOR_ID
+        item.reviewed_at = reviewed_at
+        item.resolution_source = 'auto_policy'
+        item.resolution_policy_version = None
+        item.auto_validation_id = None
+        payload = dict(item.payload or {})
+        payload['needs_more_evidence'] = {
+            'requested_at': reviewed_at.isoformat(),
+            'requested_by': SYSTEM_AUTO_REVIEW_ACTOR_ID,
+            'reason_code': 'evidence_version_changed',
+            'previous_status': 'pending_review',
+        }
+        item.payload = payload
+        db.flush([item])
+        return ReviewTransitionResult(
+            item_id=item.id,
+            status=item.status,
+            replayed=False,
+            promotion=None,
+        )
+
+
+def _raise_review_permission_denied() -> None:
+    raise HTTPException(
+        status_code=403,
+        detail='Review approval permission required.',
+    )
 
 
 def _validate_source_evidence(item: ReviewItem) -> None:

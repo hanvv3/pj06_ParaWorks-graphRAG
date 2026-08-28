@@ -1,0 +1,431 @@
+from __future__ import annotations
+
+from decimal import Decimal
+
+import pytest
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from backend.app.core.demo_auth import USERS
+from backend.app.models import (
+    AgentRun,
+    AgentWorkflowEvidenceRef,
+    AgentWorkflowThread,
+    AuditLog,
+    ReviewItem,
+    ReviewItemEvidenceRef,
+    Source,
+)
+from backend.app.review.actors import (
+    CreateNewPromotion,
+    ReviewResolutionActor,
+    auto_review_actor,
+    human_review_actor,
+)
+from backend.app.review.transitions import (
+    CanonicalReviewEvidenceStalenessResolver,
+    InternalReviewTransitionService,
+    ReviewTransitionService,
+)
+from backend.app.schemas.auto_review import AUTO_REVIEW_POLICY_VERSION
+from backend.app.services.audit import record_review_resolution_audit
+
+
+def _seed_item(
+    db: Session,
+    *,
+    item_type: str = 'history_event',
+    permission_level: str = 'internal',
+) -> ReviewItem:
+    payload = {
+        'history_event': {
+            'title': 'Actor boundary introduced',
+            'reason': 'The approved design requires one locked transition core.',
+        },
+        'timeline_event': {
+            'title': 'Actor boundary introduced',
+            'result_summary': 'The review transition now distinguishes resolution actors.',
+        },
+    }[item_type]
+    item = ReviewItem(
+        item_type=item_type,
+        payload=payload,
+        source_links=['https://mail.mock/evidence/actor-boundary'],
+        source_snippets=['The source directly supports the bounded test claim.'],
+        confidence_score=0.99,
+        permission_level=permission_level,
+        status='pending_review',
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+def _seed_bound_item(db: Session) -> tuple[ReviewItem, Source]:
+    thread_id = 'actor-stale-thread'
+    signature = 'a' * 64
+    source = Source(
+        source_type='drive',
+        source_id='drive:actor-stale-source',
+        source_url='https://drive.mock/actor-stale-source',
+        title='Actor stale source',
+        permission_level='internal',
+        raw_metadata={},
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=signature,
+        connector_content_signature='connector-display-only',
+    )
+    thread = AgentWorkflowThread(
+        thread_id=thread_id,
+        workflow_name='company_memory_review',
+        graph_version='company-memory-review-v2.1-auto-review',
+        checkpoint_thread_id='checkpoint:actor-stale-thread',
+        checkpoint_store='memory',
+        owner_subject_id=USERS['admin'].id,
+        security_scope_id='default',
+        input_hash='1' * 64,
+        evidence_version_hash='2' * 64,
+        status='awaiting_review',
+    )
+    db.add_all([source, thread])
+    db.flush()
+    run = AgentRun(
+        agent_name='history_agent',
+        prompt_version='history-extraction:c5-v1',
+        status='complete',
+        source_window='bounded-test-window',
+        cache_key='actor-stale-run',
+        model_name='gpt-5.4-mini-2026-03-17',
+        generation_provider='openai',
+        generation_reasoning_effort='none',
+        generation_route_version='auto-review-extraction-route:v1',
+        generation_output_contract_version='history-candidate:c5-v1',
+        permission_level='internal',
+        workflow_thread_id=thread_id,
+        effect_key='actor-stale-effect',
+    )
+    db.add(run)
+    db.flush()
+    workflow_ref = AgentWorkflowEvidenceRef(
+        workflow_thread_id=thread_id,
+        ordinal=1,
+        canonical_source_type='drive',
+        canonical_table='sources',
+        canonical_row_id=source.id,
+        document_version_id=None,
+        external_revision=None,
+        content_signature=signature,
+        permission_level_snapshot='internal',
+        content_fingerprint='3' * 64,
+    )
+    item = ReviewItem(
+        item_type='history_event',
+        payload={
+            'title': 'Canonical evidence was bound',
+            'reason': 'The candidate records the exact source version.',
+        },
+        source_links=[source.source_url],
+        source_snippets=['The candidate records the exact source version.'],
+        confidence_score=0.99,
+        permission_level='internal',
+        status='pending_review',
+        workflow_thread_id=thread_id,
+        candidate_key='actor-stale-candidate',
+        agent_run_id=run.id,
+        candidate_contract_version='c5-v1',
+    )
+    db.add_all([workflow_ref, item])
+    db.flush()
+    db.add(
+        ReviewItemEvidenceRef(
+            review_item_id=item.id,
+            workflow_thread_id=thread_id,
+            workflow_evidence_ref_id=workflow_ref.id,
+            candidate_slot_ordinal=1,
+            message_content_fingerprint='4' * 64,
+            fingerprint_key_version='test-key-v1',
+            fingerprint_key_material_verifier='5' * 64,
+        )
+    )
+    db.commit()
+    db.refresh(item)
+    db.refresh(source)
+    return item, source
+
+
+def test_human_adapter_preserves_exact_permission_levels() -> None:
+    actor = human_review_actor(USERS['admin'])
+
+    assert actor.subject_id == USERS['admin'].id
+    assert actor.actor_type == 'human'
+    assert set(actor.allowed_permission_levels) == USERS['admin'].permission_levels
+    assert actor.capabilities == frozenset(
+        {'human_review', 'auto_review_rollout_admin'}
+    )
+    assert actor.policy_version is None
+
+
+def test_auto_actor_has_only_public_internal_and_auto_review() -> None:
+    actor = auto_review_actor(policy_version=AUTO_REVIEW_POLICY_VERSION)
+
+    assert actor == ReviewResolutionActor(
+        subject_id='system:auto-review',
+        actor_type='auto_policy',
+        allowed_permission_levels=('public', 'internal'),
+        capabilities=frozenset({'auto_review'}),
+        policy_version=AUTO_REVIEW_POLICY_VERSION,
+    )
+
+
+def test_public_request_cannot_supply_actor_type_capability_or_directive(
+    client,
+    db_session: Session,
+) -> None:
+    item = _seed_item(db_session)
+
+    response = client.post(
+        f'/api/v1/review/{item.id}/approve',
+        params={
+            'actor_type': 'auto_policy',
+            'capability': 'auto_review',
+            'approval_directive': 'reuse_existing',
+        },
+        headers={
+            'X-Demo-User': 'viewer',
+            'X-Review-Actor-Type': 'auto_policy',
+            'X-Review-Capability': 'auto_review',
+        },
+        json={
+            'actor_type': 'auto_policy',
+            'capability': 'auto_review',
+            'approval_directive': {'kind': 'reuse_existing'},
+        },
+    )
+
+    assert response.status_code == 200
+    db_session.refresh(item)
+    assert item.reviewer_id == USERS['viewer'].id
+    assert item.resolution_source == 'human'
+    assert item.resolution_policy_version is None
+    assert item.auto_validation_id is None
+
+
+def test_auto_actor_cannot_reject_request_evidence_or_bulk_review(
+    db_session: Session,
+) -> None:
+    actor = auto_review_actor(policy_version=AUTO_REVIEW_POLICY_VERSION)
+    service = ReviewTransitionService()
+    reject_item = _seed_item(db_session)
+    evidence_item = _seed_item(db_session, item_type='timeline_event')
+
+    for item, action in (
+        (reject_item, 'reject'),
+        (evidence_item, 'needs_more_evidence'),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            service.transition(
+                db=db_session,
+                item_id=item.id,
+                action=action,
+                actor=actor,
+            )
+        assert exc_info.value.status_code == 403
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.transition_many(
+            db=db_session,
+            item_ids=[reject_item.id, evidence_item.id],
+            action='approve',
+            actor=actor,
+        )
+    assert exc_info.value.status_code == 403
+    assert reject_item.status == 'pending_review'
+    assert evidence_item.status == 'pending_review'
+
+
+def test_only_internal_stale_directive_with_locked_canonical_drift_marks_needs_more(
+    db_session: Session,
+) -> None:
+    item, source = _seed_bound_item(db_session)
+    service = InternalReviewTransitionService(
+        evidence_staleness_resolver=CanonicalReviewEvidenceStalenessResolver()
+    )
+    source.server_content_signature = 'b' * 64
+    db_session.commit()
+
+    result = service.mark_evidence_stale(db=db_session, item_id=item.id)
+
+    db_session.refresh(item)
+    assert result.status == 'needs_more_evidence'
+    assert result.promotion is None
+    assert item.reviewer_id == 'system:auto-review'
+    assert item.payload['needs_more_evidence'] == {
+        'requested_at': item.payload['needs_more_evidence']['requested_at'],
+        'requested_by': 'system:auto-review',
+        'reason_code': 'evidence_version_changed',
+        'previous_status': 'pending_review',
+    }
+    assert item.payload['needs_more_evidence']['requested_at'].endswith('+00:00')
+
+
+def test_public_or_current_evidence_cannot_invoke_stale_directive(
+    db_session: Session,
+) -> None:
+    item, _source = _seed_bound_item(db_session)
+    internal = InternalReviewTransitionService(
+        evidence_staleness_resolver=CanonicalReviewEvidenceStalenessResolver()
+    )
+    auto_actor = auto_review_actor(policy_version=AUTO_REVIEW_POLICY_VERSION)
+
+    with pytest.raises(ValueError, match='canonical evidence is current'):
+        internal.mark_evidence_stale(db=db_session, item_id=item.id)
+    with pytest.raises(HTTPException) as exc_info:
+        ReviewTransitionService().transition(
+            db=db_session,
+            item_id=item.id,
+            action='needs_more_evidence',
+            actor=auto_actor,
+        )
+    assert exc_info.value.status_code == 403
+    assert item.status == 'pending_review'
+
+
+def test_wrong_policy_auto_actor_cannot_approve(db_session: Session) -> None:
+    item = _seed_item(db_session)
+    wrong_policy_actor = auto_review_actor(policy_version='auto-review-policy:wrong')
+
+    with pytest.raises(HTTPException) as exc_info:
+        ReviewTransitionService().transition(
+            db=db_session,
+            item_id=item.id,
+            action='approve',
+            actor=wrong_policy_actor,
+            approval_directive=CreateNewPromotion(),
+        )
+
+    assert exc_info.value.status_code == 403
+    assert item.status == 'pending_review'
+
+
+def test_existing_human_approve_reject_needs_more_and_replay_are_unchanged(
+    db_session: Session,
+) -> None:
+    actor = human_review_actor(USERS['admin'])
+    approve_item = _seed_item(db_session)
+    reject_item = _seed_item(db_session, item_type='timeline_event')
+    evidence_item = _seed_item(db_session)
+    service = ReviewTransitionService()
+
+    approved = service.transition(
+        db=db_session,
+        item_id=approve_item.id,
+        action='approve',
+        actor=actor,
+    )
+    replay = service.transition(
+        db=db_session,
+        item_id=approve_item.id,
+        action='approve',
+        actor=actor,
+    )
+    rejected = service.transition(
+        db=db_session,
+        item_id=reject_item.id,
+        action='reject',
+        actor=actor,
+    )
+    needs_more = service.transition(
+        db=db_session,
+        item_id=evidence_item.id,
+        action='needs_more_evidence',
+        actor=actor,
+        note='Add the exact source version.',
+    )
+
+    assert approved.status == 'approved'
+    assert replay.replayed is True
+    assert replay.promotion == approved.promotion
+    assert rejected.status == 'rejected'
+    assert needs_more.status == 'needs_more_evidence'
+    assert evidence_item.payload['needs_more_evidence']['note'] == (
+        'Add the exact source version.'
+    )
+    for item in (approve_item, reject_item, evidence_item):
+        assert item.resolution_source == 'human'
+        assert item.resolution_policy_version is None
+        assert item.auto_validation_id is None
+
+
+def test_audit_writer_does_not_log_raw_reason_or_source_content(
+    db_session: Session,
+) -> None:
+    actor = human_review_actor(USERS['admin'])
+
+    record_review_resolution_audit(
+        db=db_session,
+        actor=actor,
+        human_user=USERS['admin'],
+        action='review.approve',
+        review_item_id=41,
+        outcome='approved',
+        metadata={
+            'item_type': 'history_event',
+            'effect_count': 1,
+            'reason': 'raw model rationale must not be stored',
+            'source_content': 'raw source content must not be stored',
+            'source_url': 'https://private.invalid/raw',
+            'estimated_cost_usd': Decimal('0.001234'),
+        },
+    )
+    db_session.commit()
+
+    audit = db_session.scalars(select(AuditLog)).one()
+    serialized = repr(audit.metadata_)
+    assert 'raw model rationale' not in serialized
+    assert 'raw source content' not in serialized
+    assert 'private.invalid' not in serialized
+    assert audit.metadata_ == {
+        'actor_type': 'human',
+        'review_item_id': 41,
+        'outcome': 'approved',
+        'item_type': 'history_event',
+        'effect_count': 1,
+        'estimated_cost_usd': '0.001234',
+    }
+
+
+def test_system_resolution_audit_uses_fixed_schema_projection_without_fake_user(
+    db_session: Session,
+) -> None:
+    actor = auto_review_actor(policy_version=AUTO_REVIEW_POLICY_VERSION)
+
+    record_review_resolution_audit(
+        db=db_session,
+        actor=actor,
+        action='review.auto_approve',
+        review_item_id=73,
+        outcome='approved',
+        metadata={
+            'policy_version': AUTO_REVIEW_POLICY_VERSION,
+            'validation_id': 9,
+            'effect_count': 2,
+        },
+    )
+    db_session.commit()
+
+    audit = db_session.scalars(select(AuditLog)).one()
+    assert audit.actor_id == 'system:auto-review'
+    assert audit.actor_email == 'system:auto-review@paraworks.invalid'
+    assert audit.actor_role == 'system'
+    assert audit.target_type == 'review_item'
+    assert audit.target_id == '73'
+    assert audit.metadata_ == {
+        'actor_type': 'auto_policy',
+        'review_item_id': 73,
+        'outcome': 'approved',
+        'policy_version': AUTO_REVIEW_POLICY_VERSION,
+        'validation_id': 9,
+        'effect_count': 2,
+    }

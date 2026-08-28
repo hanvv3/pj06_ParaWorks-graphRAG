@@ -285,8 +285,13 @@ def test_reject_mail_document_review_item_preserves_source_evidence(client, db_s
     assert db_session.scalar(select(DocumentChunk).where(DocumentChunk.source_id == source.id)) is not None
     audit_log = db_session.scalar(select(AuditLog).where(AuditLog.action == 'review.reject'))
     assert audit_log is not None
-    assert audit_log.metadata_['source_ids_preserved'] == ['gmail:reject-preserve']
-    assert audit_log.metadata_['rejected_review_item_id'] == item.id
+    assert audit_log.metadata_ == {
+        'actor_type': 'human',
+        'review_item_id': item.id,
+        'outcome': 'rejected',
+        'item_type': 'history_event',
+    }
+    assert 'gmail:reject-preserve' not in str(audit_log.metadata_)
 
 
 def test_patch_review_item_updates_payload(client) -> None:
@@ -724,7 +729,7 @@ def test_terminal_route_action_returns_typed_conflict(client, db_session) -> Non
     assert response.json()['detail'] == {'code': 'invalid_state_transition'}
 
 
-def test_workflow_bound_review_audit_is_bounded_and_contains_no_item_or_source_ids(client, db_session) -> None:
+def test_workflow_bound_review_audit_is_bounded_and_contains_no_source_ids(client, db_session) -> None:
     item = ReviewItem(
         item_type='history_event',
         payload={
@@ -749,13 +754,13 @@ def test_workflow_bound_review_audit_is_bounded_and_contains_no_item_or_source_i
     assert audit.target_type == 'review_workflow'
     assert audit.target_id == 'workflow-audit-safe'
     assert audit.metadata_ == {
-        'action': 'reject',
-        'result_code': 'rejected',
+        'actor_type': 'human',
+        'review_item_id': item.id,
+        'outcome': 'rejected',
         'replayed': False,
         'effect_count': 0,
     }
     serialized = str(audit.metadata_)
-    assert str(item.id) not in serialized
     assert 'secret-message-id' not in serialized
     assert 'Sensitive source content' not in serialized
 

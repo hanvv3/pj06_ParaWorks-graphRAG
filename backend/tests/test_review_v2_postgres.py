@@ -47,6 +47,7 @@ from backend.app.models import (
     TimelineEvent,
     Todo,
 )
+from backend.app.review.actors import human_review_actor
 from backend.app.review.transitions import ReviewTransitionService
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
@@ -636,7 +637,7 @@ def _approve_only_item(
             db=db,
             item_id=item.id,
             action='approve',
-            actor=USERS['admin'],
+            actor=human_review_actor(USERS['admin']),
         )
         assert result.replayed is False
         assert result.promotion is not None

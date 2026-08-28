@@ -21,6 +21,7 @@ from backend.app.models import (
     ReviewItem,
     Source,
 )
+from backend.app.review.actors import ReviewResolutionActor, human_review_actor
 from backend.app.review.transitions import (
     InvalidReviewTransition,
     ReviewAction,
@@ -36,7 +37,10 @@ from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
     COMPANY_MEMORY_REVIEW_WORKFLOW,
 )
-from backend.app.services.audit import record_audit_log
+from backend.app.services.audit import (
+    record_audit_log,
+    record_review_resolution_audit,
+)
 from backend.app.services.review_display import review_item_display_title
 
 router = APIRouter(prefix='/review', tags=['review'])
@@ -163,11 +167,12 @@ def approve_agent_review_candidates(
     ).all()
     visible_items = _visible_review_items(all_items, user, settings)
     candidate_items = [item for item in visible_items if _is_agent_candidate(item)]
+    actor = _human_actor_for_items(user, candidate_items)
     batch = ReviewTransitionService().transition_many(
         db=db,
         item_ids=[item.id for item in candidate_items],
         action='approve',
-        actor=user,
+        actor=actor,
     )
     approved_item_ids = [result.item_id for result in batch.results]
     skipped_count = (
@@ -215,11 +220,12 @@ def bulk_review_items(
     settings: AppSettings,
 ) -> dict:
     items = _bulk_action_items(db, request, user, settings)
+    actor = _human_actor_for_items(user, items)
     batch = ReviewTransitionService().transition_many(
         db=db,
         item_ids=[item.id for item in items],
         action=request.action,
-        actor=user,
+        actor=actor,
     )
     approved_item_ids = [result.item_id for result in batch.results if result.status == 'approved']
     rejected_item_ids = [result.item_id for result in batch.results if result.status == 'rejected']
@@ -315,14 +321,22 @@ def approve_review_item(
     settings: AppSettings,
 ) -> dict:
     item = _get_review_item_for_action(db, item_id, settings)
+    actor = _human_actor_for_item(user, item)
     result = _transition_or_http(
         db=db,
         item_id=item.id,
         action='approve',
-        actor=user,
+        actor=actor,
     )
     if not result.replayed:
-        _record_transition_audit(db=db, actor=user, item=item, action='approve', result=result)
+        _record_transition_audit(
+            db=db,
+            actor=actor,
+            human_user=user,
+            item=item,
+            action='approve',
+            result=result,
+        )
     db.commit()
     db.refresh(item)
     response = _review_item_response(item, _agent_run_for_item(db, item))
@@ -341,17 +355,19 @@ def request_more_evidence_for_review_item(
     request: ReviewEvidenceRequest | None = None,
 ) -> dict:
     item = _get_review_item_for_action(db, item_id, settings)
+    actor = _human_actor_for_item(user, item)
     note = (request.note or '').strip() if request else ''
     result = _transition_or_http(
         db=db,
         item_id=item.id,
         action='needs_more_evidence',
-        actor=user,
+        actor=actor,
         note=note,
     )
     _record_transition_audit(
         db=db,
-        actor=user,
+        actor=actor,
+        human_user=user,
         item=item,
         action='needs_more_evidence',
         result=result,
@@ -373,13 +389,21 @@ def reject_review_item(
     settings: AppSettings,
 ) -> dict:
     item = _get_review_item_for_action(db, item_id, settings)
+    actor = _human_actor_for_item(user, item)
     result = _transition_or_http(
         db=db,
         item_id=item.id,
         action='reject',
-        actor=user,
+        actor=actor,
     )
-    _record_transition_audit(db=db, actor=user, item=item, action='reject', result=result)
+    _record_transition_audit(
+        db=db,
+        actor=actor,
+        human_user=user,
+        item=item,
+        action='reject',
+        result=result,
+    )
     db.commit()
     db.refresh(item)
     response = _review_item_response(item, _agent_run_for_item(db, item))
@@ -393,7 +417,7 @@ def _transition_or_http(
     db: Session,
     item_id: int,
     action: ReviewAction,
-    actor: DemoUser,
+    actor: ReviewResolutionActor,
     note: str | None = None,
 ) -> ReviewTransitionResult:
     try:
@@ -447,7 +471,8 @@ def _legacy_promotion_response(item: ReviewItem, result: ReviewTransitionResult)
 def _record_transition_audit(
     *,
     db: Session,
-    actor: DemoUser,
+    actor: ReviewResolutionActor,
+    human_user: DemoUser,
     item: ReviewItem,
     action: ReviewAction,
     result: ReviewTransitionResult,
@@ -465,15 +490,16 @@ def _record_transition_audit(
                 len(result.promotion.created_record_ids)
                 + len(result.promotion.created_timeline_event_ids)
             )
-        record_audit_log(
+        record_review_resolution_audit(
             db=db,
             actor=actor,
+            human_user=human_user,
             action=audit_action,
+            review_item_id=item.id,
+            outcome=result.status,
             target_type='review_workflow',
             target_id=item.workflow_thread_id,
             metadata={
-                'action': action,
-                'result_code': result.status,
                 'replayed': result.replayed,
                 'effect_count': effect_count,
             },
@@ -488,8 +514,6 @@ def _record_transition_audit(
     elif action == 'reject':
         metadata = {
             'item_type': item.item_type,
-            'source_ids_preserved': _source_ids_for_legacy_audit(item),
-            'rejected_review_item_id': item.id,
         }
     else:
         metadata = {
@@ -497,25 +521,45 @@ def _record_transition_audit(
             'note_present': bool(note),
             'source_count': len(item.source_snippets or []),
         }
-    record_audit_log(
+    record_review_resolution_audit(
         db=db,
         actor=actor,
+        human_user=human_user,
         action=audit_action,
+        review_item_id=item.id,
+        outcome=result.status,
         target_type='review_item',
         target_id=item.id,
         metadata=metadata,
     )
 
 
-def _source_ids_for_legacy_audit(item: ReviewItem) -> list[str]:
-    raw_source_ids = item.payload.get('source_ids', [])
-    if not isinstance(raw_source_ids, list):
-        return []
-    return [
-        source_id.strip()
-        for source_id in raw_source_ids
-        if isinstance(source_id, str) and source_id.strip()
-    ]
+def _human_actor_for_item(
+    user: DemoUser,
+    item: ReviewItem,
+) -> ReviewResolutionActor:
+    ensure_can_review_permission(user, item.permission_level)
+    if item.permission_level not in user.permission_levels:
+        raise HTTPException(
+            status_code=403,
+            detail='Review approval permission required.',
+        )
+    return human_review_actor(user)
+
+
+def _human_actor_for_items(
+    user: DemoUser,
+    items: list[ReviewItem],
+) -> ReviewResolutionActor:
+    ensure_can_review_permission(user, 'public')
+    for item in items:
+        ensure_can_review_permission(user, item.permission_level)
+        if item.permission_level not in user.permission_levels:
+            raise HTTPException(
+                status_code=403,
+                detail='Review approval permission required.',
+            )
+    return human_review_actor(user)
 
 
 def _visible_review_items(items: list[ReviewItem], user: DemoUser, settings: Settings) -> list[ReviewItem]:

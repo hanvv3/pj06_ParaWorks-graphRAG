@@ -24,13 +24,19 @@ from backend.app.api.v1.review import (
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.demo_auth import USERS
 from backend.app.models import (
+    AgentRun,
+    AgentWorkflowEvidenceRef,
+    AgentWorkflowThread,
     AuditLog,
     DecisionRecord,
     HistoryEvent,
     ReviewItem,
+    ReviewItemEvidenceRef,
+    Source,
     TimelineEvent,
     Todo,
 )
+from backend.app.review.actors import human_review_actor
 from backend.app.review.transitions import ReviewTransitionService
 from backend.app.schemas.review import ReviewEvidenceRequest
 
@@ -99,6 +105,7 @@ class _TransitionHarness:
     session_factory: sessionmaker[Session]
     settings: Settings
     workflow_thread_id: str
+    workflow_evidence_ref_id: int
 
 
 @pytest.fixture
@@ -124,6 +131,47 @@ def postgres_transition_harness(
             autocommit=False,
             expire_on_commit=False,
         )
+        with factory() as db:
+            source = Source(
+                source_type='drive',
+                source_id=f'drive:{workflow_thread_id}',
+                source_url='https://postgres-race.invalid/evidence',
+                title='PostgreSQL transition evidence',
+                permission_level='internal',
+                raw_metadata={},
+                server_content_signature_schema='server-source-content:v1',
+                server_content_signature='a' * 64,
+                connector_content_signature='fixture-display-only',
+            )
+            thread = AgentWorkflowThread(
+                thread_id=workflow_thread_id,
+                workflow_name='company_memory_review',
+                graph_version='company-memory-review-v2.1-auto-review',
+                checkpoint_thread_id=f'checkpoint:{workflow_thread_id}',
+                checkpoint_store='postgres',
+                owner_subject_id=USERS['admin'].id,
+                security_scope_id='default',
+                input_hash='b' * 64,
+                evidence_version_hash='c' * 64,
+                status='awaiting_review',
+            )
+            db.add_all([source, thread])
+            db.flush()
+            evidence_ref = AgentWorkflowEvidenceRef(
+                workflow_thread_id=workflow_thread_id,
+                ordinal=1,
+                canonical_source_type='drive',
+                canonical_table='sources',
+                canonical_row_id=source.id,
+                document_version_id=None,
+                external_revision=None,
+                content_signature=source.server_content_signature,
+                permission_level_snapshot='internal',
+                content_fingerprint='d' * 64,
+            )
+            db.add(evidence_ref)
+            db.commit()
+            evidence_ref_id = evidence_ref.id
         harness = _TransitionHarness(
             engine=engine,
             session_factory=factory,
@@ -134,6 +182,7 @@ def postgres_transition_harness(
                 database_url=database_url,
             ),
             workflow_thread_id=workflow_thread_id,
+            workflow_evidence_ref_id=evidence_ref_id,
         )
         try:
             yield harness
@@ -167,11 +216,37 @@ def _cleanup_exact_rows(harness: _TransitionHarness) -> None:
                     )
                 )
             db.execute(
+                delete(ReviewItemEvidenceRef).where(
+                    ReviewItemEvidenceRef.review_item_id.in_(review_ids)
+                )
+            )
+            db.execute(
                 delete(ReviewItem).where(ReviewItem.id.in_(review_ids))
             )
         db.execute(
             delete(AuditLog).where(
                 AuditLog.target_id == harness.workflow_thread_id
+            )
+        )
+        db.execute(
+            delete(AgentRun).where(
+                AgentRun.workflow_thread_id == harness.workflow_thread_id
+            )
+        )
+        db.execute(
+            delete(AgentWorkflowEvidenceRef).where(
+                AgentWorkflowEvidenceRef.workflow_thread_id
+                == harness.workflow_thread_id
+            )
+        )
+        db.execute(
+            delete(Source).where(
+                Source.source_id == f'drive:{harness.workflow_thread_id}'
+            )
+        )
+        db.execute(
+            delete(AgentWorkflowThread).where(
+                AgentWorkflowThread.thread_id == harness.workflow_thread_id
             )
         )
         db.commit()
@@ -202,6 +277,24 @@ def _seed_item(
     item_type: str,
 ) -> int:
     with harness.session_factory() as db:
+        run_key = uuid4().hex
+        run = AgentRun(
+            agent_name=f'{item_type}_agent',
+            prompt_version=f'{item_type}-extraction:c5-v1',
+            status='complete',
+            source_window='bounded-postgres-transition-fixture',
+            cache_key=f'postgres-transition:{run_key}',
+            model_name='gpt-5.4-mini-2026-03-17',
+            generation_provider='openai',
+            generation_reasoning_effort='none',
+            generation_route_version='auto-review-extraction-route:v1',
+            generation_output_contract_version=f'{item_type}-candidate:c5-v1',
+            permission_level='internal',
+            workflow_thread_id=harness.workflow_thread_id,
+            effect_key=f'postgres-transition:{run_key}',
+        )
+        db.add(run)
+        db.flush()
         item = ReviewItem(
             item_type=item_type,
             payload=_valid_payload(item_type),
@@ -212,8 +305,22 @@ def _seed_item(
             status='pending_review',
             workflow_thread_id=harness.workflow_thread_id,
             candidate_key=f'postgres-transition:{uuid4().hex}',
+            agent_run_id=run.id,
+            candidate_contract_version='c5-v1',
         )
         db.add(item)
+        db.flush()
+        db.add(
+            ReviewItemEvidenceRef(
+                review_item_id=item.id,
+                workflow_thread_id=harness.workflow_thread_id,
+                workflow_evidence_ref_id=harness.workflow_evidence_ref_id,
+                candidate_slot_ordinal=1,
+                message_content_fingerprint='e' * 64,
+                fingerprint_key_version='task4-postgres-v1',
+                fingerprint_key_material_verifier='f' * 64,
+            )
+        )
         db.commit()
         db.refresh(item)
         return item.id
@@ -276,7 +383,7 @@ def test_concurrent_single_and_bulk_approval_create_one_target_and_companion(
                 db=db,
                 item_ids=[item_id],
                 action='approve',
-                actor=USERS['admin'],
+                actor=human_review_actor(USERS['admin']),
             )
             assert batch.failed_items == ()
             assert batch.skipped_items == ()
