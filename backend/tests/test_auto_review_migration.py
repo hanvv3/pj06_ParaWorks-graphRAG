@@ -11,7 +11,9 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
@@ -71,6 +73,105 @@ AUTO_REVIEW_TABLES = {
     'vector_serving_tombstones',
 }
 
+TASK2_INDEXES = {
+    table_name: set() for table_name in AUTO_REVIEW_TABLES
+}
+TASK2_INDEXES['trusted_knowledge_fingerprints'] = {
+    (
+        'ix_trusted_knowledge_fingerprint_collision_lookup',
+        (
+            'security_scope_id',
+            'knowledge_type',
+            'project_scope_hmac',
+            'normalized_title_bucket_hmac',
+            'review_status',
+            'permission_level',
+        ),
+        False,
+    )
+}
+
+PINNED_2F_COLUMNS = {
+    'agent_runtime_schema_versions': {
+        'id', 'component', 'package_name', 'package_version', 'schema_revision',
+        'applied_at',
+    },
+    'agent_runs': {
+        'id', 'agent_name', 'prompt_version', 'status', 'source_window',
+        'cache_key', 'model_name', 'input_tokens', 'output_tokens',
+        'total_tokens', 'estimated_cost_usd', 'permission_level', 'metadata',
+        'workflow_thread_id', 'effect_key', 'started_at', 'completed_at',
+    },
+    'agent_workflow_threads': {
+        'thread_id', 'workflow_name', 'graph_version', 'checkpoint_thread_id',
+        'checkpoint_store', 'owner_subject_id', 'security_scope_id',
+        'client_request_id', 'input_hash', 'evidence_version_hash', 'status',
+        'state_version', 'lease_token', 'lease_expires_at',
+        'checkpoint_confirmed_at', 'cancelled_at', 'cancelled_by_subject_id',
+        'created_at', 'updated_at', 'completed_at', 'expires_at',
+    },
+    'agent_workflow_requests': {
+        'workflow_thread_id', 'input_schema_version', 'request_kind',
+        'agent_names', 'selection_policy_version', 'input_hash',
+        'fingerprint_key_version',
+    },
+    'agent_workflow_evidence_refs': {
+        'id', 'workflow_thread_id', 'ordinal', 'canonical_source_type',
+        'canonical_table', 'canonical_row_id', 'document_version_id',
+        'external_revision', 'content_signature', 'permission_level_snapshot',
+        'content_fingerprint',
+    },
+    'assistant_conversations': {
+        'id', 'user_id', 'title', 'summary', 'summary_updated_at', 'created_at',
+        'updated_at',
+    },
+    'assistant_messages': {
+        'id', 'conversation_id', 'role', 'content', 'citations', 'source_ids',
+        'source_links', 'source_snippets', 'permission_level',
+        'hidden_match_count', 'permission_notice', 'agent_run_id', 'metadata',
+        'created_at',
+    },
+    'sources': {
+        'id', 'source_type', 'source_id', 'source_url', 'title', 'author',
+        'permission_level', 'raw_metadata', 'created_at',
+    },
+    'documents': {'id', 'source_id', 'title', 'current_version'},
+    'document_versions': {'id', 'document_id', 'version', 'body'},
+    'document_parser_runs': {
+        'id', 'document_id', 'document_version_id', 'source_id', 'parser_name',
+        'parser_status', 'parser_status_reason', 'mime_type',
+        'document_version_label', 'revision_id', 'content_signature',
+        'chunk_count', 'started_at', 'finished_at', 'metadata',
+    },
+    'document_chunks': {
+        'id', 'version_id', 'source_id', 'chunk_index', 'text',
+        'source_snippet', 'permission_level', 'metadata',
+    },
+    'review_items': {
+        'id', 'item_type', 'payload', 'source_links', 'source_snippets',
+        'confidence_score', 'permission_level', 'status', 'reviewer_id',
+        'reviewed_at', 'workflow_thread_id', 'candidate_key',
+        'predecessor_review_item_id', 'created_at',
+    },
+}
+
+PINNED_2F_DDL = (
+    'CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)',
+    'CREATE TABLE agent_runtime_schema_versions (id INTEGER PRIMARY KEY, component VARCHAR(64) UNIQUE NOT NULL, package_name VARCHAR(128) NOT NULL, package_version VARCHAR(32) NOT NULL, schema_revision INTEGER NOT NULL, applied_at DATETIME NOT NULL)',
+    'CREATE TABLE agent_runs (id INTEGER PRIMARY KEY, agent_name VARCHAR(64) NOT NULL, prompt_version VARCHAR(128) NOT NULL, status VARCHAR(32) NOT NULL, source_window VARCHAR(200) NOT NULL, cache_key VARCHAR(128) NOT NULL, model_name VARCHAR(128) NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd FLOAT NOT NULL DEFAULT 0, permission_level VARCHAR(32) NOT NULL, metadata JSON NOT NULL DEFAULT (\'{}\'), workflow_thread_id VARCHAR(64), effect_key VARCHAR(128), started_at DATETIME NOT NULL, completed_at DATETIME)',
+    'CREATE TABLE agent_workflow_threads (thread_id VARCHAR(64) PRIMARY KEY, workflow_name VARCHAR(64) NOT NULL, graph_version VARCHAR(64) NOT NULL, checkpoint_thread_id VARCHAR(128) UNIQUE NOT NULL, checkpoint_store VARCHAR(32) NOT NULL, owner_subject_id VARCHAR(128) NOT NULL, security_scope_id VARCHAR(128) NOT NULL, client_request_id VARCHAR(128), input_hash VARCHAR(64) NOT NULL, evidence_version_hash VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL, state_version INTEGER NOT NULL DEFAULT 0, lease_token VARCHAR(64), lease_expires_at DATETIME, checkpoint_confirmed_at DATETIME, cancelled_at DATETIME, cancelled_by_subject_id VARCHAR(128), created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, completed_at DATETIME, expires_at DATETIME)',
+    'CREATE TABLE agent_workflow_requests (workflow_thread_id VARCHAR(64) PRIMARY KEY, input_schema_version VARCHAR(32) NOT NULL, request_kind VARCHAR(64) NOT NULL, agent_names JSON NOT NULL, selection_policy_version VARCHAR(64) NOT NULL, input_hash VARCHAR(64) NOT NULL, fingerprint_key_version VARCHAR(32) NOT NULL)',
+    'CREATE TABLE agent_workflow_evidence_refs (id INTEGER PRIMARY KEY, workflow_thread_id VARCHAR(64) NOT NULL, ordinal INTEGER NOT NULL, canonical_source_type VARCHAR(32) NOT NULL, canonical_table VARCHAR(64) NOT NULL, canonical_row_id INTEGER NOT NULL, document_version_id INTEGER, external_revision VARCHAR(255), content_signature VARCHAR(128) NOT NULL, permission_level_snapshot VARCHAR(32) NOT NULL, content_fingerprint VARCHAR(64) NOT NULL, CONSTRAINT uq_agent_workflow_evidence_ref_ordinal UNIQUE (workflow_thread_id, ordinal))',
+    'CREATE TABLE assistant_conversations (id INTEGER PRIMARY KEY, user_id VARCHAR(120) NOT NULL, title VARCHAR(160) NOT NULL, summary TEXT, summary_updated_at DATETIME, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)',
+    'CREATE TABLE assistant_messages (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL, role VARCHAR(24) NOT NULL, content TEXT NOT NULL, citations JSON NOT NULL, source_ids JSON NOT NULL, source_links JSON NOT NULL, source_snippets JSON NOT NULL, permission_level VARCHAR(32), hidden_match_count INTEGER NOT NULL DEFAULT 0, permission_notice TEXT, agent_run_id INTEGER, metadata JSON NOT NULL DEFAULT (\'{}\'), created_at DATETIME NOT NULL)',
+    'CREATE TABLE sources (id INTEGER PRIMARY KEY, source_type VARCHAR(32) NOT NULL, source_id VARCHAR(128) UNIQUE NOT NULL, source_url VARCHAR(500) NOT NULL, title VARCHAR(300) NOT NULL, author VARCHAR(200), permission_level VARCHAR(32) NOT NULL, raw_metadata JSON NOT NULL DEFAULT (\'{}\'), created_at DATETIME NOT NULL)',
+    'CREATE TABLE documents (id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL, title VARCHAR(300) NOT NULL, current_version VARCHAR(64) NOT NULL DEFAULT \'v1\')',
+    'CREATE TABLE document_versions (id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL, version VARCHAR(64) NOT NULL DEFAULT \'v1\', body TEXT NOT NULL)',
+    'CREATE TABLE document_parser_runs (id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL, document_version_id INTEGER NOT NULL, source_id INTEGER NOT NULL, parser_name VARCHAR(128) NOT NULL, parser_status VARCHAR(32) NOT NULL, parser_status_reason VARCHAR(300), mime_type VARCHAR(160) NOT NULL DEFAULT \'\', document_version_label VARCHAR(64) NOT NULL DEFAULT \'v1\', revision_id VARCHAR(128) NOT NULL DEFAULT \'\', content_signature VARCHAR(300) NOT NULL DEFAULT \'\', chunk_count INTEGER NOT NULL DEFAULT 0, started_at DATETIME NOT NULL, finished_at DATETIME NOT NULL, metadata JSON NOT NULL DEFAULT (\'{}\'))',
+    'CREATE TABLE document_chunks (id INTEGER PRIMARY KEY, version_id INTEGER NOT NULL, source_id INTEGER NOT NULL, chunk_index INTEGER NOT NULL, text TEXT NOT NULL, source_snippet TEXT NOT NULL, permission_level VARCHAR(32) NOT NULL, metadata JSON NOT NULL DEFAULT (\'{}\'))',
+    'CREATE TABLE review_items (id INTEGER PRIMARY KEY, item_type VARCHAR(64) NOT NULL, payload JSON NOT NULL, source_links JSON NOT NULL, source_snippets JSON NOT NULL, confidence_score FLOAT NOT NULL, permission_level VARCHAR(32) NOT NULL, status VARCHAR(32) NOT NULL, reviewer_id VARCHAR(64), reviewed_at DATETIME, workflow_thread_id VARCHAR(64), candidate_key VARCHAR(128), predecessor_review_item_id INTEGER, created_at DATETIME NOT NULL)',
+)
+
 
 @pytest.fixture
 def migration_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -84,10 +185,83 @@ def migration_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     get_settings.cache_clear()
 
 
+@pytest.fixture(scope='module', autouse=True)
+def isolated_postgresql_schema():
+    original_url = os.getenv('PARAWORKS_TEST_POSTGRES_URL')
+    if not original_url:
+        yield
+        return
+    schema_name = f'task2_{uuid4().hex}'
+    admin_engine = create_engine(original_url)
+    if inspect(admin_engine).get_table_names():
+        pytest.fail(
+            'PARAWORKS_TEST_POSTGRES_URL must name a freshly recreated '
+            'empty disposable database'
+        )
+    with admin_engine.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA {schema_name}'))
+        connection.execute(
+            text(
+                f'CREATE TABLE {schema_name}.alembic_version '
+                '(version_num VARCHAR(32) NOT NULL PRIMARY KEY)'
+            )
+        )
+    url = make_url(original_url)
+    query = dict(url.query)
+    query['options'] = f'-csearch_path={schema_name},public'
+    isolated_url = url.set(query=query).render_as_string(hide_password=False)
+    os.environ['PARAWORKS_TEST_POSTGRES_URL'] = isolated_url
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        if original_url is None:
+            os.environ.pop('PARAWORKS_TEST_POSTGRES_URL', None)
+        else:
+            os.environ['PARAWORKS_TEST_POSTGRES_URL'] = original_url
+        get_settings.cache_clear()
+        with admin_engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA {schema_name} CASCADE'))
+        admin_engine.dispose()
+
+
 def _run(operation: Callable, config: Config, revision: str) -> None:
     get_settings.cache_clear()
     operation(config, revision)
     get_settings.cache_clear()
+
+
+def _create_pinned_previous_schema(database_url: str) -> Engine:
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        for statement in PINNED_2F_DDL:
+            connection.execute(text(statement))
+        connection.execute(
+            text('INSERT INTO alembic_version (version_num) VALUES (:revision)'),
+            {'revision': PREVIOUS_REVISION},
+        )
+    inspector = inspect(engine)
+    assert set(inspector.get_table_names()) == set(PINNED_2F_COLUMNS) | {
+        'alembic_version'
+    }
+    for table_name, expected_columns in PINNED_2F_COLUMNS.items():
+        assert {
+            column['name'] for column in inspector.get_columns(table_name)
+        } == expected_columns
+    return engine
+
+
+def _assert_exact_task2_indexes(inspector) -> None:
+    for table_name, expected in TASK2_INDEXES.items():
+        actual = {
+            (
+                index['name'],
+                tuple(index['column_names']),
+                bool(index['unique']),
+            )
+            for index in inspector.get_indexes(table_name)
+        }
+        assert actual == expected
 
 
 def _postgres_engine(monkeypatch: pytest.MonkeyPatch):
@@ -300,6 +474,75 @@ def _claimed_extraction_call(
     )
 
 
+def _insert_initial_provider_state(connection, *, suffix: str) -> tuple[int, int]:
+    model = f'provider-round2-{suffix}'
+    state_id = connection.scalar(
+        text(
+            'INSERT INTO auto_review_provider_safety_states '
+            '(purpose, provider, model, reasoning_effort, state_version, '
+            'authorized_cost_policy_version, token_estimator_version, '
+            'tokenizer_encoding, reply_priming_tokens, framing_safety_tokens, '
+            'input_usd_per_1m, output_usd_per_1m, breaker_open, overrun_count, '
+            'authorized_at, last_event_sequence, created_at, updated_at) VALUES '
+            "('validation', 'openai', :model, 'medium', 1, 'cost:v1', "
+            "'estimator:v1', 'o200k_base', 16, 512, 2.000000, 12.000000, "
+            'false, 0, CURRENT_TIMESTAMP, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) '
+            'RETURNING id'
+        ),
+        {'model': model},
+    )
+    event_id = connection.scalar(
+        text(
+            'INSERT INTO auto_review_provider_safety_events '
+            '(provider_safety_state_id, purpose, provider, model, '
+            'reasoning_effort, event_sequence, event_kind, prior_state_version, '
+            'new_state_version, cost_policy_version, token_estimator_version, '
+            'tokenizer_encoding, reply_priming_tokens, framing_safety_tokens, '
+            'input_usd_per_1m, output_usd_per_1m, prior_breaker_open, '
+            'new_breaker_open, actor_subject_hmac, fingerprint_key_version, '
+            'fingerprint_key_material_verifier, created_at) VALUES '
+            "(:state_id, 'validation', 'openai', :model, 'medium', 1, "
+            "'initial_authorized', 0, 1, 'cost:v1', 'estimator:v1', "
+            "'o200k_base', 16, 512, 2.000000, 12.000000, false, false, "
+            ':actor, :key_version, :verifier, CURRENT_TIMESTAMP) RETURNING id'
+        ),
+        {
+            'state_id': state_id,
+            'model': model,
+            'actor': 'a' * 64,
+            'key_version': 'pg-test-v1',
+            'verifier': 'b' * 64,
+        },
+    )
+    connection.execute(
+        text(
+            'UPDATE auto_review_provider_safety_states SET '
+            'last_event_sequence=1, last_event_id=:event_id WHERE id=:state_id'
+        ),
+        {'event_id': event_id, 'state_id': state_id},
+    )
+    return state_id, event_id
+
+
+def _insert_rollout_state(
+    engine: Engine,
+    *,
+    suffix: str,
+    state_version: int = 0,
+    corrected_critical_count: int = 0,
+) -> int:
+    with Session(engine) as db:
+        state = AutoReviewRolloutState(
+            security_scope_id=f'rollout-{suffix}',
+            policy_version='policy:v1',
+            state_version=state_version,
+            corrected_critical_count=corrected_critical_count,
+        )
+        db.add(state)
+        db.commit()
+        return state.id
+
+
 def test_auto_review_migration_upgrades_fresh_schema_and_writes_boundary(
     migration_database,
 ) -> None:
@@ -310,6 +553,7 @@ def test_auto_review_migration_upgrades_fresh_schema_and_writes_boundary(
     engine = create_engine(database_url)
     inspector = inspect(engine)
     assert set(inspector.get_table_names()) >= AUTO_REVIEW_TABLES
+    _assert_exact_task2_indexes(inspector)
     with engine.connect() as connection:
         assert connection.scalar(text('SELECT version_num FROM alembic_version')) == REVISION
         marker = connection.execute(
@@ -336,8 +580,7 @@ def test_auto_review_migration_preserves_legacy_rows_and_connector_signature_onl
     migration_database,
 ) -> None:
     config, database_url = migration_database
-    _run(command.upgrade, config, PREVIOUS_REVISION)
-    engine = create_engine(database_url)
+    engine = _create_pinned_previous_schema(database_url)
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -366,25 +609,35 @@ def test_auto_review_migration_preserves_legacy_rows_and_connector_signature_onl
         ).one()
     assert row == ('connector-only', None, None)
 
-
-def test_migration_backfills_only_unique_verified_parser_signature_pointer(
-    migration_database,
-) -> None:
-    config, database_url = migration_database
-    _run(command.upgrade, config, PREVIOUS_REVISION)
-    engine = create_engine(database_url)
-    with engine.begin() as connection:
-        source_id = connection.scalar(
+    with engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(
             text(
                 'INSERT INTO sources '
                 '(source_type, source_id, source_url, title, permission_level, '
                 'raw_metadata, server_content_signature_schema, '
                 'server_content_signature, created_at) VALUES '
-                "('drive', 'verified-pointer', 'https://example.test/pointer', "
-                "'Pointer', 'internal', '{}', 'server-source-content:v1', "
-                ':signature, CURRENT_TIMESTAMP) RETURNING id'
+                "('drive', 'uppercase-signature', 'https://example.test/bad', "
+                "'Bad', 'internal', '{}', 'server-source-content:v1', "
+                ':signature, CURRENT_TIMESTAMP)'
             ),
-            {'signature': 'a' * 64},
+            {'signature': 'A' * 64},
+        )
+
+
+def test_migration_backfills_only_unambiguous_legacy_version_pointer(
+    migration_database,
+) -> None:
+    config, database_url = migration_database
+    engine = _create_pinned_previous_schema(database_url)
+    with engine.begin() as connection:
+        source_id = connection.scalar(
+            text(
+                'INSERT INTO sources '
+                '(source_type, source_id, source_url, title, permission_level, '
+                'raw_metadata, created_at) VALUES '
+                "('drive', 'verified-pointer', 'https://example.test/pointer', "
+                "'Pointer', 'internal', '{}', CURRENT_TIMESTAMP) RETURNING id"
+            )
         )
         document_id = connection.scalar(
             text(
@@ -393,48 +646,21 @@ def test_migration_backfills_only_unique_verified_parser_signature_pointer(
             ),
             {'source_id': source_id},
         )
-        version_ids = [
-            connection.scalar(
-                text(
-                    'INSERT INTO document_versions (document_id, version, body) '
-                    "VALUES (:document_id, 'v1', :body) RETURNING id"
-                ),
-                {'document_id': document_id, 'body': body},
-            )
-            for body in ('ambiguous-old', 'verified-current')
-        ]
-        connection.execute(
+        version_id = connection.scalar(
             text(
-                'INSERT INTO document_parser_runs '
-                '(document_id, document_version_id, source_id, parser_name, '
-                'parser_status, mime_type, document_version_label, revision_id, '
-                'content_signature, server_content_signature_schema, '
-                'server_content_signature, parser_policy_version, parser_version, '
-                'chunk_policy_version, chunk_count, started_at, finished_at, metadata) '
-                'VALUES (:document_id, :version_id, :source_id, :parser_name, '
-                "'complete', '', 'v1', '', '', 'server-source-content:v1', "
-                ":signature, 'parser-policy:v1', 'parser:v1', 'chunk:v1', 0, "
-                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, '{}')"
+                'INSERT INTO document_versions (document_id, version, body) '
+                "VALUES (:document_id, 'v1', 'unique-current') RETURNING id"
             ),
-            {
-                'document_id': document_id,
-                'version_id': version_ids[1],
-                'source_id': source_id,
-                'parser_name': 'verified-parser',
-                'signature': 'a' * 64,
-            },
+            {'document_id': document_id},
         )
         ambiguous_source_id = connection.scalar(
             text(
                 'INSERT INTO sources '
                 '(source_type, source_id, source_url, title, permission_level, '
-                'raw_metadata, server_content_signature_schema, '
-                'server_content_signature, created_at) VALUES '
+                'raw_metadata, created_at) VALUES '
                 "('drive', 'ambiguous-pointer', 'https://example.test/ambiguous', "
-                "'Ambiguous', 'internal', '{}', 'server-source-content:v1', "
-                ':signature, CURRENT_TIMESTAMP) RETURNING id'
-            ),
-            {'signature': 'b' * 64},
+                "'Ambiguous', 'internal', '{}', CURRENT_TIMESTAMP) RETURNING id"
+            )
         )
         ambiguous_document_id = connection.scalar(
             text(
@@ -443,39 +669,14 @@ def test_migration_backfills_only_unique_verified_parser_signature_pointer(
             ),
             {'source_id': ambiguous_source_id},
         )
-        ambiguous_versions = [
-            connection.scalar(
+        for body in ('match-one', 'match-two'):
+            connection.execute(
                 text(
                     'INSERT INTO document_versions (document_id, version, body) '
-                    "VALUES (:document_id, 'v1', :body) RETURNING id"
+                    "VALUES (:document_id, 'v1', :body)"
                 ),
                 {'document_id': ambiguous_document_id, 'body': body},
             )
-            for body in ('match-one', 'match-two')
-        ]
-        for ordinal, version_id in enumerate(ambiguous_versions, start=1):
-            connection.execute(
-                text(
-                    'INSERT INTO document_parser_runs '
-                    '(document_id, document_version_id, source_id, parser_name, '
-                    'parser_status, mime_type, document_version_label, revision_id, '
-                    'content_signature, server_content_signature_schema, '
-                    'server_content_signature, parser_policy_version, parser_version, '
-                    'chunk_policy_version, chunk_count, started_at, finished_at, metadata) '
-                    'VALUES (:document_id, :version_id, :source_id, :parser_name, '
-                    "'complete', '', 'v1', '', '', 'server-source-content:v1', "
-                    ":signature, 'parser-policy:v1', 'parser:v1', 'chunk:v1', 0, "
-                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, '{}')"
-                ),
-                {
-                    'document_id': ambiguous_document_id,
-                    'version_id': version_id,
-                    'source_id': ambiguous_source_id,
-                    'parser_name': f'ambiguous-parser-{ordinal}',
-                    'signature': 'b' * 64,
-                },
-            )
-
     _run(command.upgrade, config, 'head')
 
     with engine.connect() as connection:
@@ -491,7 +692,7 @@ def test_migration_backfills_only_unique_verified_parser_signature_pointer(
             ),
             {'id': ambiguous_document_id},
         )
-    assert pointer == version_ids[1]
+    assert pointer == version_id
     assert ambiguous_pointer is None
 
 
@@ -1074,6 +1275,42 @@ def test_postgresql_provider_state_requires_initial_authorization_event(
             db.commit()
 
 
+@pytest.mark.parametrize(
+    'assignment',
+    [
+        'overrun_count = overrun_count + 1',
+        'last_overrun_cost_usd = 0.500000',
+        'last_overrun_at = CURRENT_TIMESTAMP',
+        "breaker_reason_code = 'budget_overrun'",
+        "regression_gate_reference = 'gate:unaudited'",
+        "authorized_at = authorized_at + INTERVAL '1 second'",
+        'cleared_at = CURRENT_TIMESTAMP',
+    ],
+)
+def test_postgresql_provider_aggregate_rejects_unaudited_state_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    assignment: str,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    with engine.begin() as connection:
+        state_id, _ = _insert_initial_provider_state(
+            connection, suffix=uuid4().hex[:10]
+        )
+
+    connection = engine.connect()
+    transaction = connection.begin()
+    connection.execute(
+        text(
+            f'UPDATE auto_review_provider_safety_states SET {assignment} '
+            'WHERE id=:state_id'
+        ),
+        {'state_id': state_id},
+    )
+    with pytest.raises(DBAPIError, match='provider safety event required'):
+        transaction.commit()
+    connection.close()
+
+
 def test_postgresql_rollout_control_fields_cannot_change_without_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1095,6 +1332,98 @@ def test_postgresql_rollout_control_fields_cannot_change_without_event(
 
         with pytest.raises(DBAPIError, match='control event'):
             db.commit()
+
+
+@pytest.mark.parametrize(
+    'metric_column',
+    [
+        'shadow_predicted_count',
+        'shadow_completed_count',
+        'shadow_supported_count',
+        'enforce_promotion_ordinal',
+        'post_audit_selected_count',
+        'post_audit_completed_count',
+        'post_audit_critical_count',
+        'confirmed_mandatory_audit_count',
+        'pending_mandatory_audit_count',
+        'invalidated_before_audit_count',
+        'corrected_critical_count',
+    ],
+)
+def test_postgresql_rollout_metric_update_requires_state_version_increment(
+    monkeypatch: pytest.MonkeyPatch,
+    metric_column: str,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    state_id = _insert_rollout_state(engine, suffix=uuid4().hex[:10])
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(DBAPIError, match='rollout metric state version required'):
+            connection.execute(
+                text(
+                    f'UPDATE auto_review_rollout_states SET '
+                    f'{metric_column}={metric_column}+1 WHERE id=:state_id'
+                ),
+                {'state_id': state_id},
+            )
+        transaction.rollback()
+
+
+def test_postgresql_rollout_metric_update_preserves_control_event_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    state_id = _insert_rollout_state(engine, suffix=uuid4().hex[:10])
+    with engine.begin() as connection:
+        before = connection.execute(
+            text(
+                'SELECT state_version, control_epoch, last_event_sequence, '
+                'last_event_id FROM auto_review_rollout_states WHERE id=:state_id'
+            ),
+            {'state_id': state_id},
+        ).one()
+        connection.execute(
+            text(
+                'UPDATE auto_review_rollout_states SET state_version=state_version+1, '
+                'shadow_predicted_count=shadow_predicted_count+1 '
+                'WHERE id=:state_id'
+            ),
+            {'state_id': state_id},
+        )
+        after = connection.execute(
+            text(
+                'SELECT state_version, control_epoch, last_event_sequence, '
+                'last_event_id FROM auto_review_rollout_states WHERE id=:state_id'
+            ),
+            {'state_id': state_id},
+        ).one()
+
+    assert after == (before.state_version + 1, before.control_epoch, 0, None)
+
+
+def test_postgresql_rollout_corrected_critical_count_never_decreases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    state_id = _insert_rollout_state(
+        engine,
+        suffix=uuid4().hex[:10],
+        state_version=1,
+        corrected_critical_count=1,
+    )
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(DBAPIError, match='corrected critical count is monotonic'):
+            connection.execute(
+                text(
+                    'UPDATE auto_review_rollout_states SET state_version=2, '
+                    'corrected_critical_count=0 WHERE id=:state_id'
+                ),
+                {'state_id': state_id},
+            )
+        transaction.rollback()
 
 
 def test_postgresql_completed_validation_call_requires_exact_terminal_children(
@@ -1803,6 +2132,124 @@ def test_postgresql_c5_chunk_lineage_is_immutable(
             db.commit()
 
 
+def test_postgresql_legacy_parser_identity_cannot_be_upgraded_in_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    suffix = uuid4().hex[:12]
+    with Session(engine) as db:
+        source = Source(
+            source_type='drive',
+            source_id=f'legacy-parser-{suffix}',
+            source_url='https://example.test/legacy-parser',
+            title='Legacy parser source',
+            permission_level='internal',
+            raw_metadata={},
+        )
+        document = Document(source=source, title='Document')
+        version = DocumentVersion(document=document, version='v1', body='body')
+        db.add_all([source, document, version])
+        db.flush()
+        parser_run = DocumentParserRun(
+            document_id=document.id,
+            document_version_id=version.id,
+            source_id=source.id,
+            parser_name='legacy-parser',
+            parser_status='complete',
+        )
+        db.add(parser_run)
+        db.commit()
+        source_id = source.id
+        parser_run_id = parser_run.id
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                'UPDATE sources SET '
+                "server_content_signature_schema='server-source-content:v1', "
+                "server_content_signature=:signature WHERE id=:source_id"
+            ),
+            {'signature': 'a' * 64, 'source_id': source_id},
+        )
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(DBAPIError, match='parser identity is immutable'):
+            connection.execute(
+                text(
+                    'UPDATE document_parser_runs SET '
+                    "server_content_signature_schema='server-source-content:v1', "
+                    'server_content_signature=:signature, '
+                    "parser_policy_version='parser-policy:v1', "
+                    "parser_version='parser:v1', chunk_policy_version='chunk:v1' "
+                    'WHERE id=:parser_run_id'
+                ),
+                {'signature': 'a' * 64, 'parser_run_id': parser_run_id},
+            )
+        transaction.rollback()
+
+
+def test_postgresql_legacy_chunk_cannot_attach_parser_lineage_in_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    suffix = uuid4().hex[:12]
+    with Session(engine) as db:
+        source = Source(
+            source_type='drive',
+            source_id=f'legacy-chunk-{suffix}',
+            source_url='https://example.test/legacy-chunk',
+            title='Legacy chunk source',
+            permission_level='internal',
+            raw_metadata={},
+            server_content_signature_schema='server-source-content:v1',
+            server_content_signature='a' * 64,
+        )
+        document = Document(source=source, title='Document')
+        version = DocumentVersion(document=document, version='v1', body='body')
+        db.add_all([source, document, version])
+        db.flush()
+        parser_run = DocumentParserRun(
+            document_id=document.id,
+            document_version_id=version.id,
+            source_id=source.id,
+            parser_name='c5-parser',
+            parser_status='complete',
+            server_content_signature_schema='server-source-content:v1',
+            server_content_signature='a' * 64,
+            parser_policy_version='parser-policy:v1',
+            parser_version='parser:v1',
+            chunk_policy_version='chunk:v1',
+        )
+        db.add(parser_run)
+        db.flush()
+        legacy_chunk = DocumentChunk(
+            version_id=version.id,
+            source_id=source.id,
+            chunk_index=0,
+            text='body',
+            source_snippet='body',
+            permission_level='internal',
+            metadata_={},
+        )
+        db.add(legacy_chunk)
+        db.commit()
+        parser_run_id = parser_run.id
+        chunk_id = legacy_chunk.id
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        with pytest.raises(DBAPIError, match='chunk lineage is immutable'):
+            connection.execute(
+                text(
+                    'UPDATE document_chunks SET parser_run_id=:parser_run_id '
+                    'WHERE id=:chunk_id'
+                ),
+                {'parser_run_id': parser_run_id, 'chunk_id': chunk_id},
+            )
+        transaction.rollback()
+
+
 def test_postgresql_terminal_audit_is_immutable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1881,6 +2328,7 @@ def test_postgresql_provider_event_rejects_wrong_prior_snapshot(
 ) -> None:
     engine = _postgres_engine(monkeypatch)
     suffix = uuid4().hex[:12]
+    authorization_at = datetime.now(UTC)
     with Session(engine) as db:
         state = AutoReviewProviderSafetyState(
             purpose='validation',
@@ -1895,7 +2343,7 @@ def test_postgresql_provider_event_rejects_wrong_prior_snapshot(
             framing_safety_tokens=512,
             input_usd_per_1m=Decimal('1.000000'),
             output_usd_per_1m=Decimal('2.000000'),
-            authorized_at=datetime.now(UTC),
+            authorized_at=authorization_at,
         )
         db.add(state)
         db.flush()
@@ -1921,6 +2369,7 @@ def test_postgresql_provider_event_rejects_wrong_prior_snapshot(
             actor_subject_hmac='a' * 64,
             fingerprint_key_version='v1',
             fingerprint_key_material_verifier='b' * 64,
+            created_at=authorization_at,
         )
         db.add(initial)
         db.flush()
@@ -2005,5 +2454,8 @@ def test_postgresql_rollout_event_rejects_wrong_prior_snapshot(
         state.last_event_sequence = 1
         state.last_event_id = event.id
 
-        with pytest.raises(DBAPIError, match='prior rollout snapshot'):
+        with pytest.raises(
+            DBAPIError,
+            match='prior rollout snapshot|rollout control event required',
+        ):
             db.commit()

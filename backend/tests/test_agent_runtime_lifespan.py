@@ -1,5 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.agent_runtime.checkpointing import (
@@ -42,7 +43,9 @@ def test_create_app_does_not_start_checkpoint_runtime_before_lifespan() -> None:
     assert not hasattr(app.state, 'agent_checkpoint_runtime')
 
 
-def test_app_lifespan_starts_exposes_and_closes_checkpoint_runtime_once() -> None:
+def test_app_lifespan_starts_exposes_and_closes_checkpoint_runtime_once(
+    db_session: Session,
+) -> None:
     events: list[str] = []
     runtime = _FakeCheckpointRuntime(events)
 
@@ -50,7 +53,12 @@ def test_app_lifespan_starts_exposes_and_closes_checkpoint_runtime_once() -> Non
         events.append('factory')
         return runtime
 
-    app = create_app(checkpoint_runtime_factory=runtime_factory)  # type: ignore[arg-type]
+    app = create_app(
+        checkpoint_runtime_factory=runtime_factory,  # type: ignore[arg-type]
+        workflow_session_factory=sessionmaker(
+            bind=db_session.get_bind(), expire_on_commit=False
+        ),
+    )
 
     with TestClient(app) as client:
         assert events == ['factory', 'start:False']
@@ -61,10 +69,17 @@ def test_app_lifespan_starts_exposes_and_closes_checkpoint_runtime_once() -> Non
     assert events == ['factory', 'start:False', 'close']
 
 
-def test_app_lifespan_registers_immutable_v2_graph_even_when_new_runs_disabled() -> None:
+def test_app_lifespan_registers_immutable_v2_graph_even_when_new_runs_disabled(
+    db_session: Session,
+) -> None:
     events: list[str] = []
     runtime = _FakeCheckpointRuntime(events)
-    app = create_app(checkpoint_runtime_factory=lambda _settings: runtime)  # type: ignore[arg-type]
+    app = create_app(
+        checkpoint_runtime_factory=lambda _settings: runtime,  # type: ignore[arg-type]
+        workflow_session_factory=sessionmaker(
+            bind=db_session.get_bind(), expire_on_commit=False
+        ),
+    )
 
     with TestClient(app):
         builder = app.state.agent_graph_registry.resolve(
@@ -140,7 +155,9 @@ def test_disabled_start_ignores_terminal_or_non_v2_threads(
     assert events == ['start:False', 'close']
 
 
-def test_same_app_lifespan_reentry_rejects_closed_checkpoint_runtime() -> None:
+def test_same_app_lifespan_reentry_rejects_closed_checkpoint_runtime(
+    db_session: Session,
+) -> None:
     runtime = CheckpointRuntime(
         Settings(
             _env_file=None,
@@ -150,6 +167,9 @@ def test_same_app_lifespan_reentry_rejects_closed_checkpoint_runtime() -> None:
     )
     app = create_app(
         checkpoint_runtime_factory=lambda _settings: runtime,
+        workflow_session_factory=sessionmaker(
+            bind=db_session.get_bind(), expire_on_commit=False
+        ),
     )
 
     with TestClient(app):
@@ -186,6 +206,7 @@ def test_disabled_runtime_can_start_only_to_preserve_existing_memory_threads() -
 
 def test_missing_production_model_credentials_do_not_block_app_lifespan(
     monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
 ) -> None:
     monkeypatch.setenv('PARAWORKS_DEMO_MODE', 'false')
     monkeypatch.setenv('AGENT_LLM_ENABLED', 'false')
@@ -195,7 +216,12 @@ def test_missing_production_model_credentials_do_not_block_app_lifespan(
     get_settings.cache_clear()
     events: list[str] = []
     runtime = _FakeCheckpointRuntime(events)
-    app = create_app(checkpoint_runtime_factory=lambda _settings: runtime)  # type: ignore[arg-type]
+    app = create_app(
+        checkpoint_runtime_factory=lambda _settings: runtime,  # type: ignore[arg-type]
+        workflow_session_factory=sessionmaker(
+            bind=db_session.get_bind(), expire_on_commit=False
+        ),
+    )
 
     try:
         with TestClient(app) as client:
@@ -248,3 +274,38 @@ def test_lifespan_bootstraps_c5_keys_before_building_drafting_service(
         pass
 
     assert events == ['start:False', 'key_bootstrap', 'catalog', 'close']
+
+
+def test_lifespan_fails_closed_when_c5_key_bootstrap_database_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    runtime = _FakeCheckpointRuntime(events)
+    database_error = OperationalError(
+        'SELECT auto_review_runtime_key_states',
+        {},
+        RuntimeError('database unavailable'),
+    )
+
+    def ensure_initialized(_self):
+        events.append('key_bootstrap')
+        raise database_error
+
+    def build_catalog(_settings):
+        events.append('catalog')
+        raise AssertionError('catalog must not be constructed after bootstrap failure')
+
+    monkeypatch.setattr(
+        'backend.app.main.AutoReviewKeyBootstrapService.ensure_initialized',
+        ensure_initialized,
+    )
+    monkeypatch.setattr('backend.app.main.build_review_agent_catalog', build_catalog)
+    app = create_app(
+        checkpoint_runtime_factory=lambda _settings: runtime,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(OperationalError) as exc_info, TestClient(app):
+        pass
+
+    assert exc_info.value is database_error
+    assert events == ['start:False', 'key_bootstrap', 'close']

@@ -2898,10 +2898,25 @@ tests passed with 53 tests; ruff passed.
 - PostgreSQL guards enforce ReviewItem cutover provenance, validation terminal
   consistency, Assistant lineage, provider/rollout event-backed state, and
   source/parser/chunk authority. Do not replace these with SQLite-only checks.
+- Provider aggregate mutations cover the full authorization/overrun snapshot
+  and require exact state-version/event/backpointer alignment. Rollout metrics
+  use `state_version + 1` without changing `control_epoch` or the last control
+  event; control mutations increment both, and `corrected_critical_count` is
+  monotonic.
+- Parser-run identity and chunk lineage are frozen on every UPDATE, including
+  legacy null-to-value attempts. C.5 repair must insert replacement rows.
 - `backend/app/admin/auto_review_retained_state.py` is the shared exhaustive
   schema/retained-state authority for bootstrap, reset, and downgrade.
-  Inspection/query errors must propagate; only empty/test schemas downgrade.
+  Inspection/query errors must propagate; lifespan bootstrap database errors
+  close the checkpoint runtime and abort startup before service construction.
+  Only empty/test schemas downgrade.
 - PostgreSQL verification requires `PARAWORKS_TEST_POSTGRES_URL`; the isolated
-  Docker fixture is on port `55432` with pgvector. Missing URLs fail, not skip.
+  Docker fixture is on port `55432` with pgvector. The migration test module
+  creates a unique schema and drops it in `finally`, so generated rows do not
+  leak between runs. Missing URLs fail, not skip.
+- Historical-upgrade coverage is pinned to a manual `2f6a8b9c0d1e` schema and
+  must not call current `Base.metadata`. Current round-2 evidence is `134`
+  focused tests and `45` PostgreSQL-only tests (zero skips), plus the unchanged
+  `118`-test Task 1 compatibility suite.
 - Cutover stays drain/migrate/deploy/bootstrap/reconcile. Slack remains
   C.5-ineligible and Task 2 never calls live providers or connectors.

@@ -4759,7 +4759,18 @@ Cost/security note:
 - PostgreSQL enforces same-owner identities, deferred validation completeness,
   exact current Assistant evidence lineage, append-only provider/rollout/audit
   ledgers, immutable trusted provenance, and source/parser/chunk authority.
+  Provider counters/cost/time/reason/gate/timestamps require the exact event
+  backpointer. Rollout metric-only updates increment `state_version` while
+  preserving `control_epoch` and event sequence; cumulative correction counts
+  cannot decrease.
 - Bootstrap, connector reset, and empty-only downgrade share exhaustive,
-  fail-closed C.5 retained-state detection. Populated schemas refuse downgrade.
+  fail-closed C.5 retained-state detection. Database bootstrap errors abort
+  startup before C.5 service construction, and populated schemas refuse
+  downgrade. Legacy parser/chunk rows remain eligible only as retained audit
+  data: null authority/lineage cannot be attached later by UPDATE.
 - Slack remains outside C.5 automatic eligibility. Verification uses local
   SQLite and isolated PostgreSQL/pgvector only, with no live provider calls.
+- Round-2 verification used a pinned manual `2f6a8b9c0d1e` schema fixture,
+  exact Task 2 index assertions, and finally-dropped PostgreSQL schemas:
+  `134 passed` in the focused suite, including `45` PostgreSQL tests with zero
+  skips; the Task 1 compatibility suite remains `118 passed`.

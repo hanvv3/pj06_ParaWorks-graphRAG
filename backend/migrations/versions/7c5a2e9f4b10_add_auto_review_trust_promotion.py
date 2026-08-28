@@ -25,6 +25,12 @@ depends_on = None
 
 BOUNDARY_COMPONENT = 'auto_review_trust_promotion'
 
+_LOWER_HEX_64_REMAINDER = 'server_content_signature'
+for _character in '0123456789abcdef':
+    _LOWER_HEX_64_REMAINDER = (
+        f"replace({_LOWER_HEX_64_REMAINDER}, '{_character}', '')"
+    )
+
 ADDED_COLUMNS = C5_ADDED_COLUMNS
 
 
@@ -130,7 +136,8 @@ def _add_existing_table_constraints_before_new_tables() -> None:
         '(server_content_signature IS NULL AND '
         'server_content_signature_schema IS NULL) OR '
         "(server_content_signature_schema = 'server-source-content:v1' AND "
-        'length(server_content_signature) = 64)',
+        'length(server_content_signature) = 64 AND '
+        f'{_LOWER_HEX_64_REMAINDER} = \'\')',
     )
     _create_check(
         'document_parser_runs',
@@ -141,6 +148,7 @@ def _add_existing_table_constraints_before_new_tables() -> None:
         'chunk_policy_version IS NULL) OR '
         "(server_content_signature_schema = 'server-source-content:v1' AND "
         'length(server_content_signature) = 64 AND '
+        f'{_LOWER_HEX_64_REMAINDER} = \'\' AND '
         'parser_policy_version IS NOT NULL AND parser_version IS NOT NULL AND '
         'chunk_policy_version IS NOT NULL)',
     )
@@ -673,31 +681,125 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
         CREATE OR REPLACE FUNCTION enforce_provider_safety_state_event()
         RETURNS trigger LANGUAGE plpgsql AS $$
         DECLARE aggregate auto_review_provider_safety_states%ROWTYPE;
+        DECLARE event auto_review_provider_safety_events%ROWTYPE;
+        DECLARE protected_changed boolean;
         BEGIN
           SELECT * INTO aggregate FROM auto_review_provider_safety_states
           WHERE id = NEW.id;
+          SELECT * INTO event FROM auto_review_provider_safety_events candidate
+          WHERE candidate.id = aggregate.last_event_id
+            AND candidate.provider_safety_state_id = aggregate.id
+            AND candidate.event_sequence = aggregate.last_event_sequence;
           IF aggregate.last_event_id IS NULL OR
-             aggregate.last_event_sequence = 0 OR NOT EXISTS (
-            SELECT 1 FROM auto_review_provider_safety_events event
-            WHERE event.id = aggregate.last_event_id
-              AND event.provider_safety_state_id = aggregate.id
-              AND event.event_sequence = aggregate.last_event_sequence
-              AND event.purpose = aggregate.purpose
-              AND event.provider = aggregate.provider
-              AND event.model = aggregate.model
-              AND event.reasoning_effort = aggregate.reasoning_effort
-              AND event.new_state_version = aggregate.state_version
-              AND event.cost_policy_version =
+             aggregate.last_event_sequence = 0 OR NOT FOUND OR
+             event.purpose <> aggregate.purpose OR
+             event.provider <> aggregate.provider OR
+             event.model <> aggregate.model OR
+             event.reasoning_effort <> aggregate.reasoning_effort OR
+             event.new_state_version <> aggregate.state_version OR
+             event.cost_policy_version <>
                 aggregate.authorized_cost_policy_version
-              AND event.token_estimator_version =
+             OR event.token_estimator_version <>
                 aggregate.token_estimator_version
-              AND event.tokenizer_encoding = aggregate.tokenizer_encoding
-              AND event.reply_priming_tokens = aggregate.reply_priming_tokens
-              AND event.framing_safety_tokens = aggregate.framing_safety_tokens
-              AND event.input_usd_per_1m = aggregate.input_usd_per_1m
-              AND event.output_usd_per_1m = aggregate.output_usd_per_1m
-              AND event.new_breaker_open = aggregate.breaker_open
-          ) THEN RAISE EXCEPTION 'provider initial authorization event required';
+             OR event.tokenizer_encoding <> aggregate.tokenizer_encoding OR
+             event.reply_priming_tokens <> aggregate.reply_priming_tokens OR
+             event.framing_safety_tokens <> aggregate.framing_safety_tokens OR
+             event.input_usd_per_1m <> aggregate.input_usd_per_1m OR
+             event.output_usd_per_1m <> aggregate.output_usd_per_1m OR
+             event.new_breaker_open <> aggregate.breaker_open
+          THEN RAISE EXCEPTION 'provider initial authorization event required';
+          END IF;
+
+          IF TG_OP = 'INSERT' OR
+             (OLD.last_event_sequence = 0 AND
+              aggregate.last_event_sequence = 1 AND
+              aggregate.state_version = OLD.state_version)
+          THEN
+            IF event.event_kind <> 'initial_authorized' OR
+               event.prior_state_version <> 0 OR
+               event.new_state_version <> 1 OR
+               aggregate.state_version <> 1 OR
+               aggregate.overrun_count <> 0 OR
+               aggregate.last_overrun_cost_usd IS NOT NULL OR
+               aggregate.last_overrun_at IS NOT NULL OR
+               aggregate.breaker_open OR
+               aggregate.breaker_reason_code IS NOT NULL OR
+               event.reason_code IS DISTINCT FROM
+                 aggregate.breaker_reason_code OR
+               event.regression_gate_reference IS DISTINCT FROM
+                 aggregate.regression_gate_reference OR
+               aggregate.authorized_at IS DISTINCT FROM event.created_at OR
+               aggregate.cleared_at IS NOT NULL
+            THEN RAISE EXCEPTION 'provider initial authorization event required';
+            END IF;
+            RETURN NEW;
+          END IF;
+
+          protected_changed :=
+            aggregate.purpose IS DISTINCT FROM OLD.purpose OR
+            aggregate.provider IS DISTINCT FROM OLD.provider OR
+            aggregate.model IS DISTINCT FROM OLD.model OR
+            aggregate.reasoning_effort IS DISTINCT FROM OLD.reasoning_effort OR
+            aggregate.state_version IS DISTINCT FROM OLD.state_version OR
+            aggregate.authorized_cost_policy_version IS DISTINCT FROM
+              OLD.authorized_cost_policy_version OR
+            aggregate.token_estimator_version IS DISTINCT FROM
+              OLD.token_estimator_version OR
+            aggregate.tokenizer_encoding IS DISTINCT FROM OLD.tokenizer_encoding OR
+            aggregate.reply_priming_tokens IS DISTINCT FROM
+              OLD.reply_priming_tokens OR
+            aggregate.framing_safety_tokens IS DISTINCT FROM
+              OLD.framing_safety_tokens OR
+            aggregate.input_usd_per_1m IS DISTINCT FROM OLD.input_usd_per_1m OR
+            aggregate.output_usd_per_1m IS DISTINCT FROM OLD.output_usd_per_1m OR
+            aggregate.breaker_open IS DISTINCT FROM OLD.breaker_open OR
+            aggregate.breaker_reason_code IS DISTINCT FROM
+              OLD.breaker_reason_code OR
+            aggregate.overrun_count IS DISTINCT FROM OLD.overrun_count OR
+            aggregate.last_overrun_cost_usd IS DISTINCT FROM
+              OLD.last_overrun_cost_usd OR
+            aggregate.last_overrun_at IS DISTINCT FROM OLD.last_overrun_at OR
+            aggregate.regression_gate_reference IS DISTINCT FROM
+              OLD.regression_gate_reference OR
+            aggregate.authorized_at IS DISTINCT FROM OLD.authorized_at OR
+            aggregate.cleared_at IS DISTINCT FROM OLD.cleared_at OR
+            aggregate.last_event_sequence IS DISTINCT FROM
+              OLD.last_event_sequence OR
+            aggregate.last_event_id IS DISTINCT FROM OLD.last_event_id;
+
+          IF protected_changed THEN
+            IF aggregate.last_event_sequence <> OLD.last_event_sequence + 1 OR
+               aggregate.last_event_id IS NOT DISTINCT FROM OLD.last_event_id OR
+               aggregate.state_version <> OLD.state_version + 1 OR
+               event.prior_state_version <> OLD.state_version OR
+               event.new_state_version <> aggregate.state_version OR
+               event.prior_breaker_open <> OLD.breaker_open OR
+               event.reason_code IS DISTINCT FROM
+                 aggregate.breaker_reason_code OR
+               event.regression_gate_reference IS DISTINCT FROM
+                 aggregate.regression_gate_reference
+            THEN RAISE EXCEPTION 'provider safety event required'; END IF;
+
+            IF event.event_kind = 'budget_overrun' THEN
+              IF NOT aggregate.breaker_open OR
+                 aggregate.overrun_count <> OLD.overrun_count + 1 OR
+                 aggregate.last_overrun_cost_usd IS NULL OR
+                 aggregate.last_overrun_at IS DISTINCT FROM event.created_at OR
+                 aggregate.authorized_at IS DISTINCT FROM OLD.authorized_at OR
+                 aggregate.cleared_at IS DISTINCT FROM OLD.cleared_at
+              THEN RAISE EXCEPTION 'provider safety event required'; END IF;
+            ELSIF event.event_kind = 'breaker_cleared' THEN
+              IF aggregate.breaker_open OR
+                 aggregate.overrun_count <> OLD.overrun_count OR
+                 aggregate.last_overrun_cost_usd IS DISTINCT FROM
+                   OLD.last_overrun_cost_usd OR
+                 aggregate.last_overrun_at IS DISTINCT FROM OLD.last_overrun_at OR
+                 aggregate.authorized_at IS DISTINCT FROM OLD.authorized_at OR
+                 aggregate.cleared_at IS DISTINCT FROM event.created_at
+              THEN RAISE EXCEPTION 'provider safety event required'; END IF;
+            ELSE
+              RAISE EXCEPTION 'provider safety event required';
+            END IF;
           END IF;
           RETURN NEW;
         END $$
@@ -726,7 +828,7 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
           FROM auto_review_rollout_control_events
           WHERE rollout_state_id = NEW.rollout_state_id AND id <> NEW.id;
           IF NEW.event_sequence = 1 THEN
-            IF NEW.prior_state_version <> 0 OR NEW.prior_control_epoch <> 0 OR
+            IF NEW.prior_state_version < 0 OR NEW.prior_control_epoch <> 0 OR
                NEW.prior_max_authorized_percentage <> 0 OR
                NEW.prior_breaker_open <> false OR
                NEW.prior_authorization_generation <> 0
@@ -738,7 +840,7 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
             IF NOT FOUND THEN
               RAISE EXCEPTION 'rollout events require gapless atomic backpointer';
             END IF;
-            IF prior_event.new_state_version <> NEW.prior_state_version OR
+            IF prior_event.new_state_version > NEW.prior_state_version OR
                prior_event.new_control_epoch <> NEW.prior_control_epoch OR
                prior_event.new_max_authorized_percentage <>
                  NEW.prior_max_authorized_percentage OR
@@ -765,35 +867,123 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
         """
         CREATE OR REPLACE FUNCTION enforce_rollout_state_control_event()
         RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE metric_changed boolean;
+        DECLARE control_changed boolean;
         BEGIN
-          IF NEW.control_epoch IS DISTINCT FROM OLD.control_epoch OR
-             NEW.max_authorized_percentage IS DISTINCT FROM
+          IF NEW.security_scope_id IS DISTINCT FROM OLD.security_scope_id OR
+             NEW.policy_version IS DISTINCT FROM OLD.policy_version
+          THEN RAISE EXCEPTION 'rollout identity is immutable'; END IF;
+
+          IF NEW.corrected_critical_count < OLD.corrected_critical_count THEN
+            RAISE EXCEPTION 'corrected critical count is monotonic';
+          END IF;
+          IF NEW.shadow_predicted_count < OLD.shadow_predicted_count OR
+             NEW.shadow_completed_count < OLD.shadow_completed_count OR
+             NEW.shadow_supported_count < OLD.shadow_supported_count OR
+             NEW.enforce_promotion_ordinal < OLD.enforce_promotion_ordinal OR
+             NEW.post_audit_selected_count < OLD.post_audit_selected_count OR
+             NEW.post_audit_completed_count < OLD.post_audit_completed_count OR
+             NEW.post_audit_critical_count < OLD.post_audit_critical_count OR
+             NEW.confirmed_mandatory_audit_count <
+               OLD.confirmed_mandatory_audit_count OR
+             NEW.invalidated_before_audit_count <
+               OLD.invalidated_before_audit_count OR
+             NEW.authorization_generation < OLD.authorization_generation
+          THEN RAISE EXCEPTION 'rollout cumulative counter is monotonic'; END IF;
+
+          metric_changed :=
+            NEW.shadow_predicted_count IS DISTINCT FROM
+              OLD.shadow_predicted_count OR
+            NEW.shadow_completed_count IS DISTINCT FROM
+              OLD.shadow_completed_count OR
+            NEW.shadow_supported_count IS DISTINCT FROM
+              OLD.shadow_supported_count OR
+            NEW.enforce_promotion_ordinal IS DISTINCT FROM
+              OLD.enforce_promotion_ordinal OR
+            NEW.post_audit_selected_count IS DISTINCT FROM
+              OLD.post_audit_selected_count OR
+            NEW.post_audit_completed_count IS DISTINCT FROM
+              OLD.post_audit_completed_count OR
+            NEW.post_audit_critical_count IS DISTINCT FROM
+              OLD.post_audit_critical_count OR
+            NEW.confirmed_mandatory_audit_count IS DISTINCT FROM
+              OLD.confirmed_mandatory_audit_count OR
+            NEW.pending_mandatory_audit_count IS DISTINCT FROM
+              OLD.pending_mandatory_audit_count OR
+            NEW.invalidated_before_audit_count IS DISTINCT FROM
+              OLD.invalidated_before_audit_count OR
+            NEW.corrected_critical_count IS DISTINCT FROM
+              OLD.corrected_critical_count;
+          control_changed :=
+            NEW.control_epoch IS DISTINCT FROM OLD.control_epoch OR
+            NEW.max_authorized_percentage IS DISTINCT FROM
                OLD.max_authorized_percentage OR
-             NEW.authorization_generation IS DISTINCT FROM
+            NEW.authorization_generation IS DISTINCT FROM
                OLD.authorization_generation OR
-             NEW.authorization_at IS DISTINCT FROM OLD.authorization_at OR
-             NEW.breaker_open IS DISTINCT FROM OLD.breaker_open OR
-             NEW.breaker_reason_code IS DISTINCT FROM OLD.breaker_reason_code OR
-             NEW.breaker_opened_at IS DISTINCT FROM OLD.breaker_opened_at OR
-             NEW.regression_gate_reference IS DISTINCT FROM
-               OLD.regression_gate_reference
-          THEN
-            IF NEW.last_event_sequence <> OLD.last_event_sequence + 1 OR
+            NEW.authorization_at IS DISTINCT FROM OLD.authorization_at OR
+            NEW.breaker_open IS DISTINCT FROM OLD.breaker_open OR
+            NEW.breaker_reason_code IS DISTINCT FROM OLD.breaker_reason_code OR
+            NEW.breaker_opened_at IS DISTINCT FROM OLD.breaker_opened_at OR
+            NEW.regression_gate_reference IS DISTINCT FROM
+              OLD.regression_gate_reference;
+
+          IF metric_changed OR control_changed THEN
+            IF NEW.state_version <> OLD.state_version + 1
+            THEN RAISE EXCEPTION 'rollout metric state version required'; END IF;
+          ELSIF NEW.state_version IS DISTINCT FROM OLD.state_version THEN
+            RAISE EXCEPTION 'rollout state version requires mutation';
+          END IF;
+
+          IF control_changed THEN
+            IF EXISTS (
+              SELECT 1 FROM auto_review_rollout_control_events event
+              WHERE event.id = NEW.last_event_id
+                AND event.rollout_state_id = NEW.id
+            ) AND NOT EXISTS (
+              SELECT 1 FROM auto_review_rollout_control_events event
+              WHERE event.id = NEW.last_event_id
+                AND event.rollout_state_id = NEW.id
+                AND event.prior_state_version = OLD.state_version
+                AND event.prior_control_epoch = OLD.control_epoch
+                AND event.prior_max_authorized_percentage =
+                  OLD.max_authorized_percentage
+                AND event.prior_authorization_generation =
+                  OLD.authorization_generation
+                AND event.prior_breaker_open = OLD.breaker_open
+            ) THEN RAISE EXCEPTION 'prior rollout snapshot mismatch'; END IF;
+            IF NEW.control_epoch <> OLD.control_epoch + 1 OR
+               NEW.last_event_sequence <> OLD.last_event_sequence + 1 OR
                NEW.last_event_id IS NULL OR
                NEW.last_event_id IS NOT DISTINCT FROM OLD.last_event_id OR NOT EXISTS (
                  SELECT 1 FROM auto_review_rollout_control_events event
                  WHERE event.id = NEW.last_event_id
                    AND event.rollout_state_id = NEW.id
                    AND event.event_sequence = NEW.last_event_sequence
+                   AND event.prior_state_version = OLD.state_version
                    AND event.new_state_version = NEW.state_version
+                   AND event.prior_control_epoch = OLD.control_epoch
                    AND event.new_control_epoch = NEW.control_epoch
+                   AND event.prior_max_authorized_percentage =
+                     OLD.max_authorized_percentage
                    AND event.new_max_authorized_percentage =
                      NEW.max_authorized_percentage
+                   AND event.prior_authorization_generation =
+                     OLD.authorization_generation
                    AND event.new_authorization_generation =
                      NEW.authorization_generation
+                   AND event.prior_breaker_open = OLD.breaker_open
                    AND event.new_breaker_open = NEW.breaker_open
+                   AND event.reason_code IS NOT DISTINCT FROM
+                     NEW.breaker_reason_code
+                   AND event.regression_gate_reference IS NOT DISTINCT FROM
+                     NEW.regression_gate_reference
                )
             THEN RAISE EXCEPTION 'rollout control event required'; END IF;
+          ELSIF NEW.control_epoch IS DISTINCT FROM OLD.control_epoch OR
+                NEW.last_event_sequence IS DISTINCT FROM
+                  OLD.last_event_sequence OR
+                NEW.last_event_id IS DISTINCT FROM OLD.last_event_id
+          THEN RAISE EXCEPTION 'rollout control event required';
           END IF;
           RETURN NEW;
         END $$
@@ -1013,7 +1203,12 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
         CREATE OR REPLACE FUNCTION enforce_c5_parser_identity_immutable()
         RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
-          IF TG_OP = 'UPDATE' AND OLD.server_content_signature IS NOT NULL AND (
+          IF TG_OP = 'UPDATE' AND (
+             NEW.document_id IS DISTINCT FROM OLD.document_id OR
+             NEW.document_version_id IS DISTINCT FROM OLD.document_version_id OR
+             NEW.source_id IS DISTINCT FROM OLD.source_id OR
+             NEW.parser_name IS DISTINCT FROM OLD.parser_name OR
+             NEW.content_signature IS DISTINCT FROM OLD.content_signature OR
              NEW.server_content_signature_schema IS DISTINCT FROM
                OLD.server_content_signature_schema OR
              NEW.server_content_signature IS DISTINCT FROM OLD.server_content_signature OR
@@ -1044,11 +1239,10 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
         CREATE OR REPLACE FUNCTION enforce_c5_chunk_lineage_immutable()
         RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
-          IF OLD.parser_run_id IS NOT NULL AND (
-             NEW.parser_run_id IS DISTINCT FROM OLD.parser_run_id OR
+          IF NEW.parser_run_id IS DISTINCT FROM OLD.parser_run_id OR
              NEW.version_id IS DISTINCT FROM OLD.version_id OR
              NEW.source_id IS DISTINCT FROM OLD.source_id OR
-             NEW.chunk_index IS DISTINCT FROM OLD.chunk_index)
+             NEW.chunk_index IS DISTINCT FROM OLD.chunk_index
           THEN RAISE EXCEPTION 'C.5 chunk lineage is immutable'; END IF;
           RETURN NEW;
         END $$
