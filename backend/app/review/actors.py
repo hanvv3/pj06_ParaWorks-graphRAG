@@ -6,7 +6,7 @@ from threading import RLock
 from typing import Literal, NoReturn, TypeAlias
 from weakref import ReferenceType, ref
 
-from backend.app.core.demo_auth import DemoUser, find_demo_user
+from backend.app.core.demo_auth import DemoUser, _assert_authenticated_demo_user
 from backend.app.core.rbac import (
     PERMISSION_ORDER,
     REVIEW_APPROVAL_PERMISSIONS,
@@ -198,15 +198,7 @@ def _build_actor_boundary() -> tuple[
         return actor
 
     def adapt_human(user: DemoUser) -> ReviewResolutionActor:
-        if not isinstance(user, DemoUser):
-            raise TypeError(
-                'Human review adapter requires an authenticated DemoUser'
-            )
-        canonical = find_demo_user(user.id) or find_demo_user(user.email)
-        if canonical is not user:
-            raise ValueError(
-                'Authenticated DemoUser does not match canonical identity'
-            )
+        _assert_authenticated_demo_user(user)
         capabilities: set[ReviewResolutionCapability] = set()
         if user.role in REVIEW_APPROVAL_PERMISSIONS:
             capabilities.add('human_review')

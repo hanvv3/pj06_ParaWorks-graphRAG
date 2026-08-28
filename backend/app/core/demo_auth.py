@@ -1,7 +1,11 @@
+from collections.abc import Callable
 from dataclasses import dataclass
+from threading import RLock
 from typing import Annotated
+from weakref import ReferenceType, ref
 
 from fastapi import Depends, Header, HTTPException, Request
+from sqlalchemy import inspect as inspect_sqlalchemy
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
@@ -11,6 +15,7 @@ from backend.app.core.session_auth import (
     serialize_auth_user,
 )
 from backend.app.db.session import get_db
+from backend.app.models import AuthUser
 
 
 @dataclass(frozen=True)
@@ -88,20 +93,6 @@ USERS = {
 }
 
 
-def get_demo_user(
-    request: Request,
-    db: Annotated[Session, Depends(get_db)],
-    x_demo_user: Annotated[str, Header()] = 'admin',
-) -> DemoUser:
-    settings = get_settings()
-    session_user = authenticate_session_cookie(request.cookies.get(settings.auth_session_cookie_name), db, settings)
-    if session_user is not None:
-        return demo_user_from_serialized(serialize_auth_user(session_user))
-    if not settings.paraworks_demo_mode:
-        raise HTTPException(status_code=401, detail='Authentication required.')
-    return find_demo_user(x_demo_user) or USERS['viewer']
-
-
 def find_demo_user(value: str) -> DemoUser | None:
     normalized = value.strip().lower()
     if not normalized:
@@ -149,6 +140,117 @@ def demo_user_from_serialized(payload: dict) -> DemoUser:
         department=payload['department'],
         aliases=tuple(payload.get('aliases', ())),
     )
+
+
+def _build_authenticated_demo_user_boundary() -> tuple[
+    Callable[..., DemoUser],
+    Callable[[DemoUser], None],
+]:
+    authenticated: dict[
+        int,
+        tuple[ReferenceType[DemoUser], tuple[object, ...]],
+    ] = {}
+    lock = RLock()
+
+    def snapshot(user: DemoUser) -> tuple[object, ...]:
+        return (
+            user.id,
+            user.email,
+            user.role,
+            frozenset(user.permission_levels),
+            user.name,
+            user.title,
+            user.department,
+            user.aliases,
+        )
+
+    static_identities = {
+        id(user): (user, snapshot(user)) for user in USERS.values()
+    }
+
+    def register_session_projection(user: DemoUser) -> DemoUser:
+        user_id = id(user)
+
+        def discard(
+            reference: ReferenceType[DemoUser],
+            user_identity: int = user_id,
+        ) -> None:
+            with lock:
+                entry = authenticated.get(user_identity)
+                if entry is not None and entry[0] is reference:
+                    authenticated.pop(user_identity, None)
+
+        reference = ref(user, discard)
+        with lock:
+            existing = authenticated.get(user_id)
+            if existing is not None and existing[0]() is not None:
+                raise RuntimeError(
+                    'Authenticated DemoUser identity registry collision'
+                )
+            authenticated[user_id] = (reference, snapshot(user))
+        return user
+
+    def get_authenticated_user(
+        request: Request,
+        db: Annotated[Session, Depends(get_db)],
+        x_demo_user: Annotated[str, Header()] = 'admin',
+    ) -> DemoUser:
+        settings = get_settings()
+        session_user = authenticate_session_cookie(
+            request.cookies.get(settings.auth_session_cookie_name),
+            db,
+            settings,
+        )
+        if session_user is not None:
+            state = inspect_sqlalchemy(session_user)
+            if (
+                not isinstance(session_user, AuthUser)
+                or not state.persistent
+                or state.detached
+                or state.session is not db
+                or session_user.id is None
+            ):
+                raise RuntimeError(
+                    'Session authentication did not return a persistent user'
+                )
+            return register_session_projection(
+                demo_user_from_serialized(serialize_auth_user(session_user))
+            )
+        if not settings.paraworks_demo_mode:
+            raise HTTPException(
+                status_code=401,
+                detail='Authentication required.',
+            )
+        return find_demo_user(x_demo_user) or USERS['viewer']
+
+    def assert_authenticated(user: DemoUser) -> None:
+        if not isinstance(user, DemoUser):
+            raise TypeError('Human review adapter requires a DemoUser')
+        static_entry = static_identities.get(id(user))
+        if static_entry is not None and static_entry[0] is user:
+            if snapshot(user) != static_entry[1]:
+                raise ValueError(
+                    'Authenticated DemoUser claims changed after authentication'
+                )
+            return
+        with lock:
+            entry = authenticated.get(id(user))
+            if entry is None or entry[0]() is not user:
+                raise ValueError(
+                    'DemoUser is not an authenticated canonical identity'
+                )
+            if snapshot(user) != entry[1]:
+                raise ValueError(
+                    'Authenticated DemoUser claims changed after authentication'
+                )
+
+    return get_authenticated_user, assert_authenticated
+
+
+get_demo_user, _assert_authenticated_demo_user = (
+    _build_authenticated_demo_user_boundary()
+)
+del _build_authenticated_demo_user_boundary
 
 
 def list_demo_users() -> list[dict]:

@@ -13,13 +13,22 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.requests import Request
 
-from backend.app.core.demo_auth import USERS, DemoUser
+from backend.app.core.config import get_settings
+from backend.app.core.demo_auth import (
+    USERS,
+    DemoUser,
+    demo_user_from_serialized,
+    get_demo_user,
+)
+from backend.app.core.session_auth import create_session_token, serialize_auth_user
 from backend.app.models import (
     AgentRun,
     AgentWorkflowEvidenceRef,
     AgentWorkflowThread,
     AuditLog,
+    AuthUser,
     HistoryEvent,
     ReviewItem,
     ReviewItemEvidenceRef,
@@ -266,6 +275,125 @@ def test_human_adapter_rejects_unknown_demo_user_identity() -> None:
 
     with pytest.raises(ValueError, match='canonical'):
         human_review_actor(unknown)
+
+
+def test_direct_auth_user_serialization_projection_is_not_authenticated(
+    db_session: Session,
+) -> None:
+    auth_user = AuthUser(
+        external_id='direct-serialization-user',
+        email='direct-serialization@example.invalid',
+        display_name='Direct Serialization User',
+        role='reviewer',
+        department='Security',
+        title='Reviewer',
+        status='active',
+        permission_levels=['public', 'internal'],
+    )
+    db_session.add(auth_user)
+    db_session.commit()
+    projection = demo_user_from_serialized(serialize_auth_user(auth_user))
+
+    with pytest.raises(ValueError):
+        human_review_actor(projection)
+
+
+def test_real_session_projection_requires_exact_unmutated_identity(
+    db_session: Session,
+) -> None:
+    auth_user = AuthUser(
+        external_id='session-provenance-reviewer',
+        email='session-provenance@example.invalid',
+        display_name='Session Provenance Reviewer',
+        role='reviewer',
+        department='Security',
+        title='Reviewer',
+        status='active',
+        permission_levels=['public', 'internal'],
+    )
+    db_session.add(auth_user)
+    db_session.commit()
+    settings = get_settings()
+    session_token = create_session_token(auth_user.id, settings)
+    request = Request(
+        {
+            'type': 'http',
+            'headers': [
+                (
+                    b'cookie',
+                    (
+                        f'{settings.auth_session_cookie_name}={session_token}'
+                    ).encode(),
+                )
+            ],
+        }
+    )
+    projection = get_demo_user(request, db_session, 'viewer')
+    clone = DemoUser(
+        id=projection.id,
+        email=projection.email,
+        role=projection.role,
+        permission_levels=set(projection.permission_levels),
+        name=projection.name,
+        title=projection.title,
+        department=projection.department,
+        aliases=projection.aliases,
+    )
+
+    human_review_actor(projection)
+    assert clone == projection
+    with pytest.raises(ValueError):
+        human_review_actor(clone)
+    projection.permission_levels.add('restricted')
+    with pytest.raises(ValueError):
+        human_review_actor(projection)
+
+
+def test_authenticated_projection_registry_is_weak_and_not_module_exposed(
+    db_session: Session,
+) -> None:
+    auth_user = AuthUser(
+        external_id='session-gc-reviewer',
+        email='session-gc@example.invalid',
+        display_name='Session GC Reviewer',
+        role='reviewer',
+        department='Security',
+        title='Reviewer',
+        status='active',
+        permission_levels=['public', 'internal'],
+    )
+    db_session.add(auth_user)
+    db_session.commit()
+    settings = get_settings()
+    session_token = create_session_token(auth_user.id, settings)
+    request = Request(
+        {
+            'type': 'http',
+            'headers': [
+                (
+                    b'cookie',
+                    (
+                        f'{settings.auth_session_cookie_name}={session_token}'
+                    ).encode(),
+                )
+            ],
+        }
+    )
+    projection = get_demo_user(request, db_session, 'viewer')
+    projection_reference = ref(projection)
+    demo_auth_module = import_module('backend.app.core.demo_auth')
+
+    for name in (
+        '_register_authenticated_demo_user',
+        '_authenticated_demo_users',
+        '_authentication_registry',
+        '_build_authenticated_demo_user_boundary',
+    ):
+        assert name not in vars(demo_auth_module)
+
+    del projection
+    gc.collect()
+    assert projection_reference() is None
 
 
 def test_review_package_root_does_not_export_authority_constructors() -> None:
@@ -564,6 +692,74 @@ def test_public_request_cannot_supply_actor_type_capability_or_directive(
     assert item.resolution_source == 'human'
     assert item.resolution_policy_version is None
     assert item.auto_validation_id is None
+
+
+def test_real_local_cookie_session_preserves_all_public_review_actions(
+    client,
+    db_session: Session,
+) -> None:
+    login = client.post(
+        '/api/v1/auth/login',
+        json={'email': USERS['admin'].email},
+    )
+    assert login.status_code == 200
+    approve_item = _seed_item(db_session)
+    reject_item = _seed_item(db_session, item_type='timeline_event')
+    evidence_item = _seed_item(db_session)
+
+    approved = client.post(f'/api/v1/review/{approve_item.id}/approve')
+    replayed = client.post(f'/api/v1/review/{approve_item.id}/approve')
+    rejected = client.post(f'/api/v1/review/{reject_item.id}/reject')
+    needs_more = client.post(
+        f'/api/v1/review/{evidence_item.id}/request-more-evidence',
+        json={'note': 'Attach the exact document version.'},
+    )
+
+    assert approved.status_code == 200
+    assert approved.json()['status'] == 'approved'
+    assert approved.json()['replayed'] is False
+    assert replayed.status_code == 200
+    assert replayed.json()['status'] == 'approved'
+    assert replayed.json()['replayed'] is True
+    assert rejected.status_code == 200
+    assert rejected.json()['status'] == 'rejected'
+    assert needs_more.status_code == 200
+    assert needs_more.json()['status'] == 'needs_more_evidence'
+    assert needs_more.json()['payload']['needs_more_evidence']['note'] == (
+        'Attach the exact document version.'
+    )
+
+
+def test_real_cookie_session_accepts_persisted_google_identity_shape(
+    client,
+    db_session: Session,
+) -> None:
+    auth_user = AuthUser(
+        external_id='google-oauth2:reviewer-42',
+        email='google-reviewer@example.invalid',
+        display_name='Google Reviewer',
+        role='reviewer',
+        department='Product',
+        title='Product Reviewer',
+        status='active',
+        permission_levels=['public', 'internal'],
+    )
+    db_session.add(auth_user)
+    db_session.commit()
+    settings = get_settings()
+    client.cookies.set(
+        settings.auth_session_cookie_name,
+        create_session_token(auth_user.id, settings),
+        domain='testserver.local',
+        path='/',
+    )
+    item = _seed_item(db_session)
+
+    response = client.post(f'/api/v1/review/{item.id}/approve')
+
+    assert response.status_code == 200
+    assert response.json()['status'] == 'approved'
+    assert response.json()['reviewer_id'] == auth_user.external_id
 
 
 def test_auto_actor_cannot_reject_request_evidence_or_bulk_review(
