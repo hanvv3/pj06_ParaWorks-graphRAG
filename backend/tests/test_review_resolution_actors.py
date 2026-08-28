@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import copy
+import gc
+import inspect
 import pickle
 from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
 from importlib import import_module
+from weakref import ref
 
 import pytest
 from fastapi import HTTPException
@@ -250,6 +253,21 @@ def test_human_adapter_rejects_equal_value_clone_of_canonical_demo_user() -> Non
         human_review_actor(equal_value_clone)
 
 
+def test_human_adapter_rejects_unknown_demo_user_identity() -> None:
+    unknown = DemoUser(
+        id='unknown-reviewer',
+        email='unknown-reviewer@example.invalid',
+        role='admin',
+        permission_levels={'public', 'internal', 'restricted'},
+        name='Unknown Reviewer',
+        title='Unknown',
+        department='Unknown',
+    )
+
+    with pytest.raises(ValueError, match='canonical'):
+        human_review_actor(unknown)
+
+
 def test_review_package_root_does_not_export_authority_constructors() -> None:
     review_package = import_module('backend.app.review')
 
@@ -259,8 +277,84 @@ def test_review_package_root_does_not_export_authority_constructors() -> None:
         'ReuseExistingPromotion',
         'human_review_actor',
         'auto_review_actor',
+        '_issue_actor',
+        '_build_actor_boundary',
+        '_assert_review_resolution_actor',
     ):
         assert not hasattr(review_package, name)
+
+
+def test_actor_module_has_no_unrestricted_issuer_or_registry_surface() -> None:
+    actor_module = import_module('backend.app.review.actors')
+    module_surface = vars(actor_module)
+
+    for name in (
+        '_issue_actor',
+        '_is_server_issued_actor',
+        '_build_actor_issuer',
+        '_build_actor_boundary',
+        '_issued_actors',
+        '_actor_registry',
+    ):
+        assert name not in module_surface
+
+    arbitrary_claim_parameters = {
+        'subject_id',
+        'allowed_permission_levels',
+        'capabilities',
+    }
+    for name, value in module_surface.items():
+        if not inspect.isfunction(value) or value.__module__ != actor_module.__name__:
+            continue
+        parameters = set(inspect.signature(value).parameters)
+        assert not arbitrary_claim_parameters.issubset(parameters), name
+
+
+def test_importable_raw_issuer_cannot_promote_forged_restricted_authority(
+    db_session: Session,
+) -> None:
+    actor_module = import_module('backend.app.review.actors')
+    item = _seed_item(db_session, permission_level='restricted')
+
+    with pytest.raises((AttributeError, TypeError, ValueError, HTTPException)):
+        forged_actor = actor_module._issue_actor(
+            subject_id='forged-subject',
+            actor_type='human',
+            allowed_permission_levels=('restricted',),
+            capabilities=frozenset({'human_review'}),
+        )
+        ReviewTransitionService().transition(
+            db=db_session,
+            item_id=item.id,
+            action='approve',
+            actor=forged_actor,
+        )
+
+    db_session.refresh(item)
+    assert item.status == 'pending_review'
+    assert item.reviewer_id is None
+    assert db_session.scalar(select(func.count()).select_from(HistoryEvent)) == 0
+
+
+def test_constrained_actor_factories_issue_validator_accepted_identities() -> None:
+    actor_module = import_module('backend.app.review.actors')
+
+    actor_module._assert_review_resolution_actor(
+        human_review_actor(USERS['admin'])
+    )
+    actor_module._assert_review_resolution_actor(
+        auto_review_actor(policy_version=AUTO_REVIEW_POLICY_VERSION)
+    )
+
+
+def test_actor_identity_registry_does_not_retain_collected_actors() -> None:
+    actor = human_review_actor(USERS['admin'])
+    actor_reference = ref(actor)
+
+    del actor
+    gc.collect()
+
+    assert actor_reference() is None
 
 
 def test_direct_forged_human_cannot_approve_restricted_item(

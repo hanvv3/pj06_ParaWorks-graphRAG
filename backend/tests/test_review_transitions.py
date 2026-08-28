@@ -246,22 +246,14 @@ def test_companion_timeline_provenance_is_exactly_once(
 
 def test_transition_rechecks_exact_actor_permission_levels(db_session: Session) -> None:
     item = _seed_item(db_session, permission_level='restricted')
-    restricted_blind_admin = DemoUser(
-        id='limited-admin',
-        email='limited-admin@example.com',
-        role='admin',
-        permission_levels={'public', 'internal'},
-        name='Limited Admin',
-        title='Administrator',
-        department='Platform',
-    )
+    restricted_blind_reviewer = USERS['viewer']
 
     with pytest.raises(HTTPException) as exc_info:
         _service().transition(
             db=db_session,
             item_id=item.id,
             action='approve',
-            actor=_actor(restricted_blind_admin),
+            actor=_actor(restricted_blind_reviewer),
         )
 
     assert exc_info.value.status_code == 403
