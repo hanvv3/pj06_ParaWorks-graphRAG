@@ -7,7 +7,9 @@ from backend.app.agents.mail_document_agent import (
     MailDocumentAgentModelResponse,
 )
 from backend.app.agents.mail_document_agent.llm import (
+    FallbackMailDocumentAgentModel,
     LangChainMailDocumentAgentModel,
+    MailDocumentLlmProviderError,
     render_mail_docs_llm_prompt,
 )
 from backend.app.agents.mail_document_agent.service import MailDocumentProjectOption
@@ -27,6 +29,14 @@ class FakeChatModel:
         return FakeChatResponse(self.content)
 
 
+class FailingMailProvider:
+    provider = 'openai'
+    max_input_chars = 12000
+
+    def extract(self, packet):
+        raise MailDocumentLlmProviderError('bounded_failure')
+
+
 class FakeMailDocumentModel:
     def extract(self, packet: EvidencePacket) -> MailDocumentAgentModelResponse:
         assert packet.source_type == 'mail_document'
@@ -38,6 +48,46 @@ class FakeMailDocumentModel:
             input_tokens=900,
             output_tokens=160,
         )
+
+
+def test_mail_fallback_records_the_provider_that_actually_succeeded() -> None:
+    packet = EvidencePacket(
+        source_type='mail_document',
+        source_window='mail-docs:fallback',
+        messages=[
+            EvidenceMessage(
+                source_id='gmail-fallback-1',
+                source_url='https://gmail.mock/fallback-1',
+                text='고객 계약 검토가 금요일까지 필요합니다.',
+                author='owner@example.com',
+                timestamp='2026-08-28T09:00:00+09:00',
+                permission_level='internal',
+            )
+        ],
+        permission_context=PermissionContext(user_id='demo-admin', role='admin'),
+    )
+    gemini = LangChainMailDocumentAgentModel(
+        provider='gemini',
+        model_name='gemini-2.5-flash',
+        chat_model=FakeChatModel(
+            '{"title":"계약 검토","summary":"금요일까지 검토합니다.",'
+            '"item_type":"todo","confidence_score":0.9,'
+            '"is_business_related":true,"structured_data":{}}'
+        ),
+        reasoning_effort='none',
+        route_version='review-model-route:v1:fallback',
+        output_contract_version='mail-document-output:v1',
+    )
+
+    result = MailDocumentAgent(
+        model=FallbackMailDocumentAgentModel([FailingMailProvider(), gemini])
+    ).run(packet)
+
+    assert result.model_provider == 'gemini'
+    assert result.cost.model_name == 'gemini-2.5-flash'
+    assert result.model_reasoning_effort == 'none'
+    assert result.route_version == 'review-model-route:v1:fallback'
+    assert result.output_contract_version == 'mail-document-output:v1'
 
 
 class FakeProjectRouter:
@@ -77,7 +127,10 @@ def test_mail_document_agent_manifest_declares_shared_contracts() -> None:
     assert MAIL_DOCUMENT_AGENT_MANIFEST.name == 'mail_document_agent'
     assert MAIL_DOCUMENT_AGENT_MANIFEST.input_contract == 'EvidencePacket'
     assert MAIL_DOCUMENT_AGENT_MANIFEST.output_contract == 'AgentRunResult'
-    assert MAIL_DOCUMENT_AGENT_PROMPT_VERSION in MAIL_DOCUMENT_AGENT_MANIFEST.prompt_versions
+    assert (
+        MAIL_DOCUMENT_AGENT_PROMPT_VERSION
+        in MAIL_DOCUMENT_AGENT_MANIFEST.prompt_versions
+    )
     assert 'history_generation' in MAIL_DOCUMENT_AGENT_MANIFEST.capabilities
 
 
@@ -155,7 +208,9 @@ def test_mail_document_agent_run_records_node_workflow_trace() -> None:
     }
 
 
-def test_mail_document_agent_workflow_skips_project_route_for_unreviewable_llm_output() -> None:
+def test_mail_document_agent_workflow_skips_project_route_for_unreviewable_llm_output() -> (
+    None
+):
     class UnreviewableModel:
         def extract(self, packet: EvidencePacket) -> MailDocumentAgentModelResponse:
             return MailDocumentAgentModelResponse(
@@ -212,7 +267,10 @@ def test_mail_document_agent_workflow_skips_project_route_for_unreviewable_llm_o
         'project_route',
         'build_result',
     ]
-    assert packet.context['mail_document_workflow']['reviewability_decision'] == 'not_reviewable'
+    assert (
+        packet.context['mail_document_workflow']['reviewability_decision']
+        == 'not_reviewable'
+    )
 
 
 def test_mail_document_agent_run_routes_projects_inside_workflow() -> None:
@@ -347,7 +405,9 @@ def test_deterministic_mail_document_agent_skips_personal_email() -> None:
     assert result.candidates == []
 
 
-def test_deterministic_mail_document_agent_extracts_calendar_meeting_as_timeline_event() -> None:
+def test_deterministic_mail_document_agent_extracts_calendar_meeting_as_timeline_event() -> (
+    None
+):
     packet = EvidencePacket(
         source_type='mail_document',
         source_window='mail-docs-calendar:meeting',
@@ -391,11 +451,19 @@ def test_deterministic_mail_document_agent_extracts_calendar_meeting_as_timeline
     assert candidate.payload_fields['calendar_end'] == '2026-06-10T11:00:00+09:00'
     assert candidate.payload_fields['calendar_location'] == 'Meet'
     assert candidate.payload_fields['calendar_organizer'] == 'lead@example.com'
-    assert candidate.payload_fields['calendar_attendee_summary'] == 'example.com, customer.co.kr'
-    assert candidate.payload_fields['event_context_key'] == 'event-launch:2026-05-13T09:00:00Z'
+    assert (
+        candidate.payload_fields['calendar_attendee_summary']
+        == 'example.com, customer.co.kr'
+    )
+    assert (
+        candidate.payload_fields['event_context_key']
+        == 'event-launch:2026-05-13T09:00:00Z'
+    )
 
 
-def test_deterministic_mail_document_agent_extracts_calendar_preparation_as_todo() -> None:
+def test_deterministic_mail_document_agent_extracts_calendar_preparation_as_todo() -> (
+    None
+):
     packet = EvidencePacket(
         source_type='mail_document',
         source_window='mail-docs-calendar:todo',
@@ -436,7 +504,9 @@ def test_deterministic_mail_document_agent_extracts_calendar_preparation_as_todo
     assert candidate.payload_fields['calendar_start'] == '2026-06-03T09:00:00+09:00'
 
 
-def test_deterministic_mail_document_agent_skips_low_signal_personal_calendar_event() -> None:
+def test_deterministic_mail_document_agent_skips_low_signal_personal_calendar_event() -> (
+    None
+):
     packet = EvidencePacket(
         source_type='mail_document',
         source_window='mail-docs-calendar:personal',
@@ -490,7 +560,9 @@ def test_mail_document_llm_prompt_requires_reviewable_business_decision() -> Non
     assert 'personal mail, newsletters, promotions' in prompt
 
 
-def test_deterministic_mail_document_agent_marks_metadata_only_evidence_uncertain() -> None:
+def test_deterministic_mail_document_agent_marks_metadata_only_evidence_uncertain() -> (
+    None
+):
     packet = EvidencePacket(
         source_type='mail_document',
         source_window='mail-docs:drive',
@@ -521,7 +593,9 @@ def test_deterministic_mail_document_agent_marks_metadata_only_evidence_uncertai
     )
 
 
-def test_deterministic_mail_document_agent_marks_unsupported_evidence_uncertain() -> None:
+def test_deterministic_mail_document_agent_marks_unsupported_evidence_uncertain() -> (
+    None
+):
     packet = EvidencePacket(
         source_type='mail_document',
         source_window='mail-docs:drive',
@@ -552,7 +626,9 @@ def test_deterministic_mail_document_agent_marks_unsupported_evidence_uncertain(
     )
 
 
-def test_deterministic_mail_document_agent_extracts_generic_korean_work_assignment() -> None:
+def test_deterministic_mail_document_agent_extracts_generic_korean_work_assignment() -> (
+    None
+):
     packet = EvidencePacket(
         source_type='mail_document',
         source_window='mail-docs:gmail',
@@ -577,14 +653,21 @@ def test_deterministic_mail_document_agent_extracts_generic_korean_work_assignme
     assert candidate.item_type == 'todo'
     assert candidate.title == '고객사 공유본 요청'
     assert candidate.summary == '김하나님, 금요일까지 고객사 공유본을 준비해주세요.'
-    assert candidate.source_snippets == ['김하나님, 금요일까지 고객사 공유본을 준비해주세요.']
+    assert candidate.source_snippets == [
+        '김하나님, 금요일까지 고객사 공유본을 준비해주세요.'
+    ]
     assert candidate.payload_fields['assignee'] == '김하나'
     assert candidate.payload_fields['due_date'] == '금요일'
-    assert candidate.payload_fields['task_summary'] == '김하나님, 금요일까지 고객사 공유본을 준비해주세요.'
+    assert (
+        candidate.payload_fields['task_summary']
+        == '김하나님, 금요일까지 고객사 공유본을 준비해주세요.'
+    )
     assert candidate.payload_fields['evidence_reason']
 
 
-def test_deterministic_mail_document_agent_summarizes_korean_business_request_without_raw_email_header() -> None:
+def test_deterministic_mail_document_agent_summarizes_korean_business_request_without_raw_email_header() -> (
+    None
+):
     packet = EvidencePacket(
         source_type='mail_document',
         source_window='mail-docs:k-tech',

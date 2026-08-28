@@ -50,11 +50,34 @@ def test_langchain_memory_adapter_uses_structured_output_contract() -> None:
     assert response.title == 'Redis decision'
     assert response.item_type == 'decision_record'
     assert response.confidence_score == 0.86
-    assert response.payload_fields == {'decision_summary': 'Redis handles queue progress.'}
+    assert response.payload_fields == {
+        'decision_summary': 'Redis handles queue progress.'
+    }
     assert response.input_tokens > 0
     assert response.output_tokens > 0
     assert chat_model.structured_model.messages[0][0] == 'system'
-    assert 'Use only the provided evidence' in chat_model.structured_model.messages[0][1]
+    assert (
+        'Use only the provided evidence' in chat_model.structured_model.messages[0][1]
+    )
+
+
+def test_memory_langchain_result_records_exact_provider_and_model() -> None:
+    response = LangChainMemoryExtractionModel(
+        chat_model=FakeChatModel(),
+        expected_item_type='decision_record',
+        task_name='decision record extraction',
+        model_name='gpt-5.4-mini-2026-03-17',
+        model_provider='openai',
+        reasoning_effort='none',
+        route_version='auto-review-extraction-route:v1',
+        output_contract_version='decision-record-extraction:v1',
+    ).extract(build_packet())
+
+    assert response.model_provider == 'openai'
+    assert response.model_name == 'gpt-5.4-mini-2026-03-17'
+    assert response.model_reasoning_effort == 'none'
+    assert response.route_version == 'auto-review-extraction-route:v1'
+    assert response.output_contract_version == 'decision-record-extraction:v1'
 
 
 def test_render_memory_extraction_prompt_omits_non_atomic_mandatory_envelope() -> None:
@@ -73,7 +96,9 @@ def test_render_memory_extraction_prompt_omits_non_atomic_mandatory_envelope() -
     assert payload['evidence'] == []
 
 
-def build_packet(text: str = 'Decision: Redis queue progress moves into company memory.') -> EvidencePacket:
+def build_packet(
+    text: str = 'Decision: Redis queue progress moves into company memory.',
+) -> EvidencePacket:
     return EvidencePacket(
         source_type='company_memory',
         source_window='test:structured-output',

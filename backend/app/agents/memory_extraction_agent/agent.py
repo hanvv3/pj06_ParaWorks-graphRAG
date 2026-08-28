@@ -71,6 +71,11 @@ class MemoryExtractionModelResponse:
     output_tokens: int
     payload_fields: dict[str, str]
     uncertainty_reason: str | None = None
+    model_provider: str | None = None
+    model_name: str | None = None
+    model_reasoning_effort: str | None = None
+    route_version: str | None = None
+    output_contract_version: str | None = None
 
 
 class MemoryExtractionModel(Protocol):
@@ -119,7 +124,9 @@ class DeterministicDecisionRecordModel:
     def extract(self, packet: EvidencePacket) -> MemoryExtractionModelResponse:
         combined_text = _combined_text(packet)
         title = '의사결정 후보'
-        decision_summary = _first_sentence(combined_text) or '의사결정 후보가 감지되었습니다.'
+        decision_summary = (
+            _first_sentence(combined_text) or '의사결정 후보가 감지되었습니다.'
+        )
         if 'Redis' in combined_text and 'PostgreSQL' in combined_text:
             title = 'Redis and PostgreSQL responsibility decision'
             decision_summary = 'Redis는 작업 상태 공유에 사용하고 PostgreSQL은 영구 기록 저장소로 유지하는 결정 후보입니다.'
@@ -142,13 +149,23 @@ class DeterministicTodoModel:
         title = assignment.get('title') or '후속 업무 후보'
         priority = 'medium'
         priority_reason = '후속 확인이 필요한 업무 항목입니다.'
-        if 'TODO' in combined_text or '권한' in combined_text or '런칭' in combined_text:
+        if (
+            'TODO' in combined_text
+            or '권한' in combined_text
+            or '런칭' in combined_text
+        ):
             title = 'Verify launch permission readiness'
             priority = 'high'
-            priority_reason = '런칭 전 OAuth/권한 검증은 제품 신뢰성과 보안에 직접 영향을 줍니다.'
+            priority_reason = (
+                '런칭 전 OAuth/권한 검증은 제품 신뢰성과 보안에 직접 영향을 줍니다.'
+            )
         if assignment:
             priority = 'high' if assignment.get('due_date') else priority
-            priority_reason = assignment.get('task_summary') or assignment.get('evidence_sentence') or priority_reason
+            priority_reason = (
+                assignment.get('task_summary')
+                or assignment.get('evidence_sentence')
+                or priority_reason
+            )
         return _response(
             packet=packet,
             item_type='todo',
@@ -190,7 +207,7 @@ class _MemoryExtractionAgent:
             output_tokens=model_response.output_tokens,
         )
         cost = estimate_agent_run_cost(
-            model_name=MEMORY_EXTRACTION_MODEL_NAME,
+            model_name=model_response.model_name or MEMORY_EXTRACTION_MODEL_NAME,
             token_usage=token_usage,
             input_cost_per_1m=self.input_cost_per_1m,
             output_cost_per_1m=self.output_cost_per_1m,
@@ -202,6 +219,10 @@ class _MemoryExtractionAgent:
             candidates=[candidate],
             cost=cost,
             cache_key=build_evidence_cache_key(packet, self.prompt_version),
+            model_provider=model_response.model_provider,
+            model_reasoning_effort=model_response.model_reasoning_effort,
+            route_version=model_response.route_version,
+            output_contract_version=model_response.output_contract_version,
         )
 
 
@@ -217,7 +238,9 @@ class HistoryAgent(_MemoryExtractionAgent):
 
 class DecisionRecordAgent(_MemoryExtractionAgent):
     def __init__(self, model: MemoryExtractionModel) -> None:
-        super().__init__(DECISION_RECORD_AGENT_NAME, DECISION_RECORD_AGENT_PROMPT_VERSION, model)
+        super().__init__(
+            DECISION_RECORD_AGENT_NAME, DECISION_RECORD_AGENT_PROMPT_VERSION, model
+        )
 
 
 class TodoAgent(_MemoryExtractionAgent):
@@ -237,13 +260,20 @@ class ValidationAgent:
         if candidate.confidence_score < self.min_confidence:
             return False
         if candidate.item_type == 'decision_record':
-            return bool(candidate.payload_fields.get('decision_summary') or candidate.summary)
+            return bool(
+                candidate.payload_fields.get('decision_summary') or candidate.summary
+            )
         if candidate.item_type == 'timeline_event':
-            return bool(candidate.payload_fields.get('result_summary') or candidate.summary)
+            return bool(
+                candidate.payload_fields.get('result_summary') or candidate.summary
+            )
         if candidate.item_type == 'history_event':
             return bool(candidate.payload_fields.get('reason') or candidate.summary)
         if candidate.item_type == 'todo':
-            return bool(candidate.payload_fields.get('priority') and candidate.payload_fields.get('priority_reason'))
+            return bool(
+                candidate.payload_fields.get('priority')
+                and candidate.payload_fields.get('priority_reason')
+            )
         return False
 
 
@@ -280,7 +310,9 @@ def _extract_assignment(packet: EvidencePacket) -> dict[str, str]:
             'task_summary': (task_summary or sentence or text[:160]).strip()[:500],
             'evidence_sentence': (sentence or message.source_snippet).strip()[:500],
             'evidence_reason': '담당자, 기한, 요청/검토/준비 같은 업무 지시 표현이 원문에 포함되어 있습니다.',
-            'source_type': str(message.metadata.get('source_type') or packet.source_type),
+            'source_type': str(
+                message.metadata.get('source_type') or packet.source_type
+            ),
         }
         assignee = _extract_assignee(text)
         due_date = _extract_due_date(text, message.metadata)
@@ -326,7 +358,9 @@ def _assignment_sentence(text: str) -> str:
     for line in lines:
         if _looks_like_work_assignment(line):
             return line
-    sentences = [part.strip() for part in re.split(r'(?<=[.!?。])\s+', text) if part.strip()]
+    sentences = [
+        part.strip() for part in re.split(r'(?<=[.!?。])\s+', text) if part.strip()
+    ]
     for sentence in sentences:
         if _looks_like_work_assignment(sentence):
             return sentence
@@ -339,7 +373,9 @@ def _extract_subject(text: str) -> str:
 
 
 def _extract_assignee(text: str) -> str:
-    label_match = re.search(r'(?:담당|owner|assignee)\s*[:：]\s*([^\n,]+)', text, re.IGNORECASE)
+    label_match = re.search(
+        r'(?:담당|owner|assignee)\s*[:：]\s*([^\n,]+)', text, re.IGNORECASE
+    )
     if label_match:
         return _clean_assignee(label_match.group(1))
     nim_match = re.search(r'([가-힣A-Za-z0-9._+-]{2,40})님[,은는\s]', text)
@@ -353,10 +389,15 @@ def _clean_assignee(value: str) -> str:
 
 
 def _extract_due_date(text: str, metadata: dict) -> str:
-    label_match = re.search(r'(?:기한|마감|due(?: date)?)\s*[:：]\s*([^\n,]+)', text, re.IGNORECASE)
+    label_match = re.search(
+        r'(?:기한|마감|due(?: date)?)\s*[:：]\s*([^\n,]+)', text, re.IGNORECASE
+    )
     if label_match:
         return label_match.group(1).strip()
-    until_match = re.search(r'((?:\d{4}[-./]\d{1,2}[-./]\d{1,2})|(?:이번\s*)?[월화수목금토일]요일|오늘|내일)\s*까지', text)
+    until_match = re.search(
+        r'((?:\d{4}[-./]\d{1,2}[-./]\d{1,2})|(?:이번\s*)?[월화수목금토일]요일|오늘|내일)\s*까지',
+        text,
+    )
     if until_match:
         return until_match.group(1).strip()
     start = metadata.get('start')
@@ -369,11 +410,18 @@ def _extract_task_summary(text: str, fallback_sentence: str) -> str:
     task_match = re.search(r'(?:업무|task)\s*[:：]\s*([^\n]+)', text, re.IGNORECASE)
     if task_match:
         return task_match.group(1).strip()
-    return re.sub(r'(?im)^subject:\s*.+$', '', fallback_sentence).strip() or fallback_sentence
+    return (
+        re.sub(r'(?im)^subject:\s*.+$', '', fallback_sentence).strip()
+        or fallback_sentence
+    )
 
 
 def _extract_project_tag(text: str) -> str:
-    match = re.search(r'(프로젝트\s*[A-Za-z0-9가-힣_-]+|Project\s+[A-Za-z0-9가-힣_-]+)', text, re.IGNORECASE)
+    match = re.search(
+        r'(프로젝트\s*[A-Za-z0-9가-힣_-]+|Project\s+[A-Za-z0-9가-힣_-]+)',
+        text,
+        re.IGNORECASE,
+    )
     return match.group(1).strip() if match else ''
 
 

@@ -72,11 +72,17 @@ class LangChainMailDocumentAgentModel:
         model_name: str,
         chat_model: Any,
         max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
+        reasoning_effort: str | None = None,
+        route_version: str | None = None,
+        output_contract_version: str | None = None,
     ) -> None:
         self.provider = provider
         self.model_name = model_name
         self.chat_model = chat_model
         self.max_input_chars = max_input_chars
+        self.reasoning_effort = reasoning_effort
+        self.route_version = route_version
+        self.output_contract_version = output_contract_version
 
     def extract(self, packet: EvidencePacket) -> MailDocumentAgentModelResponse:
         invocation = render_mail_document_langchain_invocation(
@@ -87,23 +93,33 @@ class LangChainMailDocumentAgentModel:
         try:
             response = self.chat_model.invoke(messages)
         except Exception as exc:  # pragma: no cover - provider-specific branch
-            raise MailDocumentLlmProviderError(f'{self.provider} provider failed: {exc}') from exc
+            raise MailDocumentLlmProviderError(
+                f'{self.provider} provider failed: {exc}'
+            ) from exc
 
         payload = _parse_json_content(_response_content(response))
         input_tokens, output_tokens = _usage_tokens(response, messages, payload)
 
         return MailDocumentAgentModelResponse(
             title=str(payload.get('title') or 'Mail/Docs LLM candidate')[:200],
-            summary=str(payload.get('summary') or 'Evidence was summarized by the LLM.')[:1200],
+            summary=str(
+                payload.get('summary') or 'Evidence was summarized by the LLM.'
+            )[:1200],
             item_type=_safe_item_type(payload.get('item_type')),
             confidence_score=_safe_confidence(payload.get('confidence_score')),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             model_name=self.model_name,
             uncertainty_reason=payload.get('uncertainty_reason'),
-            is_business_related=_safe_bool(payload.get('is_business_related', True), default=True),
+            is_business_related=_safe_bool(
+                payload.get('is_business_related', True), default=True
+            ),
             project_tag=payload.get('project_tag'),
             structured_data=_safe_structured_data(payload.get('structured_data')),
+            model_provider=self.provider,
+            model_reasoning_effort=self.reasoning_effort,
+            route_version=self.route_version,
+            output_contract_version=self.output_contract_version,
         )
 
 
@@ -122,7 +138,9 @@ class FallbackMailDocumentAgentModel:
             except MailDocumentLlmProviderError as exc:
                 provider_name = getattr(provider, 'provider', 'unknown')
                 errors.append(f'{provider_name}: {exc}')
-        raise MailDocumentLlmProviderError('; '.join(errors) or 'no LLM providers configured')
+        raise MailDocumentLlmProviderError(
+            '; '.join(errors) or 'no LLM providers configured'
+        )
 
 
 def build_mail_document_llm_preflight(
@@ -194,7 +212,9 @@ def build_langchain_mail_document_agent_model(
     settings: MailDocumentLlmSettings,
 ) -> FallbackMailDocumentAgentModel:
     providers = []
-    for provider in _available_providers(_clean_provider_order(settings.provider_order), settings):
+    for provider in _available_providers(
+        _clean_provider_order(settings.provider_order), settings
+    ):
         if provider in OPENAI_COMPATIBLE_PROVIDERS:
             providers.append(_build_openai_model(settings, provider=provider))
         elif provider == 'gemini':
@@ -225,7 +245,12 @@ def _render_mail_docs_prompt(
     return json.dumps(
         {
             'task': 'Extract structured output and project tags from mail/document evidence for human review.',
-            'allowed_item_types': ['history_event', 'decision_record', 'timeline_event', 'todo'],
+            'allowed_item_types': [
+                'history_event',
+                'decision_record',
+                'timeline_event',
+                'todo',
+            ],
             'requirements': [
                 'Use only the provided evidence.',
                 'The title and summary must be written in Korean.',
@@ -293,11 +318,15 @@ def _build_openai_model(
     )
 
 
-def _build_gemini_model(settings: MailDocumentLlmSettings) -> LangChainMailDocumentAgentModel:
+def _build_gemini_model(
+    settings: MailDocumentLlmSettings,
+) -> LangChainMailDocumentAgentModel:
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI
     except ImportError as exc:  # pragma: no cover - depends on optional package
-        raise MailDocumentLlmProviderError('langchain-google-genai is not installed') from exc
+        raise MailDocumentLlmProviderError(
+            'langchain-google-genai is not installed'
+        ) from exc
     return LangChainMailDocumentAgentModel(
         provider='gemini',
         model_name=settings.gemini_model,
@@ -328,7 +357,9 @@ def _preflight_response(
         'action': action,
         'reason': reason,
         'budget_status': budget_status,
-        'model_name': _model_for_provider(available_providers[0], settings) if available_providers else None,
+        'model_name': _model_for_provider(available_providers[0], settings)
+        if available_providers
+        else None,
         'provider_order': list(provider_order),
         'available_providers': available_providers,
         'estimated_input_tokens': token_usage.input_tokens,
@@ -342,7 +373,9 @@ def _preflight_response(
     }
 
 
-def _estimated_token_usage(packet: EvidencePacket, settings: MailDocumentLlmSettings) -> TokenUsage:
+def _estimated_token_usage(
+    packet: EvidencePacket, settings: MailDocumentLlmSettings
+) -> TokenUsage:
     max_input_chars = _effective_max_input_chars(settings)
     prompt = _render_legacy_mail_budget_prompt(
         packet,
@@ -350,7 +383,11 @@ def _estimated_token_usage(packet: EvidencePacket, settings: MailDocumentLlmSett
     )
     affordable_prompt_chars = _affordable_prompt_chars(settings)
     for _ in range(4):
-        if affordable_prompt_chars is None or len(prompt) <= affordable_prompt_chars or max_input_chars <= 0:
+        if (
+            affordable_prompt_chars is None
+            or len(prompt) <= affordable_prompt_chars
+            or max_input_chars <= 0
+        ):
             break
         overage = len(prompt) - affordable_prompt_chars
         max_input_chars = max(0, max_input_chars - overage - 128)
@@ -441,7 +478,10 @@ def _clean_provider_order(provider_order: tuple[str, ...]) -> tuple[str, ...]:
     cleaned = []
     for provider in provider_order:
         normalized = provider.strip().lower()
-        if normalized in {*OPENAI_COMPATIBLE_PROVIDERS, 'gemini'} and normalized not in seen:
+        if (
+            normalized in {*OPENAI_COMPATIBLE_PROVIDERS, 'gemini'}
+            and normalized not in seen
+        ):
             cleaned.append(normalized)
             seen.add(normalized)
     return tuple(cleaned) or ('openai', 'gemini')
@@ -454,7 +494,10 @@ def _model_for_provider(provider: str, settings: MailDocumentLlmSettings) -> str
 def _response_content(response: Any) -> str:
     content = getattr(response, 'content', response)
     if isinstance(content, list):
-        return ''.join(str(part.get('text', part)) if isinstance(part, dict) else str(part) for part in content)
+        return ''.join(
+            str(part.get('text', part)) if isinstance(part, dict) else str(part)
+            for part in content
+        )
     return str(content)
 
 
@@ -472,8 +515,12 @@ def _parse_json_content(content: str) -> dict[str, Any]:
     return payload
 
 
-def _usage_tokens(response: Any, messages: list[tuple[str, str]], payload: dict[str, Any]) -> tuple[int, int]:
-    usage = getattr(response, 'usage_metadata', None) or getattr(response, 'response_metadata', {}).get('token_usage', {})
+def _usage_tokens(
+    response: Any, messages: list[tuple[str, str]], payload: dict[str, Any]
+) -> tuple[int, int]:
+    usage = getattr(response, 'usage_metadata', None) or getattr(
+        response, 'response_metadata', {}
+    ).get('token_usage', {})
     input_tokens = usage.get('input_tokens') or usage.get('prompt_tokens')
     output_tokens = usage.get('output_tokens') or usage.get('completion_tokens')
     if input_tokens is None:
@@ -486,7 +533,11 @@ def _usage_tokens(response: Any, messages: list[tuple[str, str]], payload: dict[
 
 def _safe_item_type(raw_item_type: Any) -> str:
     item_type = str(raw_item_type or 'history_event')
-    return item_type if item_type in {'history_event', 'decision_record', 'timeline_event', 'todo'} else 'history_event'
+    return (
+        item_type
+        if item_type in {'history_event', 'decision_record', 'timeline_event', 'todo'}
+        else 'history_event'
+    )
 
 
 def _safe_confidence(raw_confidence: Any) -> float:

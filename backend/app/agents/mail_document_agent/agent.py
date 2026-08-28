@@ -51,6 +51,7 @@ _RESERVED_REVIEW_PAYLOAD_FIELDS = {
 @dataclass(frozen=True)
 class MailDocumentAgentModelResponse:
     """에이전트 모델의 추출 결과 데이터 구조"""
+
     title: str
     summary: str
     item_type: str
@@ -62,16 +63,22 @@ class MailDocumentAgentModelResponse:
     is_business_related: bool = True
     project_tag: str | None = None
     structured_data: dict[str, Any] | None = None
+    model_provider: str | None = None
+    model_reasoning_effort: str | None = None
+    route_version: str | None = None
+    output_contract_version: str | None = None
 
 
 class MailDocumentAgentModel(Protocol):
     """에이전트 모델이 구현해야 할 인터페이스(프로토콜)"""
+
     def extract(self, packet: EvidencePacket) -> MailDocumentAgentModelResponse:
         raise NotImplementedError
 
 
 class DeterministicMailDocumentAgentModel:
     """LLM 없이 규칙 기반으로 정보를 추출하는 테스트용 결정론적 모델"""
+
     def extract(self, packet: EvidencePacket) -> MailDocumentAgentModelResponse:
         combined_text = '\n'.join(message.text for message in packet.messages)
         input_tokens = max(1, len(combined_text) // 4)
@@ -86,7 +93,9 @@ class DeterministicMailDocumentAgentModel:
                 uncertainty_reason='personal_or_low_signal_evidence',
                 is_business_related=False,
             )
-        calendar_response = _extract_calendar_candidate(packet, input_tokens=input_tokens)
+        calendar_response = _extract_calendar_candidate(
+            packet, input_tokens=input_tokens
+        )
         if calendar_response is not None:
             return calendar_response
         title = '메일 및 문서 히스토리 후보'
@@ -97,7 +106,11 @@ class DeterministicMailDocumentAgentModel:
         assignment = _extract_assignment(packet)
         if assignment:
             title = str(assignment.get('title') or '업무 지시 후보')
-            summary = str(assignment.get('task_summary') or assignment.get('evidence_sentence') or summary)
+            summary = str(
+                assignment.get('task_summary')
+                or assignment.get('evidence_sentence')
+                or summary
+            )
             item_type = 'todo'
             structured_data = assignment
 
@@ -115,7 +128,10 @@ class DeterministicMailDocumentAgentModel:
             title = '분기별 예산 및 매출 전략 업데이트됨'
             summary = '파싱된 문서 증거에 따르면 분기별 예산 및 채용 계획이 업데이트되었습니다.'
             item_type = 'history_event'
-        elif 'contract review' in combined_text.lower() or 'due friday' in combined_text.lower():
+        elif (
+            'contract review' in combined_text.lower()
+            or 'due friday' in combined_text.lower()
+        ):
             title = '계약서 검토 일정 예약됨'
             summary = '이번 주 금요일까지 계약서 검토를 완료해야 한다는 내용이 이메일/문서에서 추출되었습니다.'
             item_type = 'todo'
@@ -123,7 +139,8 @@ class DeterministicMailDocumentAgentModel:
                 **structured_data,
                 'task_summary': summary,
                 'due_date': structured_data.get('due_date') or '금요일',
-                'evidence_reason': structured_data.get('evidence_reason') or '기한이 포함된 업무 지시 표현이 있습니다.',
+                'evidence_reason': structured_data.get('evidence_reason')
+                or '기한이 포함된 업무 지시 표현이 있습니다.',
             }
         elif packet.messages:
             summary = _business_context_summary(packet.messages[0])
@@ -152,22 +169,27 @@ class DeterministicMailDocumentAgentModel:
 @dataclass(frozen=True)
 class MailDocumentAgent:
     """메일 및 문서 데이터를 처리하여 검토 후보를 생성하는 에이전트 클래스"""
+
     model: MailDocumentAgentModel
     input_cost_per_1m: float = 0.15
     output_cost_per_1m: float = 0.60
 
     def run(self, packet: EvidencePacket) -> AgentRunResult:
         """증거 패킷을 입력받아 모델을 실행하고 결과를 AgentRunResult로 반환"""
-        model_response, candidates, project_routing_result = run_mail_document_agent_workflow(
-            packet=packet,
-            model=self.model,
-            normalize_item_type=_normalized_item_type,
-            safe_payload_fields=_safe_payload_fields,
+        model_response, candidates, project_routing_result = (
+            run_mail_document_agent_workflow(
+                packet=packet,
+                model=self.model,
+                normalize_item_type=_normalized_item_type,
+                safe_payload_fields=_safe_payload_fields,
+            )
         )
         # 비용 및 토큰 사용량 기록
         token_usage = TokenUsage(
-            input_tokens=model_response.input_tokens + project_routing_result.input_tokens,
-            output_tokens=model_response.output_tokens + project_routing_result.output_tokens,
+            input_tokens=model_response.input_tokens
+            + project_routing_result.input_tokens,
+            output_tokens=model_response.output_tokens
+            + project_routing_result.output_tokens,
         )
         cost = estimate_agent_run_cost(
             model_name=model_response.model_name or MAIL_DOCUMENT_AGENT_MODEL_NAME,
@@ -185,6 +207,10 @@ class MailDocumentAgent:
             candidates=candidates,
             cost=cost,
             cache_key=cache_key,
+            model_provider=model_response.model_provider,
+            model_reasoning_effort=model_response.model_reasoning_effort,
+            route_version=model_response.route_version,
+            output_contract_version=model_response.output_contract_version,
         )
 
 
@@ -204,7 +230,7 @@ def _parser_uncertainty_reason(packet: EvidencePacket) -> str | None:
         status = message.metadata.get('parser_status')
         reason = message.metadata.get('parser_status_reason') or 'unknown_reason'
         details.append(f'{message.source_id}={status}({reason})')
-    return f"Some document evidence is not body-parsed: {', '.join(details)}"
+    return f'Some document evidence is not body-parsed: {", ".join(details)}'
 
 
 def _parser_uncertainty_confidence(packet: EvidencePacket) -> float:
@@ -215,8 +241,8 @@ def _parser_uncertainty_confidence(packet: EvidencePacket) -> float:
         if message.metadata.get('source_type') == 'drive'
     }
     if 'unsupported' in statuses:
-        return 0.3 # 지원되지 않는 형식인 경우 낮은 신뢰도
-    return 0.42 # 일반적인 파싱 오류/제한 사항인 경우 중간 신뢰도
+        return 0.3  # 지원되지 않는 형식인 경우 낮은 신뢰도
+    return 0.42  # 일반적인 파싱 오류/제한 사항인 경우 중간 신뢰도
 
 
 def _normalized_item_type(item_type: str) -> str:
@@ -254,7 +280,9 @@ def _extract_calendar_candidate(
     lowered = text.lower()
     status = str(message.metadata.get('event_status') or '').lower()
     if status and status not in {'confirmed', 'tentative'}:
-        return _calendar_not_reviewable_response(input_tokens=input_tokens, reason='calendar_event_not_confirmed')
+        return _calendar_not_reviewable_response(
+            input_tokens=input_tokens, reason='calendar_event_not_confirmed'
+        )
 
     if _looks_like_calendar_action(text):
         summary = _calendar_summary_sentence(message)
@@ -303,11 +331,30 @@ def _extract_calendar_candidate(
             },
         )
 
-    personal_cues = ('dentist', 'doctor', 'personal', 'private', 'birthday', 'lunch', 'vacation', 'holiday')
-    business_cues = ('project', 'customer', 'client', 'launch', 'milestone', 'proposal', 'contract', 'meeting')
+    personal_cues = (
+        'dentist',
+        'doctor',
+        'personal',
+        'private',
+        'birthday',
+        'lunch',
+        'vacation',
+        'holiday',
+    )
+    business_cues = (
+        'project',
+        'customer',
+        'client',
+        'launch',
+        'milestone',
+        'proposal',
+        'contract',
+        'meeting',
+    )
     reason = (
         'personal_or_low_signal_calendar_event'
-        if any(cue in lowered for cue in personal_cues) and not any(cue in lowered for cue in business_cues)
+        if any(cue in lowered for cue in personal_cues)
+        and not any(cue in lowered for cue in business_cues)
         else 'low_signal_calendar_event'
     )
     return _calendar_not_reviewable_response(input_tokens=input_tokens, reason=reason)
@@ -327,7 +374,10 @@ def _calendar_not_reviewable_response(
         output_tokens=32,
         uncertainty_reason=reason,
         is_business_related=False,
-        structured_data={'reviewability_decision': 'not_reviewable', 'summary_quality': reason},
+        structured_data={
+            'reviewability_decision': 'not_reviewable',
+            'summary_quality': reason,
+        },
     )
 
 
@@ -335,9 +385,12 @@ def _calendar_payload_fields(message: EvidenceMessage) -> dict[str, str]:
     metadata = message.metadata
     fields = {
         'calendar_id': _metadata_string(metadata, 'calendar_id'),
-        'calendar_name': _metadata_string(metadata, 'calendar_summary') or _metadata_string(metadata, 'calendar_name'),
-        'calendar_start': _metadata_string(metadata, 'event_start') or _metadata_string(metadata, 'start'),
-        'calendar_end': _metadata_string(metadata, 'event_end') or _metadata_string(metadata, 'end'),
+        'calendar_name': _metadata_string(metadata, 'calendar_summary')
+        or _metadata_string(metadata, 'calendar_name'),
+        'calendar_start': _metadata_string(metadata, 'event_start')
+        or _metadata_string(metadata, 'start'),
+        'calendar_end': _metadata_string(metadata, 'event_end')
+        or _metadata_string(metadata, 'end'),
         'calendar_location': _metadata_string(metadata, 'location'),
         'calendar_organizer': _metadata_string(metadata, 'organizer_email'),
         'calendar_attendee_summary': _calendar_attendee_summary(metadata),
@@ -406,20 +459,33 @@ def _looks_like_calendar_timeline_event(text: str) -> bool:
 
 
 def _calendar_title(message: EvidenceMessage) -> str:
-    first_line = next((line.strip() for line in message.text.splitlines() if line.strip()), '')
+    first_line = next(
+        (line.strip() for line in message.text.splitlines() if line.strip()), ''
+    )
     return first_line[:200] if first_line else 'Calendar event candidate'
 
 
 def _calendar_summary_sentence(message: EvidenceMessage) -> str:
     summary = _business_context_summary(message)
-    start = _metadata_string(message.metadata, 'event_start') or _metadata_string(message.metadata, 'start')
+    start = _metadata_string(message.metadata, 'event_start') or _metadata_string(
+        message.metadata, 'start'
+    )
     calendar_name = _metadata_string(message.metadata, 'calendar_summary')
-    suffix = ' '.join(part for part in [f'Calendar: {calendar_name}' if calendar_name else '', f'Start: {start}' if start else ''] if part)
+    suffix = ' '.join(
+        part
+        for part in [
+            f'Calendar: {calendar_name}' if calendar_name else '',
+            f'Start: {start}' if start else '',
+        ]
+        if part
+    )
     return f'{summary} {suffix}'.strip()[:500]
 
 
 def _calendar_due_date(metadata: dict[str, Any]) -> str:
-    start = _metadata_string(metadata, 'event_start') or _metadata_string(metadata, 'start')
+    start = _metadata_string(metadata, 'event_start') or _metadata_string(
+        metadata, 'start'
+    )
     return start.split('T', 1)[0] if start else ''
 
 
@@ -438,10 +504,14 @@ def _extract_assignment(packet: EvidencePacket) -> dict[str, str]:
             'task_summary': (task_summary or sentence or text[:160]).strip()[:500],
             'evidence_sentence': (sentence or message.source_snippet).strip()[:500],
             'evidence_reason': '담당자, 기한, 요청/검토/준비 같은 업무 지시 표현이 원문에 포함되어 있습니다.',
-            'source_type': str(message.metadata.get('source_type') or packet.source_type),
+            'source_type': str(
+                message.metadata.get('source_type') or packet.source_type
+            ),
             'business_context': _business_context_summary(message),
             'action_required': 'true',
-            'recommended_next_step': _recommended_next_step(task_summary or sentence, text),
+            'recommended_next_step': _recommended_next_step(
+                task_summary or sentence, text
+            ),
             'summary_quality': 'actionable',
         }
         source_subject = _extract_subject(text)
@@ -550,7 +620,9 @@ def _assignment_sentence(text: str) -> str:
     for paragraph in paragraphs:
         if _looks_like_work_assignment(paragraph):
             return paragraph
-    sentences = [part.strip() for part in re.split(r'(?<=[.!?。])\s+', text) if part.strip()]
+    sentences = [
+        part.strip() for part in re.split(r'(?<=[.!?。])\s+', text) if part.strip()
+    ]
     for sentence in sentences:
         if _looks_like_work_assignment(sentence):
             return sentence
@@ -614,12 +686,17 @@ def _is_header_line(line: str) -> bool:
 
 
 def _extract_counterparty(text: str) -> str:
-    match = re.search(r'([A-Za-z0-9가-힣]+(?:\s+[A-Za-z0-9가-힣]+)*\s*(?:솔루션즈|테크|컴퍼니|주식회사|팀))', text)
+    match = re.search(
+        r'([A-Za-z0-9가-힣]+(?:\s+[A-Za-z0-9가-힣]+)*\s*(?:솔루션즈|테크|컴퍼니|주식회사|팀))',
+        text,
+    )
     return match.group(1).strip() if match else ''
 
 
 def _extract_assignee(text: str) -> str:
-    label_match = re.search(r'(?:담당|owner|assignee)\s*[:：]\s*([^\n,]+)', text, re.IGNORECASE)
+    label_match = re.search(
+        r'(?:담당|owner|assignee)\s*[:：]\s*([^\n,]+)', text, re.IGNORECASE
+    )
     if label_match:
         return _clean_assignee(label_match.group(1))
     nim_match = re.search(r'([가-힣A-Za-z0-9._+-]{2,40})님[,은는\s]', text)
@@ -633,10 +710,15 @@ def _clean_assignee(value: str) -> str:
 
 
 def _extract_due_date(text: str, metadata: dict) -> str:
-    label_match = re.search(r'(?:기한|마감|due(?: date)?)\s*[:：]\s*([^\n,]+)', text, re.IGNORECASE)
+    label_match = re.search(
+        r'(?:기한|마감|due(?: date)?)\s*[:：]\s*([^\n,]+)', text, re.IGNORECASE
+    )
     if label_match:
         return label_match.group(1).strip()
-    until_match = re.search(r'((?:\d{4}[-./]\d{1,2}[-./]\d{1,2})|(?:이번\s*)?[월화수목금토일]요일|오늘|내일)\s*까지', text)
+    until_match = re.search(
+        r'((?:\d{4}[-./]\d{1,2}[-./]\d{1,2})|(?:이번\s*)?[월화수목금토일]요일|오늘|내일)\s*까지',
+        text,
+    )
     if until_match:
         return until_match.group(1).strip()
     start = metadata.get('start')
@@ -654,5 +736,9 @@ def _extract_task_summary(text: str, fallback_sentence: str) -> str:
 
 
 def _extract_project_tag(text: str) -> str:
-    match = re.search(r'(프로젝트\s*[A-Za-z0-9가-힣_-]+|Project\s+[A-Za-z0-9가-힣_-]+)', text, re.IGNORECASE)
+    match = re.search(
+        r'(프로젝트\s*[A-Za-z0-9가-힣_-]+|Project\s+[A-Za-z0-9가-힣_-]+)',
+        text,
+        re.IGNORECASE,
+    )
     return match.group(1).strip() if match else ''

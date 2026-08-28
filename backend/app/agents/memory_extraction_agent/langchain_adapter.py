@@ -32,12 +32,20 @@ class LangChainMemoryExtractionModel:
         task_name: str,
         model_name: str,
         max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
+        model_provider: str | None = None,
+        reasoning_effort: str | None = None,
+        route_version: str | None = None,
+        output_contract_version: str | None = None,
     ) -> None:
         self.chat_model = chat_model
         self.expected_item_type = expected_item_type
         self.task_name = task_name
         self.model_name = model_name
         self.max_input_chars = max_input_chars
+        self.model_provider = model_provider
+        self.reasoning_effort = reasoning_effort
+        self.route_version = route_version
+        self.output_contract_version = output_contract_version
 
     def extract(self, packet: EvidencePacket) -> MemoryExtractionModelResponse:
         invocation = render_memory_extraction_langchain_invocation(
@@ -62,6 +70,11 @@ class LangChainMemoryExtractionModel:
             output_tokens=max(1, (len(output.title) + len(summary)) // 4),
             payload_fields=output.payload_fields,
             uncertainty_reason=output.uncertainty_reason,
+            model_provider=self.model_provider,
+            model_name=self.model_name,
+            model_reasoning_effort=self.reasoning_effort,
+            route_version=self.route_version,
+            output_contract_version=self.output_contract_version,
         )
 
 
