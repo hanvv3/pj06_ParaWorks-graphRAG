@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
+from backend.app.agent_runtime.canonical_sources import build_keyed_fingerprint
 from backend.app.core.config import get_settings
 from backend.app.core.demo_auth import (
     USERS,
@@ -47,6 +48,9 @@ from backend.app.review.transitions import (
     ReviewTransitionService,
 )
 from backend.app.schemas.auto_review import AUTO_REVIEW_POLICY_VERSION
+from backend.app.schemas.review_workflow import (
+    COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+)
 from backend.app.services.audit import record_review_resolution_audit
 
 
@@ -156,6 +160,23 @@ def _seed_bound_item(db: Session) -> tuple[ReviewItem, Source]:
     )
     db.add_all([workflow_ref, item])
     db.flush()
+    thread.evidence_version_hash = build_keyed_fingerprint(
+        [
+            {
+                'source_type': workflow_ref.canonical_source_type,
+                'canonical_table': workflow_ref.canonical_table,
+                'canonical_row_id': workflow_ref.canonical_row_id,
+                'document_version_id': workflow_ref.document_version_id,
+                'external_revision': workflow_ref.external_revision,
+                'content_signature': workflow_ref.content_signature,
+                'permission_level': workflow_ref.permission_level_snapshot,
+                'content_fingerprint': workflow_ref.content_fingerprint,
+            }
+        ],
+        settings=get_settings(),
+        schema_version='review-evidence-versions:v1',
+        policy_version=COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+    )
     db.add(
         ReviewItemEvidenceRef(
             review_item_id=item.id,

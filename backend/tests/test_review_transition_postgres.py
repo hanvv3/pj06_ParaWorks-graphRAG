@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session, sessionmaker
 
+from backend.app.agent_runtime.canonical_sources import build_keyed_fingerprint
 from backend.app.api.v1.review import (
     approve_review_item,
     reject_review_item,
@@ -38,6 +39,8 @@ from backend.app.models import (
     Source,
     TimelineEvent,
     Todo,
+    TrustedKnowledgeApprovalLink,
+    TrustedKnowledgeFingerprint,
 )
 from backend.app.review.actors import human_review_actor
 from backend.app.review.transitions import (
@@ -46,6 +49,9 @@ from backend.app.review.transitions import (
     ReviewTransitionService,
 )
 from backend.app.schemas.review import ReviewEvidenceRequest
+from backend.app.schemas.review_workflow import (
+    COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+)
 
 _ISOLATED_DATABASE_ERROR = 'isolated PostgreSQL test database required'
 _NON_TEST_DATABASES = frozenset({
@@ -142,6 +148,12 @@ def postgres_transition_harness(
             autocommit=False,
             expire_on_commit=False,
         )
+        harness_settings = Settings(
+            _env_file=None,
+            paraworks_demo_mode=True,
+            paraworks_database_url=database_url,
+            database_url=database_url,
+        )
         with factory() as db:
             source = Source(
                 source_type='drive',
@@ -202,17 +214,30 @@ def postgres_transition_harness(
                 content_fingerprint='d' * 64,
             )
             db.add(evidence_ref)
+            db.flush()
+            thread.evidence_version_hash = build_keyed_fingerprint(
+                [
+                    {
+                        'source_type': evidence_ref.canonical_source_type,
+                        'canonical_table': evidence_ref.canonical_table,
+                        'canonical_row_id': evidence_ref.canonical_row_id,
+                        'document_version_id': evidence_ref.document_version_id,
+                        'external_revision': evidence_ref.external_revision,
+                        'content_signature': evidence_ref.content_signature,
+                        'permission_level': evidence_ref.permission_level_snapshot,
+                        'content_fingerprint': evidence_ref.content_fingerprint,
+                    }
+                ],
+                settings=harness_settings,
+                schema_version='review-evidence-versions:v1',
+                policy_version=COMPANY_MEMORY_SELECTION_POLICY_VERSION,
+            )
             db.commit()
             evidence_ref_id = evidence_ref.id
         harness = _TransitionHarness(
             engine=engine,
             session_factory=factory,
-            settings=Settings(
-                _env_file=None,
-                paraworks_demo_mode=True,
-                paraworks_database_url=database_url,
-                database_url=database_url,
-            ),
+            settings=harness_settings,
             workflow_thread_id=workflow_thread_id,
             workflow_evidence_ref_id=evidence_ref_id,
             source_id=source.id,
@@ -240,6 +265,42 @@ def _cleanup_exact_rows(harness: _TransitionHarness) -> None:
             ).all()
         )
         if review_ids:
+            approval_ids = tuple(
+                db.scalars(
+                    select(TrustedKnowledgeApprovalLink.id).where(
+                        TrustedKnowledgeApprovalLink.review_item_id.in_(review_ids)
+                    )
+                ).all()
+            )
+            if approval_ids:
+                # C.5 approval/evidence provenance is database-enforced append-only.
+                # The suite uses a freshly created disposable database, so retain
+                # the complete graph here and drop that exact database after the run.
+                db.rollback()
+                harness.engine.dispose()
+                return
+            target_pairs: list[tuple[str, int]] = []
+            for knowledge_type, model in (
+                ('decision_record', DecisionRecord),
+                ('history_event', HistoryEvent),
+                ('timeline_event', TimelineEvent),
+                ('todo', Todo),
+            ):
+                target_pairs.extend(
+                    (knowledge_type, target_id)
+                    for target_id in db.scalars(
+                        select(model.id).where(
+                            model.source_review_item_id.in_(review_ids)
+                        )
+                    ).all()
+                )
+            for knowledge_type, target_id in target_pairs:
+                db.execute(
+                    delete(TrustedKnowledgeFingerprint).where(
+                        TrustedKnowledgeFingerprint.knowledge_type == knowledge_type,
+                        TrustedKnowledgeFingerprint.knowledge_id == target_id,
+                    )
+                )
             for model in (
                 DecisionRecord,
                 HistoryEvent,

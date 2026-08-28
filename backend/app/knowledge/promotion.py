@@ -24,6 +24,7 @@ def find_review_item_promotion(db: Session, item: ReviewItem) -> dict | None:
             'target_type': None,
             'created_record_ids': [],
             'created_timeline_event_ids': [],
+            'effect': 'created',
         }
 
     record_model = {
@@ -58,6 +59,7 @@ def find_review_item_promotion(db: Session, item: ReviewItem) -> dict | None:
         'target_type': item.item_type,
         'created_record_ids': record_ids,
         'created_timeline_event_ids': timeline_ids,
+        'effect': 'created',
     }
 
 
@@ -127,6 +129,7 @@ def promote_review_item(db: Session, item: ReviewItem) -> dict:
         'target_type': item.item_type if item.item_type in PROMOTABLE_REVIEW_TYPES else None,
         'created_record_ids': [],
         'created_timeline_event_ids': [],
+        'effect': 'created',
         'project_key': item.payload.get('project_key'),
         'next_routes': _next_routes_for_item(item.item_type),
     }
