@@ -149,18 +149,17 @@ Current state:
 - PostgreSQL restart, reconciliation, exact-batch launch, concurrent Review
   transition, concurrent resume, terminal-race, checkpoint privacy, and exact
   cleanup coverage is release-verified with zero PostgreSQL skips.
-- Deliverable C.5 Auto-Review Trust Promotion has a written design awaiting
-  user review. It keeps every AI candidate pending first, then permits only
-  low-risk direct Timeline/History facts to be promoted by an independent
-  structured validator plus a versioned deterministic policy.
+- Deliverable C.5 Auto-Review Trust Promotion design/spec and its sixteen-task
+  TDD implementation plan are finalized under the approved execution profile at
+  `docs/superpowers/plans/2026-08-28-auto-review-trust-promotion.md`. No C.5
+  product code, migration, paid provider call, or rollout enablement has started.
 
 Next priorities:
 
-1. Review and approve the written Deliverable C.5 design, then create its
-   implementation plan. Both are planning work; product-code implementation is
-   not yet authorized.
-2. After a separately approved C.5 implementation plan, implement and verify
-   Auto-Review Trust Promotion before Deliverable D.
+1. Choose subagent-driven or inline execution and explicitly authorize C.5
+   product-code implementation. Planning/specification is now finalized.
+2. After that authorization, implement and verify Auto-Review Trust Promotion
+   before Deliverable D.
 3. Plan Deliverable D Retriever Port and RAG Answer Graph V2, followed by
    Deliverable E Neo4j GraphRAG.
 4. Continue frontend consistency before final portfolio recording, and keep
@@ -462,13 +461,19 @@ Tasks:
   - PostgreSQL restart evidence now uses fully independent application A/B
     SQLAlchemy engines, pools, and sessionmakers as well as independent
     checkpoint runtimes/pools/savers; A is closed and disposed before B exists.
-  - Next boundary: written review of Deliverable C.5 Auto-Review Trust
-    Promotion. After spec approval, producing the implementation plan is still
-    planning work and is not authorization for product-code implementation.
-- Deliverable C.5 Auto-Review Trust Promotion: design written; awaiting user
-  approval before implementation planning.
-  - Proposed spec:
+  - This historical boundary is superseded: the C.5 design/spec, implementation
+    plan, and exact execution profile are finalized.
+- Deliverable C.5 Auto-Review Trust Promotion: design/spec and implementation
+  plan finalized; product implementation remains unstarted and requires an
+  explicit execution-mode and implementation authorization.
+  - Approved spec:
     `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
+  - Implementation plan:
+    `docs/superpowers/plans/2026-08-28-auto-review-trust-promotion.md`, with
+    sixteen ordered RED/GREEN/commit checkpoints covering frozen V2.0/V2.1
+    contracts, persistence, evidence bindings, policy/validator, provenance,
+    revoke/tombstones, rollout/audit, dual LangGraph lifecycle, same-screen UX,
+    and release verification.
   - Separates canonical source evidence, pending AI knowledge, and trusted
     knowledge. Raw evidence is not official knowledge and C.5 does not broaden
     current RAG indexing.
@@ -481,13 +486,47 @@ Tasks:
   - Keeps the same locked exactly-once Review transition/promotion boundary,
     adds disabled/shadow/enforce modes with default disabled, and requires exact
     provenance-aware revoke without affecting unrelated reaffirmations.
-  - Keeps immutable V2.0 threads on V2.0 and proposes a separate V2.1 graph for
+  - Keeps immutable V2.0 threads on V2.0 and defines a separate V2.1 graph for
     new shadow/enforce launches, with signed paid previews and a persistent
     post-audit rollout breaker.
-  - Proposed gates include zero hard-negative, permission/version, duplicate,
+  - Independent plan/dependency/security audits froze version-neutral evidence
+    provenance for new V2.0/V2.1 candidates, exact generator identity, current
+    workflow-owner permission checks, a no-retry single-call cost ledger,
+    indexed hidden-collision fingerprints, and monotonic revoke reconciliation.
+  - Vector revoke/reindex uses one shared per-document PostgreSQL transaction
+    lock plus tombstone-aware writes and reads. Rollout uses an explicit
+    operator latch from 0 to 10 to 100 percent; 2 percent audit begins only on
+    newly authorized full-enforce workflows and breaker close never re-enables
+    enforce automatically.
+  - Frozen gates include zero hard-negative, permission/version, duplicate,
     and cross-item-revoke failures; at least 500 shadow comparisons and at least
     99% precision before operational enforce.
-  - No production code or database schema is changed by the design commit.
+  - The exact five extraction routes are `mail_document_agent`,
+    `timeline_agent`, `history_agent`, `decision_record_agent`, and `todo_agent`;
+    each returns zero or one candidate using OpenAI
+    `gpt-5.4-mini-2026-03-17`, reasoning `none`, 10,000 input/2,048 total output
+    tokens, and USD 0.75/M input plus USD 4.50/M output.
+  - Validation uses OpenAI `gpt-5.6-terra`, reasoning `medium`, 6,000 input/
+    3,072 total output tokens, four candidates per batch, and at most two
+    batches/five candidates per workflow at USD 2/M input plus USD 12/M output.
+    Worst-case extraction USD 0.083580 plus validation USD 0.097728 equals
+    USD 0.181308, leaving USD 0.018692 below the immutable USD 0.20 limit.
+  - Persisted Assistant evidence dependencies fail closed on incomplete, stale,
+    revoked, quarantined, permission-drifted, or otherwise mismatched bindings.
+    C.5 authority comes only from the server-owned content signature, exact
+    parser policy/run, and relational `current_document_version_id`; connector
+    signatures and display labels are not authority. Provider and rollout
+    controls use append-only events with aggregate backpointers. Quality revoke
+    uses immutable assessment/audit-or-correction, then breaker/quarantine, then
+    exact revoke; a corrected confirmed audit is permanent and requires a new
+    reviewed policy version for recovery.
+  - Automated tests remain fake/deterministic. A separately authorized,
+    sanitized paid Terra benchmark is required before shadow rollout, otherwise
+    mode stays disabled. Populated C.5 data is not destroyed by downgrade/reset;
+    config disablement is the operational rollback.
+  - No production code or database schema is changed by the design or planning
+    work. Product implementation requires explicit authorization plus an
+    execution-mode choice.
 - User-directed execution order for the remaining program:
   1. Deliverable C.5 Auto-Review Trust Promotion.
   2. Deliverable D Retriever Port and RAG Answer Graph V2 using Gmail, Drive,

@@ -2,9 +2,76 @@
 
 Updated: 2026-08-28
 
-## 2026-08-28 Deliverable C.5 design awaiting written approval
+## 2026-08-28 Deliverable C.5 plan and execution profile finalized
 
-- The proposed design is
+- The user-approved design remains
+  `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
+  Its implementation plan is
+  `docs/superpowers/plans/2026-08-28-auto-review-trust-promotion.md` on branch
+  `codex/review-hitl-v2-design`.
+- The plan has sixteen ordered RED/GREEN/commit checkpoints: V2.0 freeze and
+  V2.1 contracts, persistence, immutable candidate evidence, resolution actor,
+  exact claim/provenance/reaffirmation, revoke/tombstones, eligibility/policy,
+  real LangChain Terra validation, lease/cache orchestration, rollout/audit,
+  signed preview, separate V2.1 LangGraph/lifecycle, bounded APIs, Integrations
+  UX, Review/knowledge badges, and release verification.
+- A read-only code map confirmed that existing `state.py`,
+  `review_v2_graph.py`, V2.0 Pydantic outputs, and paused tuples must not absorb
+  V2.1 fields. The plan uses a separate V2.1 state/graph/service plus a thin
+  stored-version facade.
+- Persistence is normalized as one `TrustedKnowledgeApprovalLink` per effect
+  with many child `TrustedKnowledgeEvidenceLink` rows; this resolves the
+  approved one-effect/many-evidence requirement. A named composite FK enforces
+  that `ReviewItem.auto_validation_id` belongs to the same ReviewItem.
+- The plan freezes a bounded `auto_review_audit` list projection because the
+  approved `감사 필요`/`조치 필요` UX cannot survive reload without it. It
+  exposes only status, nullable outcome, and action-required—not ids, cohort
+  counters, hidden provenance, or raw reason. The normalized one-effect/
+  many-evidence relation and this projection are approved/frozen.
+- The immutable registry, not deployment configuration, owns exact price and
+  model identities. Deployment values may only confirm equality; missing or
+  mismatched key/price readiness fails closed before shadow/enforce.
+- Independent plan, dependency, and security audits were applied before code:
+  new V2.0/V2.1 candidates both bind exact evidence; provider calls use an
+  ephemeral DTO outside DB transactions; owner permission is re-resolved before
+  and after validation and on resume; exact generator/provider identity is
+  persisted; hidden collision uses a complete keyed fingerprint projection.
+- The extraction registry contains exactly `mail_document_agent`,
+  `timeline_agent`, `history_agent`, `decision_record_agent`, and `todo_agent`.
+  Each route uses OpenAI `gpt-5.4-mini-2026-03-17`, reasoning `none`, returns
+  zero or one candidate, and reserves USD 0.016716 at full cap; five routes
+  reserve USD 0.083580.
+- Validation uses OpenAI `gpt-5.6-terra`, reasoning `medium`, four candidates
+  per batch and at most two batches/five candidates per workflow. One full
+  batch reserves USD 0.048864 and two reserve USD 0.097728. Combined extraction
+  plus validation is USD 0.181308 under the immutable USD 0.20 limit.
+- Paid calls use authoritative no-retry ledgers with exact child allocation. Revoke and
+  reindex use the same document advisory lock/session plus tombstone-filtered
+  serving; in-memory deletes occur only after DB commit.
+- Persisted Assistant evidence dependencies must be complete and current or all
+  answer-derived serving fails closed. Only the server content signature,
+  parser policy/run, and relational `current_document_version_id` authorize C.5;
+  connector signatures/display labels do not. Provider and rollout control
+  history is append-only with aggregate backpointers. Quality revoke uses an
+  immutable assessment and audit-or-correction, commits breaker/quarantine
+  before physical revoke, and a corrected confirmed audit permanently requires
+  a new reviewed policy version.
+- Rollout has a persistent operator latch `0 -> 10 -> 100`; 100 cannot be
+  skipped to, 2% audit applies only to new full-enforce workflows, a critical
+  audit commits breaker plus durable revoke remediation first, and breaker
+  close cannot silently re-enable enforce.
+- Populated C.5 schema downgrade/local row reset refuses destructive audit
+  deletion. The operational rollback is config `disabled`. A paid sanitized
+  Terra benchmark still requires explicit authorization before shadow rollout.
+- This work is still planning. No product code, migration, provider call,
+  feature enablement, push, merge, or PR has occurred. The spec/plan/profile are
+  finalized. The next unapproved action is selection of subagent-driven
+  (recommended) or inline execution plus explicit product-code authorization;
+  that next action begins actual implementation.
+
+## 2026-08-28 Deliverable C.5 design approved
+
+- The approved design is
   `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`
   on branch `codex/review-hitl-v2-design`. It is planning/specification only;
   no product code, migration, live model call, rollout enablement, push, merge,
@@ -18,12 +85,12 @@ Updated: 2026-08-28
   auto approval is limited to public/internal direct-fact Timeline and narrowly
   extractive History; Decision, Todo, restricted, inferred, conflicting, and
   uncertain items remain human-reviewed.
-- The proposed validator is OpenAI `gpt-5.6-terra` with medium reasoning and
+- The approved/frozen validator is OpenAI `gpt-5.6-terra` with medium reasoning and
   strict LangChain structured output. It has no approval authority. A pure,
   versioned deterministic policy owns the final result, and an exact same
   provider/model as candidate generation cannot validate that candidate.
 - Existing durable `company-memory-review-v2.0` graph/state/topology remains
-  immutable for every existing and paused thread. C.5 proposes
+  immutable for every existing and paused thread. C.5 defines
   `company-memory-review-v2.1-auto-review` for new shadow/enforce launches only;
   Registry keeps both versions, and effective runtime mode may be demoted but
   never promoted beyond the mode stored at launch.
@@ -45,11 +112,12 @@ Updated: 2026-08-28
   presses the same explicit launch button. A signed preview token binds the
   input, graph, mode, policy/model, cost ceilings, and expiry. Sync/status/page
   polling never calls the provider.
-- Proposed values needing approval with the written spec include policy/prompt
-  versions, `0.9800` per-field threshold, 8 candidates/12 slots/12,000 input
-  characters, USD 0.02 batch and USD 0.20 workflow ceilings, new schema/status/
-  API fields, 500 shadow comparisons, 99% precision, 10% canary, and post-audit
-  sampling percentages.
+- Approved values include policy/prompt/output-contract versions, `0.9800`
+  per-field threshold, five candidates/workflow, four candidates/batch, two
+  batches, 12 evidence slots, 6,000 validation input/3,072 total output tokens,
+  exact USD 0.083580 extraction + USD 0.097728 validation = USD 0.181308
+  profile reserve under the USD 0.20 limit, new schema/status/API fields, 500
+  shadow comparisons, 99% precision, 10% canary, and post-audit sampling.
 - A scope-wide existence-only collision guard routes hidden restricted
   collisions to human review without exposing content, identity, permission, or
   count. Exact duplicate reuse remains limited to currently visible trusted
@@ -58,9 +126,9 @@ Updated: 2026-08-28
   `AutoReviewRolloutState` makes first-50/10%/2% audits and the critical
   enforce-to-shadow breaker enforceable rather than a manual checklist. A
   critical outcome opens/commits the breaker before exact revoke is attempted.
-- Next work classification: review/approval of the written spec. After approval,
-  creating the implementation plan with TDD checkpoints is still **planning**.
-  Product-code implementation requires a separately reviewed/approved plan.
+- The design/spec and implementation-plan gate is complete. Product-code
+  implementation remains unstarted and requires explicit authorization plus an
+  execution-mode choice.
 
 ## 2026-08-27 Review Queue HITL V2 release verified
 

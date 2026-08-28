@@ -6,6 +6,70 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-28 Auto-Review Trust Promotion finalized plan and frozen profile
+
+- Recorded user approval of the C.5 design and converted it into the sixteen
+  ordered TDD/commit checkpoints in
+  `docs/superpowers/plans/2026-08-28-auto-review-trust-promotion.md`.
+- Mapped the current V2.0 schemas, graph, lifecycle service, Review transition,
+  promotion, indexing, API, and same-screen frontend surfaces before assigning
+  implementation ownership. V2.0 remains an immutable compatibility surface;
+  V2.1 uses separate state, graph, service, and response models.
+- Split work into contracts/persistence, immutable evidence refs, resolution
+  actors, exact provenance/reaffirmation, revoke/tombstones, deterministic
+  eligibility/policy, real LangChain Terra validation, validation leases/cache,
+  audit/rollout breaker, signed one-click launch, dual-version LangGraph/API,
+  existing-screen UX, and PostgreSQL/golden release gates.
+- The finalized plan freezes two implementation details: one approval-effect
+  row with many canonical evidence-link rows, and
+  a bounded public audit-state projection so `감사 필요` and `조치 필요` remain
+  truthful after reload. No hidden provenance identity/count or raw reason is
+  exposed.
+- Froze the exact five-route extraction profile on OpenAI
+  `gpt-5.4-mini-2026-03-17`, reasoning `none`, at 10,000 input/2,048 total
+  output tokens and USD 0.75/M input plus USD 4.50/M output. Each selected agent
+  returns zero or one candidate; all five routes reserve at most USD 0.083580.
+- Froze validation on OpenAI `gpt-5.6-terra`, reasoning `medium`, at 6,000
+  input/3,072 total output tokens, four candidates per batch and at most two
+  batches/five candidates per workflow. Two batches reserve USD 0.097728, so
+  the maximum profile is USD 0.181308 with USD 0.018692 headroom below the
+  immutable USD 0.20 limit. Deployment values may only confirm exact registry
+  equality.
+- Three independent read-only plan audits found and closed pre-implementation
+  gaps: V2.0 human provenance, workflow-owner permission drift, provider-call
+  transaction boundaries, exact generator identity, hidden-collision storage,
+  batch cost multiplication, revoke/reindex MVCC races, audit crash recovery,
+  rollout auto-promotion, and post-completion revoke reconciliation.
+- The revised plan uses one authoritative no-retry validation-call ledger with
+  atomic cost reservation, a complete keyed trusted-fingerprint projection,
+  common per-document PostgreSQL transaction locks plus active tombstone search
+  filtering, and a persistent `0 -> 10 -> 100` operator authorization latch.
+  Two-percent audits begin only for newly authorized full-enforce workflows.
+- Persisted Assistant messages now have a planned complete evidence-dependency
+  contract; incomplete, stale, revoked, quarantined, permission-incompatible,
+  or unavailable bindings fail closed across list, context, summary, email, and
+  RAG projections without leaking partial citations.
+- Source authority is planned around the server-owned content signature, exact
+  parser policy/run, and relational current-document-version pointer. Connector
+  signatures, display labels, timestamps guessed with `now()`, and `MAX(id)`
+  repairs cannot authorize C.5 serving.
+- Provider and rollout changes use append-only control events with atomic
+  aggregate backpointers. Quality revoke uses an immutable assessment and
+  audit-or-correction, commits breaker/quarantine first, and never rewrites a
+  confirmed audit; a correction permanently requires a new reviewed policy.
+- New V2.0 and V2.1 candidates both receive immutable evidence provenance, but
+  only V2.1 is auto-review eligible. Stored V2.1 threads remain resumable with
+  global disabled or a missing provider key and fall back safely to the human
+  queue rather than changing graph version.
+- Deterministic CI does not claim model quality. A separately authorized,
+  sanitized paid Terra aggregate benchmark is required before shadow rollout;
+  otherwise the feature stays disabled.
+- This remains planning only. No product code, migration, model/provider call,
+  paid-mode enablement, push, merge, or PR was performed. Planning/specification
+  is finalized. The next unapproved action is execution-mode selection plus
+  explicit product-code authorization, and that next action begins actual
+  implementation.
+
 ## 2026-08-28 Auto-Review Trust Promotion design
 
 - Wrote the proposed Deliverable C.5 design between Review Queue HITL V2 and
@@ -41,10 +105,9 @@ demo story changes.
   immutable, adds V2.1-only state, blocks inaccessible collision buckets without
   leaking them, and persists sampled human audits plus an enforce-to-shadow
   breaker.
-- The written design awaits user approval. After approval, the next activity is
-  creating a TDD implementation plan, which is still planning rather than
-  product-code implementation. Sequence remains C.5 -> D Retriever/RAG Answer
-  Graph V2 -> E Neo4j GraphRAG -> Slack recovery last.
+- The written design was subsequently approved and converted into the separate
+  TDD implementation plan above. Sequence remains C.5 -> D Retriever/RAG
+  Answer Graph V2 -> E Neo4j GraphRAG -> Slack recovery last.
 
 ## 2026-08-27 Review Queue HITL V2 release verification
 
