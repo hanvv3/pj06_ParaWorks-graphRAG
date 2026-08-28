@@ -445,6 +445,10 @@ class _CliArgumentError(ValueError):
     pass
 
 
+class _CliStorageInitializationError(RuntimeError):
+    pass
+
+
 class _BoundedArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise _CliArgumentError('command arguments were refused')
@@ -572,7 +576,7 @@ def _default_service(
 def main(argv: list[str] | None = None) -> int:
     try:
         return _run_cli(argv)
-    except SQLAlchemyError:
+    except (_CliStorageInitializationError, SQLAlchemyError):
         return _emit_cli_error(code='storage_unavailable', exit_code=3)
     except (AutoReviewKeyAdminError, AutoReviewKeyBootstrapError, ValueError) as exc:
         code = getattr(exc, 'code', None)
@@ -585,10 +589,10 @@ def main(argv: list[str] | None = None) -> int:
 def _run_cli(argv: list[str] | None) -> int:
     args = build_cli_parser().parse_args(argv)
     settings = Settings()
-    from backend.app.db.session import SessionLocal
+    session_factory = _initialize_cli_storage()
 
     service = AutoReviewKeyAdminService(
-        session_factory=SessionLocal,
+        session_factory=session_factory,
         settings=settings,
         key_ring_source=_EnvironmentKeyRingSource(),
     )
@@ -627,6 +631,14 @@ def _run_cli(argv: list[str] | None) -> int:
         ready = result.ready
     print(json.dumps(payload, separators=(',', ':'), sort_keys=True))
     return 0 if ready else 3
+
+
+def _initialize_cli_storage() -> sessionmaker:
+    try:
+        from backend.app.db.session import SessionLocal
+    except (ModuleNotFoundError, SQLAlchemyError) as exc:
+        raise _CliStorageInitializationError from exc
+    return SessionLocal
 
 
 def _emit_cli_error(*, code: str, exit_code: int) -> int:

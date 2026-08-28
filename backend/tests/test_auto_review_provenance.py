@@ -3377,6 +3377,40 @@ def test_key_admin_module_cli_bounds_storage_initialization_failure() -> None:
     )
 
 
+def test_key_admin_module_cli_classifies_missing_dbapi_as_storage_failure() -> None:
+    fake_secret = 'z' * 48
+    missing_driver_url = (
+        'postgresql+psycopg2://final4_fake_role_test:'
+        'final4_fake_password@127.0.0.1:55432/final4_fake_database_test'
+    )
+    completed = _run_key_admin_module_cli(
+        'status',
+        env_updates={
+            'AUTO_REVIEW_MODE': 'disabled',
+            'PARAWORKS_DEMO_MODE': 'false',
+            'PARAWORKS_DATABASE_URL': missing_driver_url,
+            'DATABASE_URL': missing_driver_url,
+            'AGENT_RUNTIME_FINGERPRINT_SECRET': fake_secret,
+        },
+        env_removals=('PARAWORKS_DEMO_DATABASE_URL',),
+    )
+
+    _assert_bounded_cli_error(
+        completed,
+        code='storage_unavailable',
+        exit_code=3,
+        forbidden=(
+            missing_driver_url,
+            'psycopg2',
+            'ModuleNotFoundError',
+            'final4_fake_role_test',
+            'final4_fake_password',
+            'final4_fake_database_test',
+            fake_secret,
+        ),
+    )
+
+
 def test_key_admin_module_cli_bounds_lazy_rebuild_refusal(
     auto_review_postgres: tuple[sessionmaker[Session], Settings],
 ) -> None:
