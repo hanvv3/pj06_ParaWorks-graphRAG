@@ -138,6 +138,14 @@ class AgentWorkflowRequest(Base):
     auto_review_extraction_output_usd_per_1m: Mapped[float | None] = mapped_column(
         Numeric(12, 6)
     )
+    auto_review_extraction_provider: Mapped[str | None] = mapped_column(String(120))
+    auto_review_extraction_model: Mapped[str | None] = mapped_column(String(120))
+    auto_review_extraction_reasoning_effort: Mapped[str | None] = mapped_column(
+        String(32)
+    )
+    auto_review_extraction_route_version: Mapped[str | None] = mapped_column(
+        String(64)
+    )
     auto_review_enforce_percentage: Mapped[int | None] = mapped_column(Integer)
     authorized_percentage_at_launch: Mapped[int | None] = mapped_column(Integer)
     rollout_authorization_generation: Mapped[int | None] = mapped_column(Integer)

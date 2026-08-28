@@ -4750,3 +4750,16 @@ Cost/security note:
     병합해 화면에서 `완료`로 보이게 했다.
   - 검증: backend 프로젝트/대시보드/todo 테스트 32개 통과, ruff 통과,
     frontend lint/build 통과, Playwright 대시보드/타임라인 3개 통과.
+
+## 2026-08-28 Auto-review trust promotion persistence hardening
+
+- Added the additive C.5 persistence boundary at Alembic revision
+  `7c5a2e9f4b10`, preserving nullable V2.0 rows while storing exact V2.1
+  extraction/provider/model/reasoning/route snapshots.
+- PostgreSQL enforces same-owner identities, deferred validation completeness,
+  exact current Assistant evidence lineage, append-only provider/rollout/audit
+  ledgers, immutable trusted provenance, and source/parser/chunk authority.
+- Bootstrap, connector reset, and empty-only downgrade share exhaustive,
+  fail-closed C.5 retained-state detection. Populated schemas refuse downgrade.
+- Slack remains outside C.5 automatic eligibility. Verification uses local
+  SQLite and isolated PostgreSQL/pgvector only, with no live provider calls.

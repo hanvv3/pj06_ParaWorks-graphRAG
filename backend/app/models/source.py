@@ -16,6 +16,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.db.base import Base
 
+_LOWER_HEX_64_REMAINDER = 'server_content_signature'
+for _character in '0123456789abcdef':
+    _LOWER_HEX_64_REMAINDER = (
+        f"replace({_LOWER_HEX_64_REMAINDER}, '{_character}', '')"
+    )
+
 
 class Source(Base):
     __tablename__ = 'sources'
@@ -24,7 +30,8 @@ class Source(Base):
             '(server_content_signature IS NULL AND '
             'server_content_signature_schema IS NULL) OR '
             "(server_content_signature_schema = 'server-source-content:v1' AND "
-            'length(server_content_signature) = 64)',
+            'length(server_content_signature) = 64 AND '
+            f'{_LOWER_HEX_64_REMAINDER} = \'\')',
             name='ck_sources_server_content_signature_authority',
         ),
     )
@@ -109,6 +116,7 @@ class DocumentParserRun(Base):
             'chunk_policy_version IS NULL) OR '
             "(server_content_signature_schema = 'server-source-content:v1' AND "
             'length(server_content_signature) = 64 AND '
+            f'{_LOWER_HEX_64_REMAINDER} = \'\' AND '
             'parser_policy_version IS NOT NULL AND parser_version IS NOT NULL AND '
             'chunk_policy_version IS NOT NULL)',
             name='ck_document_parser_runs_c5_identity',

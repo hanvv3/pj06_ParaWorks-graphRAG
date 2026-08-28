@@ -374,6 +374,24 @@ class AutoReviewExtractionCall(Base):
             name='ck_auto_review_extraction_calls_candidate_count',
         ),
         CheckConstraint(
+            "(status = 'claimed' AND terminal_at IS NULL AND "
+            'provider_attempt_count = 0 AND attempt_started_at IS NULL AND '
+            'charged_input_tokens IS NULL AND charged_output_tokens IS NULL AND '
+            'charged_cost_usd = 0 AND budget_overrun = false) OR '
+            "(status = 'completed' AND provider_attempt_count = 1 AND "
+            'attempt_started_at IS NOT NULL AND terminal_at IS NOT NULL AND '
+            'charged_input_tokens IS NOT NULL AND charged_input_tokens >= 0 AND '
+            'charged_output_tokens IS NOT NULL AND charged_output_tokens >= 0) OR '
+            "(status = 'failed' AND terminal_at IS NOT NULL AND "
+            '((provider_attempt_count = 0 AND attempt_started_at IS NULL AND '
+            'charged_input_tokens = 0 AND charged_output_tokens = 0 AND '
+            'charged_cost_usd = 0 AND budget_overrun = false) OR '
+            '(provider_attempt_count = 1 AND attempt_started_at IS NOT NULL AND '
+            'charged_input_tokens IS NOT NULL AND charged_input_tokens >= 0 AND '
+            'charged_output_tokens IS NOT NULL AND charged_output_tokens >= 0)))',
+            name='ck_auto_review_extraction_calls_terminal_charge',
+        ),
+        CheckConstraint(
             "(status != 'completed' AND result_kind IS NULL AND "
             'result_candidate_count IS NULL AND result_candidate_set_hmac IS NULL) '
             "OR (status = 'completed' AND result_kind = 'no_candidate' AND "
@@ -381,6 +399,10 @@ class AutoReviewExtractionCall(Base):
             "OR (status = 'completed' AND result_kind = 'candidate' AND "
             'result_candidate_count = 1 AND length(result_candidate_set_hmac) = 64)',
             name='ck_auto_review_extraction_calls_terminal_result',
+        ),
+        CheckConstraint(
+            'max_candidates_per_agent = 1',
+            name='ck_auto_review_extraction_calls_single_candidate_cap',
         ),
     )
 
@@ -781,7 +803,9 @@ class AssistantMessageEvidenceDependency(Base):
     knowledge_id: Mapped[int | None] = mapped_column(Integer)
     approval_link_id: Mapped[int | None] = mapped_column(Integer)
     legacy_human_base: Mapped[bool] = mapped_column(Boolean, default=False)
-    legacy_source_review_item_id: Mapped[int | None] = mapped_column(Integer)
+    legacy_source_review_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey('review_items.id', ondelete='RESTRICT')
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -1045,9 +1069,32 @@ class AutoReviewPostAudit(Base):
             name='ck_auto_review_post_audits_outcome',
         ),
         CheckConstraint(
-            "NOT (status = 'completed' AND outcome IS NULL) OR "
-            "(system_resolution_code = 'source_invalidated_before_audit' AND "
-            'audit_reason IS NULL AND auditor_subject_hmac IS NULL)',
+            "(status = 'pending' AND outcome IS NULL AND "
+            'system_resolution_code IS NULL AND remediation_code IS NULL AND '
+            'auditor_subject_hmac IS NULL AND '
+            'auditor_fingerprint_key_version IS NULL AND '
+            'auditor_fingerprint_key_material_verifier IS NULL AND '
+            'audit_reason IS NULL AND audited_at IS NULL) OR '
+            "(status = 'completed' AND outcome IS NULL AND "
+            "system_resolution_code = 'source_invalidated_before_audit' AND "
+            'remediation_code IS NULL AND auditor_subject_hmac IS NULL AND '
+            'auditor_fingerprint_key_version IS NULL AND '
+            'auditor_fingerprint_key_material_verifier IS NULL AND '
+            'audit_reason IS NULL AND audited_at IS NOT NULL) OR '
+            "(status = 'completed' AND outcome IS NOT NULL AND "
+            'system_resolution_code IS NULL AND remediation_code IS NULL AND '
+            'length(auditor_subject_hmac) = 64 AND '
+            'auditor_fingerprint_key_version IS NOT NULL AND '
+            'length(auditor_fingerprint_key_material_verifier) = 64 AND '
+            'length(trim(audit_reason)) BETWEEN 1 AND 500 AND '
+            'audit_reason = trim(audit_reason) AND audited_at IS NOT NULL) OR '
+            "(status = 'remediation_required' AND outcome IS NOT NULL AND "
+            "system_resolution_code IN ('revoke_pending', 'revoke_failed') AND "
+            'remediation_code IS NOT NULL AND length(auditor_subject_hmac) = 64 AND '
+            'auditor_fingerprint_key_version IS NOT NULL AND '
+            'length(auditor_fingerprint_key_material_verifier) = 64 AND '
+            'length(trim(audit_reason)) BETWEEN 1 AND 500 AND '
+            'audit_reason = trim(audit_reason) AND audited_at IS NOT NULL)',
             name='ck_auto_review_post_audits_terminal_outcome',
         ),
     )

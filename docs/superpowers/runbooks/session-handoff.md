@@ -2890,3 +2890,18 @@ tests passed with 53 tests; ruff passed.
   - `npm.cmd run lint` → 통과
   - `npm.cmd run build` → 통과
   - `npm.cmd run test:visual -- timeline-project-date-groups.spec.ts dashboard-workflow.spec.ts --project=chromium-desktop` → `3 passed`
+
+## 2026-08-28 C.5 Task 2 persistence boundary
+
+- Head migration is `7c5a2e9f4b10` over `2f6a8b9c0d1e`. It is additive for
+  retained V2.0 rows; new V2.1 rows bind exact generation and evidence identity.
+- PostgreSQL guards enforce ReviewItem cutover provenance, validation terminal
+  consistency, Assistant lineage, provider/rollout event-backed state, and
+  source/parser/chunk authority. Do not replace these with SQLite-only checks.
+- `backend/app/admin/auto_review_retained_state.py` is the shared exhaustive
+  schema/retained-state authority for bootstrap, reset, and downgrade.
+  Inspection/query errors must propagate; only empty/test schemas downgrade.
+- PostgreSQL verification requires `PARAWORKS_TEST_POSTGRES_URL`; the isolated
+  Docker fixture is on port `55432` with pgvector. Missing URLs fail, not skip.
+- Cutover stays drain/migrate/deploy/bootstrap/reconcile. Slack remains
+  C.5-ineligible and Task 2 never calls live providers or connectors.

@@ -11,6 +11,11 @@ from alembic import op
 from sqlalchemy import inspect
 
 import backend.app.models  # noqa: F401
+from backend.app.admin.auto_review_retained_state import (
+    C5_ADDED_COLUMNS,
+    C5_TABLE_NAMES,
+    has_retained_c5_state,
+)
 from backend.app.db.base import Base
 
 revision = '7c5a2e9f4b10'
@@ -20,115 +25,7 @@ depends_on = None
 
 BOUNDARY_COMPONENT = 'auto_review_trust_promotion'
 
-C5_TABLE_NAMES = (
-    'auto_review_runtime_key_states',
-    'auto_review_provider_safety_states',
-    'auto_review_provider_safety_events',
-    'trusted_knowledge_fingerprint_projection_states',
-    'trusted_knowledge_fingerprints',
-    'review_item_evidence_refs',
-    'auto_review_extraction_calls',
-    'auto_review_validation_calls',
-    'auto_review_validations',
-    'trusted_knowledge_approval_links',
-    'trusted_knowledge_evidence_links',
-    'assistant_message_evidence_dependencies',
-    'assistant_message_knowledge_evidence_refs',
-    'auto_review_rollout_states',
-    'auto_review_rollout_control_events',
-    'auto_review_promotion_decisions',
-    'auto_review_post_audits',
-    'auto_review_revocation_assessments',
-    'auto_review_audit_corrections',
-    'vector_serving_tombstones',
-)
-
-ADDED_COLUMNS = {
-    'agent_workflow_requests': (
-        'fingerprint_key_material_verifier',
-        'auto_review_mode',
-        'auto_review_validator_provider',
-        'auto_review_validator_model',
-        'auto_review_reasoning_effort',
-        'auto_review_validator_prompt_version',
-        'auto_review_validator_output_contract_version',
-        'auto_review_policy_version',
-        'auto_review_cost_policy_version',
-        'auto_review_extraction_cost_policy_version',
-        'auto_review_token_estimator_version',
-        'auto_review_extraction_token_estimator_version',
-        'auto_review_tokenizer_encoding',
-        'auto_review_reply_priming_tokens',
-        'auto_review_framing_safety_tokens',
-        'auto_review_max_input_tokens',
-        'auto_review_max_output_tokens',
-        'auto_review_max_candidates_per_batch',
-        'auto_review_max_batches_per_workflow',
-        'auto_review_max_candidates_per_workflow',
-        'auto_review_max_provider_attempts',
-        'auto_review_provider_timeout_seconds',
-        'auto_review_provider_send_start_window_seconds',
-        'auto_review_provider_attempt_lease_seconds',
-        'auto_review_provider_commit_grace_seconds',
-        'auto_review_validator_input_usd_per_1m',
-        'auto_review_validator_output_usd_per_1m',
-        'auto_review_extraction_input_usd_per_1m',
-        'auto_review_extraction_output_usd_per_1m',
-        'auto_review_enforce_percentage',
-        'authorized_percentage_at_launch',
-        'rollout_authorization_generation',
-        'validation_provider_safety_state_version',
-        'extraction_provider_safety_snapshot_set_hmac',
-        'rollout_control_epoch',
-        'selected_extraction_agent_count',
-        'extraction_plan_set_hmac',
-        'extraction_max_input_chars_per_agent',
-        'extraction_max_input_tokens_per_agent',
-        'extraction_max_output_tokens_per_agent',
-        'extraction_max_candidates_per_agent',
-        'confirmed_extraction_cost_ceiling_usd',
-        'confirmed_validation_cost_ceiling_usd',
-        'confirmed_total_cost_ceiling_usd',
-        'auto_review_budget_limit_usd',
-    ),
-    'agent_runs': (
-        'generation_provider',
-        'generation_reasoning_effort',
-        'generation_route_version',
-        'generation_output_contract_version',
-    ),
-    'assistant_messages': (
-        'evidence_contract_version',
-        'serving_dependency_count',
-    ),
-    'sources': (
-        'server_content_signature_schema',
-        'server_content_signature',
-        'connector_content_signature',
-    ),
-    'documents': ('current_document_version_id',),
-    'document_parser_runs': (
-        'server_content_signature_schema',
-        'server_content_signature',
-        'parser_policy_version',
-        'parser_version',
-        'chunk_policy_version',
-    ),
-    'document_chunks': ('parser_run_id',),
-    'review_items': (
-        'agent_run_id',
-        'candidate_contract_version',
-        'resolution_source',
-        'resolution_policy_version',
-        'auto_validation_id',
-        'revoked_at',
-        'revoked_by_subject_hmac',
-        'revoked_by_fingerprint_key_version',
-        'revoked_by_fingerprint_key_material_verifier',
-        'revoke_knowledge_remained_trusted',
-        'revoke_document_count',
-    ),
-}
+ADDED_COLUMNS = C5_ADDED_COLUMNS
 
 
 def upgrade() -> None:
@@ -322,6 +219,38 @@ def _backfill_unambiguous_current_document_versions() -> None:
                 'WHERE document_versions.document_id = documents.id) = 1'
             )
         )
+        if {'sources', 'document_parser_runs'} <= _table_names():
+            op.get_bind().execute(
+                sa.text(
+                    'UPDATE documents SET current_document_version_id = '
+                    '(SELECT MIN(run.document_version_id) '
+                    'FROM document_parser_runs run JOIN sources source '
+                    'ON source.id = run.source_id '
+                    'WHERE run.document_id = documents.id '
+                    'AND run.server_content_signature_schema = '
+                    "'server-source-content:v1' "
+                    'AND run.server_content_signature = '
+                    'source.server_content_signature '
+                    'AND source.server_content_signature_schema = '
+                    "'server-source-content:v1' "
+                    'AND run.parser_policy_version IS NOT NULL '
+                    'AND run.parser_version IS NOT NULL '
+                    'AND run.chunk_policy_version IS NOT NULL) '
+                    'WHERE current_document_version_id IS NULL AND '
+                    '(SELECT COUNT(*) FROM document_parser_runs run '
+                    'JOIN sources source ON source.id = run.source_id '
+                    'WHERE run.document_id = documents.id '
+                    'AND run.server_content_signature_schema = '
+                    "'server-source-content:v1' "
+                    'AND run.server_content_signature = '
+                    'source.server_content_signature '
+                    'AND source.server_content_signature_schema = '
+                    "'server-source-content:v1' "
+                    'AND run.parser_policy_version IS NOT NULL '
+                    'AND run.parser_version IS NOT NULL '
+                    'AND run.chunk_policy_version IS NOT NULL) = 1'
+                )
+            )
 
 
 def _insert_boundary_marker() -> None:
@@ -513,12 +442,186 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
         EXECUTE FUNCTION enforce_assistant_dependency_child_count()
         """,
         """
+        CREATE OR REPLACE FUNCTION enforce_validation_call_terminal_children()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE new_row jsonb := COALESCE(to_jsonb(NEW), '{}'::jsonb);
+        DECLARE old_row jsonb := COALESCE(to_jsonb(OLD), '{}'::jsonb);
+        DECLARE call_id integer;
+        DECLARE parent auto_review_validation_calls%ROWTYPE;
+        DECLARE child_count integer;
+        DECLARE claimed_count integer;
+        DECLARE completed_count integer;
+        DECLARE failed_count integer;
+        BEGIN
+          call_id := COALESCE(
+            (new_row ->> 'validation_call_id')::integer,
+            (old_row ->> 'validation_call_id')::integer,
+            (new_row ->> 'id')::integer,
+            (old_row ->> 'id')::integer);
+          SELECT * INTO parent FROM auto_review_validation_calls WHERE id = call_id;
+          IF NOT FOUND THEN RETURN COALESCE(NEW, OLD); END IF;
+          SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'claimed'),
+                 COUNT(*) FILTER (WHERE status = 'completed'),
+                 COUNT(*) FILTER (WHERE status = 'failed')
+            INTO child_count, claimed_count, completed_count, failed_count
+          FROM auto_review_validations WHERE validation_call_id = call_id;
+          IF child_count <> parent.candidate_count OR child_count NOT BETWEEN 1 AND 4 OR
+             (parent.status = 'claimed' AND claimed_count <> child_count) OR
+             (parent.status = 'completed' AND completed_count <> child_count) OR
+             (parent.status = 'failed' AND failed_count <> child_count)
+          THEN RAISE EXCEPTION 'validation terminal children mismatch'; END IF;
+          RETURN COALESCE(NEW, OLD);
+        END $$
+        """,
+        """
+        CREATE CONSTRAINT TRIGGER trg_validation_call_terminal_children_guard
+        AFTER INSERT OR UPDATE ON auto_review_validation_calls
+        DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+        EXECUTE FUNCTION enforce_validation_call_terminal_children()
+        """,
+        """
+        CREATE CONSTRAINT TRIGGER trg_validation_child_terminal_parent_guard
+        AFTER INSERT OR UPDATE OR DELETE ON auto_review_validations
+        DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+        EXECUTE FUNCTION enforce_validation_call_terminal_children()
+        """,
+        """
+        CREATE OR REPLACE FUNCTION enforce_validation_child_mutation()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE parent_status varchar;
+        BEGIN
+          SELECT status INTO parent_status FROM auto_review_validation_calls
+          WHERE id = OLD.validation_call_id;
+          IF TG_OP = 'DELETE' OR OLD.status <> 'claimed' OR
+             parent_status <> 'claimed' OR
+             NEW.review_item_id IS DISTINCT FROM OLD.review_item_id OR
+             NEW.validation_call_id IS DISTINCT FROM OLD.validation_call_id OR
+             NEW.workflow_thread_id IS DISTINCT FROM OLD.workflow_thread_id OR
+             NEW.validation_key IS DISTINCT FROM OLD.validation_key OR
+             NEW.evidence_version_hash IS DISTINCT FROM OLD.evidence_version_hash OR
+             NEW.candidate_generation_fingerprint IS DISTINCT FROM
+               OLD.candidate_generation_fingerprint
+          THEN RAISE EXCEPTION 'validation child is immutable'; END IF;
+          RETURN NEW;
+        END $$
+        """,
+        """
+        CREATE TRIGGER trg_validation_child_mutation_guard
+        BEFORE UPDATE OR DELETE ON auto_review_validations FOR EACH ROW
+        EXECUTE FUNCTION enforce_validation_child_mutation()
+        """,
+        """
+        CREATE OR REPLACE FUNCTION enforce_assistant_dependency_exactness()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE new_row jsonb := COALESCE(to_jsonb(NEW), '{}'::jsonb);
+        DECLARE old_row jsonb := COALESCE(to_jsonb(OLD), '{}'::jsonb);
+        DECLARE dependency_id integer;
+        DECLARE dep assistant_message_evidence_dependencies%ROWTYPE;
+        DECLARE expected_count integer;
+        DECLARE actual_count integer;
+        DECLARE human_proven boolean := false;
+        BEGIN
+          dependency_id := COALESCE(
+            (new_row ->> 'dependency_id')::integer,
+            (old_row ->> 'dependency_id')::integer,
+            (new_row ->> 'id')::integer,
+            (old_row ->> 'id')::integer);
+          SELECT * INTO dep FROM assistant_message_evidence_dependencies
+          WHERE id = dependency_id;
+          IF NOT FOUND THEN RETURN COALESCE(NEW, OLD); END IF;
+          IF dep.dependency_kind = 'raw_chunk' THEN
+            IF NOT EXISTS (
+              SELECT 1 FROM document_chunks chunk
+              JOIN document_parser_runs parser ON parser.id = chunk.parser_run_id
+              JOIN document_versions version ON version.id = chunk.version_id
+              JOIN documents document ON document.id = version.document_id
+              JOIN sources source ON source.id = chunk.source_id
+              WHERE chunk.id = dep.document_chunk_id
+                AND chunk.version_id = dep.document_version_id
+                AND chunk.source_id = dep.source_id
+                AND chunk.parser_run_id = dep.parser_run_id
+                AND document.current_document_version_id = dep.document_version_id
+                AND dep.current_document_version_id = dep.document_version_id
+                AND parser.document_id = document.id
+                AND parser.document_version_id = dep.document_version_id
+                AND parser.source_id = dep.source_id
+                AND parser.server_content_signature_schema =
+                    dep.server_content_signature_schema
+                AND parser.server_content_signature = dep.server_content_signature
+                AND parser.parser_policy_version = dep.parser_policy_version
+                AND parser.parser_version = dep.parser_version
+                AND parser.chunk_policy_version = dep.chunk_policy_version
+                AND source.server_content_signature_schema =
+                    dep.server_content_signature_schema
+                AND source.server_content_signature = dep.server_content_signature
+            ) THEN RAISE EXCEPTION 'raw dependency is not current'; END IF;
+          ELSIF dep.approval_link_id IS NOT NULL THEN
+            SELECT COUNT(*) INTO expected_count FROM trusted_knowledge_evidence_links
+            WHERE approval_link_id = dep.approval_link_id;
+            SELECT COUNT(*) INTO actual_count
+            FROM assistant_message_knowledge_evidence_refs ref
+            WHERE ref.dependency_id = dep.id;
+            IF expected_count < 1 OR actual_count <> expected_count OR NOT EXISTS (
+              SELECT 1 FROM trusted_knowledge_approval_links approval
+              WHERE approval.id = dep.approval_link_id
+                AND approval.knowledge_type = dep.knowledge_type
+                AND approval.knowledge_id = dep.knowledge_id
+                AND approval.active = true AND approval.revoked_at IS NULL
+            ) THEN RAISE EXCEPTION 'complete active approval effect required'; END IF;
+          ELSE
+            SELECT EXISTS (
+              SELECT 1 FROM review_items item
+              WHERE item.id = dep.legacy_source_review_item_id
+                AND item.status = 'approved' AND item.resolution_source = 'human'
+            ) INTO human_proven;
+            IF human_proven AND dep.knowledge_type = 'timeline_event' THEN
+              SELECT EXISTS (SELECT 1 FROM timeline_events target
+                WHERE target.id = dep.knowledge_id AND
+                  target.source_review_item_id = dep.legacy_source_review_item_id)
+                INTO human_proven;
+            ELSIF human_proven AND dep.knowledge_type = 'history_event' THEN
+              SELECT EXISTS (SELECT 1 FROM history_events target
+                WHERE target.id = dep.knowledge_id AND
+                  target.source_review_item_id = dep.legacy_source_review_item_id)
+                INTO human_proven;
+            ELSIF human_proven AND dep.knowledge_type = 'decision_record' THEN
+              SELECT EXISTS (SELECT 1 FROM decision_records target
+                WHERE target.id = dep.knowledge_id AND
+                  target.source_review_item_id = dep.legacy_source_review_item_id)
+                INTO human_proven;
+            ELSIF human_proven AND dep.knowledge_type = 'todo' THEN
+              SELECT EXISTS (SELECT 1 FROM todos target
+                WHERE target.id = dep.knowledge_id AND
+                  target.source_review_item_id = dep.legacy_source_review_item_id)
+                INTO human_proven;
+            ELSE human_proven := false;
+            END IF;
+            IF NOT human_proven THEN RAISE EXCEPTION 'legacy human proof required';
+            END IF;
+          END IF;
+          RETURN COALESCE(NEW, OLD);
+        END $$
+        """,
+        """
+        CREATE CONSTRAINT TRIGGER trg_assistant_dependency_exactness_guard
+        AFTER INSERT OR UPDATE ON assistant_message_evidence_dependencies
+        DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+        EXECUTE FUNCTION enforce_assistant_dependency_exactness()
+        """,
+        """
+        CREATE CONSTRAINT TRIGGER trg_assistant_dependency_child_exactness_guard
+        AFTER INSERT OR UPDATE OR DELETE ON assistant_message_knowledge_evidence_refs
+        DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+        EXECUTE FUNCTION enforce_assistant_dependency_exactness()
+        """,
+        """
         CREATE OR REPLACE FUNCTION enforce_provider_safety_event_sequence()
         RETURNS trigger LANGUAGE plpgsql AS $$
         DECLARE parent_sequence integer;
         DECLARE parent_event_id integer;
         DECLARE parent_state_version integer;
         DECLARE prior_sequence integer;
+        DECLARE prior_event auto_review_provider_safety_events%ROWTYPE;
         BEGIN
           SELECT last_event_sequence, last_event_id, state_version
             INTO parent_sequence, parent_event_id, parent_state_version
@@ -528,6 +631,29 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
           FROM auto_review_provider_safety_events
           WHERE provider_safety_state_id = NEW.provider_safety_state_id
             AND id <> NEW.id;
+          IF NEW.event_sequence = 1 THEN
+            IF NEW.event_kind <> 'initial_authorized' OR
+               NEW.prior_state_version <> 0 OR NEW.prior_breaker_open <> false
+            THEN RAISE EXCEPTION 'prior provider snapshot mismatch'; END IF;
+          ELSE
+            SELECT * INTO prior_event FROM auto_review_provider_safety_events
+            WHERE provider_safety_state_id = NEW.provider_safety_state_id
+              AND event_sequence = NEW.event_sequence - 1;
+            IF NOT FOUND THEN
+              RAISE EXCEPTION 'provider safety events require gapless atomic backpointer';
+            END IF;
+            IF NEW.event_kind = 'initial_authorized' OR
+               prior_event.new_state_version <> NEW.prior_state_version OR
+               prior_event.new_breaker_open <> NEW.prior_breaker_open
+            THEN RAISE EXCEPTION 'prior provider snapshot mismatch'; END IF;
+          END IF;
+          IF (NEW.event_kind = 'budget_overrun' AND NEW.new_breaker_open <> true) OR
+             (NEW.event_kind = 'breaker_cleared' AND
+               (NEW.new_breaker_open <> false OR
+                NEW.cost_policy_version = prior_event.cost_policy_version)) OR
+             (NEW.event_kind = 'initial_authorized' AND
+               NEW.new_breaker_open <> false)
+          THEN RAISE EXCEPTION 'provider event transition mismatch'; END IF;
           IF NEW.event_sequence <> prior_sequence + 1 OR
              parent_sequence <> NEW.event_sequence OR
              parent_event_id <> NEW.id OR
@@ -544,6 +670,45 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
         EXECUTE FUNCTION enforce_provider_safety_event_sequence()
         """,
         """
+        CREATE OR REPLACE FUNCTION enforce_provider_safety_state_event()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE aggregate auto_review_provider_safety_states%ROWTYPE;
+        BEGIN
+          SELECT * INTO aggregate FROM auto_review_provider_safety_states
+          WHERE id = NEW.id;
+          IF aggregate.last_event_id IS NULL OR
+             aggregate.last_event_sequence = 0 OR NOT EXISTS (
+            SELECT 1 FROM auto_review_provider_safety_events event
+            WHERE event.id = aggregate.last_event_id
+              AND event.provider_safety_state_id = aggregate.id
+              AND event.event_sequence = aggregate.last_event_sequence
+              AND event.purpose = aggregate.purpose
+              AND event.provider = aggregate.provider
+              AND event.model = aggregate.model
+              AND event.reasoning_effort = aggregate.reasoning_effort
+              AND event.new_state_version = aggregate.state_version
+              AND event.cost_policy_version =
+                aggregate.authorized_cost_policy_version
+              AND event.token_estimator_version =
+                aggregate.token_estimator_version
+              AND event.tokenizer_encoding = aggregate.tokenizer_encoding
+              AND event.reply_priming_tokens = aggregate.reply_priming_tokens
+              AND event.framing_safety_tokens = aggregate.framing_safety_tokens
+              AND event.input_usd_per_1m = aggregate.input_usd_per_1m
+              AND event.output_usd_per_1m = aggregate.output_usd_per_1m
+              AND event.new_breaker_open = aggregate.breaker_open
+          ) THEN RAISE EXCEPTION 'provider initial authorization event required';
+          END IF;
+          RETURN NEW;
+        END $$
+        """,
+        """
+        CREATE CONSTRAINT TRIGGER trg_provider_safety_state_event_guard
+        AFTER INSERT OR UPDATE ON auto_review_provider_safety_states
+        DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+        EXECUTE FUNCTION enforce_provider_safety_state_event()
+        """,
+        """
         CREATE OR REPLACE FUNCTION enforce_rollout_control_event_sequence()
         RETURNS trigger LANGUAGE plpgsql AS $$
         DECLARE parent_sequence integer;
@@ -551,6 +716,7 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
         DECLARE parent_state_version integer;
         DECLARE parent_control_epoch integer;
         DECLARE prior_sequence integer;
+        DECLARE prior_event auto_review_rollout_control_events%ROWTYPE;
         BEGIN
           SELECT last_event_sequence, last_event_id, state_version, control_epoch
             INTO parent_sequence, parent_event_id, parent_state_version,
@@ -559,6 +725,28 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
           SELECT COALESCE(MAX(event_sequence), 0) INTO prior_sequence
           FROM auto_review_rollout_control_events
           WHERE rollout_state_id = NEW.rollout_state_id AND id <> NEW.id;
+          IF NEW.event_sequence = 1 THEN
+            IF NEW.prior_state_version <> 0 OR NEW.prior_control_epoch <> 0 OR
+               NEW.prior_max_authorized_percentage <> 0 OR
+               NEW.prior_breaker_open <> false OR
+               NEW.prior_authorization_generation <> 0
+            THEN RAISE EXCEPTION 'prior rollout snapshot mismatch'; END IF;
+          ELSE
+            SELECT * INTO prior_event FROM auto_review_rollout_control_events
+            WHERE rollout_state_id = NEW.rollout_state_id
+              AND event_sequence = NEW.event_sequence - 1;
+            IF NOT FOUND THEN
+              RAISE EXCEPTION 'rollout events require gapless atomic backpointer';
+            END IF;
+            IF prior_event.new_state_version <> NEW.prior_state_version OR
+               prior_event.new_control_epoch <> NEW.prior_control_epoch OR
+               prior_event.new_max_authorized_percentage <>
+                 NEW.prior_max_authorized_percentage OR
+               prior_event.new_breaker_open <> NEW.prior_breaker_open OR
+               prior_event.new_authorization_generation <>
+                 NEW.prior_authorization_generation
+            THEN RAISE EXCEPTION 'prior rollout snapshot mismatch'; END IF;
+          END IF;
           IF NEW.event_sequence <> prior_sequence + 1 OR
              parent_sequence <> NEW.event_sequence OR parent_event_id <> NEW.id OR
              parent_state_version <> NEW.new_state_version OR
@@ -573,6 +761,47 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
         AFTER INSERT ON auto_review_rollout_control_events
         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
         EXECUTE FUNCTION enforce_rollout_control_event_sequence()
+        """,
+        """
+        CREATE OR REPLACE FUNCTION enforce_rollout_state_control_event()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.control_epoch IS DISTINCT FROM OLD.control_epoch OR
+             NEW.max_authorized_percentage IS DISTINCT FROM
+               OLD.max_authorized_percentage OR
+             NEW.authorization_generation IS DISTINCT FROM
+               OLD.authorization_generation OR
+             NEW.authorization_at IS DISTINCT FROM OLD.authorization_at OR
+             NEW.breaker_open IS DISTINCT FROM OLD.breaker_open OR
+             NEW.breaker_reason_code IS DISTINCT FROM OLD.breaker_reason_code OR
+             NEW.breaker_opened_at IS DISTINCT FROM OLD.breaker_opened_at OR
+             NEW.regression_gate_reference IS DISTINCT FROM
+               OLD.regression_gate_reference
+          THEN
+            IF NEW.last_event_sequence <> OLD.last_event_sequence + 1 OR
+               NEW.last_event_id IS NULL OR
+               NEW.last_event_id IS NOT DISTINCT FROM OLD.last_event_id OR NOT EXISTS (
+                 SELECT 1 FROM auto_review_rollout_control_events event
+                 WHERE event.id = NEW.last_event_id
+                   AND event.rollout_state_id = NEW.id
+                   AND event.event_sequence = NEW.last_event_sequence
+                   AND event.new_state_version = NEW.state_version
+                   AND event.new_control_epoch = NEW.control_epoch
+                   AND event.new_max_authorized_percentage =
+                     NEW.max_authorized_percentage
+                   AND event.new_authorization_generation =
+                     NEW.authorization_generation
+                   AND event.new_breaker_open = NEW.breaker_open
+               )
+            THEN RAISE EXCEPTION 'rollout control event required'; END IF;
+          END IF;
+          RETURN NEW;
+        END $$
+        """,
+        """
+        CREATE TRIGGER trg_rollout_state_control_event_guard
+        BEFORE UPDATE ON auto_review_rollout_states FOR EACH ROW
+        EXECUTE FUNCTION enforce_rollout_state_control_event()
         """,
         """
         CREATE OR REPLACE FUNCTION reject_c5_immutable_mutation()
@@ -608,6 +837,82 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
         CREATE TRIGGER trg_assistant_dependency_child_immutable
         BEFORE UPDATE OR DELETE ON assistant_message_knowledge_evidence_refs
         FOR EACH ROW EXECUTE FUNCTION reject_c5_immutable_mutation()
+        """,
+        """
+        CREATE TRIGGER trg_trusted_evidence_link_immutable
+        BEFORE UPDATE OR DELETE ON trusted_knowledge_evidence_links
+        FOR EACH ROW EXECUTE FUNCTION reject_c5_immutable_mutation()
+        """,
+        """
+        CREATE OR REPLACE FUNCTION enforce_trusted_approval_link_mutation()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF TG_OP = 'DELETE' OR
+             NEW.knowledge_type IS DISTINCT FROM OLD.knowledge_type OR
+             NEW.knowledge_id IS DISTINCT FROM OLD.knowledge_id OR
+             NEW.review_item_id IS DISTINCT FROM OLD.review_item_id OR
+             NEW.security_scope_id IS DISTINCT FROM OLD.security_scope_id OR
+             NEW.promotion_effect_kind IS DISTINCT FROM OLD.promotion_effect_kind OR
+             NEW.resolution_source IS DISTINCT FROM OLD.resolution_source OR
+             NEW.claim_fingerprint IS DISTINCT FROM OLD.claim_fingerprint OR
+             NEW.permission_level IS DISTINCT FROM OLD.permission_level OR
+             NEW.fingerprint_key_version IS DISTINCT FROM
+               OLD.fingerprint_key_version OR
+             NEW.fingerprint_key_material_verifier IS DISTINCT FROM
+               OLD.fingerprint_key_material_verifier OR
+             NEW.created_at IS DISTINCT FROM OLD.created_at OR
+             NOT ((NEW.active = OLD.active AND
+                   NEW.revoked_at IS NOT DISTINCT FROM OLD.revoked_at) OR
+                  (OLD.active = true AND OLD.revoked_at IS NULL AND
+                   NEW.active = false AND NEW.revoked_at IS NOT NULL))
+          THEN RAISE EXCEPTION 'trusted provenance is immutable'; END IF;
+          RETURN NEW;
+        END $$
+        """,
+        """
+        CREATE TRIGGER trg_trusted_approval_link_mutation_guard
+        BEFORE UPDATE OR DELETE ON trusted_knowledge_approval_links FOR EACH ROW
+        EXECUTE FUNCTION enforce_trusted_approval_link_mutation()
+        """,
+        """
+        CREATE OR REPLACE FUNCTION enforce_review_item_revoke_snapshot()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF TG_OP = 'UPDATE' AND OLD.revoked_at IS NOT NULL THEN
+            IF NEW.status IS DISTINCT FROM OLD.status OR
+               NEW.revoked_at IS DISTINCT FROM OLD.revoked_at OR
+               NEW.revoked_by_subject_hmac IS DISTINCT FROM
+                 OLD.revoked_by_subject_hmac OR
+               NEW.revoked_by_fingerprint_key_version IS DISTINCT FROM
+                 OLD.revoked_by_fingerprint_key_version OR
+               NEW.revoked_by_fingerprint_key_material_verifier IS DISTINCT FROM
+                 OLD.revoked_by_fingerprint_key_material_verifier OR
+               NEW.revoke_knowledge_remained_trusted IS DISTINCT FROM
+                 OLD.revoke_knowledge_remained_trusted OR
+               NEW.revoke_document_count IS DISTINCT FROM OLD.revoke_document_count
+            THEN RAISE EXCEPTION 'revoke snapshot is immutable'; END IF;
+          ELSIF NEW.status = 'revoked' OR NEW.revoked_at IS NOT NULL OR
+                NEW.revoked_by_subject_hmac IS NOT NULL OR
+                NEW.revoked_by_fingerprint_key_version IS NOT NULL OR
+                NEW.revoked_by_fingerprint_key_material_verifier IS NOT NULL OR
+                NEW.revoke_knowledge_remained_trusted IS NOT NULL OR
+                NEW.revoke_document_count IS NOT NULL
+          THEN
+            IF NEW.status <> 'revoked' OR NEW.revoked_at IS NULL OR
+               length(NEW.revoked_by_subject_hmac) <> 64 OR
+               NEW.revoked_by_fingerprint_key_version IS NULL OR
+               length(NEW.revoked_by_fingerprint_key_material_verifier) <> 64 OR
+               NEW.revoke_knowledge_remained_trusted IS NULL OR
+               NEW.revoke_document_count IS NULL OR NEW.revoke_document_count < 0
+            THEN RAISE EXCEPTION 'complete revoke snapshot required'; END IF;
+          END IF;
+          RETURN NEW;
+        END $$
+        """,
+        """
+        CREATE TRIGGER trg_review_item_revoke_snapshot_guard
+        BEFORE INSERT OR UPDATE ON review_items FOR EACH ROW
+        EXECUTE FUNCTION enforce_review_item_revoke_snapshot()
         """,
         """
         CREATE OR REPLACE FUNCTION enforce_assistant_message_immutable()
@@ -668,10 +973,47 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
         EXECUTE FUNCTION enforce_audit_correction_monotonic()
         """,
         """
+        CREATE OR REPLACE FUNCTION enforce_auto_review_post_audit_mutation()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF TG_OP = 'DELETE' OR OLD.status <> 'pending' OR
+             NEW.review_item_id IS DISTINCT FROM OLD.review_item_id OR
+             NEW.promotion_decision_id IS DISTINCT FROM OLD.promotion_decision_id OR
+             NEW.sample_cohort IS DISTINCT FROM OLD.sample_cohort OR
+             NEW.created_at IS DISTINCT FROM OLD.created_at
+          THEN RAISE EXCEPTION 'terminal audit is immutable'; END IF;
+          RETURN NEW;
+        END $$
+        """,
+        """
+        CREATE TRIGGER trg_auto_review_post_audit_mutation_guard
+        BEFORE UPDATE OR DELETE ON auto_review_post_audits FOR EACH ROW
+        EXECUTE FUNCTION enforce_auto_review_post_audit_mutation()
+        """,
+        """
+        CREATE OR REPLACE FUNCTION enforce_correction_confirmed_parent()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM auto_review_post_audits audit
+            WHERE audit.id = NEW.post_audit_id
+              AND audit.review_item_id = NEW.review_item_id
+              AND audit.status = 'completed' AND audit.outcome = 'confirmed'
+          ) THEN RAISE EXCEPTION 'correction requires confirmed parent audit';
+          END IF;
+          RETURN NEW;
+        END $$
+        """,
+        """
+        CREATE TRIGGER trg_auto_review_correction_confirmed_parent
+        BEFORE INSERT ON auto_review_audit_corrections FOR EACH ROW
+        EXECUTE FUNCTION enforce_correction_confirmed_parent()
+        """,
+        """
         CREATE OR REPLACE FUNCTION enforce_c5_parser_identity_immutable()
         RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
-          IF OLD.server_content_signature IS NOT NULL AND (
+          IF TG_OP = 'UPDATE' AND OLD.server_content_signature IS NOT NULL AND (
              NEW.server_content_signature_schema IS DISTINCT FROM
                OLD.server_content_signature_schema OR
              NEW.server_content_signature IS DISTINCT FROM OLD.server_content_signature OR
@@ -679,13 +1021,42 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
              NEW.parser_version IS DISTINCT FROM OLD.parser_version OR
              NEW.chunk_policy_version IS DISTINCT FROM OLD.chunk_policy_version)
           THEN RAISE EXCEPTION 'C.5 parser identity is immutable'; END IF;
+          IF NEW.server_content_signature IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM document_versions version
+            JOIN documents document ON document.id = version.document_id
+            JOIN sources source ON source.id = NEW.source_id
+            WHERE version.id = NEW.document_version_id
+              AND document.id = NEW.document_id
+              AND document.source_id = NEW.source_id
+              AND source.server_content_signature_schema =
+                NEW.server_content_signature_schema
+              AND source.server_content_signature = NEW.server_content_signature
+          ) THEN RAISE EXCEPTION 'parser authority mismatch'; END IF;
           RETURN NEW;
         END $$
         """,
         """
         CREATE TRIGGER trg_document_parser_run_c5_identity_immutable
-        BEFORE UPDATE ON document_parser_runs FOR EACH ROW
+        BEFORE INSERT OR UPDATE ON document_parser_runs FOR EACH ROW
         EXECUTE FUNCTION enforce_c5_parser_identity_immutable()
+        """,
+        """
+        CREATE OR REPLACE FUNCTION enforce_c5_chunk_lineage_immutable()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF OLD.parser_run_id IS NOT NULL AND (
+             NEW.parser_run_id IS DISTINCT FROM OLD.parser_run_id OR
+             NEW.version_id IS DISTINCT FROM OLD.version_id OR
+             NEW.source_id IS DISTINCT FROM OLD.source_id OR
+             NEW.chunk_index IS DISTINCT FROM OLD.chunk_index)
+          THEN RAISE EXCEPTION 'C.5 chunk lineage is immutable'; END IF;
+          RETURN NEW;
+        END $$
+        """,
+        """
+        CREATE TRIGGER trg_document_chunk_c5_lineage_immutable
+        BEFORE UPDATE ON document_chunks FOR EACH ROW
+        EXECUTE FUNCTION enforce_c5_chunk_lineage_immutable()
         """,
     )
 
@@ -694,17 +1065,30 @@ def _drop_postgresql_guards() -> None:
     if op.get_bind().dialect.name != 'postgresql':
         return
     for table_name, trigger_name in (
+        ('document_chunks', 'trg_document_chunk_c5_lineage_immutable'),
         ('document_parser_runs', 'trg_document_parser_run_c5_identity_immutable'),
+        ('auto_review_audit_corrections', 'trg_auto_review_correction_confirmed_parent'),
         ('auto_review_audit_corrections', 'trg_auto_review_audit_correction_monotonic'),
+        ('auto_review_post_audits', 'trg_auto_review_post_audit_mutation_guard'),
+        ('review_items', 'trg_review_item_revoke_snapshot_guard'),
+        ('trusted_knowledge_approval_links', 'trg_trusted_approval_link_mutation_guard'),
+        ('trusted_knowledge_evidence_links', 'trg_trusted_evidence_link_immutable'),
         ('assistant_messages', 'trg_assistant_message_committed_immutable'),
+        ('assistant_message_knowledge_evidence_refs', 'trg_assistant_dependency_child_exactness_guard'),
+        ('assistant_message_evidence_dependencies', 'trg_assistant_dependency_exactness_guard'),
         ('assistant_message_knowledge_evidence_refs', 'trg_assistant_dependency_child_immutable'),
         ('assistant_message_evidence_dependencies', 'trg_assistant_dependency_immutable'),
+        ('auto_review_validations', 'trg_validation_child_mutation_guard'),
+        ('auto_review_validations', 'trg_validation_child_terminal_parent_guard'),
+        ('auto_review_validation_calls', 'trg_validation_call_terminal_children_guard'),
         ('auto_review_revocation_assessments', 'trg_revocation_assessment_immutable'),
         ('auto_review_promotion_decisions', 'trg_promotion_decision_immutable'),
         ('auto_review_rollout_control_events', 'trg_rollout_control_event_append_only'),
         ('auto_review_provider_safety_events', 'trg_provider_safety_event_append_only'),
         ('auto_review_rollout_control_events', 'trg_rollout_control_event_sequence_guard'),
+        ('auto_review_rollout_states', 'trg_rollout_state_control_event_guard'),
         ('auto_review_provider_safety_events', 'trg_provider_safety_event_sequence_guard'),
+        ('auto_review_provider_safety_states', 'trg_provider_safety_state_event_guard'),
         ('assistant_message_evidence_dependencies', 'trg_assistant_dependency_child_count_guard'),
         ('assistant_messages', 'trg_assistant_message_evidence_guard'),
         ('agent_runtime_schema_versions', 'trg_auto_review_schema_boundary_immutable'),
@@ -714,12 +1098,22 @@ def _drop_postgresql_guards() -> None:
     ):
         op.execute(sa.text(f'DROP TRIGGER IF EXISTS {trigger_name} ON {table_name}'))
     for function_name in (
+        'enforce_c5_chunk_lineage_immutable',
         'enforce_c5_parser_identity_immutable',
+        'enforce_correction_confirmed_parent',
+        'enforce_auto_review_post_audit_mutation',
         'enforce_audit_correction_monotonic',
+        'enforce_review_item_revoke_snapshot',
+        'enforce_trusted_approval_link_mutation',
         'enforce_assistant_message_immutable',
         'reject_c5_immutable_mutation',
+        'enforce_rollout_state_control_event',
         'enforce_rollout_control_event_sequence',
+        'enforce_provider_safety_state_event',
         'enforce_provider_safety_event_sequence',
+        'enforce_assistant_dependency_exactness',
+        'enforce_validation_child_mutation',
+        'enforce_validation_call_terminal_children',
         'enforce_assistant_dependency_child_count',
         'enforce_assistant_message_evidence',
         'protect_auto_review_schema_boundary',
@@ -731,47 +1125,10 @@ def _drop_postgresql_guards() -> None:
 
 
 def _refuse_retained_c5_state() -> None:
-    bind = op.get_bind()
-    tables = _table_names()
-    for table_name in C5_TABLE_NAMES:
-        if table_name in tables and bind.scalar(
-            sa.text(f'SELECT COUNT(*) FROM {table_name}')
-        ):
-            raise RuntimeError(
-                f'retained C.5 state in {table_name}; schema downgrade refused'
-            )
-    predicates = {
-        'agent_workflow_threads': "graph_version = 'company-memory-review-v2.1-auto-review'",
-        'agent_workflow_requests': ' OR '.join(
-            f'{name} IS NOT NULL' for name in ADDED_COLUMNS['agent_workflow_requests']
-        ),
-        'review_items': ' OR '.join(
-            f'{name} IS NOT NULL' for name in ADDED_COLUMNS['review_items']
-        ),
-        'agent_runs': ' OR '.join(
-            f'{name} IS NOT NULL' for name in ADDED_COLUMNS['agent_runs']
-        ),
-        'assistant_messages': ' OR '.join(
-            f'{name} IS NOT NULL' for name in ADDED_COLUMNS['assistant_messages']
-        ),
-        'sources': ' OR '.join(
-            f'{name} IS NOT NULL' for name in ADDED_COLUMNS['sources']
-        ),
-        'documents': 'current_document_version_id IS NOT NULL',
-        'document_parser_runs': ' OR '.join(
-            f'{name} IS NOT NULL' for name in ADDED_COLUMNS['document_parser_runs']
-        ),
-        'document_chunks': 'parser_run_id IS NOT NULL',
-    }
-    for table_name, predicate in predicates.items():
-        if table_name == 'review_items' and 'status' in _column_names(table_name):
-            predicate += " OR status = 'revoked'"
-        if table_name in tables and bind.scalar(
-            sa.text(f'SELECT COUNT(*) FROM {table_name} WHERE {predicate}')
-        ):
-            raise RuntimeError(
-                f'retained C.5 state in {table_name}; schema downgrade refused'
-            )
+    if has_retained_c5_state(
+        op.get_bind(), require_complete_schema=False
+    ):
+        raise RuntimeError('retained C.5 state; schema downgrade refused')
 
 
 def _drop_existing_table_constraints_after_new_tables() -> None:

@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from backend.app.admin.auto_review_keys import has_retained_c5_state
+from backend.app.admin.auto_review_retained_state import has_retained_c5_state
 from backend.app.core.config import Settings
 from backend.app.models import (
     AgentRun,

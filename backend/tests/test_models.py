@@ -1,14 +1,18 @@
 from collections.abc import Generator
 from datetime import datetime
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.db.base import Base
 from backend.app.models import (
     AgentRun,
     AgentWorkflowEvidenceRef,
+    AgentWorkflowRequest,
+    AgentWorkflowThread,
     AutoReviewExtractionCall,
     AutoReviewPostAudit,
     AutoReviewProviderSafetyEvent,
@@ -113,6 +117,275 @@ def test_c5_models_expose_bounded_identity_columns_and_named_ownership() -> None
         constraint.name
         for constraint in AgentWorkflowEvidenceRef.__table__.constraints
     }
+
+
+def test_v21_request_persists_exact_extraction_generation_snapshot() -> None:
+    columns = AgentWorkflowRequest.__table__.c
+
+    assert columns.auto_review_extraction_provider.type.length == 120
+    assert columns.auto_review_extraction_model.type.length == 120
+    assert columns.auto_review_extraction_reasoning_effort.type.length == 32
+    assert columns.auto_review_extraction_route_version.type.length == 64
+    assert all(
+        columns[name].nullable
+        for name in (
+            'auto_review_extraction_provider',
+            'auto_review_extraction_model',
+            'auto_review_extraction_reasoning_effort',
+            'auto_review_extraction_route_version',
+        )
+    )
+
+
+def test_claimed_extraction_call_rejects_terminal_charge_fields(
+    db_session: Session,
+) -> None:
+    thread = AgentWorkflowThread(
+        thread_id='extraction-charge-thread',
+        workflow_name='company-memory-review',
+        graph_version='company-memory-review-v2.1-auto-review',
+        checkpoint_thread_id='checkpoint-extraction-charge',
+        checkpoint_store='sqlite',
+        owner_subject_id='owner',
+        security_scope_id='scope',
+        input_hash='a' * 64,
+        evidence_version_hash='b' * 64,
+        status='created',
+    )
+    run = AgentRun(
+        agent_name='timeline_agent',
+        prompt_version='timeline:c5-v1',
+        status='claimed',
+        source_window='window',
+        cache_key='extraction-charge-cache',
+        model_name='gpt-5.4-mini-2026-03-17',
+        permission_level='internal',
+        workflow_thread_id=thread.thread_id,
+        generation_provider='openai',
+        generation_reasoning_effort='none',
+        generation_route_version='auto-review-extraction-route:v1',
+        generation_output_contract_version='timeline-candidate:c5-v1',
+    )
+    db_session.add_all([thread, run])
+    db_session.flush()
+    db_session.add(
+        AutoReviewExtractionCall(
+            agent_run_id=run.id,
+            workflow_thread_id=thread.thread_id,
+            agent_name=run.agent_name,
+            extraction_plan_hmac='c' * 64,
+            provider='openai',
+            model='gpt-5.4-mini-2026-03-17',
+            reasoning_effort='none',
+            route_version='auto-review-extraction-route:v1',
+            prompt_version='timeline:c5-v1',
+            output_contract_version='timeline-candidate:c5-v1',
+            extraction_registry_version='registry:v1',
+            cost_policy_version='cost:v1',
+            provider_safety_state_version=1,
+            token_estimator_version='estimator:v1',
+            tokenizer_encoding='o200k_base',
+            reply_priming_tokens=16,
+            framing_safety_tokens=512,
+            prepared_content_hmac='d' * 64,
+            prepared_character_count=100,
+            framed_input_token_cap=1000,
+            total_output_token_cap=100,
+            max_candidates_per_agent=1,
+            input_usd_per_1m=Decimal('1.000000'),
+            output_usd_per_1m=Decimal('2.000000'),
+            fingerprint_key_version='v1',
+            fingerprint_key_material_verifier='e' * 64,
+            provider_timeout_seconds=30,
+            provider_send_start_window_seconds=5,
+            provider_attempt_lease_seconds=60,
+            provider_commit_grace_seconds=5,
+            workflow_extraction_cost_ceiling_usd=Decimal('1.000000'),
+            workflow_total_cost_ceiling_usd=Decimal('2.000000'),
+            status='claimed',
+            provider_attempt_count=0,
+            reserved_input_tokens=100,
+            reserved_output_tokens=100,
+            reserved_cost_usd=Decimal('0.100000'),
+            charged_input_tokens=1,
+            charged_output_tokens=0,
+            charged_cost_usd=Decimal('0.000001'),
+            budget_overrun=False,
+            budget_overrun_cost_usd=Decimal('0.000000'),
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_extraction_call_rejects_more_than_one_candidate_cap(
+    db_session: Session,
+) -> None:
+    thread = AgentWorkflowThread(
+        thread_id='extraction-cap-thread',
+        workflow_name='company-memory-review',
+        graph_version='company-memory-review-v2.1-auto-review',
+        checkpoint_thread_id='checkpoint-extraction-cap',
+        checkpoint_store='sqlite',
+        owner_subject_id='owner',
+        security_scope_id='scope',
+        input_hash='a' * 64,
+        evidence_version_hash='b' * 64,
+        status='created',
+    )
+    run = AgentRun(
+        agent_name='timeline_agent',
+        prompt_version='timeline:c5-v1',
+        status='claimed',
+        source_window='window',
+        cache_key='extraction-cap-cache',
+        model_name='gpt-5.4-mini-2026-03-17',
+        permission_level='internal',
+        workflow_thread_id=thread.thread_id,
+        generation_provider='openai',
+        generation_reasoning_effort='none',
+        generation_route_version='auto-review-extraction-route:v1',
+        generation_output_contract_version='timeline-candidate:c5-v1',
+    )
+    db_session.add_all([thread, run])
+    db_session.flush()
+    call = AutoReviewExtractionCall(
+        agent_run_id=run.id,
+        workflow_thread_id=thread.thread_id,
+        agent_name=run.agent_name,
+        extraction_plan_hmac='c' * 64,
+        provider='openai',
+        model='gpt-5.4-mini-2026-03-17',
+        reasoning_effort='none',
+        route_version='auto-review-extraction-route:v1',
+        prompt_version='timeline:c5-v1',
+        output_contract_version='timeline-candidate:c5-v1',
+        extraction_registry_version='registry:v1',
+        cost_policy_version='cost:v1',
+        provider_safety_state_version=1,
+        token_estimator_version='estimator:v1',
+        tokenizer_encoding='o200k_base',
+        reply_priming_tokens=16,
+        framing_safety_tokens=512,
+        prepared_content_hmac='d' * 64,
+        prepared_character_count=100,
+        framed_input_token_cap=1000,
+        total_output_token_cap=100,
+        max_candidates_per_agent=2,
+        input_usd_per_1m=Decimal('1.000000'),
+        output_usd_per_1m=Decimal('2.000000'),
+        fingerprint_key_version='v1',
+        fingerprint_key_material_verifier='e' * 64,
+        provider_timeout_seconds=30,
+        provider_send_start_window_seconds=5,
+        provider_attempt_lease_seconds=60,
+        provider_commit_grace_seconds=5,
+        workflow_extraction_cost_ceiling_usd=Decimal('1.000000'),
+        workflow_total_cost_ceiling_usd=Decimal('2.000000'),
+        status='claimed',
+        provider_attempt_count=0,
+        reserved_input_tokens=100,
+        reserved_output_tokens=100,
+        reserved_cost_usd=Decimal('0.100000'),
+        charged_cost_usd=Decimal('0.000000'),
+        budget_overrun=False,
+        budget_overrun_cost_usd=Decimal('0.000000'),
+    )
+    db_session.add(call)
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+@pytest.mark.parametrize('signature', ['A' * 64, 'g' * 64])
+def test_source_authority_rejects_non_lowercase_or_non_hex_signature(
+    db_session: Session,
+    signature: str,
+) -> None:
+    db_session.add(
+        Source(
+            source_type='drive',
+            source_id='invalid-server-signature',
+            source_url='https://example.test/source',
+            title='Source',
+            permission_level='internal',
+            raw_metadata={},
+            server_content_signature_schema='server-source-content:v1',
+            server_content_signature=signature,
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_pending_audit_rejects_human_terminal_fields(db_session: Session) -> None:
+    db_session.add(
+        AutoReviewPostAudit(
+            review_item_id=100,
+            promotion_decision_id=200,
+            sample_cohort='first_50',
+            status='pending',
+            outcome='confirmed',
+            auditor_subject_hmac='a' * 64,
+            auditor_fingerprint_key_version='v1',
+            auditor_fingerprint_key_material_verifier='b' * 64,
+            audit_reason='confirmed by a human',
+            audited_at=datetime.now(),
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+@pytest.mark.parametrize(
+    'values',
+    [
+        {
+            'status': 'completed',
+            'system_resolution_code': 'source_invalidated_before_audit',
+            'audit_reason': 'must be null for system resolution',
+            'audited_at': datetime.now(),
+        },
+        {
+            'status': 'completed',
+            'outcome': 'confirmed',
+            'audit_reason': 'missing auditor identity',
+            'audited_at': datetime.now(),
+        },
+        {
+            'status': 'completed',
+            'system_resolution_code': 'wrong-code',
+            'audited_at': datetime.now(),
+        },
+        {
+            'status': 'remediation_required',
+            'outcome': 'incorrect',
+            'auditor_subject_hmac': 'a' * 64,
+            'auditor_fingerprint_key_version': 'v1',
+            'auditor_fingerprint_key_material_verifier': 'b' * 64,
+            'audit_reason': 'reason',
+            'audited_at': datetime.now(),
+        },
+    ],
+)
+def test_audit_rejects_non_exact_terminal_field_combinations(
+    db_session: Session,
+    values: dict,
+) -> None:
+    db_session.add(
+        AutoReviewPostAudit(
+            review_item_id=101,
+            promotion_decision_id=201,
+            sample_cohort='first_50',
+            **values,
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
 
 
 def test_c5_append_only_and_authority_checks_are_present_in_metadata() -> None:

@@ -2,9 +2,14 @@ import hashlib
 import hmac
 from dataclasses import dataclass
 
-from sqlalchemy import inspect, select, text
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
+from backend.app.admin.auto_review_retained_state import (
+    C5SchemaCapabilityError,
+    c5_schema_available,
+    has_retained_c5_state,
+)
 from backend.app.agent_runtime.keyed_mutation_guard import KeyedMutationGuard
 from backend.app.core.config import Settings
 from backend.app.models.auto_review import (
@@ -51,7 +56,13 @@ class AutoReviewKeyBootstrapService:
 
     def ensure_initialized(self) -> AutoReviewKeyBootstrapResult:
         with self._session_factory() as db:
-            if not _c5_schema_available(db):
+            try:
+                schema_available = c5_schema_available(db)
+            except C5SchemaCapabilityError as exc:
+                raise AutoReviewKeyBootstrapError(
+                    'incomplete_c5_schema', str(exc)
+                ) from exc
+            if not schema_available:
                 db.rollback()
                 return AutoReviewKeyBootstrapResult(
                     schema_available=False,
@@ -79,7 +90,7 @@ class AutoReviewKeyBootstrapService:
                 runtime = KeyedMutationGuard.lock_runtime_key_state(
                     db, for_update=True
                 )
-                retained = _has_retained_c5_state(db, ignore_runtime=True)
+                retained = has_retained_c5_state(db, ignore_runtime=True)
                 if runtime is None and retained:
                     raise AutoReviewKeyBootstrapError(
                         'retained_keyed_state_without_runtime_identity',
@@ -139,14 +150,6 @@ class AutoReviewKeyBootstrapService:
                 )
 
 
-def _c5_schema_available(db: Session) -> bool:
-    tables = set(inspect(db.get_bind()).get_table_names())
-    return {
-        'auto_review_runtime_key_states',
-        'trusted_knowledge_fingerprint_projection_states',
-    } <= tables
-
-
 def _require_runtime_identity(
     runtime: AutoReviewRuntimeKeyState,
     *,
@@ -178,100 +181,3 @@ def _require_projection_identity(
             'projection_key_identity_mismatch',
             'projection key identity does not match retained runtime state',
         )
-
-
-NEW_C5_TABLES = (
-    'auto_review_provider_safety_events',
-    'auto_review_provider_safety_states',
-    'trusted_knowledge_fingerprint_projection_states',
-    'trusted_knowledge_fingerprints',
-    'review_item_evidence_refs',
-    'auto_review_extraction_calls',
-    'auto_review_validation_calls',
-    'auto_review_validations',
-    'trusted_knowledge_approval_links',
-    'trusted_knowledge_evidence_links',
-    'assistant_message_evidence_dependencies',
-    'assistant_message_knowledge_evidence_refs',
-    'auto_review_rollout_states',
-    'auto_review_rollout_control_events',
-    'auto_review_promotion_decisions',
-    'auto_review_post_audits',
-    'auto_review_revocation_assessments',
-    'auto_review_audit_corrections',
-    'vector_serving_tombstones',
-)
-
-
-def has_retained_c5_state(db: Session) -> bool:
-    return _has_retained_c5_state(db, ignore_runtime=False)
-
-
-def _has_retained_c5_state(db: Session, *, ignore_runtime: bool) -> bool:
-    tables = set(inspect(db.get_bind()).get_table_names())
-    inspected_tables = list(NEW_C5_TABLES)
-    if not ignore_runtime:
-        inspected_tables.append('auto_review_runtime_key_states')
-    for table_name in inspected_tables:
-        if table_name in tables and db.execute(
-            text(f'SELECT 1 FROM {table_name} LIMIT 1')
-        ).first():
-            return True
-
-    predicates = {
-        'agent_workflow_threads': "graph_version = 'company-memory-review-v2.1-auto-review'",
-        'agent_workflow_requests': (
-            'auto_review_mode IS NOT NULL OR '
-            'fingerprint_key_material_verifier IS NOT NULL OR '
-            'confirmed_total_cost_ceiling_usd IS NOT NULL'
-        ),
-        'review_items': (
-            "candidate_contract_version IS NOT NULL OR agent_run_id IS NOT NULL OR "
-            "resolution_source IS NOT NULL OR auto_validation_id IS NOT NULL OR "
-            "revoked_at IS NOT NULL OR status = 'revoked'"
-        ),
-        'agent_runs': (
-            'generation_provider IS NOT NULL OR '
-            'generation_reasoning_effort IS NOT NULL OR '
-            'generation_route_version IS NOT NULL OR '
-            'generation_output_contract_version IS NOT NULL'
-        ),
-        'assistant_messages': (
-            'evidence_contract_version IS NOT NULL OR '
-            'serving_dependency_count IS NOT NULL'
-        ),
-        'sources': (
-            'server_content_signature_schema IS NOT NULL OR '
-            'server_content_signature IS NOT NULL OR '
-            'connector_content_signature IS NOT NULL'
-        ),
-        'documents': 'current_document_version_id IS NOT NULL',
-        'document_parser_runs': (
-            'server_content_signature_schema IS NOT NULL OR '
-            'server_content_signature IS NOT NULL OR '
-            'parser_policy_version IS NOT NULL OR parser_version IS NOT NULL OR '
-            'chunk_policy_version IS NOT NULL'
-        ),
-        'document_chunks': 'parser_run_id IS NOT NULL',
-    }
-    for table_name, predicate in predicates.items():
-        if table_name not in tables:
-            continue
-        columns = {item['name'] for item in inspect(db.get_bind()).get_columns(table_name)}
-        mentioned = {
-            token
-            for token in predicate.replace('(', ' ').replace(')', ' ').split()
-            if token.isidentifier()
-        }
-        if not (mentioned & columns):
-            continue
-        try:
-            retained = db.execute(
-                text(f'SELECT 1 FROM {table_name} WHERE {predicate} LIMIT 1')
-            ).first()
-        except Exception:
-            db.rollback()
-            continue
-        if retained:
-            return True
-    return False
