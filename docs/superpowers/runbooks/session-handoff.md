@@ -2899,10 +2899,16 @@ tests passed with 53 tests; ruff passed.
   consistency, Assistant lineage, provider/rollout event-backed state, and
   source/parser/chunk authority. Do not replace these with SQLite-only checks.
 - Provider aggregate mutations cover the full authorization/overrun snapshot
-  and require exact state-version/event/backpointer alignment. Rollout metrics
-  use `state_version + 1` without changing `control_epoch` or the last control
-  event; control mutations increment both, and `corrected_critical_count` is
-  monotonic.
+  and require exact state-version/event/backpointer alignment. `budget_overrun`
+  preserves the authorized estimator/framing/price tuple; `breaker_cleared`
+  requires an open breaker, operator attribution, a different reviewed cost
+  policy, and the exact replacement authority. Rollout control kinds are
+  transition-specific: percentage authorization cannot change a breaker,
+  breaker open/close cannot masquerade as authorization or invalidation, and
+  generation invalidation only lowers the latch and advances its generation.
+  Rollout metrics use `state_version + 1` without changing `control_epoch` or
+  the last control event; control mutations increment both, and
+  `corrected_critical_count` is monotonic.
 - Parser-run identity and chunk lineage are frozen on every UPDATE, including
   legacy null-to-value attempts. C.5 repair must insert replacement rows.
 - `backend/app/admin/auto_review_retained_state.py` is the shared exhaustive
@@ -2915,8 +2921,8 @@ tests passed with 53 tests; ruff passed.
   creates a unique schema and drops it in `finally`, so generated rows do not
   leak between runs. Missing URLs fail, not skip.
 - Historical-upgrade coverage is pinned to a manual `2f6a8b9c0d1e` schema and
-  must not call current `Base.metadata`. Current round-2 evidence is `134`
-  focused tests and `45` PostgreSQL-only tests (zero skips), plus the unchanged
+  must not call current `Base.metadata`. Current round-3 evidence is `159`
+  focused tests and `70` PostgreSQL-only tests (zero skips), plus the unchanged
   `118`-test Task 1 compatibility suite.
 - Cutover stays drain/migrate/deploy/bootstrap/reconcile. Slack remains
   C.5-ineligible and Task 2 never calls live providers or connectors.

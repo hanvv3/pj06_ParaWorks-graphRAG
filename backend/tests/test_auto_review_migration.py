@@ -524,6 +524,136 @@ def _insert_initial_provider_state(connection, *, suffix: str) -> tuple[int, int
     return state_id, event_id
 
 
+def _apply_provider_transition(
+    connection,
+    *,
+    state_id: int,
+    event_kind: str,
+    authority_updates: dict[str, object] | None = None,
+) -> int:
+    state = connection.execute(
+        text(
+            'SELECT * FROM auto_review_provider_safety_states '
+            'WHERE id=:state_id'
+        ),
+        {'state_id': state_id},
+    ).mappings().one()
+    authority = {
+        'authorized_cost_policy_version': state['authorized_cost_policy_version'],
+        'token_estimator_version': state['token_estimator_version'],
+        'tokenizer_encoding': state['tokenizer_encoding'],
+        'reply_priming_tokens': state['reply_priming_tokens'],
+        'framing_safety_tokens': state['framing_safety_tokens'],
+        'input_usd_per_1m': state['input_usd_per_1m'],
+        'output_usd_per_1m': state['output_usd_per_1m'],
+    }
+    authority.update(authority_updates or {})
+    created_at = connection.scalar(text('SELECT clock_timestamp()'))
+    is_overrun = event_kind == 'budget_overrun'
+    new_breaker_open = is_overrun
+    reason_code = 'budget_overrun' if is_overrun else None
+    gate_reference = (
+        'gate:provider-remediated'
+        if event_kind == 'breaker_cleared'
+        else state['regression_gate_reference']
+    )
+    event_id = connection.scalar(
+        text(
+            'INSERT INTO auto_review_provider_safety_events '
+            '(provider_safety_state_id, purpose, provider, model, '
+            'reasoning_effort, event_sequence, event_kind, prior_state_version, '
+            'new_state_version, cost_policy_version, token_estimator_version, '
+            'tokenizer_encoding, reply_priming_tokens, framing_safety_tokens, '
+            'input_usd_per_1m, output_usd_per_1m, prior_breaker_open, '
+            'new_breaker_open, reason_code, regression_gate_reference, '
+            'actor_subject_hmac, call_hmac, fingerprint_key_version, '
+            'fingerprint_key_material_verifier, created_at) VALUES '
+            '(:state_id, :purpose, :provider, :model, :reasoning_effort, '
+            ':event_sequence, :event_kind, :prior_state_version, '
+            ':new_state_version, :cost_policy_version, :token_estimator_version, '
+            ':tokenizer_encoding, :reply_priming_tokens, :framing_safety_tokens, '
+            ':input_usd_per_1m, :output_usd_per_1m, :prior_breaker_open, '
+            ':new_breaker_open, :reason_code, :regression_gate_reference, '
+            ':actor_subject_hmac, :call_hmac, :fingerprint_key_version, '
+            ':fingerprint_key_material_verifier, :created_at) RETURNING id'
+        ),
+        {
+            'state_id': state_id,
+            'purpose': state['purpose'],
+            'provider': state['provider'],
+            'model': state['model'],
+            'reasoning_effort': state['reasoning_effort'],
+            'event_sequence': state['last_event_sequence'] + 1,
+            'event_kind': event_kind,
+            'prior_state_version': state['state_version'],
+            'new_state_version': state['state_version'] + 1,
+            'cost_policy_version': authority['authorized_cost_policy_version'],
+            'token_estimator_version': authority['token_estimator_version'],
+            'tokenizer_encoding': authority['tokenizer_encoding'],
+            'reply_priming_tokens': authority['reply_priming_tokens'],
+            'framing_safety_tokens': authority['framing_safety_tokens'],
+            'input_usd_per_1m': authority['input_usd_per_1m'],
+            'output_usd_per_1m': authority['output_usd_per_1m'],
+            'prior_breaker_open': state['breaker_open'],
+            'new_breaker_open': new_breaker_open,
+            'reason_code': reason_code,
+            'regression_gate_reference': gate_reference,
+            'actor_subject_hmac': None if is_overrun else 'c' * 64,
+            'call_hmac': 'd' * 64 if is_overrun else None,
+            'fingerprint_key_version': 'pg-test-v1',
+            'fingerprint_key_material_verifier': 'b' * 64,
+            'created_at': created_at,
+        },
+    )
+    connection.execute(
+        text(
+            'UPDATE auto_review_provider_safety_states SET '
+            'state_version=:new_state_version, '
+            'authorized_cost_policy_version=:cost_policy_version, '
+            'token_estimator_version=:token_estimator_version, '
+            'tokenizer_encoding=:tokenizer_encoding, '
+            'reply_priming_tokens=:reply_priming_tokens, '
+            'framing_safety_tokens=:framing_safety_tokens, '
+            'input_usd_per_1m=:input_usd_per_1m, '
+            'output_usd_per_1m=:output_usd_per_1m, '
+            'breaker_open=:new_breaker_open, breaker_reason_code=:reason_code, '
+            'overrun_count=:overrun_count, '
+            'last_overrun_cost_usd=:last_overrun_cost_usd, '
+            'last_overrun_at=:last_overrun_at, '
+            'regression_gate_reference=:regression_gate_reference, '
+            'cleared_at=:cleared_at, last_event_sequence=:event_sequence, '
+            'last_event_id=:event_id WHERE id=:state_id'
+        ),
+        {
+            'state_id': state_id,
+            'new_state_version': state['state_version'] + 1,
+            'cost_policy_version': authority['authorized_cost_policy_version'],
+            'token_estimator_version': authority['token_estimator_version'],
+            'tokenizer_encoding': authority['tokenizer_encoding'],
+            'reply_priming_tokens': authority['reply_priming_tokens'],
+            'framing_safety_tokens': authority['framing_safety_tokens'],
+            'input_usd_per_1m': authority['input_usd_per_1m'],
+            'output_usd_per_1m': authority['output_usd_per_1m'],
+            'new_breaker_open': new_breaker_open,
+            'reason_code': reason_code,
+            'overrun_count': state['overrun_count'] + (1 if is_overrun else 0),
+            'last_overrun_cost_usd': (
+                Decimal('0.500000')
+                if is_overrun
+                else state['last_overrun_cost_usd']
+            ),
+            'last_overrun_at': (
+                created_at if is_overrun else state['last_overrun_at']
+            ),
+            'regression_gate_reference': gate_reference,
+            'cleared_at': created_at if event_kind == 'breaker_cleared' else None,
+            'event_sequence': state['last_event_sequence'] + 1,
+            'event_id': event_id,
+        },
+    )
+    return event_id
+
+
 def _insert_rollout_state(
     engine: Engine,
     *,
@@ -541,6 +671,121 @@ def _insert_rollout_state(
         db.add(state)
         db.commit()
         return state.id
+
+
+def _apply_rollout_transition(
+    connection,
+    *,
+    state_id: int,
+    transition: str,
+    event_kind: str,
+) -> int:
+    state = connection.execute(
+        text('SELECT * FROM auto_review_rollout_states WHERE id=:state_id'),
+        {'state_id': state_id},
+    ).mappings().one()
+    created_at = connection.scalar(text('SELECT clock_timestamp()'))
+    new_percentage = state['max_authorized_percentage']
+    new_breaker_open = state['breaker_open']
+    new_generation = state['authorization_generation']
+    authorization_at = state['authorization_at']
+    breaker_reason_code = state['breaker_reason_code']
+    breaker_opened_at = state['breaker_opened_at']
+    gate_reference = state['regression_gate_reference']
+    if transition == 'percentage_authorized':
+        new_percentage = 10 if new_percentage == 0 else 100
+        new_generation += 1
+        authorization_at = created_at
+        gate_reference = f'gate:authorized:{new_percentage}'
+    elif transition == 'breaker_opened':
+        new_breaker_open = True
+        breaker_reason_code = 'critical_audit'
+        breaker_opened_at = created_at
+    elif transition == 'breaker_closed':
+        new_breaker_open = False
+        breaker_reason_code = None
+        breaker_opened_at = None
+        gate_reference = 'gate:remediated'
+    elif transition == 'generation_invalidated':
+        new_percentage = 0
+        new_generation += 1
+        authorization_at = None
+    else:
+        raise AssertionError(f'unknown rollout transition: {transition}')
+
+    event_id = connection.scalar(
+        text(
+            'INSERT INTO auto_review_rollout_control_events '
+            '(rollout_state_id, security_scope_id, policy_version, '
+            'event_sequence, event_kind, prior_state_version, new_state_version, '
+            'prior_control_epoch, new_control_epoch, '
+            'prior_max_authorized_percentage, new_max_authorized_percentage, '
+            'prior_breaker_open, new_breaker_open, '
+            'prior_authorization_generation, new_authorization_generation, '
+            'reason_code, regression_gate_reference, actor_subject_hmac, '
+            'fingerprint_key_version, fingerprint_key_material_verifier, '
+            'created_at) VALUES '
+            '(:state_id, :security_scope_id, :policy_version, :event_sequence, '
+            ':event_kind, :prior_state_version, :new_state_version, '
+            ':prior_control_epoch, :new_control_epoch, :prior_percentage, '
+            ':new_percentage, :prior_breaker_open, :new_breaker_open, '
+            ':prior_generation, :new_generation, :reason_code, :gate_reference, '
+            ':actor_subject_hmac, :fingerprint_key_version, :verifier, '
+            ':created_at) RETURNING id'
+        ),
+        {
+            'state_id': state_id,
+            'security_scope_id': state['security_scope_id'],
+            'policy_version': state['policy_version'],
+            'event_sequence': state['last_event_sequence'] + 1,
+            'event_kind': event_kind,
+            'prior_state_version': state['state_version'],
+            'new_state_version': state['state_version'] + 1,
+            'prior_control_epoch': state['control_epoch'],
+            'new_control_epoch': state['control_epoch'] + 1,
+            'prior_percentage': state['max_authorized_percentage'],
+            'new_percentage': new_percentage,
+            'prior_breaker_open': state['breaker_open'],
+            'new_breaker_open': new_breaker_open,
+            'prior_generation': state['authorization_generation'],
+            'new_generation': new_generation,
+            'reason_code': breaker_reason_code,
+            'gate_reference': gate_reference,
+            'actor_subject_hmac': 'e' * 64,
+            'fingerprint_key_version': 'pg-test-v1',
+            'verifier': 'f' * 64,
+            'created_at': created_at,
+        },
+    )
+    connection.execute(
+        text(
+            'UPDATE auto_review_rollout_states SET '
+            'state_version=:new_state_version, control_epoch=:new_control_epoch, '
+            'max_authorized_percentage=:new_percentage, '
+            'authorization_generation=:new_generation, '
+            'authorization_at=:authorization_at, breaker_open=:new_breaker_open, '
+            'breaker_reason_code=:reason_code, '
+            'breaker_opened_at=:breaker_opened_at, '
+            'regression_gate_reference=:gate_reference, '
+            'last_event_sequence=:event_sequence, last_event_id=:event_id '
+            'WHERE id=:state_id'
+        ),
+        {
+            'state_id': state_id,
+            'new_state_version': state['state_version'] + 1,
+            'new_control_epoch': state['control_epoch'] + 1,
+            'new_percentage': new_percentage,
+            'new_generation': new_generation,
+            'authorization_at': authorization_at,
+            'new_breaker_open': new_breaker_open,
+            'reason_code': breaker_reason_code,
+            'breaker_opened_at': breaker_opened_at,
+            'gate_reference': gate_reference,
+            'event_sequence': state['last_event_sequence'] + 1,
+            'event_id': event_id,
+        },
+    )
+    return event_id
 
 
 def test_auto_review_migration_upgrades_fresh_schema_and_writes_boundary(
@@ -1311,6 +1556,108 @@ def test_postgresql_provider_aggregate_rejects_unaudited_state_mutation(
     connection.close()
 
 
+@pytest.mark.parametrize(
+    ('column_name', 'replacement'),
+    [
+        ('authorized_cost_policy_version', 'cost:wrong-overrun'),
+        ('token_estimator_version', 'estimator:wrong-overrun'),
+        ('tokenizer_encoding', 'wrong_encoding'),
+        ('reply_priming_tokens', 17),
+        ('framing_safety_tokens', 513),
+        ('input_usd_per_1m', Decimal('2.100000')),
+        ('output_usd_per_1m', Decimal('12.100000')),
+    ],
+)
+def test_postgresql_budget_overrun_cannot_replace_authorized_provider_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    column_name: str,
+    replacement: object,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    with engine.begin() as connection:
+        state_id, _ = _insert_initial_provider_state(
+            connection, suffix=uuid4().hex[:10]
+        )
+
+    connection = engine.connect()
+    transaction = connection.begin()
+    _apply_provider_transition(
+        connection,
+        state_id=state_id,
+        event_kind='budget_overrun',
+        authority_updates={column_name: replacement},
+    )
+    with pytest.raises(DBAPIError, match='provider event transition mismatch'):
+        transaction.commit()
+    connection.close()
+
+
+def test_postgresql_breaker_clear_requires_an_open_provider_breaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    with engine.begin() as connection:
+        state_id, _ = _insert_initial_provider_state(
+            connection, suffix=uuid4().hex[:10]
+        )
+
+    connection = engine.connect()
+    transaction = connection.begin()
+    _apply_provider_transition(
+        connection,
+        state_id=state_id,
+        event_kind='breaker_cleared',
+        authority_updates={
+            'authorized_cost_policy_version': 'cost:v2',
+            'token_estimator_version': 'estimator:v2',
+            'input_usd_per_1m': Decimal('2.100000'),
+            'output_usd_per_1m': Decimal('12.100000'),
+        },
+    )
+    with pytest.raises(DBAPIError, match='provider event transition mismatch'):
+        transaction.commit()
+    connection.close()
+
+
+def test_postgresql_provider_event_kinds_allow_exact_overrun_then_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    with engine.begin() as connection:
+        state_id, _ = _insert_initial_provider_state(
+            connection, suffix=uuid4().hex[:10]
+        )
+    with engine.begin() as connection:
+        _apply_provider_transition(
+            connection,
+            state_id=state_id,
+            event_kind='budget_overrun',
+        )
+    with engine.begin() as connection:
+        _apply_provider_transition(
+            connection,
+            state_id=state_id,
+            event_kind='breaker_cleared',
+            authority_updates={
+                'authorized_cost_policy_version': 'cost:v2',
+                'token_estimator_version': 'estimator:v2',
+                'input_usd_per_1m': Decimal('2.100000'),
+                'output_usd_per_1m': Decimal('12.100000'),
+            },
+        )
+    with engine.connect() as connection:
+        state = connection.execute(
+            text(
+                'SELECT state_version, authorized_cost_policy_version, '
+                'breaker_open, breaker_reason_code, overrun_count, '
+                'last_event_sequence FROM auto_review_provider_safety_states '
+                'WHERE id=:state_id'
+            ),
+            {'state_id': state_id},
+        ).one()
+    assert state == (3, 'cost:v2', False, None, 1, 3)
+
+
 def test_postgresql_rollout_control_fields_cannot_change_without_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1332,6 +1679,108 @@ def test_postgresql_rollout_control_fields_cannot_change_without_event(
 
         with pytest.raises(DBAPIError, match='control event'):
             db.commit()
+
+
+ROLLOUT_EVENT_KINDS = (
+    'percentage_authorized',
+    'breaker_opened',
+    'breaker_closed',
+    'generation_invalidated',
+)
+
+
+@pytest.mark.parametrize(
+    ('transition', 'wrong_event_kind'),
+    [
+        (transition, event_kind)
+        for transition in ROLLOUT_EVENT_KINDS
+        for event_kind in ROLLOUT_EVENT_KINDS
+        if event_kind != transition
+    ],
+)
+def test_postgresql_rollout_transition_rejects_every_wrong_event_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    transition: str,
+    wrong_event_kind: str,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    state_id = _insert_rollout_state(engine, suffix=uuid4().hex[:10])
+    if transition == 'breaker_closed':
+        with engine.begin() as connection:
+            _apply_rollout_transition(
+                connection,
+                state_id=state_id,
+                transition='breaker_opened',
+                event_kind='breaker_opened',
+            )
+    elif transition == 'generation_invalidated':
+        with engine.begin() as connection:
+            _apply_rollout_transition(
+                connection,
+                state_id=state_id,
+                transition='percentage_authorized',
+                event_kind='percentage_authorized',
+            )
+
+    connection = engine.connect()
+    transaction = connection.begin()
+    with pytest.raises(DBAPIError, match='rollout event transition mismatch'):
+        _apply_rollout_transition(
+            connection,
+            state_id=state_id,
+            transition=transition,
+            event_kind=wrong_event_kind,
+        )
+        transaction.commit()
+    transaction.rollback()
+    connection.close()
+
+
+@pytest.mark.parametrize('event_kind', ROLLOUT_EVENT_KINDS)
+def test_postgresql_rollout_event_kinds_allow_exact_transition(
+    monkeypatch: pytest.MonkeyPatch,
+    event_kind: str,
+) -> None:
+    engine = _postgres_engine(monkeypatch)
+    state_id = _insert_rollout_state(engine, suffix=uuid4().hex[:10])
+    if event_kind == 'breaker_closed':
+        with engine.begin() as connection:
+            _apply_rollout_transition(
+                connection,
+                state_id=state_id,
+                transition='breaker_opened',
+                event_kind='breaker_opened',
+            )
+    elif event_kind == 'generation_invalidated':
+        with engine.begin() as connection:
+            _apply_rollout_transition(
+                connection,
+                state_id=state_id,
+                transition='percentage_authorized',
+                event_kind='percentage_authorized',
+            )
+
+    with engine.begin() as connection:
+        _apply_rollout_transition(
+            connection,
+            state_id=state_id,
+            transition=event_kind,
+            event_kind=event_kind,
+        )
+
+    with engine.connect() as connection:
+        state = connection.execute(
+            text(
+                'SELECT state_version, control_epoch, last_event_sequence '
+                'FROM auto_review_rollout_states WHERE id=:state_id'
+            ),
+            {'state_id': state_id},
+        ).one()
+    expected_sequence = 2 if event_kind in {
+        'breaker_closed',
+        'generation_invalidated',
+    } else 1
+    assert state == (expected_sequence, expected_sequence, expected_sequence)
 
 
 @pytest.mark.parametrize(

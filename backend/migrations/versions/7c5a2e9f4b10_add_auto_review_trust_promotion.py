@@ -782,21 +782,44 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
 
             IF event.event_kind = 'budget_overrun' THEN
               IF NOT aggregate.breaker_open OR
+                 aggregate.authorized_cost_policy_version IS DISTINCT FROM
+                   OLD.authorized_cost_policy_version OR
+                 aggregate.token_estimator_version IS DISTINCT FROM
+                   OLD.token_estimator_version OR
+                 aggregate.tokenizer_encoding IS DISTINCT FROM
+                   OLD.tokenizer_encoding OR
+                 aggregate.reply_priming_tokens IS DISTINCT FROM
+                   OLD.reply_priming_tokens OR
+                 aggregate.framing_safety_tokens IS DISTINCT FROM
+                   OLD.framing_safety_tokens OR
+                 aggregate.input_usd_per_1m IS DISTINCT FROM
+                   OLD.input_usd_per_1m OR
+                 aggregate.output_usd_per_1m IS DISTINCT FROM
+                   OLD.output_usd_per_1m OR
+                 aggregate.regression_gate_reference IS DISTINCT FROM
+                   OLD.regression_gate_reference OR
+                 aggregate.breaker_reason_code IS NULL OR
                  aggregate.overrun_count <> OLD.overrun_count + 1 OR
                  aggregate.last_overrun_cost_usd IS NULL OR
                  aggregate.last_overrun_at IS DISTINCT FROM event.created_at OR
                  aggregate.authorized_at IS DISTINCT FROM OLD.authorized_at OR
                  aggregate.cleared_at IS DISTINCT FROM OLD.cleared_at
-              THEN RAISE EXCEPTION 'provider safety event required'; END IF;
+              THEN RAISE EXCEPTION 'provider event transition mismatch'; END IF;
             ELSIF event.event_kind = 'breaker_cleared' THEN
-              IF aggregate.breaker_open OR
+              IF NOT OLD.breaker_open OR aggregate.breaker_open OR
+                 aggregate.authorized_cost_policy_version IS NOT DISTINCT FROM
+                   OLD.authorized_cost_policy_version OR
+                 aggregate.breaker_reason_code IS NOT NULL OR
+                 aggregate.regression_gate_reference IS NULL OR
+                 aggregate.regression_gate_reference IS NOT DISTINCT FROM
+                   OLD.regression_gate_reference OR
                  aggregate.overrun_count <> OLD.overrun_count OR
                  aggregate.last_overrun_cost_usd IS DISTINCT FROM
                    OLD.last_overrun_cost_usd OR
                  aggregate.last_overrun_at IS DISTINCT FROM OLD.last_overrun_at OR
                  aggregate.authorized_at IS DISTINCT FROM OLD.authorized_at OR
                  aggregate.cleared_at IS DISTINCT FROM event.created_at
-              THEN RAISE EXCEPTION 'provider safety event required'; END IF;
+              THEN RAISE EXCEPTION 'provider event transition mismatch'; END IF;
             ELSE
               RAISE EXCEPTION 'provider safety event required';
             END IF;
@@ -869,6 +892,7 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
         RETURNS trigger LANGUAGE plpgsql AS $$
         DECLARE metric_changed boolean;
         DECLARE control_changed boolean;
+        DECLARE control_event auto_review_rollout_control_events%ROWTYPE;
         BEGIN
           IF NEW.security_scope_id IS DISTINCT FROM OLD.security_scope_id OR
              NEW.policy_version IS DISTINCT FROM OLD.policy_version
@@ -979,6 +1003,74 @@ def _postgresql_guard_statements() -> tuple[str, ...]:
                      NEW.regression_gate_reference
                )
             THEN RAISE EXCEPTION 'rollout control event required'; END IF;
+
+            SELECT * INTO control_event
+            FROM auto_review_rollout_control_events candidate
+            WHERE candidate.id = NEW.last_event_id
+              AND candidate.rollout_state_id = NEW.id;
+            IF NOT FOUND THEN
+              RAISE EXCEPTION 'rollout control event required';
+            END IF;
+
+            IF control_event.event_kind = 'percentage_authorized' THEN
+              IF OLD.breaker_open OR NEW.breaker_open OR
+                 NOT ((OLD.max_authorized_percentage = 0 AND
+                       NEW.max_authorized_percentage = 10) OR
+                      (OLD.max_authorized_percentage = 10 AND
+                       NEW.max_authorized_percentage = 100)) OR
+                 NEW.authorization_generation <>
+                   OLD.authorization_generation + 1 OR
+                 NEW.authorization_at IS DISTINCT FROM control_event.created_at OR
+                 NEW.breaker_reason_code IS NOT NULL OR
+                 NEW.breaker_opened_at IS NOT NULL OR
+                 NEW.regression_gate_reference IS NULL OR
+                 NEW.regression_gate_reference IS NOT DISTINCT FROM
+                   OLD.regression_gate_reference OR
+                 NEW.corrected_critical_count <> 0
+              THEN RAISE EXCEPTION 'rollout event transition mismatch'; END IF;
+            ELSIF control_event.event_kind = 'breaker_opened' THEN
+              IF OLD.breaker_open OR NOT NEW.breaker_open OR
+                 NEW.max_authorized_percentage IS DISTINCT FROM
+                   OLD.max_authorized_percentage OR
+                 NEW.authorization_generation IS DISTINCT FROM
+                   OLD.authorization_generation OR
+                 NEW.authorization_at IS DISTINCT FROM OLD.authorization_at OR
+                 NEW.breaker_reason_code IS NULL OR
+                 NEW.breaker_opened_at IS DISTINCT FROM control_event.created_at OR
+                 NEW.regression_gate_reference IS DISTINCT FROM
+                   OLD.regression_gate_reference
+              THEN RAISE EXCEPTION 'rollout event transition mismatch'; END IF;
+            ELSIF control_event.event_kind = 'breaker_closed' THEN
+              IF NOT OLD.breaker_open OR NEW.breaker_open OR
+                 OLD.max_authorized_percentage <> 0 OR
+                 NEW.max_authorized_percentage <> 0 OR
+                 NEW.authorization_generation IS DISTINCT FROM
+                   OLD.authorization_generation OR
+                 NEW.authorization_at IS DISTINCT FROM OLD.authorization_at OR
+                 NEW.breaker_reason_code IS NOT NULL OR
+                 NEW.breaker_opened_at IS NOT NULL OR
+                 NEW.regression_gate_reference IS NULL OR
+                 NEW.regression_gate_reference IS NOT DISTINCT FROM
+                   OLD.regression_gate_reference OR
+                 NEW.corrected_critical_count <> 0
+              THEN RAISE EXCEPTION 'rollout event transition mismatch'; END IF;
+            ELSIF control_event.event_kind = 'generation_invalidated' THEN
+              IF OLD.max_authorized_percentage NOT IN (10, 100) OR
+                 NEW.max_authorized_percentage <> 0 OR
+                 NEW.authorization_generation <>
+                   OLD.authorization_generation + 1 OR
+                 NEW.authorization_at IS NOT NULL OR
+                 NEW.breaker_open IS DISTINCT FROM OLD.breaker_open OR
+                 NEW.breaker_reason_code IS DISTINCT FROM
+                   OLD.breaker_reason_code OR
+                 NEW.breaker_opened_at IS DISTINCT FROM
+                   OLD.breaker_opened_at OR
+                 NEW.regression_gate_reference IS DISTINCT FROM
+                   OLD.regression_gate_reference
+              THEN RAISE EXCEPTION 'rollout event transition mismatch'; END IF;
+            ELSE
+              RAISE EXCEPTION 'rollout event transition mismatch';
+            END IF;
           ELSIF NEW.control_epoch IS DISTINCT FROM OLD.control_epoch OR
                 NEW.last_event_sequence IS DISTINCT FROM
                   OLD.last_event_sequence OR
