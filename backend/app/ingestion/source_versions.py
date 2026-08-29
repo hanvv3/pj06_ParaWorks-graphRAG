@@ -1,3 +1,4 @@
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
@@ -16,6 +17,8 @@ class CanonicalSourceLike(Protocol):
     source_type: str
     source_id: str
     raw_metadata: dict
+    server_content_signature_schema: str | None
+    server_content_signature: str | None
 
 
 @dataclass(frozen=True)
@@ -26,8 +29,10 @@ class SourceVersionRef:
 
 
 def current_content_signature(source: CanonicalSourceLike) -> str | None:
-    value = (source.raw_metadata or {}).get('content_signature')
-    return value if isinstance(value, str) and value else None
+    if source.server_content_signature_schema != 'server-source-content:v1':
+        return None
+    value = source.server_content_signature
+    return value if isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) else None
 
 
 def source_version_ref(source: CanonicalSourceLike) -> SourceVersionRef | None:

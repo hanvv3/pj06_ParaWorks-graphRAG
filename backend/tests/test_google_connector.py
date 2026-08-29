@@ -173,6 +173,7 @@ def test_google_connector_maps_gmail_messages_to_source_events() -> None:
     assert event.raw_metadata['has_external_participants'] is True
     assert event.raw_metadata['body_source'] == 'payload'
     assert event.raw_metadata['body_truncated'] is False
+    assert event.semantic_timestamp_raw == '1777600800000'
 
 
 def test_google_connector_decodes_encoded_gmail_sender_names() -> None:
@@ -291,6 +292,7 @@ def test_google_connector_maps_gmail_attachments_to_source_events() -> None:
     assert attachment.raw_metadata['parser_status_reason'] == ''
     assert attachment.raw_metadata['document_version'] == '1777600800000'
     assert attachment.raw_metadata['content_signature'] == 'gmail_attachment:msg-attach-1:att-1:2048'
+    assert attachment.semantic_timestamp_raw == '1777600800000'
 
 
 def test_google_connector_maps_drive_files_to_source_events() -> None:
@@ -327,6 +329,7 @@ def test_google_connector_maps_drive_files_to_source_events() -> None:
     assert event.raw_metadata['document_version'] == '42'
     assert event.raw_metadata['revision_id'] == 'rev-42'
     assert event.raw_metadata['content_signature'] == 'drive:file-1:42:rev-42'
+    assert event.semantic_timestamp_raw == '2026-05-01T09:00:00Z'
 
 
 def test_google_connector_exports_google_docs_text_into_drive_source_events() -> None:
@@ -746,6 +749,175 @@ def test_google_connector_maps_calendar_events_to_source_events() -> None:
     assert event.raw_metadata['external_domains'] == ['customer.co.kr']
     assert event.raw_metadata['has_external_attendees'] is True
     assert event.raw_metadata['duration_minutes'] == 60
+    assert event.semantic_timestamp_raw == '2026-05-02T09:00:00+09:00'
+
+
+@pytest.mark.parametrize('internal_date', [None, '', 'not-millis', 'NaN'])
+def test_gmail_missing_or_malformed_internal_date_is_rejected_without_now_fallback(
+    internal_date: object,
+) -> None:
+    class InvalidGmailTimestampClient(FakeGoogleClient):
+        def gmail_messages(self, *, after_internal_date: str | None = None) -> list[dict]:
+            message = super().gmail_messages(after_internal_date=after_internal_date)[0]
+            message['internalDate'] = internal_date
+            return [message]
+
+    connector = GoogleConnector(
+        config=GoogleConnectorConfig(
+            connector_type='gmail',
+            oauth_token='google-oauth-token',
+            account_id='google-user-1',
+            account_name='para@example.com',
+        ),
+        client=InvalidGmailTimestampClient(),
+    )
+
+    with pytest.raises(GoogleApiError, match='Gmail internalDate is missing or malformed'):
+        connector.fetch_events()
+
+
+@pytest.mark.parametrize(
+    'modified_time',
+    [None, '', 'not-a-timestamp', '2026-05-01T09:00:00'],
+)
+def test_drive_missing_or_malformed_modified_time_is_rejected_without_now_fallback(
+    modified_time: object,
+) -> None:
+    file = FakeGoogleClient().drive_files()[0]
+    file['modifiedTime'] = modified_time
+    connector = GoogleConnector(
+        config=GoogleConnectorConfig(
+            connector_type='drive',
+            oauth_token='google-oauth-token',
+            account_id='google-user-1',
+            account_name='para@example.com',
+        ),
+        client=FakeGoogleClient(drive_files=[file]),
+    )
+
+    with pytest.raises(GoogleApiError, match='Drive modifiedTime is missing or malformed'):
+        connector.fetch_events()
+
+
+def test_calendar_missing_updated_uses_deterministic_start_for_display_but_signature_uses_raw_start() -> None:
+    class AllDayWithoutUpdatedClient(FakeGoogleClient):
+        def calendar_events(
+            self,
+            *,
+            calendar_id: str,
+            time_min: str | None = None,
+            time_max: str | None = None,
+            updated_min: str | None = None,
+        ) -> list[dict]:
+            return [
+                {
+                    'id': 'all-day-1',
+                    'summary': 'Company holiday',
+                    'start': {'date': '2026-05-03'},
+                    'end': {'date': '2026-05-04'},
+                }
+            ]
+
+    connector = GoogleConnector(
+        config=GoogleConnectorConfig(
+            connector_type='calendar',
+            oauth_token='google-oauth-token',
+            account_id='google-user-1',
+            account_name='para@example.com',
+        ),
+        client=AllDayWithoutUpdatedClient(),
+    )
+
+    event = connector.fetch_events()[0]
+
+    assert event.timestamp == datetime(2026, 5, 3, 0, 0, tzinfo=UTC)
+    assert event.semantic_timestamp_raw == '2026-05-03'
+    assert event.raw_metadata['start'] == '2026-05-03'
+    assert event.raw_metadata['sync_cursor'] == '2026-05-03'
+
+
+def test_calendar_semantic_time_rejects_ambiguous_start_and_preserves_missing_end_as_null() -> None:
+    class CalendarSemanticTimeClient(FakeGoogleClient):
+        def __init__(self, event: dict) -> None:
+            super().__init__()
+            self.event = event
+
+        def calendar_events(
+            self,
+            *,
+            calendar_id: str,
+            time_min: str | None = None,
+            time_max: str | None = None,
+            updated_min: str | None = None,
+        ) -> list[dict]:
+            return [self.event]
+
+    config = GoogleConnectorConfig(
+        connector_type='calendar',
+        oauth_token='google-oauth-token',
+        account_id='google-user-1',
+        account_name='para@example.com',
+    )
+    ambiguous = {
+        'id': 'ambiguous-time',
+        'start': {
+            'date': '2026-05-03',
+            'dateTime': '2026-05-03T09:00:00+09:00',
+        },
+    }
+
+    with pytest.raises(GoogleApiError, match='Calendar start is missing or malformed'):
+        GoogleConnector(
+            config=config,
+            client=CalendarSemanticTimeClient(ambiguous),
+        ).fetch_events()
+
+    with pytest.raises(GoogleApiError, match='Calendar location is malformed'):
+        GoogleConnector(
+            config=config,
+            client=CalendarSemanticTimeClient(
+                {
+                    'id': 'malformed-location',
+                    'location': {'room': 'A'},
+                    'start': {'date': '2026-05-03'},
+                }
+            ),
+        ).fetch_events()
+
+    event = GoogleConnector(
+        config=config,
+        client=CalendarSemanticTimeClient(
+            {
+                'id': 'missing-end',
+                'updated': 'not-an-aware-timestamp',
+                'start': {'date': '2026-05-03'},
+            }
+        ),
+    ).fetch_events()[0]
+
+    assert event.raw_metadata['end'] is None
+    assert event.raw_metadata['event_end'] is None
+    assert event.raw_metadata['sync_cursor'] == '2026-05-03'
+    assert event.timestamp == datetime(2026, 5, 3, 0, 0, tzinfo=UTC)
+
+
+def test_supported_google_adapter_populates_exact_semantic_timestamp_raw() -> None:
+    gmail = GoogleConnector(
+        config=GoogleConnectorConfig('gmail', 'token', 'account', 'para@example.com'),
+        client=FakeGoogleClient(),
+    ).fetch_events()[0]
+    drive = GoogleConnector(
+        config=GoogleConnectorConfig('drive', 'token', 'account', 'para@example.com'),
+        client=FakeGoogleClient(),
+    ).fetch_events()[0]
+    calendar = GoogleConnector(
+        config=GoogleConnectorConfig('calendar', 'token', 'account', 'para@example.com'),
+        client=FakeGoogleClient(),
+    ).fetch_events()[0]
+
+    assert gmail.semantic_timestamp_raw == '1777600800000'
+    assert drive.semantic_timestamp_raw == '2026-05-01T09:00:00Z'
+    assert calendar.semantic_timestamp_raw == '2026-05-02T09:00:00+09:00'
 
 
 def test_google_web_api_client_attaches_bearer_token() -> None:

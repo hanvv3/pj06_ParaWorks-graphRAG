@@ -1,17 +1,85 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from backend.app.agent_runtime.keyed_mutation_guard import (
+    KeyedMutationGuard,
+    KeyGenerationLockedContext,
+    lock_runtime_state,
+)
 from backend.app.connectors.base import SourceEvent
+from backend.app.core.config import Settings, get_settings
 from backend.app.documents.service import (
     parsed_document_from_source_event,
     persist_parsed_document,
 )
+from backend.app.ingestion.source_content_signature import (
+    CanonicalSourceContentSignature,
+    SourceStateChangeClassification,
+    canonical_source_content_signature,
+    classify_source_state_change,
+    connector_content_signature,
+    normalize_source_permission,
+    server_parser_policy_for_event,
+)
 from backend.app.ingestion.source_versions import SourceVersionRef, source_version_refs
 from backend.app.models import (
+    Document,
     DocumentChunk,
+    DocumentParserRun,
+    DocumentVersion,
     Source,
+    VectorIndexState,
+)
+from backend.app.rag.indexing import VectorIndexWriter, compute_vector_document_hash
+from backend.app.rag.serving_locks import VectorServingLockManager
+from backend.app.rag.vector_store import VectorDocument
+from backend.app.review.auto_review_source_reconciliation import (
+    CommittedSourceStateChange,
+)
+
+_C5_SOURCE_TYPES = frozenset({'gmail', 'gmail_attachment', 'drive', 'calendar'})
+_OPERATIONAL_METADATA_KEYS = (
+    'sync_cursor',
+    'sync_partition',
+    'connector_revision',
+    'connector_updated_at',
+)
+_SERVER_RESOLVED_METADATA_KEYS = frozenset(
+    {
+        'account_id',
+        'oauth_scope',
+        'oauth_scopes',
+        'required_scopes',
+        'security_scope_id',
+        'server_security_scope',
+    }
+)
+_CONNECTOR_AUTHORITY_KEYS = frozenset(
+    {
+        'content_signature',
+        'current_document_version_id',
+        'server_content_signature',
+        'server_content_signature_schema',
+    }
+)
+_PERMISSION_RANK = {'public': 0, 'internal': 1, 'restricted': 2}
+_PARSER_METADATA_KEYS = (
+    'parser_name',
+    'parser_status',
+    'parser_status_reason',
+    'mime_type',
+    'document_version',
+    'revision_id',
+    'content_signature',
+    'content_hash',
+    'section_path',
+    'page_number',
 )
 
 
@@ -20,84 +88,610 @@ class IngestionResult:
     created_review_items: int
     changed_source_ids: list[str]
     changed_source_refs: list[SourceVersionRef]
+    changed_source_states: list[CommittedSourceStateChange]
+    skipped_events: int = 0
+
+
+@dataclass
+class _VectorMutations:
+    delete_ids: set[str]
+    narrowings: dict[str, set[str]]
+
+    @classmethod
+    def empty(cls) -> _VectorMutations:
+        return cls(delete_ids=set(), narrowings={})
 
 
 def ingest_events(db: Session, events: list[SourceEvent]) -> int:
     return ingest_events_with_result(db, events).created_review_items
 
 
-def ingest_events_with_result(db: Session, events: list[SourceEvent]) -> IngestionResult:
-    created_chunks: list[DocumentChunk] = []
+def ingest_events_with_result(
+    db: Session,
+    events: list[SourceEvent],
+    *,
+    vector_writer: VectorIndexWriter | None = None,
+    settings: Settings | None = None,
+) -> IngestionResult:
+    resolved_settings = settings or get_settings()
+    production_vector_mutation = bool(
+        vector_writer is not None
+        and vector_writer.__class__.__name__ == 'PgVectorStore'
+        and db.get_bind().dialect.name == 'postgresql'
+    )
+    barrier = (
+        KeyedMutationGuard.generation_barrier(db)
+        if production_vector_mutation
+        else nullcontext()
+    )
+    try:
+        with barrier:
+            key_context = (
+                lock_runtime_state(db) if production_vector_mutation else None
+            )
+            if production_vector_mutation and key_context is None:
+                raise RuntimeError('C.5 source mutation key runtime unavailable')
+            return _ingest_events_transaction(
+                db,
+                events,
+                vector_writer=vector_writer,
+                settings=resolved_settings,
+                key_context=key_context,
+            )
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _ingest_events_transaction(
+    db: Session,
+    events: list[SourceEvent],
+    *,
+    vector_writer: VectorIndexWriter | None,
+    settings: Settings,
+    key_context: KeyGenerationLockedContext | None,
+) -> IngestionResult:
+    existing_sources = _locked_sources_by_external_id(
+        db, [event.source_id for event in events]
+    )
+    _lock_existing_document_state(db, existing_sources.values())
     changed_source_ids: list[str] = []
+    changed_state_rows: list[tuple[Source, SourceStateChangeClassification]] = []
+    mutations = _VectorMutations.empty()
+    skipped_events = 0
 
     for event in events:
-        existing_source = db.scalar(select(Source).where(Source.source_id == event.source_id))
-        if existing_source is not None and _same_content_signature(existing_source, event):
+        existing_source = existing_sources.get(event.source_id)
+        if event.source_type == 'slack':
+            if _legacy_slack_event_is_unchanged(existing_source, event):
+                skipped_events += 1
+                continue
+            source = _persist_legacy_slack_event(
+                db,
+                event=event,
+                existing_source=existing_source,
+            )
+            existing_sources[event.source_id] = source
+            changed_source_ids.append(event.source_id)
             continue
+        if event.source_type not in _C5_SOURCE_TYPES:
+            raise ValueError('unsupported ingestion source type')
+
+        current_parser_run = _current_parser_run(db, existing_source)
+        computed_signature = canonical_source_content_signature(event)
+        parser_policy = server_parser_policy_for_event(event)
+        classification = classify_source_state_change(
+            source=existing_source,
+            event=event,
+            current_parser_run=current_parser_run,
+            computed_signature=computed_signature,
+            parser_policy=parser_policy,
+        )
+        if classification.primary_code == 'unchanged':
+            _advance_unchanged_operational_state(
+                source=existing_source,
+                event=event,
+            )
+            skipped_events += 1
+            continue
+
+        source = _upsert_c5_source(
+            db,
+            event=event,
+            existing_source=existing_source,
+            signature=computed_signature,
+        )
+        existing_sources[event.source_id] = source
         changed_source_ids.append(event.source_id)
 
-        if existing_source is None:
-            source = Source(
-                source_type=event.source_type,
-                source_id=event.source_id,
-                source_url=event.source_url,
-                title=event.title,
-                author=event.author,
-                permission_level=event.permission_level,
-                raw_metadata={**event.raw_metadata, 'participants': list(event.participants)},
+        if (
+            classification.permission_changed
+            and not classification.content_changed
+            and not classification.parser_policy_changed
+        ):
+            _apply_permission_only_change(
+                db,
+                source=source,
+                incoming_permission=normalize_source_permission(event.permission_level),
+                mutations=mutations,
             )
-            db.add(source)
-            db.flush()
         else:
-            source = existing_source
-            source.source_url = event.source_url
-            source.title = event.title
-            source.author = event.author
-            source.permission_level = event.permission_level
-            source.raw_metadata = {**event.raw_metadata, 'participants': list(event.participants)}
-
-        parsed_document = parsed_document_from_source_event(event)
-        source.raw_metadata = {
-            **(source.raw_metadata or {}),
-            'content_signature': parsed_document.content_signature,
-        }
-        created_chunks.extend(
+            old_chunk_ids = _source_chunk_document_ids(db, source.id)
+            parsed_document = parsed_document_from_source_event(
+                event,
+                server_signature=computed_signature,
+                parser_policy=parser_policy,
+            )
             persist_parsed_document(
                 db,
                 source=source,
                 title=event.title,
                 parsed=parsed_document,
                 metadata={
-                    **event.raw_metadata,
+                    **_canonical_source_metadata(
+                        event,
+                        existing_metadata=source.raw_metadata,
+                    ),
                     'source_id': event.source_id,
                     'source_url': event.source_url,
                     'source_type': event.source_type,
-                    'permission_level': event.permission_level,
+                    'permission_level': source.permission_level,
                     'participants': list(event.participants),
                     'scenario': event.raw_metadata.get('scenario'),
                 },
+                server_signature=computed_signature,
+                parser_policy=parser_policy,
             )
-        )
+            mutations.delete_ids.update(old_chunk_ids)
+        db.flush()
+        changed_state_rows.append((source, classification))
 
+    _apply_vector_mutations(
+        db,
+        mutations=mutations,
+        vector_writer=vector_writer,
+        settings=settings,
+        key_context=key_context,
+    )
     db.commit()
     db.expire_all()
     changed_sources = (
-        db.scalars(select(Source).where(Source.source_id.in_(changed_source_ids))).all()
+        db.scalars(
+            select(Source).where(Source.source_id.in_(changed_source_ids))
+        ).all()
         if changed_source_ids
         else []
     )
-    # 룰 기반 추출기를 제거하였으므로 생성된 ReviewItem 개수는 0으로 반환합니다. 
-    # 실제 리뷰 아이템은 AI Agent를 통해 별도로 생성됩니다.
+    changed_states = [
+        CommittedSourceStateChange(
+            source_id=source.id,
+            content_changed=classification.content_changed,
+            permission_changed=classification.permission_changed,
+            parser_policy_changed=classification.parser_policy_changed,
+            primary_code=classification.primary_code,
+        )
+        for source, classification in changed_state_rows
+    ]
     return IngestionResult(
         created_review_items=0,
         changed_source_ids=changed_source_ids,
         changed_source_refs=source_version_refs(changed_sources),
+        changed_source_states=changed_states,
+        skipped_events=skipped_events,
     )
 
 
-def _same_content_signature(source: Source, event: SourceEvent) -> bool:
-    existing_signature = (source.raw_metadata or {}).get('content_signature')
-    incoming_signature = event.raw_metadata.get('content_signature')
-    if existing_signature and incoming_signature:
+def _locked_sources_by_external_id(
+    db: Session,
+    source_ids: list[str],
+) -> dict[str, Source]:
+    normalized = sorted(set(source_ids))
+    if not normalized:
+        return {}
+    statement = (
+        select(Source)
+        .where(Source.source_id.in_(normalized))
+        .order_by(Source.id)
+    )
+    if db.get_bind().dialect.name == 'postgresql':
+        statement = statement.with_for_update()
+    return {source.source_id: source for source in db.scalars(statement).all()}
+
+
+def _lock_existing_document_state(
+    db: Session,
+    sources: Iterable[Source],
+) -> None:
+    if db.get_bind().dialect.name != 'postgresql':
+        return
+    source_ids = sorted(
+        source.id
+        for source in sources
+        if source.source_type in _C5_SOURCE_TYPES
+    )
+    if not source_ids:
+        return
+    documents = tuple(
+        db.scalars(
+            select(Document)
+            .where(Document.source_id.in_(source_ids))
+            .order_by(Document.id)
+            .with_for_update()
+        ).all()
+    )
+    document_ids = [document.id for document in documents]
+    if not document_ids:
+        return
+    tuple(
+        db.scalars(
+            select(DocumentVersion)
+            .where(DocumentVersion.document_id.in_(document_ids))
+            .order_by(DocumentVersion.id)
+            .with_for_update()
+        ).all()
+    )
+    tuple(
+        db.scalars(
+            select(DocumentParserRun)
+            .where(DocumentParserRun.document_id.in_(document_ids))
+            .order_by(DocumentParserRun.id)
+            .with_for_update()
+        ).all()
+    )
+    tuple(
+        db.scalars(
+            select(DocumentChunk)
+            .where(DocumentChunk.source_id.in_(source_ids))
+            .order_by(DocumentChunk.id)
+            .with_for_update()
+        ).all()
+    )
+
+
+def _upsert_c5_source(
+    db: Session,
+    *,
+    event: SourceEvent,
+    existing_source: Source | None,
+    signature: CanonicalSourceContentSignature,
+) -> Source:
+    previous_metadata = existing_source.raw_metadata if existing_source else {}
+    metadata = _canonical_source_metadata(
+        event,
+        existing_metadata=previous_metadata,
+    )
+    permission = normalize_source_permission(event.permission_level)
+    if existing_source is None:
+        source = Source(
+            source_type=event.source_type,
+            source_id=event.source_id,
+            source_url=event.source_url,
+            title=event.title,
+            author=event.author,
+            permission_level=permission,
+            raw_metadata=metadata,
+            server_content_signature_schema=signature.schema,
+            server_content_signature=signature.signature,
+            connector_content_signature=connector_content_signature(event),
+        )
+        db.add(source)
+        db.flush()
+        return source
+    existing_source.source_type = event.source_type
+    existing_source.source_url = event.source_url
+    existing_source.title = event.title
+    existing_source.author = event.author
+    existing_source.permission_level = permission
+    existing_source.raw_metadata = metadata
+    existing_source.server_content_signature_schema = signature.schema
+    existing_source.server_content_signature = signature.signature
+    existing_source.connector_content_signature = connector_content_signature(event)
+    return existing_source
+
+
+def _canonical_source_metadata(
+    event: SourceEvent,
+    *,
+    existing_metadata: dict,
+) -> dict:
+    incoming = {
+        key: value
+        for key, value in event.raw_metadata.items()
+        if key not in _CONNECTOR_AUTHORITY_KEYS
+    }
+    if existing_metadata:
+        for key in _SERVER_RESOLVED_METADATA_KEYS:
+            if key in existing_metadata:
+                incoming[key] = existing_metadata[key]
+            else:
+                incoming.pop(key, None)
+    incoming['participants'] = list(event.participants)
+    incoming['semantic_timestamp_raw'] = event.semantic_timestamp_raw
+    return incoming
+
+
+def _advance_unchanged_operational_state(
+    *,
+    source: Source | None,
+    event: SourceEvent,
+) -> None:
+    if source is None:
+        raise RuntimeError('unchanged source state requires an existing source')
+    metadata = dict(source.raw_metadata or {})
+    for key in _OPERATIONAL_METADATA_KEYS:
+        if key in event.raw_metadata:
+            metadata[key] = event.raw_metadata[key]
+    source.raw_metadata = metadata
+    source.source_url = event.source_url
+    source.connector_content_signature = connector_content_signature(event)
+
+
+def _current_parser_run(
+    db: Session,
+    source: Source | None,
+) -> DocumentParserRun | None:
+    if source is None:
+        return None
+    document = db.scalar(select(Document).where(Document.source_id == source.id))
+    if document is None or document.current_document_version_id is None:
+        return None
+    runs = tuple(
+        db.scalars(
+            select(DocumentParserRun)
+            .where(
+                DocumentParserRun.document_id == document.id,
+                DocumentParserRun.source_id == source.id,
+                DocumentParserRun.document_version_id
+                == document.current_document_version_id,
+            )
+            .order_by(DocumentParserRun.id)
+        ).all()
+    )
+    return runs[0] if len(runs) == 1 else None
+
+
+def _source_chunk_document_ids(db: Session, source_id: int) -> set[str]:
+    return {
+        f'chunk:{chunk_id}'
+        for chunk_id in db.scalars(
+            select(DocumentChunk.id).where(DocumentChunk.source_id == source_id)
+        ).all()
+    }
+
+
+def _apply_permission_only_change(
+    db: Session,
+    *,
+    source: Source,
+    incoming_permission: str,
+    mutations: _VectorMutations,
+) -> None:
+    chunks = tuple(
+        db.scalars(
+            select(DocumentChunk)
+            .where(DocumentChunk.source_id == source.id)
+            .order_by(DocumentChunk.id)
+        ).all()
+    )
+    document_ids = {f'chunk:{chunk.id}' for chunk in chunks}
+    if incoming_permission not in _PERMISSION_RANK:
+        for chunk in chunks:
+            chunk.permission_level = incoming_permission
+            chunk.metadata_ = {
+                **(chunk.metadata_ or {}),
+                'permission_level': incoming_permission,
+            }
+        mutations.delete_ids.update(document_ids)
+        return
+    for chunk in chunks:
+        current = normalize_source_permission(chunk.permission_level)
+        effective = max(
+            (current, incoming_permission),
+            key=lambda value: _PERMISSION_RANK.get(value, len(_PERMISSION_RANK)),
+        )
+        chunk.permission_level = effective
+        chunk.metadata_ = {
+            **(chunk.metadata_ or {}),
+            'permission_level': effective,
+        }
+        if effective != current:
+            mutations.narrowings.setdefault(effective, set()).add(
+                f'chunk:{chunk.id}'
+            )
+    db.flush()
+    for permission, document_ids_for_permission in mutations.narrowings.items():
+        for document_id in document_ids_for_permission:
+            _refresh_chunk_index_state_hash(
+                db,
+                source=source,
+                document_id=document_id,
+                permission_level=permission,
+            )
+
+
+def _refresh_chunk_index_state_hash(
+    db: Session,
+    *,
+    source: Source,
+    document_id: str,
+    permission_level: str,
+) -> None:
+    chunk = db.get(DocumentChunk, int(document_id.split(':', maxsplit=1)[1]))
+    if chunk is None:
+        return
+    metadata = {
+        'chunk_id': chunk.id,
+        'source_pk': source.id,
+        'source_id': source.source_id,
+        'source_type': source.source_type,
+        'author': source.author,
+        'author_name': source.raw_metadata.get('author_name') or source.author,
+        'channel_name': source.raw_metadata.get('channel_name'),
+        'timestamp': str(
+            source.raw_metadata.get('ts') or source.created_at.isoformat()
+        ),
+        'created_at_date': source.raw_metadata.get('created_at_date'),
+        'category': chunk.metadata_.get('category'),
+        'topic_tag': chunk.metadata_.get('topic_tag'),
+        'importance': chunk.metadata_.get('importance'),
+        'scenario': source.raw_metadata.get('scenario'),
+        **{
+            key: chunk.metadata_.get(key)
+            for key in _PARSER_METADATA_KEYS
+            if key in chunk.metadata_
+        },
+    }
+    content_hash = compute_vector_document_hash(
+        VectorDocument(
+            document_id=document_id,
+            text=chunk.text,
+            source_url=source.source_url,
+            source_snippet=chunk.source_snippet,
+            permission_level=permission_level,
+            metadata=metadata,
+        )
+    )
+    for state in db.scalars(
+        select(VectorIndexState).where(
+            VectorIndexState.document_id == document_id
+        )
+    ).all():
+        state.content_hash = content_hash
+
+
+def _apply_vector_mutations(
+    db: Session,
+    *,
+    mutations: _VectorMutations,
+    vector_writer: VectorIndexWriter | None,
+    settings: Settings,
+    key_context: KeyGenerationLockedContext | None,
+) -> None:
+    all_document_ids = sorted(
+        mutations.delete_ids.union(
+            document_id
+            for ids in mutations.narrowings.values()
+            for document_id in ids
+        )
+    )
+    if not all_document_ids:
+        return
+    locked_context = None
+    production_pgvector = bool(
+        vector_writer is not None
+        and vector_writer.__class__.__name__ == 'PgVectorStore'
+        and db.get_bind().dialect.name == 'postgresql'
+    )
+    if production_pgvector:
+        if key_context is None:
+            raise RuntimeError('C.5 vector mutation key context unavailable')
+        manager = VectorServingLockManager(db=db, settings=settings)
+        bound = manager.bind_transaction(key_context)
+        locked_context = manager.acquire_documents(bound, all_document_ids)
+        tuple(
+            db.scalars(
+                select(VectorIndexState)
+                .where(VectorIndexState.document_id.in_(all_document_ids))
+                .order_by(VectorIndexState.id)
+                .with_for_update()
+            ).all()
+        )
+    if mutations.delete_ids:
+        db.execute(
+            delete(VectorIndexState).where(
+                VectorIndexState.document_id.in_(sorted(mutations.delete_ids))
+            )
+        )
+        if vector_writer is not None:
+            if production_pgvector:
+                vector_writer.delete_many(
+                    sorted(mutations.delete_ids),
+                    locked_context=locked_context,  # type: ignore[call-arg]
+                )
+            else:
+                vector_writer.delete_many(sorted(mutations.delete_ids))
+    if vector_writer is None:
+        return
+    for permission_level in sorted(
+        mutations.narrowings,
+        key=lambda value: _PERMISSION_RANK.get(value, len(_PERMISSION_RANK)),
+    ):
+        document_ids = sorted(
+            mutations.narrowings[permission_level] - mutations.delete_ids
+        )
+        if not document_ids:
+            continue
+        if production_pgvector:
+            vector_writer.narrow_permissions(
+                document_ids,
+                permission_level,
+                locked_context=locked_context,  # type: ignore[call-arg]
+            )
+        else:
+            vector_writer.narrow_permissions(document_ids, permission_level)
+
+
+def _legacy_slack_event_is_unchanged(
+    source: Source | None,
+    event: SourceEvent,
+) -> bool:
+    if source is None:
+        return False
+    existing_signature = source.connector_content_signature
+    if existing_signature is None:
+        existing_signature = (source.raw_metadata or {}).get('content_signature')
+    incoming_signature = connector_content_signature(event)
+    if isinstance(existing_signature, str) and incoming_signature is not None:
         return existing_signature == incoming_signature
     return True
+
+
+def _persist_legacy_slack_event(
+    db: Session,
+    *,
+    event: SourceEvent,
+    existing_source: Source | None,
+) -> Source:
+    metadata = {**event.raw_metadata, 'participants': list(event.participants)}
+    if existing_source is None:
+        source = Source(
+            source_type=event.source_type,
+            source_id=event.source_id,
+            source_url=event.source_url,
+            title=event.title,
+            author=event.author,
+            permission_level=event.permission_level,
+            raw_metadata=metadata,
+            connector_content_signature=connector_content_signature(event),
+        )
+        db.add(source)
+        db.flush()
+    else:
+        source = existing_source
+        source.source_url = event.source_url
+        source.title = event.title
+        source.author = event.author
+        source.permission_level = event.permission_level
+        source.raw_metadata = metadata
+        source.connector_content_signature = connector_content_signature(event)
+    parsed_document = parsed_document_from_source_event(event)
+    source.raw_metadata = {
+        **(source.raw_metadata or {}),
+        'content_signature': parsed_document.content_signature,
+    }
+    persist_parsed_document(
+        db,
+        source=source,
+        title=event.title,
+        parsed=parsed_document,
+        metadata={
+            **event.raw_metadata,
+            'source_id': event.source_id,
+            'source_url': event.source_url,
+            'source_type': event.source_type,
+            'permission_level': event.permission_level,
+            'participants': list(event.participants),
+            'scenario': event.raw_metadata.get('scenario'),
+        },
+    )
+    return source

@@ -3,6 +3,10 @@ from sqlalchemy.orm import Session
 
 from backend.app.connectors.base import SourceEvent
 from backend.app.documents.parsers import ParsedDocument, ParsedDocumentChunk, ParserRun
+from backend.app.ingestion.source_content_signature import (
+    CanonicalSourceContentSignature,
+    ServerParserPolicy,
+)
 from backend.app.models import (
     Document,
     DocumentChunk,
@@ -15,27 +19,53 @@ DEFAULT_CHUNK_MAX_CHARS = 1_200
 SOURCE_SNIPPET_MAX_CHARS = 240
 
 
-def parsed_document_from_source_event(event: SourceEvent) -> ParsedDocument:
+def parsed_document_from_source_event(
+    event: SourceEvent,
+    *,
+    server_signature: CanonicalSourceContentSignature | None = None,
+    parser_policy: ServerParserPolicy | None = None,
+) -> ParsedDocument:
     metadata = event.raw_metadata
     document_version = str(metadata.get('document_version') or 'v1')
     revision_id = str(metadata.get('revision_id') or '')
-    content_signature = str(metadata.get('content_signature') or f'{event.source_id}:{document_version}')
-    source_snippet = str(metadata.get('source_snippet') or _snippet(event.body))
-    chunk_max_chars = _chunk_max_chars(metadata)
+    if (server_signature is None) != (parser_policy is None):
+        raise ValueError('server signature and parser policy must be supplied together')
+    if server_signature is None:
+        content_signature = str(
+            metadata.get('content_signature') or f'{event.source_id}:{document_version}'
+        )
+        source_snippet = str(metadata.get('source_snippet') or _snippet(event.body))
+        chunk_max_chars = _chunk_max_chars(metadata)
+        parser_run = ParserRun(
+            parser_name=str(
+                metadata.get('parser_name') or f'{event.source_type}_source_event'
+            ),
+            parser_status=str(metadata.get('parser_status') or 'parsed'),
+            parser_status_reason=_optional_string(
+                metadata.get('parser_status_reason')
+            ),
+        )
+        mime_type = str(metadata.get('mime_type') or event.source_type)
+    else:
+        content_signature = server_signature.signature
+        source_snippet = _snippet(event.body)
+        chunk_max_chars = parser_policy.chunk_max_chars
+        parser_run = ParserRun(
+            parser_name=parser_policy.parser_name,
+            parser_status='parsed',
+            parser_status_reason=None,
+        )
+        mime_type = parser_policy.mime_type
     return ParsedDocument(
         source_id=event.source_id,
         source_url=event.source_url,
         source_snippet=source_snippet,
         permission_level=event.permission_level,
-        mime_type=str(metadata.get('mime_type') or event.source_type),
+        mime_type=mime_type,
         document_version=document_version,
         revision_id=revision_id,
         content_signature=content_signature,
-        parser_run=ParserRun(
-            parser_name=str(metadata.get('parser_name') or f'{event.source_type}_source_event'),
-            parser_status=str(metadata.get('parser_status') or 'parsed'),
-            parser_status_reason=_optional_string(metadata.get('parser_status_reason')),
-        ),
+        parser_run=parser_run,
         chunks=_parsed_chunks_from_text(event.body, max_chars=chunk_max_chars),
     )
 
@@ -47,7 +77,11 @@ def persist_parsed_document(
     title: str,
     parsed: ParsedDocument,
     metadata: dict,
+    server_signature: CanonicalSourceContentSignature | None = None,
+    parser_policy: ServerParserPolicy | None = None,
 ) -> list[DocumentChunk]:
+    if (server_signature is None) != (parser_policy is None):
+        raise ValueError('server signature and parser policy must be supplied together')
     document = db.scalar(select(Document).where(Document.source_id == source.id))
     if document is None:
         document = Document(
@@ -69,6 +103,9 @@ def persist_parsed_document(
     db.add(version)
     db.flush()
 
+    if server_signature is not None:
+        document.current_document_version_id = version.id
+
     parser_run = DocumentParserRun(
         document_id=document.id,
         document_version_id=version.id,
@@ -80,6 +117,19 @@ def persist_parsed_document(
         document_version_label=parsed.document_version,
         revision_id=parsed.revision_id,
         content_signature=parsed.content_signature,
+        server_content_signature_schema=(
+            server_signature.schema if server_signature is not None else None
+        ),
+        server_content_signature=(
+            server_signature.signature if server_signature is not None else None
+        ),
+        parser_policy_version=(
+            parser_policy.parser_policy_version if parser_policy is not None else None
+        ),
+        parser_version=(parser_policy.parser_version if parser_policy is not None else None),
+        chunk_policy_version=(
+            parser_policy.chunk_policy_version if parser_policy is not None else None
+        ),
         chunk_count=len(parsed.chunks),
         metadata_={
             'source_id': parsed.source_id,
@@ -89,12 +139,14 @@ def persist_parsed_document(
         },
     )
     db.add(parser_run)
+    db.flush()
 
     chunks: list[DocumentChunk] = []
     for parsed_chunk in parsed.chunks:
         chunk = DocumentChunk(
             version_id=version.id,
             source_id=source.id,
+            parser_run_id=parser_run.id if server_signature is not None else None,
             chunk_index=parsed_chunk.chunk_index,
             text=parsed_chunk.text,
             source_snippet=parsed_chunk.source_snippet,

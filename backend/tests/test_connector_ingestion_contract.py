@@ -14,7 +14,13 @@ from backend.app.ingestion import service as ingestion_service
 from backend.app.ingestion import sync as ingestion_sync
 from backend.app.ingestion.source_versions import SourceVersionRef
 from backend.app.ingestion.sync import sync_connector_events
-from backend.app.models import DocumentChunk, DocumentParserRun, Source, SyncJob
+from backend.app.models import (
+    Document,
+    DocumentChunk,
+    DocumentParserRun,
+    Source,
+    SyncJob,
+)
 
 
 def source_event(source_id: str = 'contract-event-1') -> SourceEvent:
@@ -65,6 +71,7 @@ def drive_source_event(
             'parser_status_reason': parser_status_reason,
             'source_snippet': body,
         },
+        semantic_timestamp_raw='2026-05-01T09:00:00Z',
     )
 
 
@@ -251,7 +258,7 @@ def test_sync_returns_canonical_refs_after_ingestion_commit(
         SourceVersionRef(
             source_type='drive',
             source_id='drive:file-1',
-            version_or_signature='drive:file-1:42:rev-42',
+            version_or_signature=source.server_content_signature,
         )
     ]
     assert ordering.index('commit') < ordering.index('expire_all')
@@ -345,6 +352,7 @@ def test_sync_connector_events_persists_parser_run_provenance(db_session: Sessio
                         'content_signature': 'drive:parser-test:42:rev-42',
                         'source_snippet': 'Parser test document',
                     },
+                    semantic_timestamp_raw='2026-05-01T09:00:00Z',
                 )
             ]
         ),
@@ -353,19 +361,24 @@ def test_sync_connector_events_persists_parser_run_provenance(db_session: Sessio
     parser_run = db_session.query(DocumentParserRun).one()
     assert result.fetched_events == 1
     assert result.changed_source_ids == ['drive:parser-test']
-    assert parser_run.parser_name == 'google_drive_metadata'
-    assert parser_run.parser_status == 'metadata_only'
-    assert parser_run.parser_status_reason == 'pdf_parser_not_enabled'
+    assert parser_run.parser_name == 'server_drive_source_event'
+    assert parser_run.parser_status == 'parsed'
+    assert parser_run.parser_status_reason is None
     assert parser_run.mime_type == 'application/pdf'
     assert parser_run.document_version_label == '42'
     assert parser_run.revision_id == 'rev-42'
-    assert parser_run.content_signature == 'drive:parser-test:42:rev-42'
+    assert len(parser_run.content_signature) == 64
+    assert parser_run.server_content_signature == parser_run.content_signature
+    assert parser_run.server_content_signature_schema == 'server-source-content:v1'
+    assert parser_run.parser_policy_version == 'server-source-parser-policy:v1'
+    assert parser_run.parser_version == 'source-event-paragraph-parser:v1'
+    assert parser_run.chunk_policy_version == 'paragraph-chunks:1200:v1'
     assert parser_run.chunk_count == 1
     assert parser_run.metadata_ == {
         'source_id': 'drive:parser-test',
         'source_url': 'https://drive.mock/parser-test',
         'permission_level': 'restricted',
-        'source_snippet': 'Parser test document',
+        'source_snippet': 'Google Drive file changed: Parser test document',
     }
 
 
@@ -405,8 +418,169 @@ def test_sync_connector_events_ingests_changed_content_signature(db_session: Ses
     assert result.skipped_events == 0
     chunks = db_session.query(DocumentChunk).order_by(DocumentChunk.id).all()
     assert len(chunks) == 2
-    assert chunks[0].metadata_['content_signature'] == 'drive:file-1:42:rev-42'
-    assert chunks[1].metadata_['content_signature'] == 'drive:file-1:43:rev-43'
+    assert len(chunks[0].metadata_['content_signature']) == 64
+    assert len(chunks[1].metadata_['content_signature']) == 64
+    assert chunks[0].metadata_['content_signature'] != chunks[1].metadata_['content_signature']
+
+
+def test_deferred_slack_repeated_event_keeps_legacy_dedupe_but_never_gains_c5_authority(
+    db_session: Session,
+) -> None:
+    first = sync_connector_events(db=db_session, connector=ContractConnector())
+    second = sync_connector_events(db=db_session, connector=ContractConnector())
+
+    source = db_session.query(Source).one()
+    document = db_session.query(Document).one()
+    parser_run = db_session.query(DocumentParserRun).one()
+    chunk = db_session.query(DocumentChunk).one()
+    assert first.skipped_events == 0
+    assert second.skipped_events == 1
+    assert source.server_content_signature_schema is None
+    assert source.server_content_signature is None
+    assert document.current_document_version_id is None
+    assert parser_run.parser_policy_version is None
+    assert chunk.parser_run_id is None
+
+
+def test_same_content_permission_only_event_is_not_skipped_and_does_not_reparse(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public_event = drive_source_event()
+    public_event = SourceEvent(
+        **{
+            **public_event.__dict__,
+            'permission_level': 'public',
+        }
+    )
+    internal_event = SourceEvent(
+        **{
+            **public_event.__dict__,
+            'permission_level': 'internal',
+        }
+    )
+    reconciled: list[tuple] = []
+
+    class RecordingReconciliationService:
+        def __init__(self, db, *, settings, vector_writer=None) -> None:
+            self.db = db
+
+        def reconcile(self, changed_states):
+            states = tuple(changed_states)
+            assert all(self.db.get(Source, state.source_id) is not None for state in states)
+            reconciled.append(states)
+            return object()
+
+    monkeypatch.setattr(
+        ingestion_sync,
+        'AutoReviewSourceReconciliationService',
+        RecordingReconciliationService,
+        raising=False,
+    )
+    connector = DriveContentSignatureConnector([public_event])
+    sync_connector_events(db=db_session, connector=connector)
+    reconciled.clear()
+
+    result = sync_connector_events(
+        db=db_session,
+        connector=DriveContentSignatureConnector([internal_event]),
+    )
+
+    assert result.skipped_events == 0
+    assert result.changed_source_ids == ['drive:file-1']
+    assert db_session.query(DocumentParserRun).count() == 1
+    assert len(reconciled) == 1
+    assert reconciled[0][0].content_changed is False
+    assert reconciled[0][0].permission_changed is True
+
+
+def test_permission_change_is_visible_to_preflight_before_any_provider_call(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public_event = SourceEvent(
+        **{
+            **drive_source_event().__dict__,
+            'permission_level': 'public',
+        }
+    )
+    restricted_event = SourceEvent(
+        **{
+            **public_event.__dict__,
+            'permission_level': 'restricted',
+        }
+    )
+    observed_permissions: list[str] = []
+
+    class ProviderTripwireWriter:
+        def upsert_with_embedding(self, document, embedding) -> None:
+            raise AssertionError('permission preflight must happen before provider work')
+
+        def delete_many(self, document_ids) -> int:
+            return len(tuple(document_ids))
+
+        def narrow_permissions(self, document_ids, permission_level: str) -> int:
+            return len(tuple(document_ids))
+
+    class RecordingReconciliationService:
+        def __init__(self, db, *, settings, vector_writer=None) -> None:
+            self.db = db
+
+        def reconcile(self, changed_states):
+            source_pk = tuple(changed_states)[0].source_id
+            observed_permissions.append(self.db.get(Source, source_pk).permission_level)
+            return object()
+
+    monkeypatch.setattr(
+        ingestion_sync,
+        'AutoReviewSourceReconciliationService',
+        RecordingReconciliationService,
+    )
+    writer = ProviderTripwireWriter()
+    sync_connector_events(
+        db=db_session,
+        connector=DriveContentSignatureConnector([public_event]),
+        vector_writer=writer,
+    )
+    observed_permissions.clear()
+
+    sync_connector_events(
+        db=db_session,
+        connector=DriveContentSignatureConnector([restricted_event]),
+        vector_writer=writer,
+    )
+
+    assert observed_permissions == ['restricted']
+
+
+def test_unchanged_event_performs_zero_reconciliation(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reconciliation_calls: list[tuple] = []
+
+    class RecordingReconciliationService:
+        def __init__(self, db, *, settings, vector_writer=None) -> None:
+            pass
+
+        def reconcile(self, changed_states):
+            reconciliation_calls.append(tuple(changed_states))
+            return object()
+
+    monkeypatch.setattr(
+        ingestion_sync,
+        'AutoReviewSourceReconciliationService',
+        RecordingReconciliationService,
+        raising=False,
+    )
+    connector = DriveContentSignatureConnector([drive_source_event()])
+    sync_connector_events(db=db_session, connector=connector)
+    reconciliation_calls.clear()
+
+    result = sync_connector_events(db=db_session, connector=connector)
+
+    assert result.skipped_events == 1
+    assert reconciliation_calls == []
 
 
 def test_sync_connector_events_reports_parser_status_counts(db_session: Session) -> None:

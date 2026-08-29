@@ -371,6 +371,10 @@ class GoogleConnector:
 
     def _gmail_message_to_source_event(self, message: dict) -> SourceEvent:
         message_id = str(message['id'])
+        internal_date = _required_google_millis(
+            message.get('internalDate'),
+            field_name='Gmail internalDate',
+        )
         subject = _header_value(message, 'Subject') or f'Gmail message {message_id}'
         author = _header_value(message, 'From') or self.config.account_name
         to_header = _header_value(message, 'To') or ''
@@ -403,7 +407,7 @@ class GoogleConnector:
             body='\n\n'.join(part for part in [subject, '\n'.join(header_lines), body_text] if part).strip(),
             author=author,
             participants=participants,
-            timestamp=_timestamp_from_google_millis(message.get('internalDate')),
+            timestamp=_timestamp_from_google_millis(internal_date),
             permission_level='internal',
             raw_metadata={
                 'message_id': message_id,
@@ -413,13 +417,14 @@ class GoogleConnector:
                 'date_header': date_header,
                 'account_id': self.config.account_id,
                 'sync_partition': 'gmail',
-                'sync_cursor': str(message.get('internalDate') or ''),
-                'content_signature': f'gmail:{message_id}:{message.get("internalDate") or ""}',
+                'sync_cursor': internal_date,
+                'content_signature': f'gmail:{message_id}:{internal_date}',
                 'body_source': body_source,
                 'body_truncated': body_truncated,
                 **domain_metadata,
                 'required_scopes': list(GOOGLE_CONNECTOR_SCOPES['gmail']),
             },
+            semantic_timestamp_raw=internal_date,
         )
 
     def _gmail_attachment_source_events(self, *, message: dict, parent_event: SourceEvent) -> list[SourceEvent]:
@@ -494,6 +499,7 @@ class GoogleConnector:
                         'source_snippet': f'Gmail attachment {filename} ({mime_type})',
                         'required_scopes': list(GOOGLE_CONNECTOR_SCOPES['gmail']),
                     },
+                    semantic_timestamp_raw=parent_event.semantic_timestamp_raw,
                 )
             )
         return events
@@ -502,7 +508,10 @@ class GoogleConnector:
         file_id = str(file['id'])
         title = str(file.get('name') or f'Drive file {file_id}')
         author = _first_owner_email(file) or self.config.account_name
-        modified_time = str(file.get('modifiedTime') or '')
+        modified_time = _required_aware_iso(
+            file.get('modifiedTime'),
+            field_name='Drive modifiedTime',
+        )
         description = str(file.get('description') or '')
         last_modifying_user_email = str((file.get('lastModifyingUser') or {}).get('emailAddress') or '')
         export_result = _drive_exported_text(client=self.client, file=file)
@@ -545,6 +554,7 @@ class GoogleConnector:
                 **parser_metadata,
                 'required_scopes': list(GOOGLE_CONNECTOR_SCOPES['drive']),
             },
+            semantic_timestamp_raw=modified_time,
         )
 
     def _calendar_event_to_source_event(self, event: dict, *, calendar: dict) -> SourceEvent:
@@ -553,11 +563,26 @@ class GoogleConnector:
         source_id = f'calendar:{calendar_id}:{event_id}'
         title = str(event.get('summary') or f'Calendar event {event_id}')
         author = str((event.get('creator') or {}).get('email') or self.config.account_name)
-        updated = str(event.get('updated') or '')
+        updated = _optional_aware_iso(event.get('updated'))
         description = str(event.get('description') or '')
-        location = str(event.get('location') or '')
-        start = _calendar_time_value(event.get('start'))
-        end = _calendar_time_value(event.get('end'))
+        location = _optional_string_value(
+            event.get('location'),
+            field_name='Calendar location',
+        )
+        start = _calendar_time_value(
+            event.get('start'),
+            field_name='Calendar start',
+            required=True,
+        )
+        end = _calendar_time_value(
+            event.get('end'),
+            field_name='Calendar end',
+            required=False,
+        )
+        display_timestamp = _calendar_display_timestamp(
+            updated=updated,
+            start=start,
+        )
         participants = [
             str(attendee['email'])
             for attendee in event.get('attendees', [])
@@ -590,7 +615,7 @@ class GoogleConnector:
             body='\n'.join(line for line in body_lines if line or line == '').strip(),
             author=author,
             participants=participants,
-            timestamp=_timestamp_from_iso(updated),
+            timestamp=display_timestamp,
             permission_level='internal',
             raw_metadata={
                 'event_id': event_id,
@@ -608,9 +633,10 @@ class GoogleConnector:
                 **calendar_metadata,
                 'account_id': self.config.account_id,
                 'sync_partition': f'calendar:{calendar_id}',
-                'sync_cursor': updated,
+                'sync_cursor': updated or start,
                 'required_scopes': list(GOOGLE_CONNECTOR_SCOPES['calendar']),
             },
+            semantic_timestamp_raw=start,
         )
 
 
@@ -854,7 +880,7 @@ def _calendar_quality_metadata(
     account_name: str,
     updated: str,
     start: str,
-    end: str,
+    end: str | None,
 ) -> dict[str, object]:
     account_domain = _email_domain(account_name)
     attendee_domains = sorted({
@@ -863,10 +889,19 @@ def _calendar_quality_metadata(
         if (domain := _email_domain(participant))
     })
     external_domains = [domain for domain in attendee_domains if account_domain and domain != account_domain]
+    organizer = event.get('organizer')
+    if organizer is not None and not isinstance(organizer, dict):
+        raise GoogleApiError('Calendar organizer is malformed')
     return {
         'event_context_key': f'{event_id}:{updated}' if updated else event_id,
-        'event_status': str(event.get('status') or ''),
-        'organizer_email': str((event.get('organizer') or {}).get('email') or ''),
+        'event_status': _optional_string_value(
+            event.get('status'),
+            field_name='Calendar status',
+        ),
+        'organizer_email': _optional_string_value(
+            (organizer or {}).get('email'),
+            field_name='Calendar organizer email',
+        ),
         'creator_email': str((event.get('creator') or {}).get('email') or ''),
         'recurring_event_id': str(event.get('recurringEventId') or ''),
         'attendee_response_statuses': _calendar_response_status_counts(event),
@@ -886,13 +921,13 @@ def _calendar_response_status_counts(event: dict) -> dict[str, int]:
     return {status: counts[status] for status in sorted(counts)}
 
 
-def _calendar_duration_minutes(start: str, end: str) -> int | None:
+def _calendar_duration_minutes(start: str, end: str | None) -> int | None:
     if not start or not end:
         return None
     try:
-        started_at = _timestamp_from_iso(start)
-        ended_at = _timestamp_from_iso(end)
-    except ValueError:
+        started_at = _calendar_display_timestamp(updated='', start=start)
+        ended_at = _calendar_display_timestamp(updated='', start=end)
+    except GoogleApiError:
         return None
     return max(int((ended_at - started_at).total_seconds() / 60), 0)
 
@@ -978,20 +1013,112 @@ def _first_owner_email(file: dict) -> str | None:
     return owners[0].get('emailAddress')
 
 
-def _calendar_time_value(value: object) -> str:
+def _calendar_time_value(
+    value: object,
+    *,
+    field_name: str,
+    required: bool,
+) -> str | None:
+    if value is None and not required:
+        return None
     if not isinstance(value, dict):
+        raise GoogleApiError(f'{field_name} is missing or malformed')
+    present = [key for key in ('date', 'dateTime') if key in value]
+    if len(present) != 1:
+        raise GoogleApiError(f'{field_name} is missing or malformed')
+    raw = value[present[0]]
+    if not isinstance(raw, str) or not raw or raw != raw.strip():
+        raise GoogleApiError(f'{field_name} is missing or malformed')
+    if present[0] == 'date':
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', raw):
+            raise GoogleApiError(f'{field_name} is missing or malformed')
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError as exc:
+            raise GoogleApiError(f'{field_name} is missing or malformed') from exc
+        if parsed.date().isoformat() != raw:
+            raise GoogleApiError(f'{field_name} is missing or malformed')
+        return raw
+    try:
+        return _required_aware_iso(raw, field_name=field_name)
+    except GoogleApiError as exc:
+        raise GoogleApiError(f'{field_name} is missing or malformed') from exc
+
+
+def _optional_aware_iso(value: object) -> str:
+    if value is None or value == '':
         return ''
-    return str(value.get('dateTime') or value.get('date') or '')
+    try:
+        return _required_aware_iso(value, field_name='Calendar updated')
+    except GoogleApiError:
+        return ''
+
+
+def _optional_string_value(
+    value: object,
+    *,
+    field_name: str,
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise GoogleApiError(f'{field_name} is malformed')
+    return value
 
 
 def _timestamp_from_google_millis(value: object) -> datetime:
-    if value is None:
-        return datetime.now(UTC)
-    return datetime.fromtimestamp(int(str(value)) / 1000, tz=UTC)
+    raw = _required_google_millis(value, field_name='Google millisecond timestamp')
+    try:
+        return datetime.fromtimestamp(int(raw) / 1000, tz=UTC)
+    except (OSError, OverflowError, ValueError) as exc:
+        raise GoogleApiError('Google millisecond timestamp is missing or malformed') from exc
 
 
 def _timestamp_from_iso(value: object) -> datetime:
-    if not value:
-        return datetime.now(UTC)
-    normalized = str(value).replace('Z', '+00:00')
-    return datetime.fromisoformat(normalized).astimezone(UTC)
+    raw = _required_aware_iso(value, field_name='Google ISO timestamp')
+    return datetime.fromisoformat(raw.replace('Z', '+00:00')).astimezone(UTC)
+
+
+def _required_google_millis(value: object, *, field_name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or not value.isascii()
+        or not value.isdecimal()
+    ):
+        raise GoogleApiError(f'{field_name} is missing or malformed')
+    try:
+        datetime.fromtimestamp(int(value) / 1000, tz=UTC)
+    except (OSError, OverflowError, ValueError) as exc:
+        raise GoogleApiError(f'{field_name} is missing or malformed') from exc
+    return value
+
+
+def _required_aware_iso(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise GoogleApiError(f'{field_name} is missing or malformed')
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError('timestamp is naive')
+    except (TypeError, ValueError) as exc:
+        raise GoogleApiError(f'{field_name} is missing or malformed') from exc
+    return value
+
+
+def _calendar_display_timestamp(*, updated: str, start: str) -> datetime:
+    if updated:
+        try:
+            return _timestamp_from_iso(updated)
+        except GoogleApiError:
+            pass
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', start):
+        try:
+            return datetime.fromisoformat(start).replace(tzinfo=UTC)
+        except ValueError as exc:
+            raise GoogleApiError('Calendar start is missing or malformed') from exc
+    try:
+        return _timestamp_from_iso(start)
+    except GoogleApiError as exc:
+        raise GoogleApiError('Calendar start is missing or malformed') from exc
