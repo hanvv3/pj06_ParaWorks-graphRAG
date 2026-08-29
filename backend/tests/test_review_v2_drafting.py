@@ -118,6 +118,7 @@ def _seed_source(
     permission_level: str = 'internal',
 ) -> Source:
     prefix = 'message' if source_type == 'gmail' else 'file'
+    server_signature = f'{sequence:064x}'
     source = Source(
         source_type=source_type,
         source_id=f'{source_type}:{prefix}-{sequence}',
@@ -128,7 +129,11 @@ def _seed_source(
         raw_metadata={
             'content_signature': f'{source_type}-signature-{sequence}',
             'revision_id': f'revision-{sequence}',
+            'review_batch_mode': 'v2_explicit',
+            'review_batch_signature': server_signature,
         },
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=server_signature,
     )
     db.add(source)
     db.flush()
@@ -146,21 +151,43 @@ def _seed_source(
     )
     db.add(version)
     db.flush()
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=version.id,
+        source_id=source.id,
+        parser_name=f'server_{source_type}_source_event',
+        parser_status='parsed',
+        parser_status_reason=None,
+        mime_type='message/rfc822' if source_type == 'gmail' else 'text/plain',
+        document_version_label='v1',
+        revision_id=f'revision-{sequence}',
+        content_signature=server_signature,
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=server_signature,
+        parser_policy_version='server-source-parser-policy:v1',
+        parser_version='source-event-paragraph-parser:v1',
+        chunk_policy_version='paragraph-chunks:1200:v1',
+        chunk_count=1,
+    )
+    db.add(parser_run)
+    db.flush()
     db.add(
         DocumentChunk(
             version_id=version.id,
             source_id=source.id,
+            parser_run_id=parser_run.id,
             chunk_index=0,
             text='고객 데모 일정 때문에 QA를 완료하고 배포하기로 결정했습니다.',
             source_snippet='고객 데모 일정 때문에 QA를 완료했습니다.',
             permission_level=permission_level,
             metadata_={
-                'content_signature': source.raw_metadata['content_signature'],
+                'content_signature': server_signature,
                 'parser_status': 'parsed',
                 'section_path': 'body',
             },
         )
     )
+    document.current_document_version_id = version.id
     db.flush()
     return source
 
@@ -314,7 +341,7 @@ def _request(
             {
                 'source_type': source.source_type,
                 'source_id': source.source_id,
-                'version_or_signature': source.raw_metadata['content_signature'],
+                'version_or_signature': source.server_content_signature,
             }
         ],
         agent_names=requested_agents,
@@ -395,7 +422,7 @@ def test_preview_never_invokes_provider_or_writes_rows(db_session) -> None:
                 {
                     'source_type': current.source_type,
                     'source_id': current.source_id,
-                    'version_or_signature': current.raw_metadata['content_signature'],
+                    'version_or_signature': current.server_content_signature,
                 }
                 for current in (source, second_source)
             ],
@@ -582,7 +609,7 @@ def test_effect_replay_skips_model_and_reuses_agent_run_and_candidates(
     assert _row_counts(factory) == (1, 1, 1)
 
 
-def test_failed_exact_version_parser_metadata_and_body_fallback_reach_mail_adapter(
+def test_exact_current_version_parser_metadata_and_body_fallback_reach_mail_adapter(
     db_session,
 ) -> None:
     settings = _settings()
@@ -595,8 +622,15 @@ def test_failed_exact_version_parser_metadata_and_body_fallback_reach_mail_adapt
     chunk = db_session.scalar(
         select(DocumentChunk).where(DocumentChunk.version_id == version.id)
     )
+    parser_run = db_session.scalar(
+        select(DocumentParserRun).where(
+            DocumentParserRun.source_id == source.id,
+            DocumentParserRun.document_version_id == version.id,
+        )
+    )
     assert version is not None
     assert chunk is not None
+    assert parser_run is not None
     chunk.text = '   '
     chunk.source_snippet = ''
     version.body = '문서 본문에서 고객 데모 QA 완료와 배포 결정을 확인했습니다.'
@@ -607,51 +641,21 @@ def test_failed_exact_version_parser_metadata_and_body_fallback_reach_mail_adapt
     )
     db_session.add(later_version)
     db_session.flush()
-    db_session.add_all(
-        [
-            DocumentParserRun(
-                document_id=version.document_id,
-                document_version_id=version.id,
-                source_id=source.id,
-                parser_name='older-parser',
-                parser_status='parsed',
-                parser_status_reason=None,
-                mime_type='application/pdf',
-                document_version_label='v1',
-                revision_id='older-revision',
-                content_signature='older-signature',
-                chunk_count=1,
-                finished_at=datetime(2026, 8, 26, tzinfo=UTC),
-            ),
-            DocumentParserRun(
-                document_id=version.document_id,
-                document_version_id=version.id,
-                source_id=source.id,
-                parser_name='authoritative-parser',
-                parser_status='failed',
-                parser_status_reason='encrypted_body',
-                mime_type='application/pdf',
-                document_version_label='v1',
-                revision_id='selected-revision',
-                content_signature='selected-signature',
-                chunk_count=0,
-                finished_at=datetime(2026, 8, 27, tzinfo=UTC),
-            ),
-            DocumentParserRun(
-                document_id=version.document_id,
-                document_version_id=later_version.id,
-                source_id=source.id,
-                parser_name='foreign-version-parser',
-                parser_status='unsupported',
-                parser_status_reason='wrong_version',
-                mime_type='application/octet-stream',
-                document_version_label='v2',
-                revision_id='foreign-revision',
-                content_signature='foreign-signature',
-                chunk_count=0,
-                finished_at=datetime(2026, 8, 28, tzinfo=UTC),
-            ),
-        ]
+    db_session.add(
+        DocumentParserRun(
+            document_id=version.document_id,
+            document_version_id=later_version.id,
+            source_id=source.id,
+            parser_name='foreign-version-parser',
+            parser_status='unsupported',
+            parser_status_reason='wrong_version',
+            mime_type='application/octet-stream',
+            document_version_label='v2',
+            revision_id='foreign-revision',
+            content_signature='foreign-signature',
+            chunk_count=0,
+            finished_at=datetime(2026, 8, 28, tzinfo=UTC),
+        )
     )
     db_session.commit()
 
@@ -697,16 +701,15 @@ def test_failed_exact_version_parser_metadata_and_body_fallback_reach_mail_adapt
     message = captured[0].messages[0]
     assert message.text == version.body
     assert message.metadata['fallback_body'] is True
-    assert message.metadata['parser_name'] == 'authoritative-parser'
-    assert message.metadata['parser_status'] == 'failed'
-    assert message.metadata['parser_status_reason'] == 'encrypted_body'
+    assert message.metadata['parser_name'] == 'server_drive_source_event'
+    assert message.metadata['parser_status'] == 'parsed'
+    assert message.metadata['parser_status_reason'] is None
     assert message.metadata['document_version_label'] == 'v1'
-    assert message.metadata['revision_id'] == 'selected-revision'
-    assert message.metadata['content_signature'] == 'selected-signature'
+    assert message.metadata['revision_id'] == 'revision-1'
+    assert message.metadata['content_signature'] == source.server_content_signature
     with factory() as db:
         review_item = db.get(ReviewItem, result.review_item_ids[0])
         assert review_item is not None
-        assert 'failed(encrypted_body)' in review_item.payload['uncertainty_reason']
 
 
 def test_failed_agent_run_is_not_replayed_as_cached_effect(db_session) -> None:
@@ -1312,7 +1315,7 @@ def test_permission_or_signature_change_discards_model_result(
             if mutation == 'permission':
                 current.permission_level = 'restricted'
             else:
-                current.raw_metadata['content_signature'] = 'changed-signature'
+                current.server_content_signature = 'f' * 64
             db.commit()
 
     adapter = _FakeAdapter(

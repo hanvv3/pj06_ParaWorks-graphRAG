@@ -52,7 +52,13 @@ from backend.app.models import (
     ReviewItem,
     ReviewItemEvidenceRef,
 )
-from backend.app.models.source import Source
+from backend.app.models.source import (
+    Document,
+    DocumentChunk,
+    DocumentParserRun,
+    DocumentVersion,
+    Source,
+)
 from backend.app.schemas.review_workflow import ReviewWorkflowRunRequest
 
 
@@ -241,6 +247,53 @@ def _seed_runtime(engine, database_url: str, *, permission_level: str = 'interna
         )
         db.add(source)
         db.flush()
+        document = Document(
+            source_id=source.id,
+            title=source.title,
+            current_version='v1',
+        )
+        db.add(document)
+        db.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version='v1',
+            body='검토 가능한 근거 문장',
+        )
+        db.add(version)
+        db.flush()
+        parser_run = DocumentParserRun(
+            document_id=document.id,
+            document_version_id=version.id,
+            source_id=source.id,
+            parser_name='server_gmail_source_event',
+            parser_status='parsed',
+            parser_status_reason=None,
+            mime_type='message/rfc822',
+            document_version_label='v1',
+            revision_id='task3-revision-1',
+            content_signature='c' * 64,
+            server_content_signature_schema='server-source-content:v1',
+            server_content_signature='c' * 64,
+            parser_policy_version='server-source-parser-policy:v1',
+            parser_version='source-event-paragraph-parser:v1',
+            chunk_policy_version='paragraph-chunks:1200:v1',
+            chunk_count=1,
+        )
+        db.add(parser_run)
+        db.flush()
+        db.add(
+            DocumentChunk(
+                version_id=version.id,
+                source_id=source.id,
+                parser_run_id=parser_run.id,
+                chunk_index=0,
+                text='검토 가능한 근거 문장',
+                source_snippet='검토 가능한 근거 문장',
+                permission_level=permission_level,
+                metadata_={},
+            )
+        )
+        document.current_document_version_id = version.id
         db.commit()
         request = ReviewWorkflowRunRequest(
             source_refs=[

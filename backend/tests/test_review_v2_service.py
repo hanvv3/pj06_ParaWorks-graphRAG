@@ -48,6 +48,7 @@ from backend.app.models.agent_workflows import (
 from backend.app.models.review import ReviewItem
 from backend.app.models.source import (
     Document,
+    DocumentChunk,
     DocumentParserRun,
     DocumentVersion,
     Source,
@@ -111,7 +112,8 @@ def _seed_source(
     *,
     permission_level: str = 'internal',
 ) -> Source:
-    signature = f'gmail-signature-{sequence}'
+    connector_signature = f'gmail-signature-{sequence}'
+    server_signature = f'{sequence:064x}'
     source = Source(
         source_type='gmail',
         source_id=f'gmail:message-{sequence}',
@@ -119,13 +121,62 @@ def _seed_source(
         title=f'Sensitive message {sequence}',
         permission_level=permission_level,
         raw_metadata={
-            'content_signature': signature,
+            'content_signature': connector_signature,
             'review_batch_mode': 'v2_explicit',
-            'review_batch_signature': signature,
+            'review_batch_signature': server_signature,
         },
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=server_signature,
     )
     db.add(source)
     db.flush()
+    document = Document(
+        source_id=source.id,
+        title=source.title,
+        current_version='v1',
+    )
+    db.add(document)
+    db.flush()
+    document_version = DocumentVersion(
+        document_id=document.id,
+        version='v1',
+        body='body for v1',
+    )
+    db.add(document_version)
+    db.flush()
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=document_version.id,
+        source_id=source.id,
+        parser_name='server_gmail_source_event',
+        parser_status='parsed',
+        parser_status_reason=None,
+        mime_type='message/rfc822',
+        document_version_label='v1',
+        revision_id='revision-1',
+        content_signature=server_signature,
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=server_signature,
+        parser_policy_version='server-source-parser-policy:v1',
+        parser_version='source-event-paragraph-parser:v1',
+        chunk_policy_version='paragraph-chunks:1200:v1',
+        chunk_count=1,
+    )
+    db.add(parser_run)
+    db.flush()
+    db.add(
+        DocumentChunk(
+            version_id=document_version.id,
+            source_id=source.id,
+            parser_run_id=parser_run.id,
+            chunk_index=0,
+            text='body for v1',
+            source_snippet='body for v1',
+            permission_level=permission_level,
+            metadata_={},
+        )
+    )
+    document.current_document_version_id = document_version.id
     return source
 
 
@@ -139,7 +190,7 @@ def _request(
             {
                 'source_type': source.source_type,
                 'source_id': source.source_id,
-                'version_or_signature': source.raw_metadata['content_signature'],
+                'version_or_signature': source.server_content_signature,
             }
         ],
         agent_names=['mail_document_agent'],
@@ -154,33 +205,20 @@ def _attach_document_version(
     version: str = 'v1',
     revision_id: str = 'revision-1',
 ) -> tuple[Document, DocumentVersion, DocumentParserRun]:
-    document = Document(
-        source_id=source.id,
-        title=source.title,
-        current_version=version,
+    document = db.scalar(select(Document).where(Document.source_id == source.id))
+    assert document is not None
+    assert document.current_version == version
+    document_version = db.get(DocumentVersion, document.current_document_version_id)
+    assert document_version is not None
+    parser_run = db.scalar(
+        select(DocumentParserRun).where(
+            DocumentParserRun.source_id == source.id,
+            DocumentParserRun.document_id == document.id,
+            DocumentParserRun.document_version_id == document_version.id,
+        )
     )
-    db.add(document)
-    db.flush()
-    document_version = DocumentVersion(
-        document_id=document.id,
-        version=version,
-        body=f'body for {version}',
-    )
-    db.add(document_version)
-    db.flush()
-    parser_run = DocumentParserRun(
-        document_id=document.id,
-        document_version_id=document_version.id,
-        source_id=source.id,
-        parser_name='test-parser',
-        parser_status='completed',
-        document_version_label=version,
-        revision_id=revision_id,
-        content_signature=f'parser-signature-{version}',
-        chunk_count=1,
-    )
-    db.add(parser_run)
-    db.flush()
+    assert parser_run is not None
+    assert parser_run.revision_id == revision_id
     return document, document_version, parser_run
 
 
@@ -1051,9 +1089,7 @@ def test_evidence_drift_after_resume_claim_restores_awaiting_without_saver_write
             with application_session_factory() as db:
                 current_source = db.get(Source, source.id)
                 assert current_source is not None
-                current_source.raw_metadata['content_signature'] = (
-                    'changed-after-resume-claim'
-                )
+                current_source.server_content_signature = 'e' * 64
                 db.commit()
         return result
 
@@ -1159,11 +1195,11 @@ def test_resume_revalidates_full_canonical_evidence_before_saver_write(
     if drift == 'parser_status':
         parser_run.parser_status = 'failed'
     elif drift == 'parser_signature':
-        parser_run.content_signature = 'changed-parser-signature'
+        parser_run.content_signature = 'd' * 64
     elif drift == 'external_revision':
         parser_run.revision_id = 'revision-2'
     elif drift == 'source_signature':
-        source.raw_metadata['content_signature'] = 'changed-source-signature'
+        source.server_content_signature = 'f' * 64
     elif drift == 'permission_level':
         source.permission_level = 'public'
     else:
@@ -1175,17 +1211,7 @@ def test_resume_revalidates_full_canonical_evidence_before_saver_write(
         )
         db_session.add(v2)
         db_session.flush()
-        db_session.add(DocumentParserRun(
-            document_id=document.id,
-            document_version_id=v2.id,
-            source_id=source.id,
-            parser_name='test-parser',
-            parser_status='completed',
-            document_version_label='v2',
-            revision_id='revision-1',
-            content_signature='parser-signature-v2',
-            chunk_count=1,
-        ))
+        document.current_document_version_id = v2.id
     db_session.commit()
 
     with pytest.raises(ReviewWorkflowServiceError) as exc_info:

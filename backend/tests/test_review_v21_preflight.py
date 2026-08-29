@@ -17,7 +17,13 @@ from backend.app.agent_runtime.review_v2_preflight import (
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
 from backend.app.models.agent_workflows import AgentWorkflowRequest
-from backend.app.models.source import Source
+from backend.app.models.source import (
+    Document,
+    DocumentChunk,
+    DocumentParserRun,
+    DocumentVersion,
+    Source,
+)
 from backend.app.schemas.auto_review import COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
 from backend.app.schemas.review_workflow import ReviewWorkflowRunRequest
 
@@ -259,22 +265,77 @@ def test_v21_create_persists_v21_graph_checkpoint_and_every_request_snapshot(
             capabilities=('review_draft',),
         )
     )
+    server_signature = '1' * 64
     source = Source(
         source_type='gmail',
         source_id='gmail:v21-storage',
         source_url='https://private.example/v21-storage',
         title='private title',
         permission_level='internal',
-        raw_metadata={'content_signature': 'v21-signature'},
+        raw_metadata={
+            'content_signature': 'v21-signature',
+            'review_batch_mode': 'v2_explicit',
+            'review_batch_signature': server_signature,
+        },
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=server_signature,
     )
     db_session.add(source)
+    db_session.flush()
+    document = Document(
+        source_id=source.id,
+        title=source.title,
+        current_version='v1',
+    )
+    db_session.add(document)
+    db_session.flush()
+    version = DocumentVersion(
+        document_id=document.id,
+        version='v1',
+        body='private canonical body',
+    )
+    db_session.add(version)
+    db_session.flush()
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=version.id,
+        source_id=source.id,
+        parser_name='server_gmail_source_event',
+        parser_status='parsed',
+        parser_status_reason=None,
+        mime_type='message/rfc822',
+        document_version_label='v1',
+        revision_id='revision-1',
+        content_signature=server_signature,
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=server_signature,
+        parser_policy_version='server-source-parser-policy:v1',
+        parser_version='source-event-paragraph-parser:v1',
+        chunk_policy_version='paragraph-chunks:1200:v1',
+        chunk_count=1,
+    )
+    db_session.add(parser_run)
+    db_session.flush()
+    db_session.add(
+        DocumentChunk(
+            version_id=version.id,
+            source_id=source.id,
+            parser_run_id=parser_run.id,
+            chunk_index=0,
+            text='private canonical body',
+            source_snippet='private canonical body',
+            permission_level='internal',
+            metadata_={},
+        )
+    )
+    document.current_document_version_id = version.id
     db_session.commit()
     request = ReviewWorkflowRunRequest(
         source_refs=[
             {
                 'source_type': 'gmail',
                 'source_id': source.source_id,
-                'version_or_signature': 'v21-signature',
+                'version_or_signature': server_signature,
             }
         ],
         agent_names=['mail_document_agent'],

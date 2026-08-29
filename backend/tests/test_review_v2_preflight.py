@@ -28,7 +28,13 @@ from backend.app.models.agent_workflows import (
     AgentWorkflowRequest,
     AgentWorkflowThread,
 )
-from backend.app.models.source import Source
+from backend.app.models.source import (
+    Document,
+    DocumentChunk,
+    DocumentParserRun,
+    DocumentVersion,
+    Source,
+)
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_INPUT_SCHEMA_VERSION,
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
@@ -81,6 +87,7 @@ def _seed_source(
     *,
     permission_level: str = 'internal',
 ) -> Source:
+    server_signature = f'{sequence:064x}'
     source = Source(
         source_type='gmail',
         source_id=f'gmail:message-{sequence}',
@@ -91,9 +98,58 @@ def _seed_source(
             'content_signature': f'gmail-signature-{sequence}',
             'source_snippet': f'sensitive snippet {sequence}',
         },
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=server_signature,
     )
     db.add(source)
     db.flush()
+    document = Document(
+        source_id=source.id,
+        title=source.title,
+        current_version='v1',
+    )
+    db.add(document)
+    db.flush()
+    version = DocumentVersion(
+        document_id=document.id,
+        version='v1',
+        body=f'sensitive body {sequence}',
+    )
+    db.add(version)
+    db.flush()
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=version.id,
+        source_id=source.id,
+        parser_name='server_gmail_source_event',
+        parser_status='parsed',
+        parser_status_reason=None,
+        mime_type='message/rfc822',
+        document_version_label='v1',
+        revision_id=f'revision-{sequence}',
+        content_signature=server_signature,
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=server_signature,
+        parser_policy_version='server-source-parser-policy:v1',
+        parser_version='source-event-paragraph-parser:v1',
+        chunk_policy_version='paragraph-chunks:1200:v1',
+        chunk_count=1,
+    )
+    db.add(parser_run)
+    db.flush()
+    db.add(
+        DocumentChunk(
+            version_id=version.id,
+            source_id=source.id,
+            parser_run_id=parser_run.id,
+            chunk_index=0,
+            text=f'sensitive body {sequence}',
+            source_snippet=f'sensitive snippet {sequence}',
+            permission_level=permission_level,
+            metadata_={},
+        )
+    )
+    document.current_document_version_id = version.id
     return source
 
 
@@ -108,7 +164,7 @@ def _request(
             {
                 'source_type': source.source_type,
                 'source_id': source.source_id,
-                'version_or_signature': source.raw_metadata['content_signature'],
+                'version_or_signature': source.server_content_signature,
             }
         ],
         agent_names=agent_names or ['mail_document_agent'],
@@ -693,6 +749,9 @@ def test_postgres_preflight_uses_transaction_scoped_advisory_lock(
         (1, 'lookup', 2),
         (1, 'lookup', 2),
         (1, 'lookup', 2),
+        (1, 'lookup', 2),
+        (1, 'lookup', 2),
+        (1, 'lookup', 2),
         (1, 'create', 2),
         (1, 'flush', 2),
         (1, 'commit', 2),
@@ -732,7 +791,7 @@ def test_postgres_concurrent_same_creator_key_different_batches_is_typed_conflic
             (
                 source.source_type,
                 source.source_id,
-                source.raw_metadata['content_signature'],
+                source.server_content_signature,
             )
             for source in sources
         ]
@@ -799,7 +858,8 @@ def test_sqlite_preflight_process_lock_serializes_exact_batch(tmp_path) -> None:
     with session_local() as seed_session:
         source = _seed_source(seed_session, 1)
         source_id = source.source_id
-        signature = source.raw_metadata['content_signature']
+        signature = source.server_content_signature
+        assert signature is not None
         seed_session.commit()
 
     barrier = Barrier(2)

@@ -12,7 +12,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from langgraph.types import Interrupt
-from sqlalchemy import create_engine, delete, func, select, text
+from sqlalchemy import create_engine, delete, func, select, text, update
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session, sessionmaker
@@ -41,11 +41,17 @@ from backend.app.models import (
     AgentWorkflowThread,
     AuditLog,
     DecisionRecord,
+    Document,
+    DocumentChunk,
+    DocumentParserRun,
+    DocumentVersion,
     HistoryEvent,
     ReviewItem,
+    ReviewItemEvidenceRef,
     Source,
     TimelineEvent,
     Todo,
+    TrustedKnowledgeApprovalLink,
 )
 from backend.app.review.actors import human_review_actor
 from backend.app.review.transitions import ReviewTransitionService
@@ -310,8 +316,29 @@ class _DeterministicDraftService:
                     candidate_key=(
                         f'postgres-candidate:{workflow_thread_id}'
                     ),
+                    agent_run_id=run.id,
+                    candidate_contract_version='c5-v1',
                 )
                 db.add(item)
+                db.flush()
+                workflow_ref = db.scalar(
+                    select(AgentWorkflowEvidenceRef).where(
+                        AgentWorkflowEvidenceRef.workflow_thread_id
+                        == workflow_thread_id
+                    )
+                )
+                assert workflow_ref is not None
+                db.add(
+                    ReviewItemEvidenceRef(
+                        review_item_id=item.id,
+                        workflow_thread_id=workflow_thread_id,
+                        workflow_evidence_ref_id=workflow_ref.id,
+                        candidate_slot_ordinal=1,
+                        message_content_fingerprint='e' * 64,
+                        fingerprint_key_version='postgres-fixture-v1',
+                        fingerprint_key_material_verifier='f' * 64,
+                    )
+                )
                 db.commit()
                 db.refresh(item)
                 items = (item,)
@@ -423,7 +450,9 @@ class _PostgresHarness:
     ) -> ReviewWorkflowRunRequest:
         suffix = uuid4().hex
         source_id = f'gmail:postgres-sensitive-source:{suffix}'
-        signature = f'postgres-signature-{suffix}'
+        connector_signature = f'postgres-signature-{suffix}'
+        server_signature = suffix * 2
+        revision = f'revision-{suffix}'
         with self.session_factory() as db:
             source = Source(
                 source_type='gmail',
@@ -435,13 +464,63 @@ class _PostgresHarness:
                 author='deterministic-fixture',
                 permission_level='internal',
                 raw_metadata={
-                    'content_signature': signature,
+                    'content_signature': connector_signature,
                     'review_batch_mode': 'v2_explicit',
-                    'review_batch_signature': signature,
-                    'external_revision': f'revision-{suffix}',
+                    'review_batch_signature': server_signature,
+                    'external_revision': revision,
                 },
+                server_content_signature_schema='server-source-content:v1',
+                server_content_signature=server_signature,
             )
             db.add(source)
+            db.flush()
+            document = Document(
+                source_id=source.id,
+                title=source.title,
+                current_version='v1',
+            )
+            db.add(document)
+            db.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                version='v1',
+                body='postgres-sensitive-source-snippet',
+            )
+            db.add(version)
+            db.flush()
+            parser_run = DocumentParserRun(
+                document_id=document.id,
+                document_version_id=version.id,
+                source_id=source.id,
+                parser_name='server_gmail_source_event',
+                parser_status='parsed',
+                parser_status_reason=None,
+                mime_type='message/rfc822',
+                document_version_label='v1',
+                revision_id=revision,
+                content_signature=server_signature,
+                server_content_signature_schema='server-source-content:v1',
+                server_content_signature=server_signature,
+                parser_policy_version='server-source-parser-policy:v1',
+                parser_version='source-event-paragraph-parser:v1',
+                chunk_policy_version='paragraph-chunks:1200:v1',
+                chunk_count=1,
+            )
+            db.add(parser_run)
+            db.flush()
+            db.add(
+                DocumentChunk(
+                    version_id=version.id,
+                    source_id=source.id,
+                    parser_run_id=parser_run.id,
+                    chunk_index=0,
+                    text='postgres-sensitive-source-snippet',
+                    source_snippet='postgres-sensitive-source-snippet',
+                    permission_level='internal',
+                    metadata_={},
+                )
+            )
+            document.current_document_version_id = version.id
             db.commit()
             db.refresh(source)
             self.source_ids.add(source.id)
@@ -450,7 +529,7 @@ class _PostgresHarness:
                 ReviewWorkflowSourceRef(
                     source_type='gmail',
                     source_id=source_id,
-                    version_or_signature=signature,
+                    version_or_signature=server_signature,
                 )
             ],
             agent_names=['history_agent'],
@@ -498,6 +577,25 @@ class _PostgresHarness:
                         if thread_ids
                         else ()
                     )
+                    retained_c5_approval = bool(
+                        review_ids
+                        and db.scalar(
+                            select(func.count())
+                            .select_from(TrustedKnowledgeApprovalLink)
+                            .where(
+                                TrustedKnowledgeApprovalLink.review_item_id.in_(
+                                    review_ids
+                                )
+                            )
+                        )
+                    )
+                    if retained_c5_approval:
+                        # Production makes approved C.5 provenance immutable.
+                        # This module already requires a disposable database;
+                        # its final database drop owns that teardown boundary.
+                        review_ids = ()
+                        thread_ids = ()
+                        self.source_ids.clear()
                     if review_ids:
                         for model in (
                             DecisionRecord,
@@ -512,6 +610,13 @@ class _PostgresHarness:
                                     )
                                 )
                             )
+                        db.execute(
+                            delete(ReviewItemEvidenceRef).where(
+                                ReviewItemEvidenceRef.review_item_id.in_(
+                                    review_ids
+                                )
+                            )
+                        )
                         db.execute(
                             delete(ReviewItem).where(
                                 ReviewItem.id.in_(review_ids)
@@ -548,6 +653,41 @@ class _PostgresHarness:
                             )
                         )
                     if self.source_ids:
+                        document_ids = tuple(
+                            db.scalars(
+                                select(Document.id).where(
+                                    Document.source_id.in_(self.source_ids)
+                                )
+                            ).all()
+                        )
+                        db.execute(
+                            delete(DocumentChunk).where(
+                                DocumentChunk.source_id.in_(self.source_ids)
+                            )
+                        )
+                        db.execute(
+                            delete(DocumentParserRun).where(
+                                DocumentParserRun.source_id.in_(self.source_ids)
+                            )
+                        )
+                        if document_ids:
+                            db.execute(
+                                update(Document)
+                                .where(Document.id.in_(document_ids))
+                                .values(current_document_version_id=None)
+                            )
+                            db.execute(
+                                delete(DocumentVersion).where(
+                                    DocumentVersion.document_id.in_(
+                                        document_ids
+                                    )
+                                )
+                            )
+                            db.execute(
+                                delete(Document).where(
+                                    Document.id.in_(document_ids)
+                                )
+                            )
                         db.execute(
                             delete(Source).where(
                                 Source.id.in_(self.source_ids)
@@ -633,7 +773,7 @@ def _approve_only_item(
                 ReviewItem.workflow_thread_id == workflow_thread_id
             )
         ).one()
-        result = ReviewTransitionService().transition(
+        result = ReviewTransitionService(settings=harness.settings).transition(
             db=db,
             item_id=item.id,
             action='approve',

@@ -21,8 +21,20 @@ from backend.app.api.v1 import integrations
 from backend.app.connectors.base import ConnectorManifest, SourceEvent
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.demo_auth import USERS
+from backend.app.ingestion.source_content_signature import (
+    canonical_source_content_signature,
+)
 from backend.app.ingestion.source_versions import SourceVersionRef
-from backend.app.models import AgentWorkflowThread, AuditLog, ReviewItem, Source
+from backend.app.models import (
+    AgentWorkflowThread,
+    AuditLog,
+    Document,
+    DocumentChunk,
+    DocumentParserRun,
+    DocumentVersion,
+    ReviewItem,
+    Source,
+)
 from backend.app.schemas.review_workflow import (
     DEFAULT_REVIEW_AGENT_NAMES,
     ReviewWorkflowRunRequest,
@@ -56,6 +68,14 @@ def _event(
     source_id: str = 'gmail:waterline-1',
     signature: str = 'gmail:waterline-1:v1',
 ) -> SourceEvent:
+    timestamp = datetime(2026, 8, 27, 9, 0, tzinfo=UTC)
+    raw_metadata = {
+        'content_signature': signature,
+        'document_version': 'v1',
+        'source_snippet': 'Project review evidence.',
+    }
+    if source_type == 'gmail_attachment':
+        raw_metadata.update(filename='brief.txt', mime_type='text/plain')
     return SourceEvent(
         source_type=source_type,
         source_id=source_id,
@@ -64,14 +84,92 @@ def _event(
         body='Project review evidence with an explicit canonical version.',
         author='owner@example.test',
         participants=['owner@example.test'],
-        timestamp=datetime(2026, 8, 27, 9, 0, tzinfo=UTC),
+        timestamp=timestamp,
         permission_level='internal',
-        raw_metadata={
-            'content_signature': signature,
-            'document_version': 'v1',
-            'source_snippet': 'Project review evidence.',
-        },
+        raw_metadata=raw_metadata,
+        semantic_timestamp_raw=(
+            str(int(timestamp.timestamp() * 1_000))
+            if source_type in {'gmail', 'gmail_attachment'}
+            else None
+        ),
     )
+
+
+def _seed_canonical_source(
+    db_session,
+    *,
+    marker_mode: str | None,
+) -> tuple[Source, str]:
+    event = _event()
+    signature = canonical_source_content_signature(event).signature
+    metadata = {'content_signature': event.raw_metadata['content_signature']}
+    if marker_mode is not None:
+        metadata.update(
+            review_batch_mode=marker_mode,
+            review_batch_signature=signature,
+        )
+    source = Source(
+        source_type=event.source_type,
+        source_id=event.source_id,
+        source_url=event.source_url,
+        title=event.title,
+        author=event.author,
+        permission_level=event.permission_level,
+        raw_metadata=metadata,
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=signature,
+    )
+    db_session.add(source)
+    db_session.flush()
+    document = Document(
+        source_id=source.id,
+        title=source.title,
+        current_version='v1',
+    )
+    db_session.add(document)
+    db_session.flush()
+    version = DocumentVersion(
+        document_id=document.id,
+        version='v1',
+        body=event.body,
+    )
+    db_session.add(version)
+    db_session.flush()
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=version.id,
+        source_id=source.id,
+        parser_name='server_gmail_source_event',
+        parser_status='parsed',
+        parser_status_reason=None,
+        mime_type='message/rfc822',
+        document_version_label='v1',
+        revision_id='v1',
+        content_signature=signature,
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=signature,
+        parser_policy_version='server-source-parser-policy:v1',
+        parser_version='source-event-paragraph-parser:v1',
+        chunk_policy_version='paragraph-chunks:1200:v1',
+        chunk_count=1,
+    )
+    db_session.add(parser_run)
+    db_session.flush()
+    db_session.add(
+        DocumentChunk(
+            version_id=version.id,
+            source_id=source.id,
+            parser_run_id=parser_run.id,
+            chunk_index=0,
+            text=event.body,
+            source_snippet='Project review evidence.',
+            permission_level=event.permission_level,
+            metadata_={},
+        )
+    )
+    document.current_document_version_id = version.id
+    db_session.flush()
+    return source, signature
 
 
 def _settings(*, v2_enabled: bool) -> Settings:
@@ -173,18 +271,23 @@ def test_v2_mode_marks_explicit_waterline_and_suppresses_legacy_candidates(
     assert response.status_code == 200
     payload = response.json()
     assert payload['created_review_items'] == 0
+    source = db_session.scalar(
+        select(Source).where(Source.source_id == 'gmail:waterline-1')
+    )
+    assert source is not None
     assert payload['changed_source_refs'] == [
         {
             'source_type': 'gmail',
             'source_id': 'gmail:waterline-1',
-            'version_or_signature': 'gmail:waterline-1:v1',
+            'version_or_signature': source.server_content_signature,
         }
     ]
-    source = db_session.scalar(select(Source).where(Source.source_id == 'gmail:waterline-1'))
-    assert source is not None
     assert source.raw_metadata['last_changed_sync_job_id'] == payload['job_id']
     assert source.raw_metadata['review_batch_mode'] == 'v2_explicit'
-    assert source.raw_metadata['review_batch_signature'] == 'gmail:waterline-1:v1'
+    assert (
+        source.raw_metadata['review_batch_signature']
+        == source.server_content_signature
+    )
     audit = db_session.scalar(select(AuditLog).order_by(AuditLog.id.desc()))
     assert audit is not None
     assert audit.metadata_['changed_source_count'] == 1
@@ -236,7 +339,10 @@ def test_legacy_success_marks_current_signature_legacy_inline(
     source = db_session.scalar(select(Source).where(Source.source_id == 'gmail:waterline-1'))
     assert source is not None
     assert source.raw_metadata['review_batch_mode'] == 'legacy_inline'
-    assert source.raw_metadata['review_batch_signature'] == 'gmail:waterline-1:v1'
+    assert (
+        source.raw_metadata['review_batch_signature']
+        == source.server_content_signature
+    )
     assert db_session.query(ReviewItem).count() == response.json()['created_review_items']
     audit = db_session.scalar(select(AuditLog).order_by(AuditLog.id.desc()))
     assert audit is not None
@@ -285,21 +391,10 @@ def test_pre_waterline_or_legacy_marker_is_rejected_by_v2_preflight(
     db_session,
     marker_mode: str | None,
 ) -> None:
-    metadata = {'content_signature': 'gmail:waterline-1:v1'}
-    if marker_mode is not None:
-        metadata.update(
-            review_batch_mode=marker_mode,
-            review_batch_signature='gmail:waterline-1:v1',
-        )
-    source = Source(
-        source_type='gmail',
-        source_id='gmail:waterline-1',
-        source_url='https://example.test/gmail:waterline-1',
-        title='Waterline evidence',
-        permission_level='internal',
-        raw_metadata=metadata,
+    _, signature = _seed_canonical_source(
+        db_session,
+        marker_mode=marker_mode,
     )
-    db_session.add(source)
     db_session.commit()
     settings = _settings(v2_enabled=True)
     request = _request(
@@ -307,7 +402,7 @@ def test_pre_waterline_or_legacy_marker_is_rejected_by_v2_preflight(
             {
                 'source_type': 'gmail',
                 'source_id': 'gmail:waterline-1',
-                'version_or_signature': 'gmail:waterline-1:v1',
+                'version_or_signature': signature,
             }
         ],
         'pre-waterline',
@@ -381,7 +476,7 @@ def test_rollback_v1_does_not_process_batch_with_existing_v2_thread(
     assert source.raw_metadata['review_batch_mode'] == 'v2_explicit'
 
 
-def test_rollback_v1_does_not_suppress_mixed_canonical_and_legacy_ids(
+def test_rollback_v1_does_not_suppress_mixed_owned_and_unowned_source_ids(
     client,
     db_session,
     monkeypatch: pytest.MonkeyPatch,
@@ -392,7 +487,7 @@ def test_rollback_v1_does_not_suppress_mixed_canonical_and_legacy_ids(
         'gmail',
         [
             _event(
-                source_id='gmail-legacy-message',
+                source_id='gmail:legacy-message',
                 signature='gmail-legacy-message:v1',
             ),
             _event(
@@ -404,7 +499,11 @@ def test_rollback_v1_does_not_suppress_mixed_canonical_and_legacy_ids(
     )
     monkeypatch.setattr(integrations, 'get_sync_connector', lambda *args, **kwargs: connector)
     sync_response = client.post('/api/v1/integrations/gmail/sync')
-    refs = sync_response.json()['changed_source_refs']
+    refs = [
+        ref
+        for ref in sync_response.json()['changed_source_refs']
+        if ref['source_type'] == 'gmail_attachment'
+    ]
     assert [ref['source_id'] for ref in refs] == ['gmail_attachment:legacy-message:file-1']
     request = _request(refs, 'mixed-owned-v2-batch')
     prepared = prepare_review_request(
@@ -435,7 +534,7 @@ def test_rollback_v1_does_not_suppress_mixed_canonical_and_legacy_ids(
     assert rollback_response.status_code == 200
     assert calls == [
         [
-            'gmail-legacy-message',
+            'gmail:legacy-message',
             'gmail_attachment:legacy-message:file-1',
         ]
     ]
