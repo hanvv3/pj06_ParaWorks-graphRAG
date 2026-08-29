@@ -337,6 +337,19 @@ def _index_pg_test_document(
     assert indexed.indexed_count == 1
 
 
+def _legacy_labeled_knowledge_text(knowledge_type: str, target) -> str:
+    if knowledge_type == 'history_event':
+        return f'기록/공유: {target.title}\n내용: {target.reason}'
+    if knowledge_type == 'timeline_event':
+        return f'Timeline: {target.title}\nSummary: {target.result_summary}'
+    if knowledge_type == 'todo':
+        return (
+            f'할 일: {target.title}\n우선순위: {target.priority}\n'
+            f'상세: {target.priority_reason}'
+        )
+    raise AssertionError(f'unsupported legacy text type: {knowledge_type}')
+
+
 def test_startup_recovery_removes_stale_physical_pgvector_before_ready() -> None:
     from backend.app.main import _recover_source_reconciliation_batch
 
@@ -2036,3 +2049,236 @@ def test_pgvector_reconciliation_narrows_under_coordinator_context() -> None:
     finally:
         Base.metadata.drop_all(engine)
         engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv('PARAWORKS_TEST_POSTGRES_URL'),
+    reason='set PARAWORKS_TEST_POSTGRES_URL to run Task 6 recovery tests',
+)
+@pytest.mark.parametrize(
+    'knowledge_type',
+    ['history_event', 'timeline_event', 'todo'],
+)
+def test_permission_recovery_only_certifies_proven_canonical_index_states(
+    knowledge_type: str,
+) -> None:
+    database_url = _task6_recovery_postgres_url()
+    schema_name = f'task6_permission_transition_{uuid4().hex}'
+    admin_engine = create_engine(database_url)
+    with admin_engine.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA {schema_name}'))
+    engine = create_engine(
+        database_url,
+        connect_args={'options': f'-csearch_path={schema_name},public'},
+    )
+    session_local = sessionmaker(bind=engine)
+    settings = Settings(database_url=database_url)
+    model_names = ('deterministic-hash:legacy-a', 'deterministic-hash:legacy-b')
+
+    class CountingDeterministicEmbeddingModel:
+        dimensions = 8
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self._delegate = DeterministicHashEmbeddingModel(dimensions=8)
+
+        def embed_many(self, texts: list[str]) -> list[list[float]]:
+            self.calls += 1
+            return self._delegate.embed_many(texts)
+
+    try:
+        Base.metadata.create_all(engine)
+        with session_local() as db:
+            target, link, store, _ = _seed_pg_canonical_knowledge_schedule(
+                db,
+                table_name='rag_vector_documents',
+                settings=settings,
+                knowledge_type=knowledge_type,
+            )
+            item = db.get(ReviewItem, link.review_item_id)
+            evidence = db.scalar(
+                select(TrustedKnowledgeEvidenceLink).where(
+                    TrustedKnowledgeEvidenceLink.approval_link_id == link.id
+                )
+            )
+            assert item is not None
+            assert evidence is not None
+            source = db.get(Source, int(evidence.canonical_source_id))
+            assert source is not None
+
+            target.permission_level = 'public'
+            item.permission_level = 'public'
+            link.permission_level = 'public'
+            source.permission_level = 'public'
+            db.commit()
+            public_document = next(
+                candidate
+                for candidate in build_rag_index_documents(db)
+                if candidate.document_id == f'{knowledge_type}:{target.id}'
+            )
+            _index_pg_test_document(
+                db,
+                document=public_document,
+                store=store,
+                model_name=model_names[0],
+                settings=settings,
+            )
+            legacy_document = replace(
+                public_document,
+                text=_legacy_labeled_knowledge_text(knowledge_type, target),
+            )
+            legacy_hash = compute_vector_document_hash(legacy_document)
+            legacy_embedding = DeterministicHashEmbeddingModel(dimensions=8).embed(
+                legacy_document.text
+            )
+            db.execute(
+                text(
+                    'UPDATE rag_vector_documents SET text = :text, '
+                    'embedding = CAST(:embedding AS vector) '
+                    'WHERE document_id = :document_id'
+                ),
+                {
+                    'text': legacy_document.text,
+                    'embedding': '['
+                    + ','.join(str(value) for value in legacy_embedding)
+                    + ']',
+                    'document_id': legacy_document.document_id,
+                },
+            )
+            first_state = db.scalar(
+                select(VectorIndexState).where(
+                    VectorIndexState.document_id == legacy_document.document_id,
+                    VectorIndexState.embedding_model == model_names[0],
+                )
+            )
+            assert first_state is not None
+            first_state.content_hash = legacy_hash
+            second_state = VectorIndexState(
+                document_id=legacy_document.document_id,
+                embedding_model=model_names[1],
+                embedding_dimensions=8,
+                content_hash=legacy_hash,
+                status='indexed',
+            )
+            db.add(second_state)
+            source.permission_level = 'internal'
+            db.commit()
+
+            recovered = AutoReviewSourceReconciliationService(
+                db,
+                settings=settings,
+                vector_writer=store,
+            ).reconcile_source_ids([source.id])
+            current_document = next(
+                candidate
+                for candidate in build_rag_index_documents(db)
+                if candidate.document_id == legacy_document.document_id
+            )
+            current_hash = compute_vector_document_hash(current_document)
+            stored = db.execute(
+                text(
+                    'SELECT text, permission_level FROM rag_vector_documents '
+                    'WHERE document_id = :document_id'
+                ),
+                {'document_id': legacy_document.document_id},
+            ).mappings().one()
+
+            assert recovered.narrowed_count == 1
+            assert stored['permission_level'] == 'internal'
+            assert stored['text'] == legacy_document.text
+            assert first_state.content_hash == legacy_hash
+            assert second_state.content_hash == legacy_hash
+            assert legacy_hash != current_hash
+
+            for state, model_name in (
+                (first_state, model_names[0]),
+                (second_state, model_names[1]),
+            ):
+                embedding = CountingDeterministicEmbeddingModel()
+                indexed = index_changed_vector_documents(
+                    db=db,
+                    documents=[current_document],
+                    writer=store,
+                    embedding_model=embedding,
+                    embedding_model_name=model_name,
+                    settings=settings,
+                )
+                replay = index_changed_vector_documents(
+                    db=db,
+                    documents=[current_document],
+                    writer=store,
+                    embedding_model=embedding,
+                    embedding_model_name=model_name,
+                    settings=settings,
+                )
+                assert indexed.indexed_count == 1
+                assert replay.skipped_count == 1
+                assert embedding.calls == 1
+                assert state.content_hash == current_hash
+
+            stored_text = db.scalar(
+                text(
+                    'SELECT text FROM rag_vector_documents '
+                    'WHERE document_id = :document_id'
+                ),
+                {'document_id': legacy_document.document_id},
+            )
+            assert stored_text == current_document.text
+
+            target.permission_level = 'public'
+            item.permission_level = 'public'
+            link.permission_level = 'public'
+            source.permission_level = 'public'
+            db.execute(
+                text(
+                    'UPDATE rag_vector_documents SET permission_level = :permission '
+                    'WHERE document_id = :document_id'
+                ),
+                {
+                    'permission': 'public',
+                    'document_id': legacy_document.document_id,
+                },
+            )
+            db.commit()
+            proven_public_document = next(
+                candidate
+                for candidate in build_rag_index_documents(db)
+                if candidate.document_id == legacy_document.document_id
+            )
+            proven_public_hash = compute_vector_document_hash(proven_public_document)
+            first_state.content_hash = proven_public_hash
+            second_state.content_hash = proven_public_hash
+            source.permission_level = 'internal'
+            db.commit()
+
+            fast_recovery = AutoReviewSourceReconciliationService(
+                db,
+                settings=settings,
+                vector_writer=store,
+            ).reconcile_source_ids([source.id])
+            proven_current_document = next(
+                candidate
+                for candidate in build_rag_index_documents(db)
+                if candidate.document_id == legacy_document.document_id
+            )
+            proven_current_hash = compute_vector_document_hash(
+                proven_current_document
+            )
+            fast_reindex = index_changed_vector_documents(
+                db=db,
+                documents=[proven_current_document],
+                writer=store,
+                embedding_model=RefusingEmbeddingModel(),
+                embedding_model_name=model_names[0],
+                settings=settings,
+            )
+
+            assert fast_recovery.narrowed_count == 1
+            assert first_state.content_hash == proven_current_hash
+            assert second_state.content_hash == proven_current_hash
+            assert fast_reindex.skipped_count == 1
+    finally:
+        engine.dispose()
+        with admin_engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA {schema_name} CASCADE'))
+        admin_engine.dispose()

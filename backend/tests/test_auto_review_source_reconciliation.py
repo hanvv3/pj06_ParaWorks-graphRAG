@@ -34,7 +34,11 @@ from backend.app.models import (
     TrustedKnowledgeFingerprint,
     VectorIndexState,
 )
-from backend.app.rag.indexing import PreviewVectorIndexWriter
+from backend.app.rag.indexing import (
+    PreviewVectorIndexWriter,
+    build_rag_index_documents,
+    compute_vector_document_hash,
+)
 from backend.app.rag.serving_locks import build_serving_lock_plan
 from backend.app.review.auto_review_revoke import (
     SourceInvalidationRevokeContext,
@@ -463,7 +467,13 @@ def test_public_to_internal_reconciliation_narrows_target_and_vector_without_emb
     history.permission_level = 'public'
     item.permission_level = 'public'
     link.permission_level = 'public'
-    source.permission_level = 'internal'
+    source.permission_level = 'public'
+    db_session.flush()
+    previous_document = next(
+        candidate
+        for candidate in build_rag_index_documents(db_session)
+        if candidate.document_id == f'history_event:{history.id}'
+    )
     fingerprint = TrustedKnowledgeFingerprint(
         knowledge_type='history_event',
         knowledge_id=history.id,
@@ -484,7 +494,15 @@ def test_public_to_internal_reconciliation_narrows_target_and_vector_without_emb
         content_hash='0' * 64,
         status='indexed',
     )
-    db_session.add_all([fingerprint, index_state])
+    proven_state = VectorIndexState(
+        document_id=f'history_event:{history.id}',
+        embedding_model='proven:8',
+        embedding_dimensions=8,
+        content_hash=compute_vector_document_hash(previous_document),
+        status='indexed',
+    )
+    source.permission_level = 'internal'
+    db_session.add_all([fingerprint, index_state, proven_state])
     writer = PreviewVectorIndexWriter()
     db_session.commit()
 
@@ -500,7 +518,13 @@ def test_public_to_internal_reconciliation_narrows_target_and_vector_without_emb
     assert item.permission_level == 'internal'
     assert link.permission_level == 'internal'
     assert fingerprint.permission_level == 'internal'
-    assert index_state.content_hash != '0' * 64
+    assert index_state.content_hash == '0' * 64
+    current_document = next(
+        candidate
+        for candidate in build_rag_index_documents(db_session)
+        if candidate.document_id == f'history_event:{history.id}'
+    )
+    assert proven_state.content_hash == compute_vector_document_hash(current_document)
     assert writer.permission_narrowings == [(('history_event:1',), 'internal')]
 
 
@@ -576,7 +600,7 @@ def test_legacy_decision_narrowing_updates_canonical_fingerprint(
     assert item.permission_level == 'internal'
     assert fingerprint.permission_level == 'internal'
     assert writer.permission_narrowings == [((document_id,), 'internal')]
-    assert index_state.content_hash != '0' * 64
+    assert index_state.content_hash == '0' * 64
     assert replay.reconciled_count == 0
     assert replay.remaining_count == 0
 
@@ -1293,7 +1317,7 @@ def test_recovery_reaches_permission_drift_after_one_hundred_current_links(
     assert lock_plan.document_ids == (canonical_document_id,)
     assert drift_link.id in lock_plan.approval_link_ids
     assert writer.permission_narrowings == [((canonical_document_id,), 'internal')]
-    assert index_state.content_hash != '0' * 64
+    assert index_state.content_hash == '0' * 64
     assert replay_after_restart.reconciled_count == 0
     assert replay_after_restart.remaining_count == 0
 

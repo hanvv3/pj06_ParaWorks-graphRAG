@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from sqlalchemy import (
@@ -607,6 +607,7 @@ class AutoReviewSourceReconciliationService:
             if target is None or item is None:
                 self._db.rollback()
                 return 'gone'
+            previous_permission_level = target.permission_level
             strictest = _strictest_many(
                 target.permission_level,
                 link.permission_level,
@@ -637,7 +638,10 @@ class AutoReviewSourceReconciliationService:
                 else:
                     self._vector_writer.narrow_permissions([document_id], strictest)
             if changed:
-                self._refresh_index_state_hash(document_id)
+                self._refresh_index_state_hash(
+                    document_id,
+                    previous_permission_level=previous_permission_level,
+                )
             self._db.commit()
             return 'narrowed' if changed else 'current'
 
@@ -705,7 +709,12 @@ class AutoReviewSourceReconciliationService:
         state.updated_at = datetime.now(UTC)
         return True
 
-    def _refresh_index_state_hash(self, document_id: str) -> None:
+    def _refresh_index_state_hash(
+        self,
+        document_id: str,
+        *,
+        previous_permission_level: str,
+    ) -> None:
         document = next(
             (
                 candidate
@@ -716,6 +725,9 @@ class AutoReviewSourceReconciliationService:
         )
         if document is None:
             return
+        previous_content_hash = compute_vector_document_hash(
+            replace(document, permission_level=previous_permission_level)
+        )
         content_hash = compute_vector_document_hash(document)
         states = tuple(
             self._db.scalars(
@@ -725,7 +737,8 @@ class AutoReviewSourceReconciliationService:
             ).all()
         )
         for state in states:
-            state.content_hash = content_hash
+            if state.content_hash == previous_content_hash:
+                state.content_hash = content_hash
 
     def _mint_source_invalidation_context(
         self, *, review_item_id: int, canonical_source_id: str
