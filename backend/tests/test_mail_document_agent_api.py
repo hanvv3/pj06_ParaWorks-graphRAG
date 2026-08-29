@@ -222,6 +222,13 @@ def test_gmail_sync_runs_agent_only_for_changed_gmail_sources(client, db_session
     ]
     assert payload['changed_source_refs'] == [
         {
+            'source_type': 'gmail',
+            'source_id': 'gmail:project-alpha-redis-summary',
+            'version_or_signature': (
+                '047babcfe30090f60d5db1047362fd1abd6855982e7bf71885dcda3379ae66df'
+            ),
+        },
+        {
             'source_type': 'gmail_attachment',
             'source_id': 'gmail_attachment:project-alpha-redis-summary:att-budget-pdf',
             'version_or_signature': (
@@ -367,28 +374,36 @@ def test_gmail_sync_smoke_ingests_attachment_metadata_boundary(client, db_sessio
         'lee@example.com',
     ]
 
-    attachment_chunk = db_session.scalar(
-        select(DocumentChunk)
-        .join(Source, DocumentChunk.source_id == Source.id)
-        .where(Source.source_id == attachment_source.source_id)
-    )
-    assert attachment_chunk is not None
-    assert attachment_chunk.permission_level == 'internal'
-    assert attachment_chunk.metadata_['source_type'] == 'gmail_attachment'
-    assert attachment_chunk.metadata_['parser_name'] == 'gmail_attachment_metadata'
-    assert attachment_chunk.metadata_['parser_status'] == 'metadata_only'
-    assert attachment_chunk.metadata_['parser_status_reason'] == 'pdf_parser_not_enabled'
-    assert attachment_chunk.metadata_['mime_type'] == 'application/pdf'
-    assert attachment_chunk.metadata_['content_signature'].endswith(':2048')
-
     parser_run = db_session.scalar(
         select(DocumentParserRun).where(DocumentParserRun.source_id == attachment_source.id)
     )
     assert parser_run is not None
-    assert parser_run.parser_name == 'gmail_attachment_metadata'
-    assert parser_run.parser_status == 'metadata_only'
-    assert parser_run.parser_status_reason == 'pdf_parser_not_enabled'
+    assert parser_run.parser_name == 'server_gmail_attachment_source_event'
+    assert parser_run.parser_status == 'parsed'
+    assert parser_run.parser_status_reason is None
+    assert parser_run.parser_policy_version == 'server-source-parser-policy:v1'
+    assert parser_run.parser_version == 'source-event-paragraph-parser:v1'
+    assert parser_run.chunk_policy_version == 'paragraph-chunks:1200:v1'
     assert parser_run.mime_type == 'application/pdf'
     assert parser_run.document_version_label == '1777544100000'
     assert parser_run.revision_id == 'att-budget-pdf'
     assert parser_run.chunk_count == 1
+
+    attachment_chunk = db_session.scalar(
+        select(DocumentChunk).where(DocumentChunk.parser_run_id == parser_run.id)
+    )
+    assert attachment_chunk is not None
+    assert attachment_chunk.source_id == attachment_source.id
+    assert attachment_chunk.version_id == parser_run.document_version_id
+    assert attachment_chunk.permission_level == 'internal'
+    assert attachment_chunk.metadata_['source_type'] == 'gmail_attachment'
+    assert (
+        attachment_chunk.metadata_['parser_name']
+        == 'server_gmail_attachment_source_event'
+    )
+    assert attachment_chunk.metadata_['parser_status'] == 'parsed'
+    assert attachment_chunk.metadata_['parser_status_reason'] is None
+    assert attachment_chunk.metadata_['mime_type'] == 'application/pdf'
+    assert attachment_chunk.metadata_['content_signature'] == (
+        '2d338d51c20091427b6d4ea953fd585bcd461f938d7a1d541132d0a35313d0ef'
+    )
