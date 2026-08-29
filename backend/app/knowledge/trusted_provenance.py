@@ -15,6 +15,8 @@ from backend.app.core.config import Settings
 from backend.app.knowledge.claim_fingerprints import (
     normalized_claim_fingerprint,
     promoted_effect_fingerprint,
+    trusted_project_scope_fingerprint,
+    trusted_title_collision_bucket,
 )
 from backend.app.knowledge.promotion import build_promotion_preview
 from backend.app.models import (
@@ -52,6 +54,49 @@ class TrustedPromotionBundle:
     record_ids: tuple[int, ...]
     timeline_ids: tuple[int, ...]
     effects: tuple[TrustedPromotionEffect, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedCandidateFingerprint:
+    knowledge_type: Literal['timeline_event', 'history_event']
+    security_scope_id: str
+    project_scope_hmac: str
+    normalized_title_bucket_hmac: str
+    normalized_claim_fingerprint: str
+
+
+def build_trusted_candidate_fingerprint(
+    *,
+    item: ReviewItem,
+    security_scope_id: str,
+    settings: Settings,
+) -> TrustedCandidateFingerprint:
+    if item.item_type not in {'timeline_event', 'history_event'}:
+        raise TrustedProvenanceMismatch('candidate type is not reusable')
+    preview = build_promotion_preview(item)
+    normalized = preview.get('normalized_payload')
+    title = normalized.get('title') if isinstance(normalized, dict) else None
+    if not preview.get('can_approve') or not isinstance(title, str) or not title.strip():
+        raise TrustedProvenanceMismatch('candidate promotion preview is incomplete')
+    project_key = item.payload.get('project_key')
+    return TrustedCandidateFingerprint(
+        knowledge_type=item.item_type,
+        security_scope_id=security_scope_id,
+        project_scope_hmac=trusted_project_scope_fingerprint(
+            project_key=project_key if isinstance(project_key, str) else None,
+            settings=settings,
+        ),
+        normalized_title_bucket_hmac=trusted_title_collision_bucket(
+            item_type=item.item_type,
+            normalized_title=title,
+            settings=settings,
+        ),
+        normalized_claim_fingerprint=normalized_claim_fingerprint(
+            item=item,
+            security_scope_id=security_scope_id,
+            settings=settings,
+        ),
+    )
 
 
 def effects_for_created_promotion(

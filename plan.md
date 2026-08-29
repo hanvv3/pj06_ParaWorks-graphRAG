@@ -561,8 +561,17 @@ Tasks:
     Review V2.1 PostgreSQL, and Review V2 PostgreSQL gates are respectively
     `28 passed`, `48 passed`, and `9 passed`; Ruff, lock, and diff checks pass,
     cleanup is DB/role `0/0`, and independent review is PASS/APPROVED with zero
-    open Critical or Important findings. Product Task 7 and later work remain
-    separately gated.
+    open Critical or Important findings. Task 7 now adds the deterministic
+    auto-review eligibility and policy authority: exact bound-evidence and
+    candidate-key revalidation, server-owned workflow scope and fingerprint
+    projection readiness, visible/hidden/legacy collision handling, a
+    credential-context scanner, and explicit post-validation identity/state
+    inputs. Its final focused gate is `54 passed`; adjacent SQLite regression
+    is `230 passed, 58 skipped`; PostgreSQL projection/collision regression is
+    `12 passed`; Ruff, compile, lock, and diff checks pass; disposable DB/role
+    cleanup is `0/0`; independent review is PASS/APPROVED with zero open
+    Critical or Important findings. No live provider was called. Task 8 and
+    later work remain separately gated.
 - User-directed execution order for the remaining program:
   1. Deliverable C.5 Auto-Review Trust Promotion Tasks 7–16.
   2. Deliverable D Retriever Port and RAG Answer Graph V2 using Gmail, Drive,

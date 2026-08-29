@@ -3186,3 +3186,40 @@ tests passed with 53 tests; ruff passed.
 - Slack connector/agent/OAuth/data work remains last by explicit user choice.
   Preserve the exact approved ten-node deselection list; Task 6 reaches four
   of those nodes. No additional deselection is authorized.
+
+## 2026-08-30 C.5 Task 7 handoff
+
+- Task 7 is implementation-complete on `codex/rag-orchestrator-agent`.
+  `backend/app/agent_runtime/auto_review_eligibility.py` owns deterministic DB
+  preflight and bounded validator DTO assembly;
+  `backend/app/agent_runtime/auto_review_policy.py` is the pure frozen policy
+  authority. API routes/connectors must not bypass these boundaries.
+- DB callers supply the current actor-visible permission levels, evidence
+  messages, registry, and budget result, but cannot supply workflow scope or
+  fingerprint projection readiness. Scope comes from the stored V2.1 workflow;
+  PostgreSQL readiness comes from exact runtime/projection/key/count/checksum
+  and missing/extra-row state. SQLite returns trusted lookup unavailable.
+- Before validation, require exact candidate-key recomputation, immutable
+  ReviewItem evidence bindings, message-set HMACs, current canonical
+  source/version/permission, strictest permission, exact C.5 generation route,
+  and `AgentRunResult` manifest output contract. Missing or drifting authority
+  is bounded human/needs-more-evidence and creates no validator request.
+- Keep `ValidationPolicyInput.validation_identity` and
+  `post_validation_state_matches` explicit. Do not restore approving defaults.
+  Reuse of one exact trusted target still requires the same successful Terra
+  validation and post-call recheck as a new promotion.
+- `credential-scan:v1` uses exact provider patterns plus bounded entropy only
+  for exact/delimiter-aware credential assignment labels. Documented fakes are
+  exact allowlist entries; do not reintroduce prefix exemptions or substring
+  label matching.
+- Final evidence: focused `54 passed`; existing contracts `41 passed`;
+  adjacent SQLite `230 passed, 58 skipped`; isolated PostgreSQL readiness,
+  drift, visible/hidden collision `12 passed`; Ruff/compile/lock/diff PASS;
+  disposable DB/role catalog `0/0`; independent Spec PASS / Quality APPROVED,
+  no open Critical or Important findings. No connector, embedding, or LLM
+  provider was called.
+- Next is C.5 Task 8, an actual implementation task: add the isolated real
+  LangChain `gpt-5.6-terra` structured validator and model-router boundary with
+  fake-model tests, zero fallback/retry/cache/tracing, and a server-owned
+  one-dispatch fence. Task 8 must not enable rollout or make a live paid call.
+  Slack recovery remains last.

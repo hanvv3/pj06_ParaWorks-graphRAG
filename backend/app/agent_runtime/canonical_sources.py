@@ -14,6 +14,7 @@ from backend.app.ingestion.source_versions import (
     SourceVersionRef,
     current_content_signature,
 )
+from backend.app.models.agent_workflows import AgentWorkflowEvidenceRef
 from backend.app.models.source import Source
 
 CANONICAL_SOURCE_FINGERPRINT_SCHEMA = 'canonical-source-version:v1'
@@ -36,6 +37,12 @@ class ResolvedSourceVersion:
     content_signature: str
     permission_level: str
     content_fingerprint: str
+
+
+@dataclass(frozen=True)
+class BoundWorkflowEvidenceResolution:
+    state: str
+    resolved: ResolvedSourceVersion | None = None
 
 
 def build_keyed_fingerprint(
@@ -65,6 +72,69 @@ def resolve_source_versions(
         _resolve_source_version(db, ref=ref, actor=actor, settings=settings)
         for ref in refs
     )
+
+
+def resolve_bound_workflow_evidence(
+    db: Session,
+    *,
+    ref: AgentWorkflowEvidenceRef,
+    visible_permission_levels: tuple[str, ...],
+    settings: Settings,
+) -> BoundWorkflowEvidenceResolution:
+    """Revalidate one immutable workflow ref against current server authority."""
+    if ref.canonical_table != 'sources' or ref.canonical_row_id <= 0:
+        return BoundWorkflowEvidenceResolution('mismatch')
+    source = db.get(Source, ref.canonical_row_id)
+    if source is None or source.permission_level not in visible_permission_levels:
+        return BoundWorkflowEvidenceResolution('missing')
+    if source.source_type != ref.canonical_source_type:
+        return BoundWorkflowEvidenceResolution('mismatch')
+    actor = DemoUser(
+        id='system:auto-review-preflight',
+        email='',
+        role='system',
+        permission_levels=set(visible_permission_levels),
+        name='',
+        title='',
+        department='',
+    )
+    try:
+        resolved = _resolve_source_version(
+            db,
+            ref=SourceVersionRef(
+                source_type=ref.canonical_source_type,
+                source_id=source.source_id,
+                version_or_signature=ref.content_signature,
+            ),
+            actor=actor,
+            settings=settings,
+        )
+    except ReviewWorkflowPreflightError as exc:
+        state = 'changed' if exc.code == 'evidence_changed' else 'mismatch'
+        return BoundWorkflowEvidenceResolution(state)
+    return classify_bound_workflow_evidence(ref=ref, resolved=resolved)
+
+
+def classify_bound_workflow_evidence(
+    *,
+    ref: AgentWorkflowEvidenceRef,
+    resolved: ResolvedSourceVersion,
+) -> BoundWorkflowEvidenceResolution:
+    if (
+        ref.canonical_table != resolved.canonical_table
+        or ref.canonical_row_id != resolved.canonical_row_id
+        or ref.canonical_source_type != resolved.source_type
+    ):
+        return BoundWorkflowEvidenceResolution('mismatch')
+    if (
+        ref.document_version_id != resolved.document_version_id
+        or ref.external_revision != resolved.external_revision
+        or ref.content_signature != resolved.content_signature
+        or ref.permission_level_snapshot != resolved.permission_level
+        or ref.content_fingerprint != resolved.content_fingerprint
+    ):
+        return BoundWorkflowEvidenceResolution('changed')
+    return BoundWorkflowEvidenceResolution('exact', resolved)
 
 
 def _resolve_source_version(

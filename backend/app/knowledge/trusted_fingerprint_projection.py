@@ -19,6 +19,7 @@ from sqlalchemy import (
     tuple_,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
@@ -159,31 +160,136 @@ def build_hidden_collision_exists_statement(
     project_scope_hmac: str,
     normalized_title_bucket_hmac: str,
     visible_permission_levels: tuple[str, ...],
+    candidate_permission_level: str | None = None,
 ) -> Select:
     if knowledge_type not in {'timeline_event', 'history_event'}:
         raise ValueError('hidden collision lookup type is unsupported')
-    collision = and_(
+    bucket = and_(
         TrustedKnowledgeFingerprint.knowledge_type == knowledge_type,
         TrustedKnowledgeFingerprint.project_scope_hmac == project_scope_hmac,
         TrustedKnowledgeFingerprint.normalized_title_bucket_hmac
         == normalized_title_bucket_hmac,
         TrustedKnowledgeFingerprint.review_status == 'approved',
-        or_(
-            and_(
-                TrustedKnowledgeFingerprint.scope_resolution == 'exact',
-                TrustedKnowledgeFingerprint.security_scope_id == security_scope_id,
-            ),
-            TrustedKnowledgeFingerprint.scope_resolution == 'legacy_unknown',
-        ),
     )
     if visible_permission_levels:
         collision = and_(
-            collision,
-            TrustedKnowledgeFingerprint.permission_level.not_in(
-                visible_permission_levels
+            bucket,
+            or_(
+                TrustedKnowledgeFingerprint.scope_resolution == 'legacy_unknown',
+                and_(
+                    TrustedKnowledgeFingerprint.scope_resolution == 'exact',
+                    TrustedKnowledgeFingerprint.security_scope_id
+                    == security_scope_id,
+                    or_(
+                        TrustedKnowledgeFingerprint.permission_level.not_in(
+                            visible_permission_levels
+                        ),
+                        *(
+                            (
+                                TrustedKnowledgeFingerprint.permission_level
+                                != candidate_permission_level,
+                            )
+                            if candidate_permission_level is not None
+                            else ()
+                        ),
+                    ),
+                ),
+            ),
+        )
+    else:
+        collision = and_(
+            bucket,
+            or_(
+                TrustedKnowledgeFingerprint.scope_resolution == 'legacy_unknown',
+                and_(
+                    TrustedKnowledgeFingerprint.scope_resolution == 'exact',
+                    TrustedKnowledgeFingerprint.security_scope_id
+                    == security_scope_id,
+                ),
             ),
         )
     return select(exists().where(collision))
+
+
+@dataclass(frozen=True, slots=True)
+class VisibleTrustedCollision:
+    knowledge_type: str
+    knowledge_id: int
+    normalized_claim_fingerprint: str
+
+
+def find_visible_trusted_collisions(
+    db: Session,
+    *,
+    knowledge_type: str,
+    security_scope_id: str,
+    project_scope_hmac: str,
+    normalized_title_bucket_hmac: str,
+    visible_permission_levels: tuple[str, ...],
+    candidate_permission_level: str,
+) -> tuple[VisibleTrustedCollision, ...]:
+    if knowledge_type not in {'timeline_event', 'history_event'}:
+        raise ValueError('visible collision lookup type is unsupported')
+    if not visible_permission_levels:
+        return ()
+    rows = tuple(
+        db.execute(
+            select(
+                TrustedKnowledgeFingerprint.knowledge_type,
+                TrustedKnowledgeFingerprint.knowledge_id,
+                TrustedKnowledgeFingerprint.normalized_claim_fingerprint,
+            )
+            .where(
+                TrustedKnowledgeFingerprint.knowledge_type == knowledge_type,
+                TrustedKnowledgeFingerprint.scope_resolution == 'exact',
+                TrustedKnowledgeFingerprint.security_scope_id == security_scope_id,
+                TrustedKnowledgeFingerprint.project_scope_hmac == project_scope_hmac,
+                TrustedKnowledgeFingerprint.normalized_title_bucket_hmac
+                == normalized_title_bucket_hmac,
+                TrustedKnowledgeFingerprint.review_status == 'approved',
+                TrustedKnowledgeFingerprint.permission_level.in_(
+                    visible_permission_levels
+                ),
+                TrustedKnowledgeFingerprint.permission_level
+                == candidate_permission_level,
+                TrustedKnowledgeFingerprint.normalized_claim_fingerprint.is_not(None),
+            )
+            .order_by(TrustedKnowledgeFingerprint.knowledge_id)
+            .limit(3)
+        ).all()
+    )
+    return tuple(
+        VisibleTrustedCollision(
+            knowledge_type=row.knowledge_type,
+            knowledge_id=row.knowledge_id,
+            normalized_claim_fingerprint=row.normalized_claim_fingerprint,
+        )
+        for row in rows
+    )
+
+
+def hidden_or_legacy_collision_exists(
+    db: Session,
+    *,
+    knowledge_type: str,
+    security_scope_id: str,
+    project_scope_hmac: str,
+    normalized_title_bucket_hmac: str,
+    visible_permission_levels: tuple[str, ...],
+    candidate_permission_level: str,
+) -> bool:
+    return bool(
+        db.scalar(
+            build_hidden_collision_exists_statement(
+                knowledge_type=knowledge_type,
+                security_scope_id=security_scope_id,
+                project_scope_hmac=project_scope_hmac,
+                normalized_title_bucket_hmac=normalized_title_bucket_hmac,
+                visible_permission_levels=visible_permission_levels,
+                candidate_permission_level=candidate_permission_level,
+            )
+        )
+    )
 
 
 def build_missing_active_projection_exists_statement(
@@ -319,6 +425,48 @@ def projection_identity_ready(
         and (projection.source_checksum or _ZERO_CHECKSUM)
         == (projection.projected_checksum or _ZERO_CHECKSUM)
     )
+
+
+def trusted_fingerprint_projection_ready(
+    db: Session,
+    *,
+    settings: Settings,
+) -> bool:
+    """Return server-owned readiness for exact trusted-collision lookups."""
+    if db.get_bind().dialect.name != 'postgresql':
+        return False
+    try:
+        runtime = _runtime_state(db)
+        projection = _projection_state(db)
+        verifier = fingerprint_key_material_verifier(
+            settings.agent_runtime_fingerprint_secret
+        )
+        if (
+            runtime is None
+            or runtime.fingerprint_key_version
+            != settings.agent_runtime_fingerprint_key_version
+            or runtime.fingerprint_key_material_verifier != verifier
+        ):
+            return False
+        expected_rows = source_projection_snapshots(
+            db,
+            settings=settings,
+            fingerprint_key_material_verifier=verifier,
+        )
+        missing_active_row = bool(
+            db.scalar(
+                build_missing_active_projection_exists_statement(
+                    expected_rows=expected_rows,
+                )
+            )
+        )
+        return projection_identity_ready(
+            runtime,
+            projection,
+            missing_active_row=missing_active_row,
+        )
+    except (SQLAlchemyError, TypeError, ValueError):
+        return False
 
 
 def snapshot_from_projection(

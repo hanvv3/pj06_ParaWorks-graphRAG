@@ -4976,3 +4976,40 @@ Cost/security note:
   transitions were independently re-reviewed and approved. Task 7 is the next
   separate product slice. Slack remains deliberately last and
   legacy-dedupe-only.
+
+## 2026-08-30 C.5 Task 7 deterministic auto-review authority
+
+- Added a pure, frozen `AutoReviewPolicyEngine` that permits only exact
+  Timeline/History candidates with public/internal permission, complete direct
+  claims, current evidence, supported generation/registry identity, available
+  budget, and a healthy trusted-fingerprint projection. Exact decimal
+  `0.9800`, slot integrity, batch integrity, uncertainty/conflict, and
+  post-provider drift are deterministic policy decisions rather than model
+  discretion.
+- Database eligibility now derives security scope from the stored workflow and
+  computes PostgreSQL projection readiness from runtime key identity,
+  projection generation/count/checksum, and the relational missing/extra-row
+  anti-join. Callers cannot assert scope or readiness. SQLite remains a
+  deterministic fail-closed smoke path.
+- Candidate keys, immutable evidence references, message-set HMACs, current
+  canonical source/version/permission, and strictest permission are
+  revalidated before creating an ephemeral validator request. Requests contain
+  only bounded `Cxx`/`Exx` aliases and normalized claim/evidence text—never
+  canonical ids, URLs, or permissions.
+- `credential-scan:v1` blocks reviewed provider patterns, assignments, and
+  bounded high-entropy values only in exact or delimiter-aware credential
+  labels. Fake values use an exact allowlist; real-looking
+  `sk-proj-example-*` strings are blocked, while normal fields such as
+  `token_estimator_version` and `secretary_notes` remain allowed.
+- Duplicate lookup reuses exactly one visible exact target only when no hidden
+  or legacy-unknown collision exists. Visible mismatch/multiplicity,
+  different-permission collision, lookup failure, or stale projection is
+  human-only and exposes no hidden metadata.
+- Verification used fake/deterministic inputs only: focused `54 passed`,
+  adjacent SQLite `230 passed, 58 skipped`, existing contracts `41 passed`,
+  and isolated PostgreSQL projection/collision `12 passed`. Ruff, compile,
+  lock, and diff checks passed; the disposable DB/role was removed (`0/0`).
+  Independent review returned Spec PASS / Quality APPROVED with no Critical or
+  Important findings. Task 8 is the next actual implementation slice and will
+  add the real LangChain Terra validator boundary without making a live call
+  during automated tests.
