@@ -1,10 +1,60 @@
 # ParaWorks Portfolio Log
 
-Last updated: 2026-08-28
+Last updated: 2026-08-29
 
 This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
+
+## 2026-08-29 C.5 Tasks 1–5 verified and typed database boundary accepted
+
+- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–5 are now
+  implemented and independently verified. Product Task 6, Tasks 7–16,
+  Deliverable D/E, frontend C.5 work, and Slack recovery remain unstarted.
+- Product Task 5 exposed a real storage-boundary problem: importing the shared
+  application session module mixed Settings resolution, SQLAlchemy/DBAPI
+  initialization, and CLI failure classification. The accepted design puts URL
+  -> engine/sessionmaker construction in the DB-owned leaf module
+  `backend.app.db.initialization` and leaves `backend.app.db.session` as the
+  process-global compatibility adapter.
+- The public storage contracts are `DatabaseRuntime`,
+  `initialize_database_runtime(database_url)`, `DatabaseConfigurationError`,
+  and `DatabaseInitializationError`. Engine/session options remain
+  `pool_pre_ping=True`, `autoflush=False`, `autocommit=False`, and
+  `expire_on_commit=True`; initialization remains connection-lazy.
+- Application consumers retain `engine`, `SessionLocal`, and `get_db`, including
+  bind identity and request-session close behavior. The key-admin CLI instead
+  owns a separate runtime and attempts disposal exactly once on success or any
+  bounded failure. Partial initialization cleanup follows the same availability
+  classifier and never retries a failed disposal.
+- Configuration failures map to bounded `configuration_refused`/exit 2;
+  proven DB/driver availability failures map to `storage_unavailable`/exit 3;
+  programmer or non-availability SQLAlchemy failures map to
+  `operation_failed`/exit 3. Output is emitted only after cleanup and is one
+  allowlisted stdout JSON line with empty stderr. Typed errors do not preserve
+  the URL, driver/module name, original message, cause, or initializer-captured
+  context; Python may still attach an unrelated caller's already-active context.
+- The six boundary commits have distinct roles: `cedd546` adds the typed
+  runtime; `cc5faa5` completes lifecycle, privacy, and error precedence;
+  `4177f80` gives key-admin independent runtime ownership; `149ea23` moves the
+  shared application adapter onto the initializer; `4018ddd` seeds a real
+  approved projection in the fresh-readiness regression; and `4d31aaf` commits
+  that seed before a separately owned CLI runtime reads it.
+- Fresh PostgreSQL + pgvector acceptance at HEAD `4d31aaf` ran six ordered
+  zero-skip gates: migration/bootstrap/lock `115 passed`, initializer
+  `58 passed`, CLI/import `23 passed` (`137 deselected`), C.5 product Task 5
+  union `204 passed`, product Task 4 union `70 passed`, and representative
+  application consumers `81 passed`. Total: `551 passed, 0 skipped`.
+- Ruff, Python `compileall`, `uv lock --check`, and `git diff --check` passed.
+  The controller created only
+  `paraworks_c5t5_dbinit_20260829_database_test` and
+  `paraworks_c5t5_dbinit_20260829_role_test`, then independent exact/run-prefix
+  catalog inspection confirmed cleanup `0:0:0:0`. The shared healthy Postgres
+  container was left running.
+- Verification used fake/deterministic non-database integrations and made no
+  live LLM, embedding, Slack, Gmail, Drive, Calendar, OAuth, connector, or
+  other provider call. It did not run or claim frontend, rollout, release,
+  push, merge, or PR work.
 
 ## 2026-08-28 Auto-Review Trust Promotion finalized plan and frozen profile
 

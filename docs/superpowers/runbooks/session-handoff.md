@@ -1,6 +1,126 @@
 # ParaWorks Harness Session Handoff
 
-Updated: 2026-08-28
+Updated: 2026-08-29
+
+## 2026-08-29 C.5 product Task 5 database boundary verified
+
+### Current boundary and next work
+
+- Deliverable C.5 product Tasks 1–5 are implemented and independently
+  verified. Final Task 5 implementation HEAD is
+  `4d31aafd37dc2526ab08d458405113c38a19d9ba` on
+  `codex/review-hitl-v2-design`.
+- The next product slice is C.5 Task 6, "Make Auto Approval Precisely Revocable
+  and Non-Resurrectable." It has not started. After C.5 Tasks 6–16, retain the
+  approved order: Deliverable D Retriever/RAG Answer Graph V2, Deliverable E
+  Neo4j GraphRAG, then Slack reconstruction/regressions last.
+- Do not infer authorization for Task 6, a paid Terra benchmark, rollout
+  enablement, frontend C.5 work, release/deploy, push, merge, or PR creation
+  from this verification record.
+
+### Public runtime and compatibility contracts
+
+- `backend.app.db.initialization` is a Settings-free leaf boundary exposing
+  `DatabaseRuntime`, `initialize_database_runtime(database_url)`,
+  `DatabaseConfigurationError(code='database_configuration_invalid')`, and
+  `DatabaseInitializationError(code='database_initialization_failed')`.
+- It preserves `create_engine(database_url, pool_pre_ping=True)` and
+  `sessionmaker(bind=engine, autoflush=False, autocommit=False,
+  expire_on_commit=True)`. Construction is connection-lazy: it performs no
+  connect, checkout/ping, inspection, or SQL.
+- Availability classification is first-match: DBAPI import/load errors;
+  `DBAPIError(connection_invalidated=True)`; then operational/interface/pool
+  timeout/disconnection errors. Configuration and initialization wrappers carry
+  no copied message, URL, driver/module name, cause, or initializer-captured
+  context.
+- `DatabaseRuntime.dispose()` latches before the engine disposal attempt, so it
+  is idempotent even when cleanup fails. A sessionmaker-construction failure
+  disposes a partially built engine once; cleanup failure overrides the earlier
+  construction failure under the same availability rules.
+- `backend.app.db.session` owns one private process-global runtime and preserves
+  public `engine`, `SessionLocal`, and `get_db`; `SessionLocal.kw['bind'] is
+  engine`, resolved URL precedence, and request-session close semantics remain
+  unchanged. The global application runtime remains process-lifetime owned.
+- key-admin does not import `SessionLocal` to create storage. It resolves the
+  URL, creates its own runtime, runs the command, attempts disposal exactly
+  once, and only then emits one bounded stdout JSON line. Configuration is exit
+  2; proven storage unavailability and operation failure are exit 3; stderr is
+  empty. Cleanup failure overrides an earlier command result without a second
+  output.
+
+### Exact implementation commits
+
+- `cedd546f7aaf7fdace40a25d785f0d09df5df108` — add the typed runtime and
+  nominal factory tests.
+- `cc5faa5bc1cc2959ba047a9eefb9724b2f742a9e` — add availability precedence,
+  privacy, partial cleanup, and idempotent disposal.
+- `4177f8019401c728786a88c69b5f17571137ad18` — move key-admin to its owned
+  runtime and bounded single-emission lifecycle.
+- `149ea2323326683767ca3d0d6c9087135277140b` — route the application session
+  compatibility adapter through the shared initializer and prove imports/URL
+  precedence.
+- `4018ddd1917cd441f0d5eb64a3eddacaf3b348bc` — seed the fresh-readiness test
+  through the existing human Review transition and real projection path.
+- `4d31aafd37dc2526ab08d458405113c38a19d9ba` — commit the seed transaction
+  before the independently owned CLI runtime performs its read.
+
+### Fresh Task 5 PostgreSQL evidence
+
+The fail-closed controller reused only the validated shared
+`paraworks-postgres` service (`pgvector/pgvector:pg17`, compose service
+`postgres`, `127.0.0.1:55432`, server identity `paraworks:postgres`) and created
+only these controller-owned identities:
+
+```text
+database=paraworks_c5t5_dbinit_20260829_database_test
+role=paraworks_c5t5_dbinit_20260829_role_test
+run_prefix=paraworks_c5t5_dbinit_20260829
+```
+
+The exact ordered test commands and observed results were:
+
+```powershell
+uv run --no-cache --locked pytest backend/tests/test_auto_review_migration.py backend/tests/test_auto_review_key_bootstrap.py backend/tests/test_keyed_mutation_guard.py -q
+# PASS: 115 passed, 0 skipped
+
+uv run --no-cache --locked pytest backend/tests/test_database_initialization.py -q
+# PASS: 58 passed, 0 skipped
+
+uv run --no-cache --locked pytest backend/tests/test_auto_review_provenance.py -q -k "key_admin_module_cli or key_admin_status_exit_code or task5_modules_import or database_import"
+# PASS: 23 passed, 137 deselected, 0 skipped
+
+uv run --no-cache --locked pytest backend/tests/test_auto_review_provenance.py backend/tests/test_review_knowledge_promotion.py backend/tests/test_review_transitions.py backend/tests/test_review_transition_postgres.py -q
+# PASS: 204 passed, 0 skipped
+
+uv run --no-cache --locked pytest backend/tests/test_review_resolution_actors.py backend/tests/test_auth_api.py backend/tests/test_review_rbac.py backend/tests/test_audit_logs.py -q
+# PASS: 70 passed, 0 skipped
+
+uv run --no-cache --locked pytest backend/tests/test_db_init.py backend/tests/test_health.py backend/tests/test_agent_runtime_lifespan.py backend/tests/test_agent_runtime_bootstrap.py backend/tests/test_agent_runtime_retention.py backend/tests/test_rag_indexing_tasks.py backend/tests/test_review_v2_api.py -q
+# PASS: 81 passed, 0 skipped
+```
+
+Total observed test evidence is `551 passed, 0 skipped` across six invocations.
+The exact static gates also passed:
+
+```powershell
+uv run --no-cache --locked ruff check backend/app/db/initialization.py backend/app/db/session.py backend/app/admin/auto_review_keys.py backend/tests/test_database_initialization.py backend/tests/test_auto_review_provenance.py
+uv run --no-cache --locked python -m compileall -q backend/app/db/initialization.py backend/app/db/session.py backend/app/admin/auto_review_keys.py
+uv lock --check
+git diff --check
+```
+
+The controller terminated exact test-database sessions, dropped only its owned
+database and role, and restored controller-managed process environment values.
+Its terminal result was
+`C.5 Task 5 verification and cleanup PASS (0:0:0:0)`. A separate read-only
+catalog query confirmed exact database, exact role, run-prefix database, and
+run-prefix role counts `0:0:0:0`. The shared container remains running by
+policy; no volume or pre-existing identity was changed.
+
+No live LLM, embedding, connector, OAuth, Slack, Gmail, Drive, Calendar, or
+other product-provider API was called. The accepted evidence does not include
+frontend, C.5 Task 6, Deliverable D/E, Slack recovery, CDC/streaming, rollout,
+release, deploy, push, merge, or PR work.
 
 ## 2026-08-28 Deliverable C.5 plan and execution profile finalized
 

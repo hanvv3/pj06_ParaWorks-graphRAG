@@ -149,21 +149,23 @@ Current state:
 - PostgreSQL restart, reconciliation, exact-batch launch, concurrent Review
   transition, concurrent resume, terminal-race, checkpoint privacy, and exact
   cleanup coverage is release-verified with zero PostgreSQL skips.
-- Deliverable C.5 Auto-Review Trust Promotion design/spec and its sixteen-task
-  TDD implementation plan are finalized under the approved execution profile at
-  `docs/superpowers/plans/2026-08-28-auto-review-trust-promotion.md`. No C.5
-  product code, migration, paid provider call, or rollout enablement has started.
+- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–5 are implemented
+  and independently verified through final HEAD `4d31aaf`. Task 5 now includes
+  a DB-owned typed SQLAlchemy runtime initializer, an application compatibility
+  adapter, and a separately owned key-admin CLI runtime with bounded,
+  privacy-safe failure outcomes. Product Tasks 6–16 remain unstarted; no paid
+  provider call or rollout enablement occurred.
 
 Next priorities:
 
-1. Choose subagent-driven or inline execution and explicitly authorize C.5
-   product-code implementation. Planning/specification is now finalized.
-2. After that authorization, implement and verify Auto-Review Trust Promotion
-   before Deliverable D.
-3. Plan Deliverable D Retriever Port and RAG Answer Graph V2, followed by
-   Deliverable E Neo4j GraphRAG.
-4. Continue frontend consistency before final portfolio recording, and keep
-   Slack data reconstruction plus its visible regression baseline last.
+1. Plan and implement C.5 product Task 6, precise revoke and non-resurrection,
+   under its separate approval/review boundary.
+2. Continue C.5 product Tasks 7–16 in the approved order; keep rollout disabled
+   and live paid-provider benchmarks separately authorized.
+3. After all C.5 product tasks are complete, plan Deliverable D Retriever Port
+   and RAG Answer Graph V2, followed by Deliverable E Neo4j GraphRAG.
+4. Continue frontend consistency only in its planned C.5 tasks, and keep Slack
+   data reconstruction plus its visible regression baseline last.
 
 ## 4. Shared Runtime Contracts
 
@@ -463,9 +465,8 @@ Tasks:
     checkpoint runtimes/pools/savers; A is closed and disposed before B exists.
   - This historical boundary is superseded: the C.5 design/spec, implementation
     plan, and exact execution profile are finalized.
-- Deliverable C.5 Auto-Review Trust Promotion: design/spec and implementation
-  plan finalized; product implementation remains unstarted and requires an
-  explicit execution-mode and implementation authorization.
+- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–5 implemented
+  and independently verified; product Task 6 is the next unstarted slice.
   - Approved spec:
     `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
   - Implementation plan:
@@ -474,6 +475,16 @@ Tasks:
     contracts, persistence, evidence bindings, policy/validator, provenance,
     revoke/tombstones, rollout/audit, dual LangGraph lifecycle, same-screen UX,
     and release verification.
+  - Actual product-task status:
+    1. V2.1 contracts and immutable V2.0 compatibility: complete.
+    2. C.5 persistence and provenance ownership: complete.
+    3. Immutable V2.1 request data and version-neutral evidence bindings:
+       complete.
+    4. Server-issued resolution actors with unchanged human behavior: complete.
+    5. Exact claim fingerprints, provenance, reaffirmation, and the database
+       initialization acceptance boundary: complete and PostgreSQL-verified.
+    6. Precise revoke and non-resurrection: not started; next planned slice.
+    7. Tasks 7–16, Deliverable D/E, and Slack recovery: not started.
   - Separates canonical source evidence, pending AI knowledge, and trusted
     knowledge. Raw evidence is not official knowledge and C.5 does not broaden
     current RAG indexing.
@@ -524,11 +535,14 @@ Tasks:
     sanitized paid Terra benchmark is required before shadow rollout, otherwise
     mode stays disabled. Populated C.5 data is not destroyed by downgrade/reset;
     config disablement is the operational rollback.
-  - No production code or database schema is changed by the design or planning
-    work. Product implementation requires explicit authorization plus an
-    execution-mode choice.
+  - Tasks 1–5 changed product code and schema under their approved TDD plan.
+    Task 5's final database-boundary commits are `cedd546`, `cc5faa5`,
+    `4177f80`, `149ea23`, `4018ddd`, and `4d31aaf`; their final PostgreSQL
+    acceptance is `551 passed, 0 skipped`, with Ruff/compile/lock/diff PASS and
+    controller-owned cleanup `0:0:0:0`. Product Task 6 and later work remain
+    separately gated.
 - User-directed execution order for the remaining program:
-  1. Deliverable C.5 Auto-Review Trust Promotion.
+  1. Deliverable C.5 Auto-Review Trust Promotion Tasks 6–16.
   2. Deliverable D Retriever Port and RAG Answer Graph V2 using Gmail, Drive,
      Calendar, trusted knowledge, and deterministic fixtures.
   3. Deliverable E Neo4j GraphRAG after D establishes the safe retriever and

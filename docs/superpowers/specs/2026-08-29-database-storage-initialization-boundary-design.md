@@ -2,7 +2,7 @@
 
 검토 버전: 2
 작성일: 2026-08-29
-상태: 독립 최종 검토 PASS · 사용자 최종 승인 완료 · 구현 계획 독립 검토 PASS — 실제 구현 승인 대기
+상태: 구현 및 검증 완료 · 독립 Spec PASS · Verification Quality APPROVED · PostgreSQL zero-skip 수용 PASS
 
 ## 1. 결정 요약
 
@@ -333,4 +333,32 @@ Task 6, Slack, connector, RAG serving, application-wide lazy DB lifecycle은 제
   chaining 규칙의 범위로 명시한다.
 - 모든 오류 출력은 bounded JSON이며 민감정보가 없다.
 - Task 5와 Task 4 회귀가 새 PostgreSQL에서 zero-skip GREEN이다.
-- 독립 리뷰 Spec PASS / Quality PASS와 controller cleanup `0:0`을 얻는다.
+- 독립 리뷰 Spec PASS / Quality PASS와 controller cleanup `0:0:0:0`을 얻는다.
+
+## 8. 구현 및 검증 결과
+
+구현은 Task 5 제품 범위의 저장소 초기화 수용 결함만 다뤘으며 최종 검증 HEAD는
+`4d31aafd37dc2526ab08d458405113c38a19d9ba`다.
+
+- `cedd546`: typed `DatabaseRuntime`과 초기화 공개 계약 추가
+- `cc5faa5`: 설정/가용성 오류 우선순위, 민감정보 비보존, partial/runtime cleanup 완성
+- `4177f80`: key-admin CLI의 독립 runtime 소유, bounded 결과, 단일 출력 경계 적용
+- `149ea23`: 기존 애플리케이션 `engine`, `SessionLocal`, `get_db` 호환 adapter 전환
+- `4018ddd`: fresh PostgreSQL readiness 검증을 실제 승인 projection으로 seed
+- `4d31aaf`: 별도 CLI runtime이 읽기 전에 seed transaction을 commit하도록 수용 테스트 수정
+
+일회성 PostgreSQL + pgvector controller는 여섯 개의 순서 고정 gate에서 합계
+`551 passed, 0 skipped`를 얻었다. 세부 결과는 migration/bootstrap/lock `115`,
+initializer `58`, CLI/import `23` (`137 deselected`), C.5 제품 Task 5 union `204`,
+제품 Task 4 union `70`, 대표 애플리케이션 consumer `81` passed다. Ruff,
+`compileall`, `uv lock --check`, `git diff --check`도 PASS했다.
+
+검증용 database와 role은 각각
+`paraworks_c5t5_dbinit_20260829_database_test`와
+`paraworks_c5t5_dbinit_20260829_role_test`였고 controller가 생성한 정확한 identity만
+정리했다. exact database, exact role, run-prefix database, run-prefix role의 독립
+postflight는 `0:0:0:0`이었다. 검증 중 live LLM, embedding, connector, OAuth 또는
+Slack/Google provider API는 호출하지 않았다.
+
+이 완료는 C.5 제품 Task 5까지의 경계다. 제품 Task 6, Deliverable D/E, Slack 복구,
+CDC/streaming, frontend 또는 release/push/merge/PR 작업을 수행하거나 승인하지 않는다.
