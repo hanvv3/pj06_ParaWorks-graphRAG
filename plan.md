@@ -149,11 +149,11 @@ Current state:
 - PostgreSQL restart, reconciliation, exact-batch launch, concurrent Review
   transition, concurrent resume, terminal-race, checkpoint privacy, and exact
   cleanup coverage is release-verified with zero PostgreSQL skips.
-- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–5 are implemented
-  and independently verified through final HEAD `4d31aaf`. Task 5 now includes
-  a DB-owned typed SQLAlchemy runtime initializer, an application compatibility
-  adapter, and a separately owned key-admin CLI runtime with bounded,
-  privacy-safe failure outcomes. Product Tasks 6–16 remain unstarted; no paid
+- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–6 are implemented
+  and independently verified. Task 6's implementation head is `a74cfeb`; exact
+  source/current-version authority, bounded reconciliation, revocable trusted
+  serving, canonical all-type serving text, and proof-based incremental vector
+  state transitions are complete. Product Tasks 7–16 remain unstarted; no paid
   provider call or rollout enablement occurred.
 - A later Task 16 release-gate dry run exposed a test-infrastructure boundary,
   not a Task 5 product regression: one shared PostgreSQL `public` schema caused
@@ -169,13 +169,13 @@ Current state:
 
 Next priorities:
 
-1. Plan and implement C.5 product Task 6, precise revoke and non-resurrection,
-   under its separate approval/review boundary.
-2. Continue C.5 product Tasks 7–16 in the approved order; keep rollout disabled
+1. Implement C.5 product Task 7 as the next approved TDD slice, preserving the
+   Task 6 source-authority, permission, and trusted-serving boundaries.
+2. Continue C.5 product Tasks 8–16 in the approved order; keep rollout disabled
    and live paid-provider benchmarks separately authorized. At Task 16 entry,
    first implement the whole-suite PostgreSQL isolation boundary after its
    detailed plan is separately approved; planning it now does not reorder
-   Tasks 6–15.
+   Tasks 7–15.
 3. After all C.5 product tasks are complete, plan Deliverable D Retriever Port
    and RAG Answer Graph V2, followed by Deliverable E Neo4j GraphRAG.
 4. Continue frontend consistency only in its planned C.5 tasks, and keep Slack
@@ -479,8 +479,8 @@ Tasks:
     checkpoint runtimes/pools/savers; A is closed and disposed before B exists.
   - This historical boundary is superseded: the C.5 design/spec, implementation
     plan, and exact execution profile are finalized.
-- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–5 implemented
-  and independently verified; product Task 6 is the next unstarted slice.
+- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–6 implemented
+  and independently verified; product Task 7 is the next unstarted slice.
   - Approved spec:
     `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
   - Implementation plan:
@@ -497,8 +497,9 @@ Tasks:
     4. Server-issued resolution actors with unchanged human behavior: complete.
     5. Exact claim fingerprints, provenance, reaffirmation, and the database
        initialization acceptance boundary: complete and PostgreSQL-verified.
-    6. Precise revoke and non-resurrection: not started; next planned slice.
-    7. Tasks 7–16, Deliverable D/E, and Slack recovery: not started.
+    6. Precise revoke and non-resurrection: complete and PostgreSQL-verified.
+    7. Tasks 7–16, Deliverable D/E, and Slack recovery: not started; Task 7 is
+       the next implementation slice.
   - Separates canonical source evidence, pending AI knowledge, and trusted
     knowledge. Raw evidence is not official knowledge and C.5 does not broaden
     current RAG indexing.
@@ -549,14 +550,21 @@ Tasks:
     sanitized paid Terra benchmark is required before shadow rollout, otherwise
     mode stays disabled. Populated C.5 data is not destroyed by downgrade/reset;
     config disablement is the operational rollback.
-  - Tasks 1–5 changed product code and schema under their approved TDD plan.
+  - Tasks 1–6 changed product code and schema under their approved TDD plan.
     Task 5's final database-boundary commits are `cedd546`, `cc5faa5`,
     `4177f80`, `149ea23`, `4018ddd`, and `4d31aaf`; their final PostgreSQL
     acceptance is `551 passed, 0 skipped`, with Ruff/compile/lock/diff PASS and
-    controller-owned cleanup `0:0:0:0`. Product Task 6 and later work remain
+    controller-owned cleanup `0:0:0:0`. Task 6's implementation head is
+    `a74cfeb`; its final isolated PostgreSQL gates are `432 passed, 4 failed`
+    for the raw comparison (exactly the four approved deferred Slack nodes) and
+    `432 passed, 4 deselected` for the non-Slack gate. Standalone pgvector,
+    Review V2.1 PostgreSQL, and Review V2 PostgreSQL gates are respectively
+    `28 passed`, `48 passed`, and `9 passed`; Ruff, lock, and diff checks pass,
+    cleanup is DB/role `0/0`, and independent review is PASS/APPROVED with zero
+    open Critical or Important findings. Product Task 7 and later work remain
     separately gated.
 - User-directed execution order for the remaining program:
-  1. Deliverable C.5 Auto-Review Trust Promotion Tasks 6–16.
+  1. Deliverable C.5 Auto-Review Trust Promotion Tasks 7–16.
   2. Deliverable D Retriever Port and RAG Answer Graph V2 using Gmail, Drive,
      Calendar, trusted knowledge, and deterministic fixtures.
   3. Deliverable E Neo4j GraphRAG after D establishes the safe retriever and

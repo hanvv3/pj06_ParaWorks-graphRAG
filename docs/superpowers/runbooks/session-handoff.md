@@ -1,6 +1,32 @@
 # ParaWorks Harness Session Handoff
 
-Updated: 2026-08-29
+Updated: 2026-08-30
+
+## 2026-08-30 C.5 Task 6 complete and next boundary
+
+- Task 6 is complete on `codex/rag-orchestrator-agent`; its independently
+  approved implementation head is `a74cfeb`. Final review verdict: Spec PASS,
+  Quality APPROVED, zero open Critical or Important findings.
+- Preserve exact server-owned content signature, parser/chunk policy, canonical
+  source id, and relational current-version authority. Reconciliation is
+  bounded/paginated; trusted serving uses one canonical all-type text builder;
+  legacy `decision` dependencies retain their stored key while trust logic uses
+  `decision_record`; vector state hashes advance on permission-only updates only
+  with proof of the exact prior canonical document.
+- Final isolated PostgreSQL evidence: raw Task 6 comparison `432 passed, 4
+  failed` (exactly the four approved deferred Slack nodes), exact non-Slack gate
+  `432 passed, 4 deselected`, standalone pgvector `28 passed`, Review V2.1
+  PostgreSQL `48 passed`, and Review V2 PostgreSQL `9 passed`. Ruff, lock, and
+  diff checks pass. The disposable DB and role are deleted; catalog counts are
+  `0/0`.
+- No live connector, LLM, embedding provider, rollout, release, deploy, push,
+  merge, or PR action occurred. The next product work is C.5 Task 7's actual
+  TDD implementation slice under the already approved C.5 plan. Do not start
+  Task 8 or broaden shared permission/trust contracts without its normal green
+  checkpoint and review.
+- Slack connector/agent/OAuth/data reconstruction remains last after D and E.
+  Preserve the exact approved ten-node Slack deselection list and authorize no
+  additional deselections.
 
 ## 2026-08-29 Whole-suite PostgreSQL isolation planning checkpoint
 
@@ -23,8 +49,8 @@ Updated: 2026-08-29
   database, allowlisted/hermetic child environments with an early test-only
   dotenv guard, an exact node/lease sidecar, bounded process/schema cleanup, and
   no additional Slack exclusion or production trigger relaxation.
-- Do not implement this boundary before its implementation plan is separately
-  approved. Planning now does not reorder C.5 Tasks 6–15. Slack
+- At this 2026-08-29 checkpoint, this boundary still required separate plan
+  approval and did not reorder the then-remaining C.5 Tasks 6–15. Slack
   reconstruction/regression remains last after D and E.
 - The C.5 Task 16 plan now points Steps 4–7 to the `postgres`,
   `compatibility`, `non-slack`, and `full` controller profiles and replaces the
@@ -3133,7 +3159,8 @@ tests passed with 53 tests; ruff passed.
   serving/revoke head was `853f476`; the `primary_code` consumer amendment is
   `d2085bc..2691691`; exact Task 6B green head `f356422` was merged by
   `242c071`. Fixture/integration hardening is `445aaf1`, `7e1cc7f`, and
-  `59c7549`.
+  `59c7549`; final authority/reconciliation hardening continues through
+  implementation head `a74cfeb`.
 - `CommittedSourceStateChange` booleans are the only reconciliation control
   authority. `primary_code` is validated bounded observability and must never
   be used to infer or suppress a change.
@@ -3147,14 +3174,15 @@ tests passed with 53 tests; ruff passed.
   Queue reads use `ReviewEvidenceVisibilityService`; do not merge these trust
   boundaries.
 - Final Task 6 PostgreSQL evidence used one freshly empty pgvector DB with all
-  three database URLs pinned to it. Raw gate: `384 passed, 4 failed`, exactly
-  the approved Slack nodes. Non-Slack gate: `384 passed, 4 deselected`. Ruff,
-  `uv lock --check`, and diff checks passed; cleanup returned DB/role `0/0`.
-- Task 7 must remove the legacy raw `content_signature` lookup in
-  `backend/app/agent_runtime/canonical_sources.py` and consume the current
-  server-signature/current-version contract. Seven Mail/Document endpoint
-  tests currently stop at that known boundary. Do not restore raw connector
-  signature authority to make them pass.
+  four database URLs pinned to it. Raw gate: `432 passed, 4 failed`, exactly
+  the approved Slack nodes. Non-Slack gate: `432 passed, 4 deselected`;
+  standalone pgvector, Review V2.1 PostgreSQL, and Review V2 PostgreSQL gates
+  are `28 passed`, `48 passed`, and `9 passed`. Ruff, `uv lock --check`, and
+  diff checks passed; cleanup returned DB/role `0/0`.
+- The canonical Mail/Document resolver already consumes the exact server
+  signature/current-version contract. All 12 focused endpoint tests and the
+  expanded 328-test Review V2/V2.1 suite are green; do not restore raw connector
+  signature authority. Task 7 is the next separate product slice.
 - Slack connector/agent/OAuth/data work remains last by explicit user choice.
   Preserve the exact approved ten-node deselection list; Task 6 reaches four
   of those nodes. No additional deselection is authorized.

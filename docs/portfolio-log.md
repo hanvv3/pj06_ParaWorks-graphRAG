@@ -1,10 +1,37 @@
 # ParaWorks Portfolio Log
 
-Last updated: 2026-08-29
+Last updated: 2026-08-30
 
 This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
+
+## 2026-08-30 C.5 Task 6 revocable trusted serving completed
+
+- Task 6 is code-complete and independently approved at implementation head
+  `a74cfeb`. Exact server-owned source signatures, parser/chunk policy, and
+  relational current-version pointers now govern ingestion, reconciliation,
+  trusted retrieval, Assistant dependencies, and vector indexing.
+- Relational reconciliation is bounded and paginated, so more than 100 stale
+  rows cannot starve later evidence. Legacy `decision` links are canonicalized
+  to `decision_record` for trust decisions while their stored dependency key is
+  preserved for replay and composite-FK integrity.
+- All trusted knowledge types now share one canonical serving-text builder
+  across indexing, deterministic/keyword retrieval, pgvector snapshots, and
+  Assistant liveness. Permission-only vector fast paths advance content hashes
+  only when the prior state proves the exact pre-narrow document; unproven or
+  legacy states remain stale and are reindexed once.
+- Fresh isolated PostgreSQL + pgvector verification produced `432 passed, 4
+  failed` for the raw comparison, with exactly the four approved deferred Slack
+  orchestration nodes, and `432 passed, 4 deselected` for the non-Slack gate.
+  Standalone gates added pgvector `28 passed`, Review V2.1 PostgreSQL `48
+  passed`, and Review V2 PostgreSQL `9 passed`. Ruff, lockfile, and diff checks
+  pass; the disposable database and role were removed with catalog counts
+  `0/0`.
+- The final independent review is Spec PASS and Quality APPROVED with zero open
+  Critical or Important findings. No live connector, LLM, embedding provider,
+  rollout, push, merge, or PR action occurred. C.5 Task 7 is the next actual
+  implementation slice; Slack reconstruction remains last after D and E.
 
 ## 2026-08-29 Whole-suite PostgreSQL isolation spec approved; implementation plan drafted
 
@@ -39,8 +66,9 @@ demo story changes.
   conditional Review V2 test-fixture correction only after the clean
   provenance RED. It also replaces C.5 Task 16's raw backend pytest commands
   with controller-owned profile calls and reviewed slice commits.
-- Product order remains C.5 Tasks 6–15, Task 16 isolation/release, D, E, then
-  Slack recovery last. This entry records planning only; no Docker/service,
+- At this 2026-08-29 checkpoint, the remaining product order was C.5 Tasks
+  6–15, Task 16 isolation/release, D, E, then Slack recovery last. This entry
+  records planning only; no Docker/service,
   test suite, provider, product-code, push, merge, or PR action was performed.
 
 ## 2026-08-29 C.5 Tasks 1–5 verified and typed database boundary accepted
@@ -4934,13 +4962,17 @@ Cost/security note:
 - Mock/demo Google inputs now mirror the real adapter identity and semantic
   timestamp contracts. Search and Ask tests consume the genuine ingestion
   authority instead of installing synthetic hashes or parser identities.
-- Fresh isolated PostgreSQL + pgvector verification produced `384 passed, 4
+- Fresh isolated PostgreSQL + pgvector verification produced `432 passed, 4
   deselected` for the exact non-Slack Task 6 gate. The raw comparison produced
-  `384 passed, 4 failed`, exactly the approved deferred Slack orchestration
-  nodes. Ruff, lockfile, and diff checks passed; the disposable DB and role
-  were removed with catalog counts `0/0`. No live connector, LLM, or embedding
-  provider was called.
-- Slack remains deliberately last and legacy-dedupe-only. Task 7 will also
-  replace the remaining Mail/Document legacy raw-signature resolver with the
-  server-signature-only canonical source contract before the wider endpoint
-  suite becomes green.
+  `432 passed, 4 failed`, exactly the approved deferred Slack orchestration
+  nodes. Standalone pgvector, Review V2.1 PostgreSQL, and Review V2 PostgreSQL
+  gates produced `28 passed`, `48 passed`, and `9 passed`. Ruff, lockfile, and
+  diff checks passed; the disposable DB and role were removed with catalog
+  counts `0/0`. No live connector, LLM, or embedding provider was called.
+- The canonical Mail/Document resolver now consumes exact server authority;
+  all 12 focused Mail/Document endpoint tests and the expanded 328-test Review
+  V2/V2.1 suite pass. Bounded relational reconciliation, legacy decision-link
+  canonicalization, all-type serving text, and proof-based vector hash
+  transitions were independently re-reviewed and approved. Task 7 is the next
+  separate product slice. Slack remains deliberately last and
+  legacy-dedupe-only.
