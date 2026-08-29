@@ -119,6 +119,7 @@ def _seed_source(
 ) -> Source:
     prefix = 'message' if source_type == 'gmail' else 'file'
     server_signature = f'{sequence:064x}'
+    mime_type = 'message/rfc822' if source_type == 'gmail' else 'text/plain'
     source = Source(
         source_type=source_type,
         source_id=f'{source_type}:{prefix}-{sequence}',
@@ -131,6 +132,7 @@ def _seed_source(
             'revision_id': f'revision-{sequence}',
             'review_batch_mode': 'v2_explicit',
             'review_batch_signature': server_signature,
+            'mime_type': mime_type,
         },
         server_content_signature_schema='server-source-content:v1',
         server_content_signature=server_signature,
@@ -158,7 +160,7 @@ def _seed_source(
         parser_name=f'server_{source_type}_source_event',
         parser_status='parsed',
         parser_status_reason=None,
-        mime_type='message/rfc822' if source_type == 'gmail' else 'text/plain',
+        mime_type=mime_type,
         document_version_label='v1',
         revision_id=f'revision-{sequence}',
         content_signature=server_signature,
