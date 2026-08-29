@@ -148,9 +148,10 @@ def test_async_status_recovers_only_refs_marked_by_latest_job(client, db_session
                 title='Latest source',
                 permission_level='internal',
                 raw_metadata={
-                    'content_signature': 'gmail:latest:v2',
                     'last_changed_sync_job_id': 'gmail-latest-job',
                 },
+                server_content_signature_schema='server-source-content:v1',
+                server_content_signature='a' * 64,
             ),
             Source(
                 source_type='gmail',
@@ -159,9 +160,10 @@ def test_async_status_recovers_only_refs_marked_by_latest_job(client, db_session
                 title='Older source',
                 permission_level='internal',
                 raw_metadata={
-                    'content_signature': 'gmail:older:v1',
                     'last_changed_sync_job_id': 'gmail-older-job',
                 },
+                server_content_signature_schema='server-source-content:v1',
+                server_content_signature='b' * 64,
             ),
             SyncJob(
                 job_id='gmail-latest-job',
@@ -181,7 +183,7 @@ def test_async_status_recovers_only_refs_marked_by_latest_job(client, db_session
         {
             'source_type': 'gmail',
             'source_id': 'gmail:latest',
-            'version_or_signature': 'gmail:latest:v2',
+            'version_or_signature': 'a' * 64,
         }
     ]
 
@@ -196,9 +198,10 @@ def test_async_status_omits_refs_hidden_from_current_actor(client, db_session) -
                 title='Internal source',
                 permission_level='internal',
                 raw_metadata={
-                    'content_signature': 'drive:internal:v1',
                     'last_changed_sync_job_id': 'drive-latest-job',
                 },
+                server_content_signature_schema='server-source-content:v1',
+                server_content_signature='c' * 64,
             ),
             Source(
                 source_type='drive',
@@ -207,9 +210,10 @@ def test_async_status_omits_refs_hidden_from_current_actor(client, db_session) -
                 title='Restricted source',
                 permission_level='restricted',
                 raw_metadata={
-                    'content_signature': 'drive:restricted:v1',
                     'last_changed_sync_job_id': 'drive-latest-job',
                 },
+                server_content_signature_schema='server-source-content:v1',
+                server_content_signature='d' * 64,
             ),
             SyncJob(
                 job_id='drive-latest-job',
@@ -232,7 +236,7 @@ def test_async_status_omits_refs_hidden_from_current_actor(client, db_session) -
         {
             'source_type': 'drive',
             'source_id': 'drive:internal',
-            'version_or_signature': 'drive:internal:v1',
+            'version_or_signature': 'c' * 64,
         }
     ]
 

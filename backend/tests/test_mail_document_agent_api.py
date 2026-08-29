@@ -217,14 +217,16 @@ def test_gmail_sync_runs_agent_only_for_changed_gmail_sources(client, db_session
     assert payload['connector_type'] == 'gmail'
     assert payload['created_review_items'] == 1
     assert payload['changed_source_ids'] == [
-        'gmail-project-alpha-redis-summary',
-        'gmail_attachment:gmail-project-alpha-redis-summary:att-budget-pdf',
+        'gmail:project-alpha-redis-summary',
+        'gmail_attachment:project-alpha-redis-summary:att-budget-pdf',
     ]
     assert payload['changed_source_refs'] == [
         {
             'source_type': 'gmail_attachment',
-            'source_id': 'gmail_attachment:gmail-project-alpha-redis-summary:att-budget-pdf',
-            'version_or_signature': 'gmail_attachment:gmail-project-alpha-redis-summary:att-budget-pdf:2048',
+            'source_id': 'gmail_attachment:project-alpha-redis-summary:att-budget-pdf',
+            'version_or_signature': (
+                '2d338d51c20091427b6d4ea953fd585bcd461f938d7a1d541132d0a35313d0ef'
+            ),
         }
     ]
     review_item = db_session.query(ReviewItem).one()
@@ -292,8 +294,8 @@ def test_gmail_sync_preserves_grouping_with_project_routing_payload(client, db_s
         if item.payload.get('agent_name') == 'mail_document_agent'
     )
     assert review_item.payload['source_ids'] == [
-        'gmail-project-alpha-redis-summary',
-        'gmail_attachment:gmail-project-alpha-redis-summary:att-budget-pdf',
+        'gmail:project-alpha-redis-summary',
+        'gmail_attachment:project-alpha-redis-summary:att-budget-pdf',
     ]
     assert review_item.payload['project_assignment_method'] == 'llm_tool'
     assert review_item.payload['project_key'] == 'project-alpha'
@@ -313,7 +315,11 @@ def test_drive_sync_marks_unmatched_project_routing_for_user_selection(client, d
 
     assert response.status_code == 200
     review_items = db_session.query(ReviewItem).order_by(ReviewItem.id).all()
-    unmatched_item = next(item for item in review_items if item.payload['source_ids'] == ['drive-permission-leakage-case'])
+    unmatched_item = next(
+        item
+        for item in review_items
+        if item.payload['source_ids'] == ['drive:permission-leakage-case']
+    )
     assert unmatched_item.payload['source_types'] == ['drive']
     assert unmatched_item.payload['project_assignment_method'] == 'llm_tool'
     assert 'project_key' not in unmatched_item.payload
@@ -345,12 +351,16 @@ def test_gmail_sync_smoke_ingests_attachment_metadata_boundary(client, db_sessio
 
     attachment_source = db_session.scalar(
         select(Source).where(
-            Source.source_id == 'gmail_attachment:gmail-project-alpha-redis-summary:att-budget-pdf'
+            Source.source_id
+            == 'gmail_attachment:project-alpha-redis-summary:att-budget-pdf'
         )
     )
     assert attachment_source is not None
     assert attachment_source.source_type == 'gmail_attachment'
-    assert attachment_source.raw_metadata['parent_source_id'] == 'gmail-project-alpha-redis-summary'
+    assert (
+        attachment_source.raw_metadata['parent_source_id']
+        == 'gmail:project-alpha-redis-summary'
+    )
     assert attachment_source.raw_metadata['participants'] == [
         'maya@example.com',
         'noah@example.com',
@@ -379,6 +389,6 @@ def test_gmail_sync_smoke_ingests_attachment_metadata_boundary(client, db_sessio
     assert parser_run.parser_status == 'metadata_only'
     assert parser_run.parser_status_reason == 'pdf_parser_not_enabled'
     assert parser_run.mime_type == 'application/pdf'
-    assert parser_run.document_version_label == '1777540500000'
+    assert parser_run.document_version_label == '1777544100000'
     assert parser_run.revision_id == 'att-budget-pdf'
     assert parser_run.chunk_count == 1

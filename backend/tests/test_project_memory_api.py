@@ -18,6 +18,48 @@ def _event(
     permission_level: str = 'internal',
     source_url: str | None = None,
 ) -> SourceEvent:
+    raw_metadata: dict[str, object] = {
+        'sync_partition': source_type,
+        'sync_cursor': '2026-05-01T09:00:00Z',
+    }
+    semantic_timestamp_raw: str | None = None
+    if source_type == 'gmail':
+        message_id = source_id.removeprefix('gmail:')
+        raw_metadata.update(
+            message_id=message_id,
+            thread_id=f'thread-{message_id}',
+            content_signature=f'{source_id}:1777600800000',
+        )
+        semantic_timestamp_raw = '1777600800000'
+    elif source_type == 'gmail_attachment':
+        _, message_id, attachment_id = source_id.split(':', maxsplit=2)
+        raw_metadata.update(
+            parent_source_id=f'gmail:{message_id}',
+            message_id=message_id,
+            attachment_id=attachment_id,
+            filename=title,
+            mime_type='application/pdf',
+            content_signature=f'{source_id}:2048',
+        )
+        semantic_timestamp_raw = '1777600800000'
+    elif source_type == 'drive':
+        raw_metadata.update(
+            mime_type='text/plain',
+            modified_time='2026-05-01T09:00:00Z',
+            content_signature=f'{source_id}:2026-05-01T09:00:00Z',
+        )
+        semantic_timestamp_raw = '2026-05-01T09:00:00Z'
+    elif source_type == 'calendar':
+        raw_metadata.update(
+            start='2026-05-01T09:00:00Z',
+            end='2026-05-01T10:00:00Z',
+            attendee_domains=['example.com'],
+            event_status='confirmed',
+            location=None,
+            organizer_email='owner@example.com',
+            content_signature=f'{source_id}:2026-05-01T09:00:00Z',
+        )
+        semantic_timestamp_raw = '2026-05-01T09:00:00Z'
     return SourceEvent(
         source_type=source_type,
         source_id=source_id,
@@ -28,10 +70,8 @@ def _event(
         participants=['owner@example.com'],
         timestamp=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
         permission_level=permission_level,
-        raw_metadata={
-            'sync_partition': source_type,
-            'sync_cursor': '2026-05-01T09:00:00Z',
-        },
+        raw_metadata=raw_metadata,
+        semantic_timestamp_raw=semantic_timestamp_raw,
     )
 
 
@@ -57,19 +97,19 @@ def test_project_classifier_finds_ktech_and_ir_but_excludes_company_rules(
         [
             _event(
                 source_type='drive',
-                source_id='drive-ktech-plan',
+                source_id='drive:ktech-plan',
                 title='02_파일럿_프로젝트/K테크 온보딩 계획',
                 body='K테크 솔루션즈 파일럿은 3개월 일정으로 진행한다.',
             ),
             _event(
                 source_type='gmail',
-                source_id='gmail-ir-followup',
+                source_id='gmail:ir-followup',
                 title='Series Seed IR 후속 요청',
                 body='VC 미팅 전 피치덱과 재무 프로젝션을 검토한다.',
             ),
             _event(
                 source_type='drive',
-                source_id='drive-company-rule',
+                source_id='drive:company-rule',
                 title='00_회사규정/휴가 정책',
                 body='회사 공통 휴가 정책 문서입니다.',
             ),
@@ -95,7 +135,7 @@ def test_project_classifier_matches_bracketed_ir_gmail_subject(db_session: Sessi
         [
             _event(
                 source_type='gmail',
-                source_id='gmail-bracket-ir',
+                source_id='gmail:bracket-ir',
                 title='[IR] A벤처스 미팅 결과 공유 및 액션 아이템',
                 body='시드 투자 IR 후속 미팅 전까지 피치덱 수정안을 준비한다.',
             )
@@ -213,7 +253,7 @@ def test_projects_reclassify_creates_pending_review_without_tokens(
         [
             _event(
                 source_type='drive',
-                source_id='drive-ktech-deadline',
+                source_id='drive:ktech-deadline',
                 title='K테크 파일럿 제안서',
                 body='K테크 파일럿 제안서는 금요일까지 업데이트해 주세요.',
                 source_url='https://drive.mock/ktech/proposal',
@@ -251,7 +291,7 @@ def test_calendar_project_assignment_summary_uses_event_title_not_raw_metadata(
         [
             _event(
                 source_type='calendar',
-                source_id='calendar-bike-maintenance',
+                source_id='calendar:primary:bike-maintenance',
                 title='자전거 정비 예약',
                 body=(
                     '자전거 정비 예약\n\n'
@@ -288,7 +328,7 @@ def test_project_assignment_summary_strips_mail_and_drive_metadata(
         [
             _event(
                 source_type='gmail',
-                source_id='gmail-paraworks-intro',
+                source_id='gmail:paraworks-intro',
                 title='ParaWorks 회사 소개서 전달드립니다',
                 body=(
                     'ParaWorks 회사 소개서 전달드립니다\n\n'
@@ -300,7 +340,7 @@ def test_project_assignment_summary_strips_mail_and_drive_metadata(
             ),
             _event(
                 source_type='drive',
-                source_id='drive-project-alpha-plan',
+                source_id='drive:project-alpha-plan',
                 title='Project Alpha rollout plan',
                 body=(
                     'Google Drive file changed: Project Alpha rollout plan\n'
@@ -312,7 +352,7 @@ def test_project_assignment_summary_strips_mail_and_drive_metadata(
             ),
             _event(
                 source_type='gmail_attachment',
-                source_id='gmail_attachment-paraworks-deck',
+                source_id='gmail_attachment:paraworks-intro:paraworks-deck',
                 title='ParaWorks 소개서.pdf',
                 body=(
                     'Gmail attachment: ParaWorks 소개서.pdf\n'
@@ -330,9 +370,9 @@ def test_project_assignment_summary_strips_mail_and_drive_metadata(
         for candidate in build_project_assignment_candidates(db_session)
     }
 
-    assert summaries['gmail-paraworks-intro'] == 'ParaWorks 회사 소개서 전달드립니다'
-    assert summaries['drive-project-alpha-plan'] == 'Project Alpha rollout plan'
-    assert summaries['gmail_attachment-paraworks-deck'] == 'ParaWorks 소개서.pdf'
+    assert summaries['gmail:paraworks-intro'] == 'ParaWorks 회사 소개서 전달드립니다'
+    assert summaries['drive:project-alpha-plan'] == 'Project Alpha rollout plan'
+    assert summaries['gmail_attachment:paraworks-intro:paraworks-deck'] == 'ParaWorks 소개서.pdf'
     for summary in summaries.values():
         assert 'From:' not in summary
         assert 'Date:' not in summary
@@ -507,7 +547,7 @@ def test_define_project_creates_pending_assignment_candidates_from_existing_sour
         [
             _event(
                 source_type='drive',
-                source_id='drive-settlement-automation',
+                source_id='drive:settlement-automation',
                 title='정산 자동화 일정',
                 body='정산 자동화 프로젝트는 이번 주에 거래처 파일 검토 화면부터 진행합니다.',
                 source_url='https://drive.mock/settlement/plan',
@@ -547,7 +587,7 @@ def test_project_classifier_uses_user_defined_projects(
         [
             _event(
                 source_type='drive',
-                source_id='drive-client-portal',
+                source_id='drive:client-portal',
                 title='고객 포털 개편 일정',
                 body='고객 포털 개편은 이번 주에 계약 문서 화면부터 진행합니다.',
                 source_url='https://drive.mock/client-portal/plan',

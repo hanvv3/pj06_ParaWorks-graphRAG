@@ -10,7 +10,11 @@ def test_mock_drive_connector_returns_permission_leakage_case() -> None:
     connector = get_mock_connector('drive')
     events = connector.fetch_events()
 
-    restricted = next(event for event in events if event.source_id == 'drive-permission-leakage-case')
+    restricted = next(
+        event
+        for event in events
+        if event.source_id == 'drive:permission-leakage-case'
+    )
     assert restricted.permission_level == 'restricted'
     assert restricted.source_url.startswith('https://drive.mock/')
 
@@ -28,8 +32,14 @@ def test_mock_gmail_connector_includes_attachment_boundary_event() -> None:
     events = get_mock_connector('gmail').fetch_events()
 
     attachment = next(event for event in events if event.source_type == 'gmail_attachment')
-    assert attachment.source_id == 'gmail_attachment:gmail-project-alpha-redis-summary:att-budget-pdf'
-    assert attachment.raw_metadata['parent_source_id'] == 'gmail-project-alpha-redis-summary'
+    assert (
+        attachment.source_id
+        == 'gmail_attachment:project-alpha-redis-summary:att-budget-pdf'
+    )
+    assert (
+        attachment.raw_metadata['parent_source_id']
+        == 'gmail:project-alpha-redis-summary'
+    )
     assert attachment.raw_metadata['parser_name'] == 'gmail_attachment_metadata'
     assert attachment.raw_metadata['parser_status'] == 'metadata_only'
     assert attachment.raw_metadata['parser_status_reason'] == 'pdf_parser_not_enabled'

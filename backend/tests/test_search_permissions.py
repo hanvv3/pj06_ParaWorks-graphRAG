@@ -1,5 +1,7 @@
 from hashlib import sha256
 
+from backend.app.connectors.mock import get_mock_connector
+from backend.app.ingestion.sync import sync_connector_events
 from backend.app.models import (
     Document,
     DocumentChunk,
@@ -64,7 +66,7 @@ def _human_approve_synced_sources(db_session) -> None:
 def test_viewer_search_cannot_see_restricted_drive_content(
     client, db_session
 ) -> None:
-    client.post('/api/v1/integrations/drive/sync')
+    sync_connector_events(db=db_session, connector=get_mock_connector('drive'))
     _establish_c5_source_authority(db_session)
     _human_approve_synced_sources(db_session)
     response = client.post('/api/v1/search', headers={'X-Demo-User': 'viewer'}, json={'query': 'confidential pricing'})
@@ -77,11 +79,11 @@ def test_viewer_search_cannot_see_restricted_drive_content(
 def test_admin_search_can_see_restricted_drive_content(
     client, db_session
 ) -> None:
-    client.post('/api/v1/integrations/drive/sync')
+    sync_connector_events(db=db_session, connector=get_mock_connector('drive'))
     _establish_c5_source_authority(db_session)
     _human_approve_synced_sources(db_session)
     response = client.post('/api/v1/search', headers={'X-Demo-User': 'admin'}, json={'query': 'confidential pricing'})
     assert response.status_code == 200
     assert len(response.json()['results']) == 1
-    assert response.json()['results'][0]['source_id'] == 'drive-permission-leakage-case'
+    assert response.json()['results'][0]['source_id'] == 'drive:permission-leakage-case'
     assert response.json()['hidden_match_count'] == 0

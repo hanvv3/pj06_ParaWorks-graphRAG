@@ -1,5 +1,7 @@
 from hashlib import sha256
 
+from backend.app.connectors.mock import get_mock_connector
+from backend.app.ingestion.sync import sync_connector_events
 from backend.app.models import (
     AgentRun,
     DecisionRecord,
@@ -64,7 +66,7 @@ def _human_approve_synced_sources(db_session) -> None:
 
 
 def test_ask_api_answers_with_visible_sources(client, db_session) -> None:
-    client.post('/api/v1/integrations/gmail/sync')
+    sync_connector_events(db=db_session, connector=get_mock_connector('gmail'))
     _establish_c5_source_authority(db_session)
     _human_approve_synced_sources(db_session)
 
@@ -87,7 +89,7 @@ def test_ask_api_answers_with_visible_sources(client, db_session) -> None:
 
 
 def test_ask_api_respects_viewer_permissions(client, db_session) -> None:
-    client.post('/api/v1/integrations/drive/sync')
+    sync_connector_events(db=db_session, connector=get_mock_connector('drive'))
     _establish_c5_source_authority(db_session)
     _human_approve_synced_sources(db_session)
 
