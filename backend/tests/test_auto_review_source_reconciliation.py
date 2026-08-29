@@ -8,6 +8,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
 from backend.app.core.config import Settings
+from backend.app.ingestion.source_content_signature import (
+    SERVER_CHUNK_POLICY_VERSION,
+    SERVER_PARSER_POLICY_VERSION,
+    SERVER_PARSER_VERSION,
+)
 from backend.app.models import (
     AutoReviewPostAudit,
     AutoReviewPromotionDecision,
@@ -17,6 +22,7 @@ from backend.app.models import (
     AutoReviewValidation,
     AutoReviewValidationCall,
     Document,
+    DocumentChunk,
     DocumentParserRun,
     DocumentVersion,
     HistoryEvent,
@@ -755,7 +761,7 @@ def test_repair_row_database_failure_is_counted_and_later_rows_continue(
 
     assert result.repaired_count == 1
     assert result.failure_count == 1
-    assert result.remaining_count == 1
+    assert result.remaining_count == 2
     assert result.readiness is False
 
 
@@ -876,7 +882,97 @@ def test_source_invalidation_revoke_writes_no_human_revocation_assessment() -> N
         )
 
 
-def test_current_pointer_repair_is_exact_and_ambiguity_remains_fail_closed(
+def _seed_pointer_repair_candidate(
+    db: Session,
+    *,
+    ordinal: int,
+    parser_overrides: dict[str, str] | None = None,
+    persist_chunk: bool = True,
+) -> tuple[Document, DocumentVersion]:
+    signature = f'{ordinal:064x}'
+    source = Source(
+        source_type='drive',
+        source_id=f'drive:pointer-repair:{ordinal}',
+        source_url=f'https://drive.mock/pointer-repair/{ordinal}',
+        title=f'Pointer repair {ordinal}',
+        permission_level='internal',
+        raw_metadata={'mime_type': 'text/plain'},
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=signature,
+    )
+    db.add(source)
+    db.flush()
+    document = Document(
+        source_id=source.id,
+        title=source.title,
+        current_version='display-only',
+    )
+    db.add(document)
+    db.flush()
+    version = DocumentVersion(
+        document_id=document.id,
+        version='v1',
+        body='exact server body',
+    )
+    db.add(version)
+    db.flush()
+    parser_values = {
+        'parser_name': 'server_drive_source_event',
+        'mime_type': 'text/plain',
+        'parser_policy_version': SERVER_PARSER_POLICY_VERSION,
+        'parser_version': SERVER_PARSER_VERSION,
+        'chunk_policy_version': SERVER_CHUNK_POLICY_VERSION,
+    }
+    parser_values.update(parser_overrides or {})
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=version.id,
+        source_id=source.id,
+        parser_name=parser_values['parser_name'],
+        parser_status='parsed',
+        mime_type=parser_values['mime_type'],
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=signature,
+        parser_policy_version=parser_values['parser_policy_version'],
+        parser_version=parser_values['parser_version'],
+        chunk_policy_version=parser_values['chunk_policy_version'],
+        chunk_count=1,
+    )
+    db.add(parser_run)
+    db.flush()
+    if persist_chunk:
+        db.add(
+            DocumentChunk(
+                version_id=version.id,
+                source_id=source.id,
+                parser_run_id=parser_run.id,
+                chunk_index=0,
+                text='exact server body',
+                source_snippet='exact server body',
+                permission_level='internal',
+                metadata_={},
+            )
+        )
+    return document, version
+
+
+def _seed_runtime_key(db: Session, settings: Settings) -> None:
+    db.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=(
+                settings.agent_runtime_fingerprint_key_version
+            ),
+            fingerprint_key_material_verifier=fingerprint_key_material_verifier(
+                settings.agent_runtime_fingerprint_secret
+            ),
+            generation=1,
+            ready=True,
+        )
+    )
+
+
+def test_current_pointer_repair_accepts_exact_server_registry_identity(
     db_session: Session,
 ) -> None:
     from backend.app.review.auto_review_source_reconciliation import (
@@ -884,98 +980,203 @@ def test_current_pointer_repair_is_exact_and_ambiguity_remains_fail_closed(
     )
 
     settings = Settings(database_url='sqlite://')
-    verifier = fingerprint_key_material_verifier(
-        settings.agent_runtime_fingerprint_secret
+    _seed_runtime_key(db_session, settings)
+    exact_document, exact_version = _seed_pointer_repair_candidate(
+        db_session,
+        ordinal=1,
     )
-    db_session.add(
-        AutoReviewRuntimeKeyState(
-            component='auto_review_trust_promotion',
-            fingerprint_key_version=(
-                settings.agent_runtime_fingerprint_key_version
-            ),
-            fingerprint_key_material_verifier=verifier,
-            generation=1,
-            ready=True,
-        )
-    )
-    exact_source = Source(
-        source_type='drive',
-        source_id='drive:repair-exact',
-        source_url='https://drive.mock/repair-exact',
-        title='Exact repair',
-        permission_level='internal',
-        raw_metadata={},
-        server_content_signature_schema='server-source-content:v1',
-        server_content_signature='1' * 64,
-    )
-    ambiguous_source = Source(
-        source_type='drive',
-        source_id='drive:repair-ambiguous',
-        source_url='https://drive.mock/repair-ambiguous',
-        title='Ambiguous repair',
-        permission_level='internal',
-        raw_metadata={},
-        server_content_signature_schema='server-source-content:v1',
-        server_content_signature='2' * 64,
-    )
-    db_session.add_all([exact_source, ambiguous_source])
-    db_session.flush()
-    exact_document = Document(
-        source_id=exact_source.id,
-        title=exact_source.title,
-        current_version='display-only',
-    )
-    ambiguous_document = Document(
-        source_id=ambiguous_source.id,
-        title=ambiguous_source.title,
-        current_version='display-only',
-    )
-    db_session.add_all([exact_document, ambiguous_document])
-    db_session.flush()
-    exact_version = DocumentVersion(
-        document_id=exact_document.id, version='v1', body='exact'
-    )
-    ambiguous_versions = [
-        DocumentVersion(
-            document_id=ambiguous_document.id,
-            version=f'v{index}',
-            body=f'ambiguous {index}',
-        )
-        for index in (1, 2)
-    ]
-    db_session.add_all([exact_version, *ambiguous_versions])
-    db_session.flush()
-    for document, source, version in [
-        (exact_document, exact_source, exact_version),
-        *(
-            (ambiguous_document, ambiguous_source, version)
-            for version in ambiguous_versions
-        ),
-    ]:
-        db_session.add(
-            DocumentParserRun(
-                document_id=document.id,
-                document_version_id=version.id,
-                source_id=source.id,
-                parser_name='plain_text',
-                parser_status='parsed',
-                server_content_signature_schema='server-source-content:v1',
-                server_content_signature=source.server_content_signature,
-                parser_policy_version='parser-policy:v1',
-                parser_version='plain-text:v1',
-                chunk_policy_version='chunk-policy:v1',
-            )
-        )
     db_session.commit()
 
     result = AutoReviewSourceReconciliationService(
         db_session, settings=settings
-    ).repair_current_document_versions(limit=2)
+    ).repair_current_document_versions(limit=1)
 
     db_session.refresh(exact_document)
-    db_session.refresh(ambiguous_document)
     assert result.repaired_count == 1
+    assert result.ambiguous_count == 0
+    assert result.remaining_count == 0
+    assert result.readiness is True
+    assert exact_document.current_document_version_id == exact_version.id
+
+
+@pytest.mark.parametrize(
+    ('field_name', 'wrong_value'),
+    [
+        ('parser_name', 'plain_text'),
+        ('mime_type', 'application/pdf'),
+        ('parser_policy_version', 'parser-policy:v1'),
+        ('parser_version', 'plain-text:v1'),
+        ('chunk_policy_version', 'chunk-policy:v1'),
+    ],
+)
+def test_current_pointer_repair_rejects_non_registry_parser_identity(
+    db_session: Session,
+    field_name: str,
+    wrong_value: str,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    settings = Settings(database_url='sqlite://')
+    _seed_runtime_key(db_session, settings)
+    document, _ = _seed_pointer_repair_candidate(
+        db_session,
+        ordinal=2,
+        parser_overrides={field_name: wrong_value},
+    )
+    db_session.commit()
+
+    result = AutoReviewSourceReconciliationService(
+        db_session, settings=settings
+    ).repair_current_document_versions(limit=1)
+
+    db_session.refresh(document)
+    assert document.current_document_version_id is None
+    assert result.repaired_count == 0
+    assert result.ambiguous_count == 1
+    assert result.remaining_count == 1
+    assert result.readiness is False
+
+
+def test_current_pointer_repair_requires_exact_run_chunk_relation(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    settings = Settings(database_url='sqlite://')
+    _seed_runtime_key(db_session, settings)
+    document, _ = _seed_pointer_repair_candidate(
+        db_session,
+        ordinal=3,
+        persist_chunk=False,
+    )
+    db_session.commit()
+
+    result = AutoReviewSourceReconciliationService(
+        db_session, settings=settings
+    ).repair_current_document_versions(limit=1)
+
+    db_session.refresh(document)
+    assert document.current_document_version_id is None
     assert result.ambiguous_count == 1
     assert result.readiness is False
-    assert exact_document.current_document_version_id == exact_version.id
-    assert ambiguous_document.current_document_version_id is None
+
+
+def test_current_pointer_repair_never_guesses_between_exact_relational_versions(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    settings = Settings(database_url='sqlite://')
+    _seed_runtime_key(db_session, settings)
+    document, _ = _seed_pointer_repair_candidate(db_session, ordinal=7)
+    source = db_session.get(Source, document.source_id)
+    assert source is not None
+    second_version = DocumentVersion(
+        document_id=document.id,
+        version='v2',
+        body='second exact server body',
+    )
+    db_session.add(second_version)
+    db_session.flush()
+    second_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=second_version.id,
+        source_id=source.id,
+        parser_name='server_drive_source_event',
+        parser_status='parsed',
+        mime_type='text/plain',
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=source.server_content_signature,
+        parser_policy_version=SERVER_PARSER_POLICY_VERSION,
+        parser_version=SERVER_PARSER_VERSION,
+        chunk_policy_version=SERVER_CHUNK_POLICY_VERSION,
+        chunk_count=1,
+    )
+    db_session.add(second_run)
+    db_session.flush()
+    db_session.add(
+        DocumentChunk(
+            version_id=second_version.id,
+            source_id=source.id,
+            parser_run_id=second_run.id,
+            chunk_index=0,
+            text='second exact server body',
+            source_snippet='second exact server body',
+            permission_level='internal',
+            metadata_={},
+        )
+    )
+    db_session.commit()
+
+    result = AutoReviewSourceReconciliationService(
+        db_session, settings=settings
+    ).repair_current_document_versions(limit=1)
+
+    db_session.refresh(document)
+    assert document.current_document_version_id is None
+    assert result.ambiguous_count == 1
+    assert result.remaining_count == 1
+    assert result.readiness is False
+
+
+def test_current_pointer_repair_limit_reports_unscanned_continuation(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    settings = Settings(database_url='sqlite://')
+    _seed_runtime_key(db_session, settings)
+    first, _ = _seed_pointer_repair_candidate(db_session, ordinal=4)
+    second, _ = _seed_pointer_repair_candidate(db_session, ordinal=5)
+    db_session.commit()
+    service = AutoReviewSourceReconciliationService(
+        db_session, settings=settings
+    )
+
+    first_result = service.repair_current_document_versions(limit=1)
+    second_result = service.repair_current_document_versions(limit=1)
+
+    db_session.refresh(first)
+    db_session.refresh(second)
+    assert first_result.repaired_count == 1
+    assert first_result.remaining_count >= 1
+    assert first_result.readiness is False
+    assert second_result.repaired_count == 1
+    assert second_result.remaining_count == 0
+    assert second_result.readiness is True
+
+
+def test_status_and_cli_exit_include_ambiguous_pointer_work(
+    db_session: Session,
+) -> None:
+    from backend.app.admin.auto_review_source_reconciliation import (
+        command_exit_code,
+    )
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    _seed_pointer_repair_candidate(
+        db_session,
+        ordinal=6,
+        parser_overrides={'parser_name': 'legacy_drive_parser'},
+    )
+    db_session.commit()
+
+    status = AutoReviewSourceReconciliationService(
+        db_session, settings=Settings(database_url='sqlite://')
+    ).status(limit=1)
+
+    assert status.stale_count == 0
+    assert status.ambiguous_count == 1
+    assert status.remaining_count >= 1
+    assert status.readiness is False
+    assert command_exit_code(status) == 3

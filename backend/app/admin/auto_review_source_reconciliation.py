@@ -7,8 +7,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from backend.app.core.config import get_settings
 from backend.app.db.session import SessionLocal
 from backend.app.review.auto_review_source_reconciliation import (
-    AutoReviewSourceReconciliationService,
     SourceReconciliationResult,
+    build_source_reconciliation_service,
 )
 
 SYSTEM_ACTOR = 'system:local-auto-review-source-reconciler'
@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = get_settings()
         with SessionLocal() as db:
-            service = AutoReviewSourceReconciliationService(
+            service = build_source_reconciliation_service(
                 db, settings=settings
             )
             if args.command == 'status':

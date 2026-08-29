@@ -34,8 +34,8 @@ from backend.app.core.config import Settings, get_settings
 from backend.app.db.session import SessionLocal
 from backend.app.models.agent_workflows import AgentWorkflowThread
 from backend.app.review.auto_review_source_reconciliation import (
-    AutoReviewSourceReconciliationService,
     SourceReconciliationResult,
+    build_source_reconciliation_service,
 )
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
@@ -180,7 +180,7 @@ def _recover_source_reconciliation_batch(
 ) -> SourceReconciliationResult:
     try:
         with session_factory() as db:
-            return AutoReviewSourceReconciliationService(
+            return build_source_reconciliation_service(
                 db, settings=settings
             ).recover_stale_sources(limit=limit)
     except (SQLAlchemyError, ValueError):

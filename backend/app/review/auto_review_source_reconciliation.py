@@ -14,6 +14,10 @@ from backend.app.agent_runtime.keyed_mutation_guard import (
     lock_runtime_state,
 )
 from backend.app.core.config import Settings
+from backend.app.ingestion.source_content_signature import (
+    SourceContentUnverifiableError,
+    server_parser_policy_for_source,
+)
 from backend.app.knowledge.trusted_fingerprint_projection import (
     ProjectionSummary,
     ProjectionSummaryDelta,
@@ -27,6 +31,7 @@ from backend.app.knowledge.trusted_serving_eligibility import (
 from backend.app.models import (
     DecisionRecord,
     Document,
+    DocumentChunk,
     DocumentParserRun,
     DocumentVersion,
     HistoryEvent,
@@ -45,6 +50,7 @@ from backend.app.rag.indexing import (
     build_rag_index_documents,
     compute_vector_document_hash,
 )
+from backend.app.rag.pgvector_store import PgVectorConfig, PgVectorStore
 from backend.app.rag.serving_locks import (
     ServingMutationLockCoordinator,
     build_serving_lock_plan,
@@ -57,6 +63,28 @@ from backend.app.review.auto_review_revoke import (
 
 _KNOWN_SERVING_PERMISSIONS = {'public', 'internal'}
 _PERMISSION_RANK = {'public': 0, 'internal': 1, 'restricted': 2}
+
+
+def build_source_reconciliation_service(
+    db: Session,
+    *,
+    settings: Settings,
+) -> AutoReviewSourceReconciliationService:
+    bind = db.get_bind()
+    vector_writer = None
+    if bind.dialect.name == 'postgresql':
+        vector_writer = PgVectorStore(
+            session=db,
+            config=PgVectorConfig(
+                embedding_dimensions=settings.openai_embedding_dimensions
+            ),
+            settings=settings,
+        )
+    return AutoReviewSourceReconciliationService(
+        db,
+        settings=settings,
+        vector_writer=vector_writer,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,10 +154,13 @@ class AutoReviewSourceReconciliationService:
         bounded = _validate_limit(limit)
         try:
             stale = self._stale_source_ids(limit=bounded)
+            pointer_count = self._null_pointer_count()
+            ambiguous = self._ambiguous_pointer_count(limit=bounded)
             return SourceReconciliationResult(
                 stale_count=len(stale),
-                remaining_count=len(stale),
-                readiness=not stale,
+                ambiguous_count=ambiguous,
+                remaining_count=len(stale) + pointer_count,
+                readiness=not stale and pointer_count == 0,
             )
         except SQLAlchemyError:
             self._db.rollback()
@@ -260,7 +291,12 @@ class AutoReviewSourceReconciliationService:
             repaired += int(outcome == 'repaired')
             ambiguous += int(outcome == 'ambiguous')
             unresolved += int(outcome == 'unresolved')
-        remaining = ambiguous + unresolved + failures
+        try:
+            remaining = self._null_pointer_count()
+        except SQLAlchemyError:
+            self._db.rollback()
+            remaining = max(1, ambiguous + unresolved + failures)
+            failures += 1
         return SourceReconciliationResult(
             repaired_count=repaired,
             ambiguous_count=ambiguous,
@@ -268,6 +304,36 @@ class AutoReviewSourceReconciliationService:
             failure_count=failures,
             readiness=remaining == 0 and failures == 0,
         )
+
+    def _null_pointer_count(self) -> int:
+        return int(
+            self._db.scalar(
+                select(func.count(Document.id)).where(
+                    Document.current_document_version_id.is_(None)
+                )
+            )
+            or 0
+        )
+
+    def _ambiguous_pointer_count(self, *, limit: int) -> int:
+        rows = tuple(
+            self._db.execute(
+                select(Document.id, Document.source_id)
+                .where(Document.current_document_version_id.is_(None))
+                .order_by(Document.id)
+                .limit(limit)
+            ).all()
+        )
+        ambiguous = 0
+        for document_id, source_id in rows:
+            outcome, _ = self._pointer_candidate(
+                document_id=document_id,
+                source_id=source_id,
+                for_update=False,
+            )
+            ambiguous += int(outcome == 'ambiguous')
+        self._db.rollback()
+        return ambiguous
 
     def _repair_current_document_version(
         self, *, document_id: int, source_id: int
@@ -298,53 +364,105 @@ class AutoReviewSourceReconciliationService:
             ):
                 self._db.rollback()
                 return 'unresolved'
-            runs_statement = (
-                select(DocumentParserRun)
-                .where(
-                    DocumentParserRun.document_id == document.id,
-                    DocumentParserRun.source_id == source.id,
-                    DocumentParserRun.server_content_signature_schema
-                    == 'server-source-content:v1',
-                    DocumentParserRun.server_content_signature
-                    == source.server_content_signature,
-                    DocumentParserRun.parser_policy_version.is_not(None),
-                    DocumentParserRun.parser_version.is_not(None),
-                    DocumentParserRun.chunk_policy_version.is_not(None),
-                )
-                .order_by(DocumentParserRun.id)
+            outcome, selected_version_id = self._pointer_candidate(
+                document_id=document.id,
+                source_id=source.id,
+                for_update=(
+                    self._db.get_bind().dialect.name == 'postgresql'
+                ),
             )
-            candidate_version_ids = tuple(
-                self._db.scalars(
-                    select(DocumentVersion.id)
-                    .where(DocumentVersion.document_id == document.id)
-                    .order_by(DocumentVersion.id)
-                ).all()
-            )
-            if self._db.get_bind().dialect.name == 'postgresql':
-                if candidate_version_ids:
-                    tuple(
-                        self._db.scalars(
-                            select(DocumentVersion)
-                            .where(
-                                DocumentVersion.id.in_(candidate_version_ids)
-                            )
-                            .order_by(DocumentVersion.id)
-                            .with_for_update()
-                        ).all()
-                    )
-                runs_statement = runs_statement.with_for_update()
-            runs = tuple(self._db.scalars(runs_statement).all())
-            version_ids = {run.document_version_id for run in runs}
-            if len(runs) != 1 or len(version_ids) != 1:
+            if outcome != 'repairable' or selected_version_id is None:
                 self._db.rollback()
-                return 'ambiguous' if runs else 'unresolved'
-            selected_version_id = next(iter(version_ids))
-            if selected_version_id not in candidate_version_ids:
-                self._db.rollback()
-                return 'unresolved'
+                return outcome
             document.current_document_version_id = selected_version_id
             self._db.commit()
             return 'repaired'
+
+    def _pointer_candidate(
+        self,
+        *,
+        document_id: int,
+        source_id: int,
+        for_update: bool,
+    ) -> tuple[str, int | None]:
+        source = self._db.get(Source, source_id)
+        document = self._db.get(Document, document_id)
+        if (
+            source is None
+            or document is None
+            or document.source_id != source.id
+            or document.current_document_version_id is not None
+            or source.server_content_signature_schema
+            != 'server-source-content:v1'
+            or source.server_content_signature is None
+        ):
+            return 'unresolved', None
+        try:
+            policy = server_parser_policy_for_source(
+                source_type=source.source_type,
+                mime_type=(source.raw_metadata or {}).get('mime_type'),
+            )
+        except SourceContentUnverifiableError:
+            return 'ambiguous', None
+        versions_statement = (
+            select(DocumentVersion)
+            .where(DocumentVersion.document_id == document.id)
+            .order_by(DocumentVersion.id)
+        )
+        runs_statement = (
+            select(DocumentParserRun)
+            .where(
+                DocumentParserRun.document_id == document.id,
+                DocumentParserRun.source_id == source.id,
+            )
+            .order_by(DocumentParserRun.id)
+        )
+        if for_update:
+            versions_statement = versions_statement.with_for_update()
+            runs_statement = runs_statement.with_for_update()
+        versions = tuple(self._db.scalars(versions_statement).all())
+        runs = tuple(self._db.scalars(runs_statement).all())
+        exact_runs = tuple(
+            run
+            for run in runs
+            if run.server_content_signature_schema
+            == 'server-source-content:v1'
+            and run.server_content_signature
+            == source.server_content_signature
+            and run.parser_status == 'parsed'
+            and run.parser_name == policy.parser_name
+            and run.mime_type == policy.mime_type
+            and run.parser_policy_version == policy.parser_policy_version
+            and run.parser_version == policy.parser_version
+            and run.chunk_policy_version == policy.chunk_policy_version
+        )
+        if len(exact_runs) != 1:
+            return ('ambiguous' if runs else 'unresolved'), None
+        run = exact_runs[0]
+        version_ids = {version.id for version in versions}
+        if run.document_version_id not in version_ids:
+            return 'ambiguous', None
+        chunks_statement = (
+            select(DocumentChunk)
+            .where(DocumentChunk.version_id == run.document_version_id)
+            .order_by(DocumentChunk.chunk_index, DocumentChunk.id)
+        )
+        if for_update:
+            chunks_statement = chunks_statement.with_for_update()
+        chunks = tuple(self._db.scalars(chunks_statement).all())
+        if (
+            run.chunk_count <= 0
+            or len(chunks) != run.chunk_count
+            or [chunk.chunk_index for chunk in chunks]
+            != list(range(run.chunk_count))
+            or any(
+                chunk.source_id != source.id
+                or chunk.parser_run_id != run.id
+                for chunk in chunks
+            )
+        ):
+            return 'ambiguous', None
+        return 'repairable', run.document_version_id
 
     def _stale_source_ids(self, *, limit: int) -> list[int]:
         evidence = TrustedKnowledgeEvidenceLink

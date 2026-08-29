@@ -141,33 +141,41 @@ def canonical_source_content_signature(
     )
 
 
-def server_parser_policy_for_event(event: SourceEvent) -> ServerParserPolicy:
-    if event.source_type not in _SEMANTIC_METADATA_KEYS:
+def server_parser_policy_for_source(
+    *, source_type: str, mime_type: object = None
+) -> ServerParserPolicy:
+    if source_type not in _SEMANTIC_METADATA_KEYS:
         raise SourceContentUnverifiableError('unsupported source type')
-    if event.source_type == 'gmail':
-        mime_type = 'message/rfc822'
-    elif event.source_type == 'calendar':
-        mime_type = 'text/calendar'
+    if source_type == 'gmail':
+        normalized_mime_type = 'message/rfc822'
+    elif source_type == 'calendar':
+        normalized_mime_type = 'text/calendar'
     else:
-        value = event.raw_metadata.get('mime_type')
-        if value is None:
-            mime_type = 'application/octet-stream'
-        elif not isinstance(value, str):
+        if mime_type is None:
+            normalized_mime_type = 'application/octet-stream'
+        elif not isinstance(mime_type, str):
             raise SourceContentUnverifiableError('mime_type must be a string or null')
         else:
-            normalized = value.strip().lower()
-            mime_type = (
+            normalized = mime_type.strip().lower()
+            normalized_mime_type = (
                 normalized
                 if normalized in _ALLOWED_MIME_TYPES
                 else 'application/octet-stream'
             )
     return ServerParserPolicy(
         parser_policy_version=SERVER_PARSER_POLICY_VERSION,
-        parser_name=f'server_{event.source_type}_source_event',
+        parser_name=f'server_{source_type}_source_event',
         parser_version=SERVER_PARSER_VERSION,
         chunk_policy_version=SERVER_CHUNK_POLICY_VERSION,
-        mime_type=mime_type,
+        mime_type=normalized_mime_type,
         chunk_max_chars=SERVER_CHUNK_MAX_CHARS,
+    )
+
+
+def server_parser_policy_for_event(event: SourceEvent) -> ServerParserPolicy:
+    return server_parser_policy_for_source(
+        source_type=event.source_type,
+        mime_type=event.raw_metadata.get('mime_type'),
     )
 
 

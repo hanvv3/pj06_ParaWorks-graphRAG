@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.admin.auto_review_keys import (
@@ -64,6 +65,25 @@ class RefusingEmbeddingModel:
         raise AssertionError('stale evidence reached the embedding provider')
 
 
+def _task6_recovery_postgres_url() -> str:
+    database_url = os.getenv('PARAWORKS_TEST_POSTGRES_URL')
+    if not database_url:
+        pytest.fail(
+            'PARAWORKS_TEST_POSTGRES_URL is required for Task 6 recovery tests'
+        )
+    parsed = make_url(database_url)
+    if (
+        parsed.get_backend_name() != 'postgresql'
+        or not (parsed.database or '').endswith('_test')
+        or not (parsed.username or '').endswith('_test')
+    ):
+        pytest.fail(
+            'Task 6 recovery requires disposable PostgreSQL database and role '
+            'names ending in _test'
+        )
+    return database_url
+
+
 def _seed_pg_schedule(
     db,
     *,
@@ -89,6 +109,91 @@ def _seed_pg_schedule(
         if candidate.document_id == document_id
     )
     return history, item, source, store, document
+
+
+def test_startup_recovery_removes_stale_physical_pgvector_before_ready() -> None:
+    from backend.app.main import _recover_source_reconciliation_batch
+
+    database_url = _task6_recovery_postgres_url()
+    schema_name = f'task6_recovery_{uuid4().hex}'
+    admin_engine = create_engine(database_url)
+    with admin_engine.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA {schema_name}'))
+    engine = create_engine(
+        database_url,
+        connect_args={'options': f'-csearch_path={schema_name},public'},
+    )
+    session_local = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        autocommit=False,
+    )
+    settings = Settings(
+        database_url=database_url,
+        openai_embedding_dimensions=8,
+    )
+    try:
+        Base.metadata.create_all(engine)
+        with session_local() as db:
+            history, _, source, store, _ = _seed_pg_schedule(
+                db,
+                table_name='rag_vector_documents',
+                settings=settings,
+            )
+            document_id = f'history_event:{history.id}'
+            db.execute(
+                text(
+                    'INSERT INTO rag_vector_documents ('
+                    'document_id, text, source_url, source_snippet, '
+                    'permission_level, metadata_json, embedding'
+                    ') VALUES ('
+                    ':document_id, :text, :source_url, :source_snippet, '
+                    ":permission_level, '{}'::jsonb, CAST(:embedding AS vector)"
+                    ')'
+                ),
+                {
+                    'document_id': document_id,
+                    'text': 'stale trusted bytes',
+                    'source_url': source.source_url,
+                    'source_snippet': 'stale trusted bytes',
+                    'permission_level': 'public',
+                    'embedding': '[0,0,0,0,0,0,0,1]',
+                },
+            )
+            source.permission_level = 'restricted'
+            db.commit()
+            assert db.scalar(
+                text(
+                    'SELECT count(*) FROM rag_vector_documents '
+                    'WHERE document_id = :document_id'
+                ),
+                {'document_id': document_id},
+            ) == 1
+
+        result = _recover_source_reconciliation_batch(
+            session_local,
+            settings=settings,
+            limit=100,
+        )
+
+        with session_local() as db:
+            physical_count = db.scalar(
+                text(
+                    'SELECT count(*) FROM rag_vector_documents '
+                    'WHERE document_id = :document_id'
+                ),
+                {'document_id': document_id},
+            )
+        assert result.reconciled_count == 1
+        assert result.revoked_count == 1
+        assert result.remaining_count == 0
+        assert result.readiness is True
+        assert physical_count == 0
+    finally:
+        engine.dispose()
+        with admin_engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA {schema_name} CASCADE'))
+        admin_engine.dispose()
 
 @pytest.mark.skipif(
     not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'),
