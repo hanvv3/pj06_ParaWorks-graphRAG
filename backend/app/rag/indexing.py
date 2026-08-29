@@ -639,7 +639,7 @@ def _decision_documents(
             document_id=f'decision_record:{decision.id}',
             source_type='decision_record',
             title=decision.title,
-            text=f'결정사항: {decision.title}\n내용: {decision.decision_summary}',
+            text=f'{decision.title}\n{decision.decision_summary}',
             source_links=decision.source_links,
             source_snippets=decision.source_snippets,
             permission_level=result.effective_permission or 'restricted',

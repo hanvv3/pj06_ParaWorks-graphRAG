@@ -15,11 +15,23 @@ from backend.app.agent_runtime.keyed_mutation_guard import (
     KeyedMutationGuard,
     lock_runtime_state,
 )
+from backend.app.agents.rag_orchestrator_agent.service import (
+    build_serving_dependency_snapshot,
+    candidates_from_vector_matches,
+    filter_live_serving_candidates,
+)
+from backend.app.assistant.service import (
+    append_assistant_message,
+    assistant_message_evidence_is_live,
+    create_conversation,
+)
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import USERS
 from backend.app.db.base import Base
 from backend.app.models import (
     AgentWorkflowEvidenceRef,
+    AssistantMessageEvidenceDependency,
+    AssistantMessageKnowledgeEvidenceRef,
     AutoReviewRuntimeKeyState,
     DecisionRecord,
     Document,
@@ -672,6 +684,94 @@ def test_pgvector_live_filter_accepts_legacy_decision_link_under_canonical_id(
     finally:
         Base.metadata.drop_all(engine)
         engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'),
+    reason='set PARAWORKS_PGVECTOR_TEST_DATABASE_URL to run pgvector integration test',
+)
+@pytest.mark.parametrize('stored_knowledge_type', ['decision', 'decision_record'])
+def test_pgvector_candidate_persists_exact_decision_link_dependency(
+    stored_knowledge_type: str,
+) -> None:
+    database_url = os.environ['PARAWORKS_PGVECTOR_TEST_DATABASE_URL']
+    with _pgvector_test_db(database_url) as (db, table_name, settings):
+        decision, _, _, link, _, store, document = _seed_pg_decision_schedule(
+            db,
+            table_name=table_name,
+            settings=settings,
+            knowledge_type=stored_knowledge_type,
+            permission_level='internal',
+        )
+        _index_pg_test_document(
+            db,
+            document=document,
+            store=store,
+            model_name=f'deterministic-hash:{stored_knowledge_type}',
+            settings=settings,
+        )
+        result = store.search_with_embedding(
+            query_embedding=DeterministicHashEmbeddingModel(
+                dimensions=8
+            ).embed('Legacy decision mutation evidence'),
+            user=USERS['viewer'],
+            limit=5,
+        )
+        vector_candidates = candidates_from_vector_matches(result.matches)
+        assert [row.source_id for row in vector_candidates] == [
+            f'decision_record:{decision.id}'
+        ]
+        candidates = filter_live_serving_candidates(
+            db=db,
+            candidates=vector_candidates,
+        )
+        candidate = next(
+            row
+            for row in candidates
+            if row.source_id == f'decision_record:{decision.id}'
+        )
+        dependency = build_serving_dependency_snapshot(db, candidate)
+
+        assert dependency is not None
+        assert dependency.serving_document_id == (
+            f'decision_record:{decision.id}'
+        )
+        assert dependency.knowledge_type == stored_knowledge_type
+        assert dependency.approval_link_id == link.id
+
+        conversation = create_conversation(
+            db, USERS['viewer'], title='PG exact dependency'
+        )
+        message = append_assistant_message(
+            db,
+            USERS['viewer'],
+            conversation,
+            content='Bound pgvector decision answer',
+            citations=[{'source_id': candidate.source_id}],
+            source_ids=[candidate.source_id],
+            source_links=[candidate.source_url],
+            source_snippets=[candidate.source_snippet],
+            permission_level='internal',
+            hidden_match_count=0,
+            permission_notice=None,
+            agent_run_id=None,
+            metadata={},
+            serving_dependencies=(dependency,),
+        )
+        stored_dependency = db.query(
+            AssistantMessageEvidenceDependency
+        ).one()
+        refs = db.query(AssistantMessageKnowledgeEvidenceRef).all()
+
+        assert stored_dependency.serving_document_id == (
+            f'decision_record:{decision.id}'
+        )
+        assert stored_dependency.knowledge_type == stored_knowledge_type
+        assert stored_dependency.approval_link_id == link.id
+        assert {ref.approval_link_id for ref in refs} == {link.id}
+        assert assistant_message_evidence_is_live(
+            db, user=USERS['viewer'], message=message
+        )
 
 
 @pytest.mark.skipif(

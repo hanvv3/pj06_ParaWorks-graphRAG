@@ -2,15 +2,18 @@ import pytest
 from sqlalchemy.orm import Session
 
 import backend.app.assistant.service as assistant_service
+from backend.app.agents.rag_orchestrator_agent import answer_question_with_rag
 from backend.app.agents.rag_orchestrator_agent.service import (
     RagEvidenceCandidate,
     build_serving_dependency_snapshot,
+    retrieve_matching_knowledge_candidates,
 )
 from backend.app.assistant.service import (
     DEFAULT_CONVERSATION_TITLE,
     RECENT_CONTEXT_MESSAGE_LIMIT,
     append_assistant_message,
     append_user_message,
+    assistant_message_evidence_is_live,
     build_contextual_question,
     create_conversation,
     eligible_context_messages,
@@ -28,6 +31,7 @@ from backend.app.models import (
     AssistantMessage,
     AssistantMessageEvidenceDependency,
     AssistantMessageKnowledgeEvidenceRef,
+    DecisionRecord,
     ReviewItem,
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
@@ -368,6 +372,103 @@ def test_rag_answer_persists_complete_exact_dependencies_with_message_atomically
     assert {ref.trusted_knowledge_evidence_link_id for ref in refs} == set(
         evidence_ids
     )
+
+
+@pytest.mark.parametrize('stored_knowledge_type', ['decision', 'decision_record'])
+def test_canonical_decision_candidate_persists_exact_stored_link_dependency(
+    db_session: Session,
+    stored_knowledge_type: str,
+) -> None:
+    viewer = USERS['viewer']
+    history, item, _, approval = _seed_explicit_history(
+        db_session, resolution_source='auto_policy'
+    )
+    decision = DecisionRecord(
+        project_key='project-a',
+        title='Canonical decision dependency',
+        decision_summary='Use the exact stored approval link identity.',
+        source_links=list(item.source_links),
+        source_snippets=list(item.source_snippets),
+        confidence_score=0.99,
+        permission_level='internal',
+        review_status='approved',
+        source_review_item_id=item.id,
+    )
+    db_session.add(decision)
+    db_session.flush([decision])
+    item.item_type = 'decision_record'
+    approval.knowledge_type = stored_knowledge_type
+    approval.knowledge_id = decision.id
+    db_session.commit()
+
+    candidate = next(
+        candidate
+        for candidate in retrieve_matching_knowledge_candidates(
+            db=db_session,
+            question='exact stored approval link identity',
+        )
+        if candidate.source_id == f'decision_record:{decision.id}'
+    )
+    dependency = build_serving_dependency_snapshot(db_session, candidate)
+
+    assert dependency is not None
+    assert dependency.serving_document_id == f'decision_record:{decision.id}'
+    assert dependency.knowledge_type == stored_knowledge_type
+    assert dependency.approval_link_id == approval.id
+
+    answer = answer_question_with_rag(
+        db=db_session,
+        user=viewer,
+        question='exact stored approval link identity',
+    )
+    assert answer.source_ids == [f'decision_record:{decision.id}']
+    assert answer.serving_dependencies == (dependency,)
+
+    conversation = create_conversation(
+        db_session, viewer, title='Canonical decision dependency'
+    )
+    message = append_assistant_message(
+        db_session,
+        viewer,
+        conversation,
+        content='Bound canonical decision answer',
+        citations=[{'source_id': candidate.source_id}],
+        source_ids=[candidate.source_id],
+        source_links=[candidate.source_url],
+        source_snippets=[candidate.source_snippet],
+        permission_level='internal',
+        hidden_match_count=0,
+        permission_notice=None,
+        agent_run_id=None,
+        metadata={},
+        serving_dependencies=(dependency,),
+    )
+
+    stored_dependency = db_session.query(
+        AssistantMessageEvidenceDependency
+    ).one()
+    evidence_refs = db_session.query(
+        AssistantMessageKnowledgeEvidenceRef
+    ).all()
+    assert stored_dependency.serving_document_id == (
+        f'decision_record:{decision.id}'
+    )
+    assert stored_dependency.knowledge_type == stored_knowledge_type
+    assert stored_dependency.approval_link_id == approval.id
+    assert {ref.approval_link_id for ref in evidence_refs} == {approval.id}
+    assert assistant_message_evidence_is_live(
+        db_session, user=viewer, message=message
+    )
+
+    approval.active = False
+    db_session.commit()
+
+    assert not assistant_message_evidence_is_live(
+        db_session, user=viewer, message=message
+    )
+    assert serialize_message(
+        message, db=db_session, user=viewer
+    )['metadata']['status'] == 'evidence_unavailable'
 
 
 def test_assistant_dependency_source_drift_permission_narrowing_or_lookup_failure_fails_closed(

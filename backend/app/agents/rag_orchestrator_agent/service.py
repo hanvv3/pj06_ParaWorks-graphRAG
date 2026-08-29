@@ -26,6 +26,7 @@ from backend.app.ingestion.source_authority import (
 from backend.app.knowledge.trusted_serving_eligibility import (
     TrustedServingEligibilityService,
     knowledge_model_for_type,
+    knowledge_type_storage_aliases,
 )
 from backend.app.models import (
     AgentRun,
@@ -604,7 +605,9 @@ def build_serving_dependency_snapshot(
         db.scalars(
             select(TrustedKnowledgeApprovalLink)
             .where(
-                TrustedKnowledgeApprovalLink.knowledge_type == knowledge_type,
+                TrustedKnowledgeApprovalLink.knowledge_type.in_(
+                    knowledge_type_storage_aliases(knowledge_type)
+                ),
                 TrustedKnowledgeApprovalLink.knowledge_id == knowledge_id,
                 TrustedKnowledgeApprovalLink.active.is_(True),
             )
@@ -633,7 +636,7 @@ def build_serving_dependency_snapshot(
                 dependency_kind='trusted_knowledge',
                 serving_content_hash=content_hash,
                 permission_level=candidate.permission_level,
-                knowledge_type=knowledge_type,
+                knowledge_type=link.knowledge_type,
                 knowledge_id=knowledge_id,
                 approval_link_id=link.id,
                 evidence_link_ids=tuple(child.id for child in children),
