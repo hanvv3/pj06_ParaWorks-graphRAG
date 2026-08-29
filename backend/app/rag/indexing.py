@@ -1,6 +1,6 @@
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
@@ -63,6 +63,7 @@ class VectorIndexResult:
     skipped_count: int = 0
     skipped_document_ids: list[str] | None = None
     saved_embedding_calls: int = 0
+    saved_serving_writes: int = 0
     embedding_request_count: int = 0
     embedding_prompt_tokens: int = 0
     embedding_total_tokens: int = 0
@@ -259,6 +260,8 @@ def _persist_locked_pgvector_batch(
     budget_decision: dict[str, float | int | str | None],
 ) -> VectorIndexResult:
     indexed: list[str] = []
+    pre_provider_skip_count = len(skipped_document_ids)
+    post_provider_skip_count = 0
     stale_skips = list(skipped_document_ids)
     document_ids = [document.document_id for document, _, _ in changed_documents]
     if not document_ids:
@@ -268,7 +271,7 @@ def _persist_locked_pgvector_batch(
             embedding_dimensions=embedding_dimensions,
             skipped_count=len(stale_skips),
             skipped_document_ids=stale_skips,
-            saved_embedding_calls=len(stale_skips),
+            saved_embedding_calls=pre_provider_skip_count,
             embedding_request_count=batch.request_count,
             embedding_prompt_tokens=batch.prompt_tokens,
             embedding_total_tokens=batch.total_tokens,
@@ -288,26 +291,35 @@ def _persist_locked_pgvector_batch(
                 raise
             db.rollback()
             stale_skips.extend(document_ids)
+            post_provider_skip_count += len(document_ids)
             return VectorIndexResult(
                 indexed_count=0,
                 document_ids=[],
                 embedding_dimensions=embedding_dimensions,
                 skipped_count=len(stale_skips),
                 skipped_document_ids=stale_skips,
-                saved_embedding_calls=len(stale_skips),
+                saved_embedding_calls=pre_provider_skip_count,
+                saved_serving_writes=post_provider_skip_count,
                 embedding_request_count=batch.request_count,
                 embedding_prompt_tokens=batch.prompt_tokens,
                 embedding_total_tokens=batch.total_tokens,
                 embedding_budget=budget_decision,
             )
         eligibility = TrustedServingEligibilityService(db)
+        canonical_documents = {
+            current.document_id: current
+            for current in build_rag_index_documents(db)
+            if current.document_id in document_ids
+        }
         for (document, content_hash, _), embedding in zip(
             changed_documents, embeddings, strict=True
         ):
             live = eligibility.for_document(document.document_id)
+            canonical = canonical_documents.get(document.document_id)
             if (
                 not live.eligible
                 or live.effective_permission is None
+                or canonical is None
                 or db.scalar(
                     select(VectorServingTombstone.id).where(
                         VectorServingTombstone.document_id
@@ -317,17 +329,20 @@ def _persist_locked_pgvector_batch(
                 is not None
             ):
                 stale_skips.append(document.document_id)
+                post_provider_skip_count += 1
                 continue
-            narrowed = VectorDocument(
-                document_id=document.document_id,
-                text=document.text,
-                source_url=document.source_url,
-                source_snippet=document.source_snippet,
-                permission_level=live.effective_permission,
-                metadata=document.metadata,
+            canonical_hash = compute_vector_document_hash(canonical)
+            exact_snapshot = canonical == document and canonical_hash == content_hash
+            permission_only_narrowing = _permission_only_narrowing(
+                embedded=document,
+                canonical=canonical,
             )
+            if not exact_snapshot and not permission_only_narrowing:
+                stale_skips.append(document.document_id)
+                post_provider_skip_count += 1
+                continue
             writer.upsert_with_embedding(
-                narrowed, embedding, locked_context=locked  # type: ignore[call-arg]
+                canonical, embedding, locked_context=locked  # type: ignore[call-arg]
             )
             indexed.append(document.document_id)
             embedding_dimensions = len(embedding)
@@ -340,10 +355,10 @@ def _persist_locked_pgvector_batch(
                 _upsert_index_state(
                     db=db,
                     state=state,
-                    document=narrowed,
+                    document=canonical,
                     embedding_model_name=embedding_model_name,
                     embedding_dimensions=embedding_dimensions,
-                    content_hash=content_hash,
+                    content_hash=canonical_hash,
                 )
         db.commit()
     return VectorIndexResult(
@@ -352,12 +367,29 @@ def _persist_locked_pgvector_batch(
         embedding_dimensions=embedding_dimensions,
         skipped_count=len(stale_skips),
         skipped_document_ids=stale_skips,
-        saved_embedding_calls=len(stale_skips),
+        saved_embedding_calls=pre_provider_skip_count,
+        saved_serving_writes=post_provider_skip_count,
         embedding_request_count=batch.request_count,
         embedding_prompt_tokens=batch.prompt_tokens,
         embedding_total_tokens=batch.total_tokens,
         embedding_budget=budget_decision,
     )
+
+
+def _permission_only_narrowing(
+    *, embedded: VectorDocument, canonical: VectorDocument
+) -> bool:
+    permission_rank = {'public': 0, 'internal': 1, 'restricted': 2}
+    if (
+        embedded.permission_level not in permission_rank
+        or canonical.permission_level not in permission_rank
+        or permission_rank[canonical.permission_level]
+        <= permission_rank[embedded.permission_level]
+    ):
+        return False
+    return replace(
+        canonical, permission_level=embedded.permission_level
+    ) == embedded
 
 
 def compute_vector_document_hash(document: VectorDocument) -> str:

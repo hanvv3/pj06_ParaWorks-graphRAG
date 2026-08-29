@@ -43,7 +43,7 @@ class RagAnswer:
     source_links: list[str]
     source_snippets: list[str]
     citations: list[dict[str, object]]
-    permission_level: str
+    permission_level: str | None
     hidden_match_count: int
     permission_notice: str | None
     cost: AgentRunCost

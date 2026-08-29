@@ -29,10 +29,12 @@ from backend.app.models import (
     Source,
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
+    VectorIndexState,
 )
 from backend.app.rag.embeddings import DeterministicHashEmbeddingModel
 from backend.app.rag.indexing import (
     build_rag_index_documents,
+    compute_vector_document_hash,
     index_changed_vector_documents,
 )
 from backend.app.rag.pgvector_store import PgVectorConfig, PgVectorStore
@@ -904,7 +906,7 @@ def test_pgvector_schedule_initial_reindex_read_then_revoke_blocks_stale_write()
     not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'),
     reason='set PARAWORKS_PGVECTOR_TEST_DATABASE_URL to run pgvector integration test',
 )
-def test_pgvector_reindex_rechecks_source_changed_after_provider() -> None:
+def test_pgvector_reindex_skips_still_eligible_canonical_drift_after_provider() -> None:
     database_url = os.environ['PARAWORKS_PGVECTOR_TEST_DATABASE_URL']
     engine = create_engine(database_url)
     session_local = sessionmaker(bind=engine)
@@ -913,7 +915,7 @@ def test_pgvector_reindex_rechecks_source_changed_after_provider() -> None:
     Base.metadata.create_all(engine)
     try:
         with session_local() as db:
-            _, _, source, store, detached = _seed_pg_schedule(
+            history, _, source, store, detached = _seed_pg_schedule(
                 db, table_name=table_name, settings=settings
             )
 
@@ -925,7 +927,13 @@ def test_pgvector_reindex_rechecks_source_changed_after_provider() -> None:
                     self.calls += 1
                     with session_local() as source_db:
                         current = source_db.get(Source, source.id)
-                        current.permission_level = 'unknown'
+                        current.source_url = 'https://gmail.mock/current-evidence-v2'
+                        current_history = source_db.get(HistoryEvent, history.id)
+                        current_history.reason = 'Exact current evidence v2'
+                        current_history.source_links = [current.source_url]
+                        current_history.source_snippets = [
+                            'Exact current evidence v2'
+                        ]
                         source_db.commit()
                     return DeterministicHashEmbeddingModel(
                         dimensions=8
@@ -944,9 +952,109 @@ def test_pgvector_reindex_rechecks_source_changed_after_provider() -> None:
             assert embedding.calls == 1
             assert result.indexed_count == 0
             assert result.skipped_document_ids == [detached.document_id]
+            assert result.saved_embedding_calls == 0
+            assert result.saved_serving_writes == 1
+            assert result.embedding_request_count == 1
             assert db.scalar(
                 text(f'SELECT count(*) FROM {table_name}')
             ) == 0
+            assert db.scalar(
+                select(VectorIndexState.id).where(
+                    VectorIndexState.document_id == detached.document_id,
+                    VectorIndexState.embedding_model
+                    == 'deterministic-hash:source-race',
+                )
+            ) is None
+            db.execute(text(f'DROP TABLE IF EXISTS {table_name}'))
+            db.commit()
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'),
+    reason='set PARAWORKS_PGVECTOR_TEST_DATABASE_URL to run pgvector integration test',
+)
+def test_pgvector_reindex_applies_permission_only_narrowing_after_provider() -> None:
+    database_url = os.environ['PARAWORKS_PGVECTOR_TEST_DATABASE_URL']
+    engine = create_engine(database_url)
+    session_local = sessionmaker(bind=engine)
+    table_name = f'rag_vector_documents_test_{uuid4().hex[:8]}'
+    settings = Settings(database_url=database_url)
+    Base.metadata.create_all(engine)
+    try:
+        with session_local() as db:
+            history, item, source, store, _ = _seed_pg_schedule(
+                db, table_name=table_name, settings=settings
+            )
+            link = db.scalar(
+                select(TrustedKnowledgeApprovalLink).where(
+                    TrustedKnowledgeApprovalLink.review_item_id == item.id
+                )
+            )
+            history.permission_level = 'public'
+            item.permission_level = 'public'
+            link.permission_level = 'public'
+            source.permission_level = 'public'
+            db.commit()
+            detached = next(
+                candidate
+                for candidate in build_rag_index_documents(db)
+                if candidate.document_id == f'history_event:{history.id}'
+            )
+            assert detached.permission_level == 'public'
+
+            class NarrowDuringProvider:
+                dimensions = 8
+                calls = 0
+
+                def embed_many(self, texts):
+                    self.calls += 1
+                    with session_local() as source_db:
+                        current = source_db.get(Source, source.id)
+                        current.permission_level = 'internal'
+                        source_db.commit()
+                    return DeterministicHashEmbeddingModel(
+                        dimensions=8
+                    ).embed_many(texts)
+
+            embedding = NarrowDuringProvider()
+            result = index_changed_vector_documents(
+                db=db,
+                documents=[detached],
+                writer=store,
+                embedding_model=embedding,
+                embedding_model_name='deterministic-hash:permission-race',
+                settings=settings,
+            )
+
+            current = next(
+                candidate
+                for candidate in build_rag_index_documents(db)
+                if candidate.document_id == detached.document_id
+            )
+            stored = db.execute(
+                text(
+                    f'SELECT permission_level, text FROM {table_name} '
+                    'WHERE document_id = :document_id'
+                ),
+                {'document_id': detached.document_id},
+            ).mappings().one()
+            state = db.scalar(
+                select(VectorIndexState).where(
+                    VectorIndexState.document_id == detached.document_id,
+                    VectorIndexState.embedding_model
+                    == 'deterministic-hash:permission-race',
+                )
+            )
+            assert embedding.calls == 1
+            assert result.indexed_count == 1
+            assert result.saved_embedding_calls == 0
+            assert result.saved_serving_writes == 0
+            assert stored['permission_level'] == 'internal'
+            assert stored['text'] == current.text
+            assert state.content_hash == compute_vector_document_hash(current)
             db.execute(text(f'DROP TABLE IF EXISTS {table_name}'))
             db.commit()
     finally:

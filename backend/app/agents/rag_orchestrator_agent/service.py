@@ -2,6 +2,7 @@ from dataclasses import dataclass, field, replace
 from hashlib import sha256
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.app.agent_runtime import EvidenceMessage, EvidencePacket, PermissionContext
@@ -134,6 +135,10 @@ def answer_question_with_rag(
         permission_context=PermissionContext(user_id=user.id, role=user.role),
     )
 
+    # Provider work must not retain the retrieval transaction. The exact
+    # serving dependencies are re-read in a fresh transaction after it returns.
+    db.rollback()
+
     if tool_logger is not None:
         tool_logger.log('rag_answer', f'start model={_rag_agent_model_label(selected_agent)} source_count={len(packet.messages)}')
     try:
@@ -148,24 +153,43 @@ def answer_question_with_rag(
         raise
     if tool_logger is not None:
         tool_logger.log('rag_answer', f'result model={answer.cost.model_name} source_count={len(answer.source_links)}')
+    db.rollback()
+    dependencies_live = _serving_dependencies_are_live(
+        db=db,
+        user=user,
+        candidates=tuple(visible_candidates),
+        snapshots=tuple(dependency_snapshots),
+    )
+    if not dependencies_live:
+        answer = _evidence_unavailable_answer(answer)
+        dependency_snapshots = []
     agent_run = AgentRun(
         agent_name=answer.agent_name,
         prompt_version=answer.prompt_version,
         status='complete',
-        source_window=packet.source_window,
+        source_window=(
+            packet.source_window
+            if dependencies_live
+            else 'ask:evidence-unavailable'
+        ),
         cache_key=answer.cache_key,
         model_name=answer.cost.model_name,
         input_tokens=answer.cost.token_usage.input_tokens,
         output_tokens=answer.cost.token_usage.output_tokens,
         total_tokens=answer.cost.token_usage.total_tokens,
         estimated_cost_usd=answer.cost.estimated_cost_usd,
-        permission_level=answer.permission_level,
+        permission_level=answer.permission_level or 'restricted',
         metadata_={
             'source_type': packet.source_type,
             'question': question,
             'source_count': len(answer.source_links),
-            'hidden_match_count': hidden_match_count,
+            'hidden_match_count': answer.hidden_match_count,
             'cache_hit': answer.cost.cache_hit,
+            **(
+                {}
+                if dependencies_live
+                else {'evidence_status': 'evidence_unavailable'}
+            ),
         },
     )
     db.add(agent_run)
@@ -178,6 +202,48 @@ def answer_question_with_rag(
     if commit_agent_run:
         db.commit()
     return answer
+
+
+def _serving_dependencies_are_live(
+    *,
+    db: Session,
+    user: DemoUser,
+    candidates: tuple[RagEvidenceCandidate, ...],
+    snapshots: tuple[ServingDependencySnapshot, ...],
+) -> bool:
+    if not snapshots:
+        return not candidates
+    if len(candidates) != len(snapshots):
+        return False
+    eligibility = TrustedServingEligibilityService(db)
+    try:
+        for candidate, snapshot in zip(candidates, snapshots, strict=True):
+            live = eligibility.for_document(snapshot.serving_document_id)
+            if (
+                not live.eligible
+                or live.effective_permission != snapshot.permission_level
+                or not can_access_permission(user, snapshot.permission_level)
+                or build_serving_dependency_snapshot(db, candidate) != snapshot
+            ):
+                return False
+    except (LookupError, SQLAlchemyError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _evidence_unavailable_answer(answer: RagAnswer) -> RagAnswer:
+    return replace(
+        answer,
+        answer='이 답변의 근거를 더 이상 확인할 수 없습니다. 다시 생성해 주세요.',
+        source_ids=[],
+        source_links=[],
+        source_snippets=[],
+        citations=[],
+        permission_level=None,
+        hidden_match_count=0,
+        permission_notice='evidence_unavailable',
+        serving_dependencies=(),
+    )
 
 
 def build_default_rag_orchestrator_agent(settings: Settings | None) -> RagOrchestratorAgent:
