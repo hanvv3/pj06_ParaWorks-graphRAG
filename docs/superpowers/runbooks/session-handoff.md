@@ -6,8 +6,10 @@ Updated: 2026-08-29
 
 - The approved-in-chat design is recorded at
   `docs/superpowers/specs/2026-08-29-whole-suite-postgresql-isolation-design.md`;
-  it passed independent Spec/Quality review, awaits user review, and is not
-  implementation authorization.
+  it passed independent Spec/Quality review and is now user-approved. The
+  detailed RED/GREEN plan is
+  `docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md`; it
+  awaits user review and is not implementation authorization.
 - Preserved non-Slack evidence is `1453 passed`, `1 skipped`, ten approved Slack
   deselections, `12 failed`, `144 errors`, with owned database/role cleanup
   `0:0:0:0` and the shared container left running healthy.
@@ -21,13 +23,15 @@ Updated: 2026-08-29
   database, allowlisted/hermetic child environments with an early test-only
   dotenv guard, an exact node/lease sidecar, bounded process/schema cleanup, and
   no additional Slack exclusion or production trigger relaxation.
-- Do not implement this boundary before its written spec and implementation
-  plan are separately approved. Planning now does not reorder C.5 Tasks 6–15.
-  Slack reconstruction/regression remains last after D and E.
-- The current C.5 Task 16 raw pytest Steps 4–7 and single-final-commit wording
-  are blocked for execution. The future isolation implementation plan must
-  amend those instructions to controller profiles and reviewed slice commits in
-  the same separately approved planning change.
+- Do not implement this boundary before its implementation plan is separately
+  approved. Planning now does not reorder C.5 Tasks 6–15. Slack
+  reconstruction/regression remains last after D and E.
+- The C.5 Task 16 plan now points Steps 4–7 to the `postgres`,
+  `compatibility`, `non-slack`, and `full` controller profiles and replaces the
+  single-final-commit instruction with reviewed behavior-slice commits plus a
+  clean documentation/evidence commit. Those amended instructions remain
+  blocked until the new isolation plan is approved and implemented at Task 16
+  entry.
 
 ## 2026-08-29 C.5 product Task 5 database boundary verified
 

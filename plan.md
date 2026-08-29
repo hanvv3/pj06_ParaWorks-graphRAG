@@ -162,8 +162,10 @@ Current state:
   clean targeted RED before their leading fixture-provenance hypothesis can be
   accepted. The approved architecture is documented in
   `docs/superpowers/specs/2026-08-29-whole-suite-postgresql-isolation-design.md`;
-  its written spec passed independent Spec/Quality review, is awaiting user
-  review, and no isolation implementation has started.
+  its written spec passed independent Spec/Quality review and is now
+  user-approved. The detailed TDD plan is
+  `docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md`; it
+  awaits user review, and no isolation implementation has started.
 
 Next priorities:
 
@@ -171,8 +173,9 @@ Next priorities:
    under its separate approval/review boundary.
 2. Continue C.5 product Tasks 7–16 in the approved order; keep rollout disabled
    and live paid-provider benchmarks separately authorized. At Task 16 entry,
-   first implement the separately approved whole-suite PostgreSQL isolation
-   boundary; planning it now does not reorder Tasks 6–15.
+   first implement the whole-suite PostgreSQL isolation boundary after its
+   detailed plan is separately approved; planning it now does not reorder
+   Tasks 6–15.
 3. After all C.5 product tasks are complete, plan Deliverable D Retriever Port
    and RAG Answer Graph V2, followed by Deliverable E Neo4j GraphRAG.
 4. Continue frontend consistency only in its planned C.5 tasks, and keep Slack

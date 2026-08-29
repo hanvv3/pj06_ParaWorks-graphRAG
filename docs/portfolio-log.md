@@ -6,7 +6,7 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
-## 2026-08-29 Whole-suite PostgreSQL isolation design approved in chat
+## 2026-08-29 Whole-suite PostgreSQL isolation spec approved; implementation plan drafted
 
 - A final non-Slack comparison run preserved `1453 passed`, `1 skipped`, the
   exact ten approved Slack deselections, `12 failed`, and `144 errors`; owned
@@ -29,9 +29,19 @@ demo story changes.
   controller cleanup. It adds no product behavior and makes no provider call.
 - Written spec:
   `docs/superpowers/specs/2026-08-29-whole-suite-postgresql-isolation-design.md`.
-  It passed independent Spec/Quality review and awaits user review;
-  implementation planning and code have not started. Product order remains C.5
-  Tasks 6–15, Task 16 isolation/release, D, E, then Slack recovery last.
+  It passed independent Spec/Quality review and is user-approved. The detailed
+  RED/GREEN plan is
+  `docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md` and
+  awaits user review; no test/helper/controller implementation has started.
+- The plan freezes five controller profiles, exact multi-child node-union
+  evidence, guarded SQLite bootstrap, privacy-safe pytest sidecars, serial
+  schema leases for eight PostgreSQL modules, exact cleanup precedence, and a
+  conditional Review V2 test-fixture correction only after the clean
+  provenance RED. It also replaces C.5 Task 16's raw backend pytest commands
+  with controller-owned profile calls and reviewed slice commits.
+- Product order remains C.5 Tasks 6–15, Task 16 isolation/release, D, E, then
+  Slack recovery last. This entry records planning only; no Docker/service,
+  test suite, provider, product-code, push, merge, or PR action was performed.
 
 ## 2026-08-29 C.5 Tasks 1–5 verified and typed database boundary accepted
 

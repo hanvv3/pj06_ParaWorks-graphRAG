@@ -3348,6 +3348,8 @@ git commit -m "feat: review and audit automatic trust inline"
 
 **Release gate:** This task adds no new trust behavior. It proves code safety with deterministic/fake provider output, a disposable PostgreSQL+pgvector target, the complete non-Slack/frontend regression set, and a rollback smoke. Separately authorized sanitized paid Terra validation and Mini extraction compatibility gates are additionally required before shadow rollout, never during automated tests. They record aggregate evidence only and leave auto review disabled by default.
 
+**Task 16 entry prerequisite:** Product Tasks 6–15 must already be implemented and reviewed. Before Step 4, `docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md` must first be separately user-approved and its infrastructure Tasks 1–11 implemented through their RED/GREEN/reviewed-commit checkpoints. That plan's Task 12 is this task's Steps 4–7 official profile proof. Its controller is the only authoritative backend release path; a focused `--child-id` result is development evidence only and never a release proof.
+
 - [ ] **Step 1: Create the Korean-first frozen golden dataset and metric harness**
 
 The fixture must label direct supported Timeline/History, proposal versus decision, planned versus completed, affirmation versus negation, conditional/uncertain wording, date/subject/actor mismatch, conflicting sources, source supersession, permission loss/unknown, partial support, high-confidence hard negative, prompt injection, exact reaffirmation, trusted collision, Decision/Todo, and restricted cases.
@@ -3414,46 +3416,43 @@ if ($extractExit -ne 0) { throw "paid Mini extraction compatibility gate failed 
 
 If authorization is withheld or any route/schema fails, rollout remains `disabled`; do not substitute an alias, Azure OpenAI, Gemini, another model, or a fallback route.
 
-- [ ] **Step 4: Run PostgreSQL restart, concurrency, audit, revoke, and reindex gates**
+- [ ] **Step 4: Run the controller-owned PostgreSQL restart, concurrency, audit, revoke, and reindex gate**
 
-Against a disposable target whose database and user names end in `_test` and that has pgvector:
+Use the approved controller to validate the existing shared service, create only its owned `_test` role/database, allocate serial schema leases, prove exact node coverage and zero skips, and clean exact owned resources:
 
 ```powershell
-uv run --locked pytest backend/tests/test_auto_review_postgres.py backend/tests/test_review_v2_postgres.py backend/tests/test_review_transition_postgres.py backend/tests/test_pgvector_integration.py -q
+uv run --locked python scripts/backend_release_matrix.py --profile postgres
 ```
 
 Required zero-skip coverage includes concurrent human/auto transition exactly once; extraction E1/E2/E3 claim/cancel/crash/restart/one-call/atomic-candidate completion and global-disabled zero-call at both pre-attempt boundaries; the durable attempt marker committing before the body-blind transport consumes its one-use dispatch permit; validation lease/restart/cancel terminal-completed and terminal-failed replay, deferred parent/child terminal guards, pre-attempt-only reclaim, global-disabled zero-call, and crash-after-provider-send no-retry conservative charge; rotation refusal during attempt-zero/attempt-one calls followed by old-generation accounting recovery; provider-safety and rollout control transitions appending exactly one immutable old/new-key event plus aggregate backpointer while lost CAS/replay and metric-only updates append none; V2.0/V2.1 immutable evidence refs; exact duplicate/reaffirmation; Gmail/Drive missing/malformed semantic timestamp rejection and Calendar deterministic start; source update or parser-policy-only change versus extraction completion, promotion, reconciliation, and reindex; Source/Document two-phase crash recovery; permission-only vector narrowing and current-version pointer repair; promotion/revoke race; shared-provenance survival; last-provenance knowledge/companion/vector revoke; same-key advisory serialization of stale-snapshot reindex versus tombstone; stale/quarantined vector search exclusion before hidden count; persisted Assistant answer dependency commit versus concurrent source drift followed by zero-leak list/context/summary/email projection; mandatory-50 replacement audit non-skippability; 10%-to-100% authorization latch and full-enforce-only 2% sampling; purpose-specific breaker/global demotion while extraction or validation is in flight; business revoke rejected before assessment insertion; quality revoke versus pending audit, confirmed-audit correction, same-reason replay, and different-reason conflict; critical/manual-audit serving quarantine before revoke and through revoke failure/crash; remediation-required persistence; owner permission loss before/during/resume; reversed provider route-set/admin lock schedules; V2.0 paused resume; stored V2.1 resume without provider readiness; and exact generated-row cleanup. Every barrier-based schedule must have a bounded test timeout and zero deadlocks. Missing `PARAWORKS_TEST_POSTGRES_URL` is a release blocker, not a pass.
 
 - [ ] **Step 5: Run the complete C.5 and C/B compatibility suites**
 
+The controller manifest freezes the same six selector groups formerly listed as independent raw pytest commands. It must prove exact canonical collection union, pairwise-disjoint verification children, native-exit/sidecar agreement, zero release-critical skips, and no live provider:
+
 ```powershell
-uv run --locked pytest backend/tests/test_auto_review_contracts.py backend/tests/test_auto_review_cost_policy.py backend/tests/test_auto_review_migration.py backend/tests/test_assistant_models.py backend/tests/test_keyed_mutation_guard.py backend/tests/test_auto_review_key_bootstrap.py backend/tests/test_provider_send_fence.py backend/tests/test_review_v21_preflight.py backend/tests/test_review_v21_drafting.py backend/tests/test_review_v21_extraction.py backend/tests/test_review_resolution_actors.py backend/tests/test_auto_review_provenance.py -q
-uv run --locked pytest backend/tests/test_auto_review_revocation.py backend/tests/test_auto_review_quality_revoke.py backend/tests/test_auto_review_source_reconciliation.py backend/tests/test_auto_review_source_reconciliation_admin.py backend/tests/test_source_content_signature.py backend/tests/test_review_evidence_visibility.py backend/tests/test_google_connector.py backend/tests/test_connector_ingestion_contract.py backend/tests/test_document_ingestion_service.py backend/tests/test_rag_indexing.py backend/tests/test_pgvector_store.py backend/tests/test_pgvector_integration.py backend/tests/test_knowledge_api.py backend/tests/test_dashboard_api.py backend/tests/test_review.py backend/tests/test_todos_api.py backend/tests/test_notifications_api.py backend/tests/test_mock_sync.py backend/tests/test_integration_runtime_status.py backend/tests/test_search_permissions.py backend/tests/test_search_retrieval_backend.py backend/tests/test_ask_api.py backend/tests/test_assistant_api.py backend/tests/test_assistant_service.py backend/tests/test_assistant_email_agent.py backend/tests/test_company_memory_orchestration_service.py backend/tests/test_orchestration_api.py backend/tests/test_project_memory_api.py backend/tests/test_rag_orchestrator_agent.py backend/tests/test_rag_orchestrator_service.py -q
-uv run --locked pytest backend/tests/test_auto_review_eligibility.py backend/tests/test_auto_review_policy.py backend/tests/test_auto_review_validator.py backend/tests/test_auto_review_model_router.py backend/tests/test_auto_review_validation_store.py backend/tests/test_auto_review_orchestrator.py backend/tests/test_auto_review_rollout.py backend/tests/test_auto_review_audit.py backend/tests/test_auto_review_rollout_admin.py backend/tests/test_auto_review_launch_confirmation.py backend/tests/test_review_workflow_facade.py -q
-uv run --locked pytest backend/tests/test_review_v21_state.py backend/tests/test_review_v21_graph.py backend/tests/test_review_v21_service.py backend/tests/test_review_v21_api.py backend/tests/test_auto_review_call_recovery.py backend/tests/test_auto_review_api.py backend/tests/test_auto_review_golden.py backend/tests/test_auto_review_evaluation_cli.py backend/tests/test_auto_review_extraction_compatibility_cli.py backend/tests/test_auto_review_postgres.py backend/tests/test_auto_review_smoke.py -q
-uv run --locked pytest backend/tests/test_review_v2_schemas.py backend/tests/test_review_v2_preflight.py backend/tests/test_review_v2_drafting.py backend/tests/test_review_transitions.py backend/tests/test_review_v2_graph.py backend/tests/test_review_v2_service.py backend/tests/test_review_v2_api.py backend/tests/test_review_v2_postgres.py backend/tests/test_review_transition_postgres.py backend/tests/test_review_knowledge_promotion.py backend/tests/test_review_rbac.py -q
-uv run --locked pytest backend/tests/test_agent_preflight.py backend/tests/test_agent_runtime_state.py backend/tests/test_agent_runtime_fingerprints.py backend/tests/test_agent_workflow_models.py backend/tests/test_agent_runtime_migration.py backend/tests/test_agent_runtime_checkpointing.py backend/tests/test_agent_runtime_lifespan.py backend/tests/test_agent_runtime_bootstrap.py backend/tests/test_agent_runtime_retention.py backend/tests/test_agent_runtime_graph_versions.py backend/tests/test_agent_runtime_checkpoint_execution.py backend/tests/test_agent_runtime_postgres_checkpoint.py backend/tests/test_db_init.py backend/tests/test_db_schema_operations.py backend/tests/test_data_reset.py backend/tests/test_langchain_langgraph_dependency_compat.py -q
+uv run --locked python scripts/backend_release_matrix.py --profile compatibility
 ```
 
-Expected: all selected tests pass, V2.0 exact snapshots remain green, and no live provider is called. Every explicitly named C.5 module above is release-critical and may not skip; only tests whose documented purpose is an unavailable optional environment may skip outside the PostgreSQL command, while the PostgreSQL command itself is zero-skip.
+Expected: all selected tests pass with zero skips/xfails/errors, V2.0 exact snapshots remain green, and no live provider is called. An unavailable optional environment is a Task 16 release blocker to configure or investigate, not accepted release evidence.
 
 - [ ] **Step 6: Run the approved non-Slack comparison gate**
 
-Use the existing ten explicit user-deferred Slack deselections and add none:
+Use the controller manifest's exact ten user-deferred Slack deselections and add none. The controller must prove selected nodes equal canonical collection minus exactly those ten:
 
 ```powershell
-uv run --locked pytest backend/tests -q --deselect=backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_runs_real_agent_services --deselect=backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_skips_agents_that_exceed_cost_budget --deselect=backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_uses_cache_when_evidence_is_unchanged --deselect=backend/tests/test_oauth_pkce.py::test_slack_oauth_pkce_generation --deselect=backend/tests/test_oauth_pkce.py::test_slack_callback_with_custom_redirect_uri_and_pkce --deselect=backend/tests/test_oauth_pkce.py::test_api_endpoints_support_redirect_uri --deselect=backend/tests/test_orchestration_api.py::test_company_memory_orchestration_api_runs_agent_services --deselect=backend/tests/test_quality_permission_regression_suite.py::test_quality_suite_company_memory_emits_review_checkpoint_without_paid_calls --deselect=backend/tests/test_quality_permission_regression_suite.py::test_quality_suite_cache_hit_does_not_duplicate_agent_runs_or_review_items --deselect=backend/tests/test_slack_oauth.py::test_slack_sync_endpoint_uses_installed_connection_token_without_exposing_it
+uv run --locked python scripts/backend_release_matrix.py --profile non-slack
 ```
 
-Expected: every selected test passes; only an already documented optional environment test may skip. Do not add a deselection for C.5.
+Expected: every selected test passes with zero skips/xfails/errors. An unavailable optional environment is a release blocker, not an accepted skip. Do not add a deselection for C.5.
 
 - [ ] **Step 7: Run the full backend suite and compare the deferred Slack baseline**
 
 ```powershell
-uv run --locked pytest backend/tests -q
+uv run --locked python scripts/backend_release_matrix.py --profile full
 ```
 
-Expected: the same ten user-deferred Slack-related test ids remain the only known failures and every C.5/non-Slack test passes. If actual baseline differs, stop and investigate rather than editing expected failures.
+Expected: the authoritative sidecars prove the same ten user-deferred Slack-related test ids are the only failures, with no errors/skips/xfails, and every C.5/non-Slack test passes. Native pytest exit `1` alone is never success. If the exact failure set or collection differs, stop and investigate rather than editing the manifest.
 
 - [ ] **Step 8: Run lock, Ruff, diff, and secret/privacy scans**
 
@@ -3548,16 +3547,18 @@ Only after every required gate passes:
 
 Do not copy this plan's expected results as if they were observed.
 
-- [ ] **Step 12: Commit verified release evidence**
+- [ ] **Step 12: Commit verified release evidence after reviewed behavior-slice commits**
+
+All test/helper/controller and product behavior must already be present in the reviewed intermediate commits required by their owning implementation plans. This final commit contains only observed product truth and release evidence; do not squash or recommit the behavior files here.
 
 ```powershell
 git diff --check
-git add backend/app/review/auto_review_evaluation.py backend/app/review/auto_review_extraction_compatibility.py backend/tests/fixtures/auto_review_golden_v1.json backend/tests/fixtures/auto_review_extraction_compat_v1.json backend/tests/test_auto_review_golden.py backend/tests/test_auto_review_evaluation_cli.py backend/tests/test_auto_review_extraction_compatibility_cli.py backend/tests/test_auto_review_smoke.py backend/tests/test_secret_hygiene.py backend/tests/test_auto_review_postgres.py backend/tests/test_review_v2_postgres.py backend/tests/test_pgvector_integration.py frontend/playwright.config.ts plan.md docs/portfolio-log.md docs/superpowers/runbooks/session-handoff.md
-git commit -m "test: verify auto review trust promotion"
+git add plan.md docs/portfolio-log.md docs/superpowers/runbooks/session-handoff.md docs/superpowers/runbooks/backend-release-matrix.md
+git commit -m "docs: record auto review release verification"
 git status --short
 ```
 
-Expected: commit succeeds and the worktree is clean. Do not push, merge, enable shadow/enforce in a deployed environment, or open a PR unless the user separately requests it.
+Expected: the documentation/evidence commit succeeds after all behavior slices and the worktree is clean. Do not push, merge, enable shadow/enforce in a deployed environment, or open a PR unless the user separately requests it.
 
 ## Final Implementation Review Checklist
 
@@ -3599,3 +3600,5 @@ This plan is approved. Before product implementation begins, explicitly authoriz
 2. **Inline Plan Execution:** Stay in this task, invoke `superpowers:executing-plans`, execute the tasks sequentially with the named RED/GREEN/commit checkpoints.
 
 Creating and approving this document is still **planning**. The next unapproved step is actual product-code implementation, gated by an explicit implementation authorization and execution-mode choice. Plan approval alone does not authorize code/migration changes, pushing, merging, opening a PR, enabling a paid mode, or touching Slack.
+
+Tasks 1–5 are complete. The next product slice remains Task 6, then Tasks 7–15. Task 16 has an additional gate: `docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md` must be separately user-approved and implemented first at Task 16 entry. Completing that isolation plan permits the Task 16 release proof only; it does not automatically authorize Deliverable D.

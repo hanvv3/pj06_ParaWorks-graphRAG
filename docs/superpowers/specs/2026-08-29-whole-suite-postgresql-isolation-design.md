@@ -2,12 +2,13 @@
 
 검토 버전: 2
 작성일: 2026-08-29
-상태: 채팅 설계 승인 완료 · 독립 Spec/Quality 검토 PASS · 서면 spec 사용자 검토 대기 · 구현 미승인
+상태: 서면 spec 사용자 승인 완료 · 독립 Spec/Quality 검토 PASS · 상세 구현 계획 사용자 검토 대기 · 구현 미승인
 
 관련 문서:
 
 - `plan.md`
 - `docs/superpowers/plans/2026-08-28-auto-review-trust-promotion.md`
+- `docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md`
 - `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`
 - `docs/superpowers/specs/2026-08-29-database-storage-initialization-boundary-design.md`
 - `.superpowers/sdd/2026-08-29-database-storage-initialization-boundary/final-nonslack-suite-report.md`
@@ -454,7 +455,10 @@ node exclusion, ignore, skip, xfail은 허용하지 않는다. authoritative evi
 tracked internal pytest plugin이 child별 unique target에 쓰는 privacy-safe JSON
 sidecar다. sidecar envelope에는 schema version, `run_id`, `profile`, `child_id`,
 `invocation_hash`, exact `report.nodeid`, phase, outcome, `wasxfail`, collection
-index와 schema lease의 hashed lease id/create/drop 상태가 들어간다.
+index와 schema lease의 hashed lease id/create/drop 상태가 들어간다. Review V2의
+clean RED 원인 확인에는 exact node/call phase와 exact PostgreSQL provenance-guard
+문구를 메모리에서만 매핑한 allowlisted reason code 하나를 사용할 수 있다.
+`longrepr`/exception text 자체는 sidecar나 report에 기록하지 않는다.
 traceback, captured output, URL, schema/database/role name, secret은 넣지 않는다.
 JUnit XML은 사람이 읽는 보조 artifact일 뿐 coverage authority가 아니다.
 
@@ -573,6 +577,7 @@ human approval을 요구한다.
 - mode
 - collected/selected/passed/failed/error/skipped/deselected counts
 - exact unexpected node ids
+- allowlisted failure-reason code별 aggregate count
 - schema lease created/dropped counts
 - expected/observed child-sidecar identity and completion counts
 - pre-drop lease-schema prefix count and non-lease sentinel state
@@ -619,10 +624,12 @@ Settings contamination, shared rows/checkpoints, future module ordering을 해�
 
 ## 10. 예상 파일 경계
 
-구현 계획은 다음 범위 안에서 작업을 나눈다.
+작성된 상세 구현 계획은 다음 범위 안에서 작업을 나눈다.
 
 - Create: `backend/tests/postgres_isolation.py`
 - Create: `backend/tests/test_postgres_isolation.py`
+- Create: `backend/tests/release_contracts.py`
+- Create: `backend/tests/test_release_contracts.py`
 - Create: `backend/tests/release_bootstrap.py`
 - Create: `backend/tests/test_release_bootstrap.py`
 - Create: `backend/tests/release_evidence_plugin.py`
@@ -697,13 +704,15 @@ C.5 Tasks 6–15
   -> Slack reconstruction/regression last
 ```
 
-이 spec 승인 후 별도 implementation plan을 작성한다. implementation plan 승인 전에는
-test/helper/controller code를 변경하지 않는다. paid provider gate, Slack baseline 변경,
-output schema, permission, token/cost, Review trust, promotion/revoke/duplicate 정책 변경은
-각각 별도 human decision이 필요하다.
+이 spec은 사용자 승인되었고 별도 implementation plan이
+`docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md`에 작성되었다.
+그 implementation plan 승인 전에는 test/helper/controller code를 변경하지 않는다.
+paid provider gate, Slack baseline 변경, output schema, permission, token/cost,
+Review trust, promotion/revoke/duplicate 정책 변경은 각각 별도 human decision이
+필요하다.
 
 기존 C.5 Task 16 plan의 raw pytest Steps 4–7과 마지막 단일 commit 지시는 이 경계를
-반영하지 못한다. 따라서 별도 implementation plan은 같은 planning commit에서 해당
-steps를 controller profile 호출로 바꾸고 behavior slice별 reviewed intermediate
-commit 뒤 clean verification commit을 요구하도록 좁게 amend해야 한다. 그 amendment가
-별도 승인되기 전에는 기존 Task 16 release 명령을 실행하지 않는다.
+반영하지 못했다. 작성된 implementation plan과 같은 planning change에서 해당 steps를
+controller profile 호출로 바꾸고 behavior slice별 reviewed intermediate commit 뒤
+clean verification commit을 요구하도록 좁게 amend했다. 그 amendment와 implementation
+plan이 별도 승인되기 전에는 Task 16 release 명령을 실행하지 않는다.
