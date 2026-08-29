@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import ast
+import os
+import subprocess
+import sys
 import traceback
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +30,7 @@ from sqlalchemy.exc import (
 )
 
 from backend.app.db import initialization
+from backend.app.db import session as database_session
 
 
 def test_initialize_database_runtime_preserves_exact_options_without_connect(
@@ -436,3 +442,244 @@ def test_typed_storage_error_retains_only_caller_active_context(
     assert storage_failure not in chain
     assert 'storage-sensitive' not in rendered
     assert 'caller-active-sentinel' in rendered
+
+
+def test_session_adapter_preserves_public_engine_and_factory_contract() -> None:
+    assert database_session.engine.pool._pre_ping is True
+    assert database_session.SessionLocal.kw['bind'] is database_session.engine
+    assert database_session.SessionLocal.kw['autoflush'] is False
+    assert database_session.SessionLocal.kw['autocommit'] is False
+    assert database_session.SessionLocal.kw['expire_on_commit'] is True
+
+
+def test_get_db_still_closes_the_request_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SessionProbe:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    session = SessionProbe()
+    monkeypatch.setattr(database_session, 'SessionLocal', lambda: session)
+    dependency: Generator[object, None, None] = database_session.get_db()
+    assert next(dependency) is session
+    dependency.close()
+    assert session.closed is True
+
+
+def _run_isolated_python(script: str) -> subprocess.CompletedProcess[str]:
+    repository_root = Path(__file__).resolve().parents[2]
+    isolated_cwd = Path(__file__).resolve().parent
+    assert not (isolated_cwd / '.env').exists()
+    allowed_parent_names = (
+        'COMSPEC',
+        'PATH',
+        'PATHEXT',
+        'SYSTEMROOT',
+        'TEMP',
+        'TMP',
+        'WINDIR',
+    )
+    env = {
+        name: os.environ[name]
+        for name in allowed_parent_names
+        if name in os.environ
+    }
+    env.update(
+        {
+            'AUTO_REVIEW_MODE': 'disabled',
+            'AUTO_REVIEW_PROVIDER_TIMEOUT_SECONDS': '60',
+            'AUTO_REVIEW_PROVIDER_SEND_START_WINDOW_SECONDS': '5',
+            'AUTO_REVIEW_PROVIDER_ATTEMPT_LEASE_SECONDS': '120',
+            'AUTO_REVIEW_PROVIDER_COMMIT_GRACE_SECONDS': '30',
+            'PARAWORKS_DEMO_MODE': 'false',
+            'PARAWORKS_DATABASE_URL': 'sqlite:///:memory:',
+            'DATABASE_URL': 'sqlite:///:memory:',
+            'PYTHONPATH': str(repository_root),
+        }
+    )
+    return subprocess.run(
+        [sys.executable, '-c', script],
+        cwd=isolated_cwd,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
+@pytest.mark.parametrize(
+    ('case_inputs', 'expected_url'),
+    (
+        (
+            {
+                'paraworks_demo_mode': True,
+                'paraworks_demo_database_url': 'sqlite:///demo-precedence.db',
+                'paraworks_database_url': 'sqlite:///override-precedence.db',
+                'database_url': 'sqlite:///fallback-precedence.db',
+            },
+            'sqlite:///demo-precedence.db',
+        ),
+        (
+            {
+                'paraworks_demo_mode': False,
+                'paraworks_demo_database_url': 'sqlite:///demo-precedence.db',
+                'paraworks_database_url': 'sqlite:///override-precedence.db',
+                'database_url': 'sqlite:///fallback-precedence.db',
+            },
+            'sqlite:///override-precedence.db',
+        ),
+        (
+            {
+                'paraworks_demo_mode': False,
+                'paraworks_demo_database_url': None,
+                'paraworks_database_url': None,
+                'database_url': 'sqlite:///fallback-precedence.db',
+            },
+            'sqlite:///fallback-precedence.db',
+        ),
+    ),
+)
+def test_session_adapter_forwards_the_resolved_database_url_in_a_fresh_process(
+    case_inputs: dict[str, object],
+    expected_url: str,
+) -> None:
+    script = (
+        'import importlib\n'
+        'from types import SimpleNamespace\n'
+        "config = importlib.import_module('backend.app.core.config')\n"
+        "initialization = importlib.import_module('backend.app.db.initialization')\n"
+        f'case_inputs = {case_inputs!r}\n'
+        'settings = config.Settings(_env_file=None, **case_inputs)\n'
+        'observed_urls = []\n'
+        'def initialize(database_url):\n'
+        '    observed_urls.append(database_url)\n'
+        '    return SimpleNamespace(engine=object(), session_factory=object())\n'
+        'config.get_settings = lambda: settings\n'
+        'initialization.initialize_database_runtime = initialize\n'
+        "importlib.import_module('backend.app.db.session')\n"
+        f'assert settings.resolved_database_url() == {expected_url!r}\n'
+        f'assert observed_urls == [{expected_url!r}]\n'
+    )
+    completed = _run_isolated_python(script)
+
+    assert completed.returncode == 0
+    assert completed.stdout == ''
+    assert completed.stderr == ''
+
+
+CONSUMER_MODULES = (
+    'backend.app.db.init_db',
+    'backend.app.tasks.sync',
+    'backend.app.tasks.rag_indexing',
+    'backend.app.agent_runtime.bootstrap',
+    'backend.app.agent_runtime.retention',
+)
+
+
+@pytest.mark.parametrize('module_name', CONSUMER_MODULES)
+@pytest.mark.parametrize('application_first', (False, True))
+def test_database_consumers_import_direct_and_application_first(
+    module_name: str,
+    application_first: bool,
+) -> None:
+    statements = ['import importlib']
+    if application_first:
+        statements.append("importlib.import_module('backend.app.main')")
+    statements.append(f'importlib.import_module({module_name!r})')
+    completed = _run_isolated_python(';'.join(statements))
+
+    assert completed.returncode == 0
+    assert completed.stdout == ''
+    assert completed.stderr == ''
+
+
+@pytest.mark.parametrize('application_first', (False, True))
+def test_fastapi_get_db_override_keeps_identity_across_import_order(
+    application_first: bool,
+) -> None:
+    if application_first:
+        ordered_imports = (
+            'from backend.app.main import app\n'
+            'from backend.app.db.session import get_db\n'
+        )
+    else:
+        ordered_imports = (
+            'from backend.app.db.session import get_db\n'
+            'from backend.app.main import app\n'
+        )
+    script = ordered_imports + (
+        'from fastapi.routing import APIRoute\n'
+        'def walk_dependencies(dependant):\n'
+        '    yield dependant\n'
+        '    for child in dependant.dependencies:\n'
+        '        yield from walk_dependencies(child)\n'
+        'route = next(\n'
+        '    route for route in app.routes\n'
+        '    if isinstance(route, APIRoute)\n'
+        "    and route.path == '/api/v1/documents'\n"
+        "    and 'GET' in route.methods\n"
+        ')\n'
+        'matches = [\n'
+        '    dependant for dependant in walk_dependencies(route.dependant)\n'
+        '    if dependant.call is get_db\n'
+        ']\n'
+        'assert len(matches) == 1\n'
+        'def override_db():\n'
+        '    yield object()\n'
+        'app.dependency_overrides[get_db] = override_db\n'
+        'assert app.dependency_overrides[matches[0].call] is override_db\n'
+        'app.dependency_overrides.clear()\n'
+    )
+    completed = _run_isolated_python(script)
+
+    assert completed.returncode == 0
+    assert completed.stdout == ''
+    assert completed.stderr == ''
+
+
+@pytest.mark.parametrize(
+    'script',
+    (
+        'import backend.app.db.initialization; import backend.app.db.session',
+        'import backend.app.db.session; import backend.app.db.initialization',
+        'import backend.app.db.session; import backend.app.main',
+        'import backend.app.main; import backend.app.db.session',
+    ),
+)
+def test_database_initialization_and_session_import_order_is_cycle_free(
+    script: str,
+) -> None:
+    completed = _run_isolated_python(script)
+
+    assert completed.returncode == 0
+    assert completed.stdout == ''
+    assert completed.stderr == ''
+
+
+def test_database_initialization_is_a_settings_and_environment_free_leaf() -> None:
+    initializer_path = Path(__file__).resolve().parents[1] / 'app/db/initialization.py'
+    tree = ast.parse(initializer_path.read_text(encoding='utf-8'))
+    prohibited_names = {'environ', 'getenv', 'get_settings', 'Settings'}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert all(alias.name != 'os' for alias in node.names)
+            assert all(
+                alias.name
+                not in {'backend.app.core.config', 'backend.app.db.session'}
+                for alias in node.names
+            )
+        if isinstance(node, ast.ImportFrom):
+            assert node.module != 'os'
+            assert node.module not in {
+                'backend.app.core.config',
+                'backend.app.db.session',
+            }
+        if isinstance(node, ast.Name):
+            assert node.id not in prohibited_names
+        if isinstance(node, ast.Attribute):
+            assert node.attr not in prohibited_names

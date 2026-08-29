@@ -3936,6 +3936,48 @@ def _run_key_admin_module_cli(
     )
 
 
+def _run_database_import_script(script: str) -> subprocess.CompletedProcess[str]:
+    repository_root = Path(__file__).resolve().parents[2]
+    isolated_cwd = Path(__file__).resolve().parent
+    assert not (isolated_cwd / '.env').exists()
+    allowed_parent_names = (
+        'COMSPEC',
+        'PATH',
+        'PATHEXT',
+        'SYSTEMROOT',
+        'TEMP',
+        'TMP',
+        'WINDIR',
+    )
+    env = {
+        name: os.environ[name]
+        for name in allowed_parent_names
+        if name in os.environ
+    }
+    env.update(
+        {
+            'AUTO_REVIEW_MODE': 'disabled',
+            'AUTO_REVIEW_PROVIDER_TIMEOUT_SECONDS': '60',
+            'AUTO_REVIEW_PROVIDER_SEND_START_WINDOW_SECONDS': '5',
+            'AUTO_REVIEW_PROVIDER_ATTEMPT_LEASE_SECONDS': '120',
+            'AUTO_REVIEW_PROVIDER_COMMIT_GRACE_SECONDS': '30',
+            'PARAWORKS_DEMO_MODE': 'false',
+            'PARAWORKS_DATABASE_URL': 'sqlite:///:memory:',
+            'DATABASE_URL': 'sqlite:///:memory:',
+            'PYTHONPATH': str(repository_root),
+        }
+    )
+    return subprocess.run(
+        [sys.executable, '-c', script],
+        cwd=isolated_cwd,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
 def _assert_bounded_cli_error(
     completed: subprocess.CompletedProcess[str],
     *,
@@ -4299,6 +4341,63 @@ def test_task5_modules_import_in_isolated_direct_and_application_orders(
     assert completed.stderr == ''
 
 
+def test_database_import_key_admin_canonical_identity_direct_and_module(
+    tmp_path: Path,
+) -> None:
+    direct = _run_database_import_script(
+        'import importlib\n'
+        'import sys\n'
+        "module = importlib.import_module('backend.app.admin.auto_review_keys')\n"
+        "assert sys.modules['backend.app.admin.auto_review_keys'] is module\n"
+        "assert importlib.import_module('backend.app.admin.auto_review_keys') "
+        'is module\n'
+        'assert module.AutoReviewKeyAdminService is '
+        "sys.modules['backend.app.admin.auto_review_keys'].AutoReviewKeyAdminService\n"
+    )
+    assert direct.returncode == 0
+    assert direct.stdout == ''
+    assert direct.stderr == ''
+
+    marker = tmp_path / 'key-admin-module-identity.txt'
+    (tmp_path / 'sitecustomize.py').write_text(
+        (
+            'import atexit\n'
+            'import sys\n'
+            'from pathlib import Path\n'
+            f'marker = Path({str(marker)!r})\n'
+            'def verify_identity():\n'
+            "    canonical = sys.modules.get('backend.app.admin.auto_review_keys')\n"
+            "    main = sys.modules.get('__main__')\n"
+            '    valid = (\n'
+            '        canonical is main\n'
+            '        and canonical is not None\n'
+            '        and canonical.AutoReviewKeyAdminService '
+            'is main.AutoReviewKeyAdminService\n'
+            '    )\n'
+            "    marker.write_text('ok' if valid else 'invalid', encoding='utf-8')\n"
+            'atexit.register(verify_identity)\n'
+        ),
+        encoding='utf-8',
+    )
+    module = _run_key_admin_module_cli(
+        'status',
+        pythonpath_entries=(tmp_path,),
+    )
+
+    assert module.returncode == 3
+    assert module.stderr == ''
+    assert json.loads(module.stdout) == {
+        'runtime_generation': None,
+        'runtime_version': None,
+        'runtime_ready': False,
+        'projection_ready': False,
+        'projection_rebuild_required': True,
+        'nonterminal_extraction_count': 0,
+        'nonterminal_validation_count': 0,
+    }
+    assert marker.read_text(encoding='utf-8') == 'ok'
+
+
 def test_key_admin_status_exit_code_tracks_fresh_readiness_without_key_output(
     auto_review_db_session: tuple[Session, Settings],
     monkeypatch: pytest.MonkeyPatch,
@@ -4308,9 +4407,23 @@ def test_key_admin_status_exit_code_tracks_fresh_readiness_without_key_output(
 
     db, settings = auto_review_db_session
     factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
-    runtime = _OwnedRuntimeProbe(factory)
     initialize_calls: list[str] = []
-    _install_owned_runtime(monkeypatch, key_admin, runtime, initialize_calls)
+    runtimes: list[_OwnedRuntimeProbe] = []
+
+    def load_database_contract() -> SimpleNamespace:
+        def initialize(database_url: str) -> _OwnedRuntimeProbe:
+            initialize_calls.append(database_url)
+            runtime = _OwnedRuntimeProbe(factory)
+            runtimes.append(runtime)
+            return runtime
+
+        return SimpleNamespace(
+            initialize=initialize,
+            configuration_error=DatabaseConfigurationError,
+            initialization_error=DatabaseInitializationError,
+        )
+
+    monkeypatch.setattr(key_admin, '_load_database_contract', load_database_contract)
     monkeypatch.setattr(key_admin, 'Settings', lambda: settings)
     assert key_admin.main(['status']) == 0
     healthy_output = capsys.readouterr().out
@@ -4334,7 +4447,9 @@ def test_key_admin_status_exit_code_tracks_fresh_readiness_without_key_output(
     assert '"projection_ready":false' in unhealthy_output
     assert '"projection_rebuild_required":true' in unhealthy_output
     assert len(unhealthy_output) < 500
-    assert runtime.dispose_calls == 2
+    assert initialize_calls == [settings.resolved_database_url()] * 2
+    assert len(runtimes) == 2
+    assert all(runtime.dispose_calls == 1 for runtime in runtimes)
 
 
 def test_projection_rebuild_cli_reports_exact_summary_and_replay(
