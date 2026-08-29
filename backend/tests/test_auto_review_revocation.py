@@ -114,13 +114,14 @@ def test_shared_key_context_cannot_rebind_after_its_root_transaction_ends(
     with KeyedMutationGuard.generation_barrier(db_session):
         key_context = lock_runtime_state(db_session)
         manager.bind_transaction(key_context)
-        original_transaction_id = id(db_session.get_transaction())
+        original_transaction = db_session.get_transaction()
+        assert original_transaction is not None
         db_session.commit()
 
         assert db_session.scalar(
             select(AutoReviewRuntimeKeyState.generation)
         ) == 1
-        assert id(db_session.get_transaction()) != original_transaction_id
+        assert db_session.get_transaction() is not original_transaction
         with pytest.raises(TypeError, match='already bound'):
             manager.bind_transaction(key_context)
         db_session.rollback()
