@@ -35,6 +35,7 @@ from backend.app.models import (
     VectorIndexState,
 )
 from backend.app.rag.indexing import PreviewVectorIndexWriter
+from backend.app.rag.serving_locks import build_serving_lock_plan
 from backend.app.review.auto_review_revoke import (
     SourceInvalidationRevokeContext,
 )
@@ -503,6 +504,56 @@ def test_public_to_internal_reconciliation_narrows_target_and_vector_without_emb
     assert writer.permission_narrowings == [(('history_event:1',), 'internal')]
 
 
+def test_stricter_fingerprint_is_not_permission_authority_or_recovery_work(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    history, _, _, link = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+    )
+    fingerprint = TrustedKnowledgeFingerprint(
+        knowledge_type='history_event',
+        knowledge_id=history.id,
+        security_scope_id='workspace-a',
+        scope_resolution='exact',
+        project_scope_hmac='a' * 64,
+        normalized_title_bucket_hmac='b' * 64,
+        normalized_claim_fingerprint='c' * 64,
+        fingerprint_key_version=link.fingerprint_key_version,
+        fingerprint_key_material_verifier=(link.fingerprint_key_material_verifier),
+        permission_level='restricted',
+        review_status='approved',
+    )
+    db_session.add(fingerprint)
+    db_session.commit()
+    service = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=PreviewVectorIndexWriter(),
+    )
+
+    before = service.status(limit=1)
+    first = service.recover_stale_sources(limit=1)
+    second = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=PreviewVectorIndexWriter(),
+    ).recover_stale_sources(limit=1)
+
+    assert [
+        before.remaining_count,
+        first.remaining_count,
+        second.remaining_count,
+    ] == [0, 0, 0]
+    assert first.reconciled_count == 0
+    assert second.reconciled_count == 0
+    assert fingerprint.permission_level == 'restricted'
+
+
 def test_committed_changed_state_dto_is_frozen_and_reconcile_is_the_public_handoff(
     db_session: Session,
 ) -> None:
@@ -769,6 +820,75 @@ def test_relational_stale_scan_has_constant_query_count_for_large_source(
     assert select_count <= 12
 
 
+def test_relational_stale_scan_rejects_non_string_drive_mime_metadata(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    _, _, source, link = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+    )
+    source.source_type = 'drive'
+    source.raw_metadata = {'mime_type': ['text/plain']}
+    parser_run = (
+        db_session.query(DocumentParserRun).filter_by(source_id=source.id).one()
+    )
+    parser_run.parser_name = 'server_drive_source_event'
+    parser_run.mime_type = 'application/octet-stream'
+    evidence = (
+        db_session.query(TrustedKnowledgeEvidenceLink)
+        .filter_by(approval_link_id=link.id)
+        .one()
+    )
+    evidence.canonical_source_kind = 'drive'
+    db_session.commit()
+
+    result = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+    ).status(limit=1)
+
+    assert result.stale_count == 1
+    assert result.remaining_count == 1
+    assert result.readiness is False
+
+
+def test_relational_stale_scan_rejects_empty_revision_evidence_identity(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    _, _, source, link = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+    )
+    parser_run = (
+        db_session.query(DocumentParserRun).filter_by(source_id=source.id).one()
+    )
+    parser_run.revision_id = ''
+    evidence = (
+        db_session.query(TrustedKnowledgeEvidenceLink)
+        .filter_by(approval_link_id=link.id)
+        .one()
+    )
+    evidence.canonical_version_or_signature = ''
+    db_session.commit()
+
+    result = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+    ).status(limit=1)
+
+    assert result.stale_count == 1
+    assert result.remaining_count == 1
+    assert result.readiness is False
+
+
 def test_recovery_reaches_late_stale_auto_evidence_after_irrelevant_prefix(
     db_session: Session,
 ) -> None:
@@ -932,7 +1052,9 @@ def test_recovery_reaches_permission_drift_after_one_hundred_current_links(
         current_signature='a' * 64,
         evidence_signature='a' * 64,
     )
+    seed_validation = db_session.query(AutoReviewValidation).one()
     drift_target: DecisionRecord | None = None
+    drift_link: TrustedKnowledgeApprovalLink | None = None
     for ordinal in range(101):
         permission = 'public' if ordinal == 100 else 'internal'
         item_type = 'decision_record' if ordinal == 100 else 'history_event'
@@ -944,7 +1066,11 @@ def test_recovery_reaches_permission_drift_after_one_hundred_current_links(
             confidence_score=0.99,
             permission_level=permission,
             status='approved',
+            candidate_contract_version='c5-v1',
             resolution_source='auto_policy',
+            workflow_thread_id=(
+                seed_validation.workflow_thread_id if ordinal == 100 else None
+            ),
         )
         db_session.add(item)
         db_session.flush()
@@ -1009,14 +1135,72 @@ def test_recovery_reaches_permission_drift_after_one_hundred_current_links(
             )
         )
         if ordinal == 100:
+            validation = AutoReviewValidation(
+                review_item_id=item.id,
+                validation_call_id=seed_validation.validation_call_id,
+                workflow_thread_id=seed_validation.workflow_thread_id,
+                validation_key='decision-validation-key',
+                evidence_version_hash=seed_validation.evidence_version_hash,
+                candidate_generation_fingerprint=(
+                    seed_validation.candidate_generation_fingerprint
+                ),
+                status='completed',
+                validator_provider=seed_validation.validator_provider,
+                validator_model=seed_validation.validator_model,
+                reasoning_effort=seed_validation.reasoning_effort,
+                validator_prompt_version=(seed_validation.validator_prompt_version),
+                validator_output_contract_version=(
+                    seed_validation.validator_output_contract_version
+                ),
+                policy_version=seed_validation.policy_version,
+                fingerprint_key_version=(seed_validation.fingerprint_key_version),
+                fingerprint_key_material_verifier=(
+                    seed_validation.fingerprint_key_material_verifier
+                ),
+                cost_policy_version=seed_validation.cost_policy_version,
+                confirmed_validation_cost_ceiling_usd=(
+                    seed_validation.confirmed_validation_cost_ceiling_usd
+                ),
+                claim_results=seed_validation.claim_results,
+                minimum_entailment_score=(seed_validation.minimum_entailment_score),
+                uncertainty_codes=seed_validation.uncertainty_codes,
+                conflict_codes=seed_validation.conflict_codes,
+                policy_decision=seed_validation.policy_decision,
+                policy_reason_codes=seed_validation.policy_reason_codes,
+                input_tokens=seed_validation.input_tokens,
+                output_tokens=seed_validation.output_tokens,
+                estimated_cost_usd=seed_validation.estimated_cost_usd,
+                cache_hit=seed_validation.cache_hit,
+                completed_at=seed_validation.completed_at,
+            )
+            db_session.add(validation)
+            db_session.flush()
+            item.auto_validation_id = validation.id
             drift_target = target
+            drift_link = link
     db_session.commit()
     assert drift_target is not None
+    assert drift_link is not None
+    canonical_document_id = f'decision_record:{drift_target.id}'
+    index_state = VectorIndexState(
+        document_id=canonical_document_id,
+        embedding_model='fake:8',
+        embedding_dimensions=8,
+        content_hash='0' * 64,
+        status='indexed',
+    )
+    db_session.add(index_state)
+    db_session.commit()
+    lock_plan = build_serving_lock_plan(
+        db_session,
+        [f'decision:{drift_target.id}'],
+    )
 
+    writer = PreviewVectorIndexWriter()
     first = AutoReviewSourceReconciliationService(
         db_session,
         settings=Settings(database_url='sqlite://'),
-        vector_writer=PreviewVectorIndexWriter(),
+        vector_writer=writer,
     ).recover_stale_sources(limit=1)
     replay_after_restart = AutoReviewSourceReconciliationService(
         db_session,
@@ -1029,6 +1213,10 @@ def test_recovery_reaches_permission_drift_after_one_hundred_current_links(
     assert first.narrowed_count == 1
     assert first.remaining_count == 0
     assert drift_target.permission_level == 'internal'
+    assert lock_plan.document_ids == (canonical_document_id,)
+    assert drift_link.id in lock_plan.approval_link_ids
+    assert writer.permission_narrowings == [((canonical_document_id,), 'internal')]
+    assert index_state.content_hash != '0' * 64
     assert replay_after_restart.reconciled_count == 0
     assert replay_after_restart.remaining_count == 0
 

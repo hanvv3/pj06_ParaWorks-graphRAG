@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -124,8 +125,17 @@ def postgres_exact_source_authority_sql(
     prefix: str,
     evidence_ref_sql: str | None = None,
     required_chunk_id_sql: str | None = None,
+    dialect: Literal['postgresql', 'sqlite'] = 'postgresql',
 ) -> str:
-    """Build the PostgreSQL equivalent of ``resolve_exact_source_authority``."""
+    """Build a bounded SQL equivalent of ``resolve_exact_source_authority``."""
+    if dialect == 'postgresql':
+        mime_json_type = f"json_typeof({source_alias}.raw_metadata->'mime_type')"
+        string_json_type = 'string'
+    elif dialect == 'sqlite':
+        mime_json_type = f"json_type({source_alias}.raw_metadata, '$.mime_type')"
+        string_json_type = 'text'
+    else:
+        raise ValueError('exact source authority SQL dialect is unsupported')
     allowed_mimes = ', '.join(
         f"'{mime_type}'" for mime_type in sorted(SERVER_ALLOWED_MIME_TYPES)
     )
@@ -144,9 +154,13 @@ def postgres_exact_source_authority_sql(
     evidence_clause = ''
     if evidence_ref_sql is not None:
         evidence_clause = f"""
-            AND {evidence_ref_sql} IN (
-                {source_alias}.server_content_signature,
-                {prefix}_parser_runs.revision_id
+            AND (
+                {evidence_ref_sql} = {source_alias}.server_content_signature
+                OR (
+                    {prefix}_parser_runs.revision_id IS NOT NULL
+                    AND {prefix}_parser_runs.revision_id <> ''
+                    AND {evidence_ref_sql} = {prefix}_parser_runs.revision_id
+                )
             )
         """
     chunk_clause = ''
@@ -165,6 +179,11 @@ def postgres_exact_source_authority_sql(
         {source_alias}.server_content_signature_schema = '{SERVER_SOURCE_CONTENT_SIGNATURE_SCHEMA}'
         AND {source_alias}.server_content_signature IS NOT NULL
         AND {source_alias}.source_type IN ('gmail', 'gmail_attachment', 'drive', 'calendar')
+        AND (
+            {source_alias}.source_type NOT IN ('gmail_attachment', 'drive')
+            OR {mime_json_type} IS NULL
+            OR {mime_json_type} IN ('null', '{string_json_type}')
+        )
         AND (
             SELECT count(*)
             FROM documents {prefix}_all_documents

@@ -20,6 +20,7 @@ from backend.app.db.base import Base
 from backend.app.models import (
     AgentWorkflowEvidenceRef,
     AutoReviewRuntimeKeyState,
+    DecisionRecord,
     Document,
     DocumentChunk,
     DocumentParserRun,
@@ -365,6 +366,168 @@ def test_pgvector_reindex_path_with_fake_embedding() -> None:
             )
             assert persisted_text == serving_documents[0].text
 
+            db.execute(text(f'DROP TABLE IF EXISTS {table_name}'))
+            db.commit()
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+@pytest.mark.parametrize('invalidity', ['non_string_mime', 'empty_revision'])
+@pytest.mark.skipif(
+    not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'),
+    reason='set PARAWORKS_PGVECTOR_TEST_DATABASE_URL to run pgvector integration test',
+)
+def test_pgvector_live_filter_rejects_python_invalid_source_authority(
+    invalidity: str,
+) -> None:
+    database_url = os.environ['PARAWORKS_PGVECTOR_TEST_DATABASE_URL']
+    engine = create_engine(database_url)
+    session_local = sessionmaker(
+        bind=engine, autoflush=False, autocommit=False
+    )
+    table_name = f'rag_vector_documents_test_{uuid4().hex[:8]}'
+    settings = Settings(
+        database_url=database_url,
+        openai_embedding_dimensions=8,
+    )
+    Base.metadata.create_all(engine)
+    try:
+        with session_local() as db:
+            history, _, source, store, document = _seed_pg_schedule(
+                db,
+                table_name=table_name,
+                settings=settings,
+            )
+            indexed = index_changed_vector_documents(
+                db=db,
+                documents=[document],
+                writer=store,
+                embedding_model=DeterministicHashEmbeddingModel(dimensions=8),
+                embedding_model_name='deterministic-hash:authority-parity',
+                settings=settings,
+            )
+            assert indexed.indexed_count == 1
+            parser_run = (
+                db.query(DocumentParserRun).filter_by(source_id=source.id).one()
+            )
+            evidence = (
+                db.query(TrustedKnowledgeEvidenceLink)
+                .join(
+                    TrustedKnowledgeApprovalLink,
+                    TrustedKnowledgeApprovalLink.id
+                    == TrustedKnowledgeEvidenceLink.approval_link_id,
+                )
+                .filter(
+                    TrustedKnowledgeApprovalLink.knowledge_id == history.id,
+                    TrustedKnowledgeApprovalLink.knowledge_type == 'history_event',
+                )
+                .one()
+            )
+            if invalidity == 'non_string_mime':
+                source.source_type = 'drive'
+                source.raw_metadata = {'mime_type': ['text/plain']}
+                parser_run.parser_name = 'server_drive_source_event'
+                parser_run.mime_type = 'application/octet-stream'
+                evidence.canonical_source_kind = 'drive'
+            else:
+                parser_run.revision_id = ''
+                evidence.canonical_version_or_signature = ''
+            db.commit()
+
+            result = store.search_with_embedding(
+                query_embedding=DeterministicHashEmbeddingModel(
+                    dimensions=8
+                ).embed('Exact current evidence'),
+                user=USERS['viewer'],
+                limit=5,
+            )
+
+            assert result.matches == []
+            assert result.hidden_match_count == 0
+            db.execute(text(f'DROP TABLE IF EXISTS {table_name}'))
+            db.commit()
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'),
+    reason='set PARAWORKS_PGVECTOR_TEST_DATABASE_URL to run pgvector integration test',
+)
+def test_pgvector_live_filter_accepts_legacy_decision_link_under_canonical_id(
+) -> None:
+    database_url = os.environ['PARAWORKS_PGVECTOR_TEST_DATABASE_URL']
+    engine = create_engine(database_url)
+    session_local = sessionmaker(
+        bind=engine, autoflush=False, autocommit=False
+    )
+    table_name = f'rag_vector_documents_test_{uuid4().hex[:8]}'
+    settings = Settings(
+        database_url=database_url,
+        openai_embedding_dimensions=8,
+    )
+    Base.metadata.create_all(engine)
+    try:
+        with session_local() as db:
+            history, item, _, store, _ = _seed_pg_schedule(
+                db,
+                table_name=table_name,
+                settings=settings,
+            )
+            decision = DecisionRecord(
+                project_key='project-a',
+                title='Canonical decision',
+                decision_summary='Legacy approval storage remains live',
+                source_links=item.source_links,
+                source_snippets=item.source_snippets,
+                confidence_score=0.99,
+                permission_level='internal',
+                review_status='approved',
+                source_review_item_id=item.id,
+            )
+            db.add(decision)
+            db.flush()
+            link = (
+                db.query(TrustedKnowledgeApprovalLink)
+                .filter_by(
+                    knowledge_type='history_event',
+                    knowledge_id=history.id,
+                )
+                .one()
+            )
+            link.knowledge_type = 'decision'
+            link.knowledge_id = decision.id
+            item.item_type = 'decision_record'
+            db.commit()
+            document_id = f'decision_record:{decision.id}'
+            document = next(
+                candidate
+                for candidate in build_rag_index_documents(db)
+                if candidate.document_id == document_id
+            )
+            indexed = index_changed_vector_documents(
+                db=db,
+                documents=[document],
+                writer=store,
+                embedding_model=DeterministicHashEmbeddingModel(dimensions=8),
+                embedding_model_name='deterministic-hash:legacy-decision',
+                settings=settings,
+            )
+            assert indexed.indexed_count == 1
+
+            result = store.search_with_embedding(
+                query_embedding=DeterministicHashEmbeddingModel(
+                    dimensions=8
+                ).embed('Legacy approval storage remains live'),
+                user=USERS['viewer'],
+                limit=5,
+            )
+
+            assert [match.document.document_id for match in result.matches] == [
+                document_id
+            ]
             db.execute(text(f'DROP TABLE IF EXISTS {table_name}'))
             db.commit()
     finally:

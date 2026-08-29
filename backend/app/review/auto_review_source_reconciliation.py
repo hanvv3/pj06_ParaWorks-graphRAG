@@ -37,6 +37,7 @@ from backend.app.knowledge.trusted_fingerprint_projection import (
 )
 from backend.app.knowledge.trusted_serving_eligibility import (
     canonical_evidence_version_is_current,
+    canonical_knowledge_document_id,
     knowledge_model_for_type,
 )
 from backend.app.models import (
@@ -475,6 +476,7 @@ class AutoReviewSourceReconciliationService:
                         source=source,
                         evidence=evidence,
                         link=link,
+                        sql_dialect=self._db.get_bind().dialect.name,
                     ),
                 )
                 .group_by(evidence.canonical_source_id)
@@ -509,6 +511,7 @@ class AutoReviewSourceReconciliationService:
                         source=source,
                         evidence=evidence,
                         link=link,
+                        sql_dialect=self._db.get_bind().dialect.name,
                     ),
                 )
                 .order_by(evidence.id)
@@ -568,7 +571,10 @@ class AutoReviewSourceReconciliationService:
         link = self._db.get(TrustedKnowledgeApprovalLink, approval_link_id)
         if link is None:
             return 'gone'
-        document_id = f'{link.knowledge_type}:{link.knowledge_id}'
+        document_id = canonical_knowledge_document_id(
+            link.knowledge_type,
+            link.knowledge_id,
+        )
         plan = build_serving_lock_plan(self._db, [document_id])
         self._db.rollback()
         with KeyedMutationGuard.generation_barrier(self._db):
@@ -613,7 +619,8 @@ class AutoReviewSourceReconciliationService:
             link.permission_level = strictest
             item.permission_level = strictest
             fingerprint_changed = self._narrow_fingerprint(
-                document_id=document_id,
+                knowledge_type=link.knowledge_type,
+                knowledge_id=link.knowledge_id,
                 permission_level=strictest,
             )
             changed = any(
@@ -633,12 +640,17 @@ class AutoReviewSourceReconciliationService:
             self._db.commit()
             return 'narrowed' if changed else 'current'
 
-    def _narrow_fingerprint(self, *, document_id: str, permission_level: str) -> bool:
-        knowledge_type, raw_id = document_id.rsplit(':', maxsplit=1)
+    def _narrow_fingerprint(
+        self,
+        *,
+        knowledge_type: str,
+        knowledge_id: int,
+        permission_level: str,
+    ) -> bool:
         row = self._db.scalar(
             select(TrustedKnowledgeFingerprint).where(
                 TrustedKnowledgeFingerprint.knowledge_type == knowledge_type,
-                TrustedKnowledgeFingerprint.knowledge_id == int(raw_id),
+                TrustedKnowledgeFingerprint.knowledge_id == knowledge_id,
             )
         )
         if row is None:
@@ -738,6 +750,7 @@ def _actionable_evidence_predicate(
     source: type[Source],
     evidence: type[TrustedKnowledgeEvidenceLink],
     link: type[TrustedKnowledgeApprovalLink],
+    sql_dialect: str,
 ) -> ColumnElement[bool]:
     return or_(
         source.id.is_(None),
@@ -751,6 +764,7 @@ def _actionable_evidence_predicate(
                 evidence_ref_sql=(
                     'trusted_knowledge_evidence_links.canonical_version_or_signature'
                 ),
+                dialect=sql_dialect,
             )
             + ')',
             type_=Boolean,
@@ -815,47 +829,53 @@ def _permission_drift_predicate(
     optional_permissions: tuple[ColumnElement[str], ...],
 ) -> ColumnElement[bool]:
     known_permissions = tuple(_PERMISSION_RANK)
-    columns = tuple((permission, False) for permission in required_permissions) + tuple(
-        (permission, True) for permission in optional_permissions
-    )
     predicates: list[ColumnElement[bool]] = []
-    for permission, optional in columns:
-        present = permission.is_not(None) if optional else literal(True)
-        predicates.append(and_(present, permission.not_in(known_permissions)))
+    for permission in required_permissions:
+        predicates.append(permission.not_in(known_permissions))
         predicates.append(
-            and_(
-                present,
+            or_(
+                and_(
+                    permission == 'public',
+                    source_permission.in_(('internal', 'restricted')),
+                ),
+                and_(
+                    permission == 'internal',
+                    source_permission == 'restricted',
+                ),
+                source_permission.not_in(known_permissions),
+            )
+        )
+        for other in required_permissions:
+            if other is permission:
+                continue
+            predicates.append(
                 or_(
                     and_(
                         permission == 'public',
-                        source_permission.in_(('internal', 'restricted')),
+                        other.in_(('internal', 'restricted')),
                     ),
-                    and_(
-                        permission == 'internal',
-                        source_permission == 'restricted',
-                    ),
-                    source_permission.not_in(known_permissions),
-                ),
+                    and_(permission == 'internal', other == 'restricted'),
+                    other.not_in(known_permissions),
+                )
             )
-        )
-        for other, other_optional in columns:
-            if other is permission:
-                continue
-            other_present = other.is_not(None) if other_optional else literal(True)
+    for permission in optional_permissions:
+        present = permission.is_not(None)
+        predicates.append(and_(present, permission.not_in(known_permissions)))
+        stricter_authorities = (source_permission, *required_permissions)
+        for authority in stricter_authorities:
             predicates.append(
                 and_(
                     present,
-                    other_present,
                     or_(
                         and_(
                             permission == 'public',
-                            other.in_(('internal', 'restricted')),
+                            authority.in_(('internal', 'restricted')),
                         ),
                         and_(
                             permission == 'internal',
-                            other == 'restricted',
+                            authority == 'restricted',
                         ),
-                        other.not_in(known_permissions),
+                        authority.not_in(known_permissions),
                     ),
                 )
             )

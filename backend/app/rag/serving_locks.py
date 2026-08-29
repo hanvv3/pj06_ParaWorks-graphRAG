@@ -17,19 +17,20 @@ from backend.app.agent_runtime.keyed_mutation_guard import (
 )
 from backend.app.agent_runtime.review_v2_preflight import advisory_key_from_hmac
 from backend.app.core.config import Settings
+from backend.app.knowledge.trusted_serving_eligibility import (
+    canonical_knowledge_type,
+    knowledge_model_for_type,
+    knowledge_type_storage_aliases,
+)
 from backend.app.models import (
     AgentWorkflowThread,
     AutoReviewAuditCorrection,
     AutoReviewPostAudit,
     AutoReviewRolloutState,
     AutoReviewRuntimeKeyState,
-    DecisionRecord,
     DocumentChunk,
-    HistoryEvent,
     ReviewItem,
     Source,
-    TimelineEvent,
-    Todo,
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
     VectorIndexState,
@@ -143,8 +144,9 @@ def build_serving_lock_plan(
         links = tuple(
             db.scalars(
                 select(TrustedKnowledgeApprovalLink).where(
-                    TrustedKnowledgeApprovalLink.knowledge_type
-                    == knowledge_type,
+                    TrustedKnowledgeApprovalLink.knowledge_type.in_(
+                        knowledge_type_storage_aliases(knowledge_type)
+                    ),
                     TrustedKnowledgeApprovalLink.knowledge_id == row_id,
                     TrustedKnowledgeApprovalLink.active.is_(True),
                 )
@@ -505,20 +507,19 @@ class VectorServingLockManager:
 def _normalize_document_ids(document_ids: Sequence[str]) -> tuple[str, ...]:
     if any(not isinstance(value, str) or not value.strip() for value in document_ids):
         raise ValueError('Serving document ids must be non-empty strings')
-    return tuple(sorted(set(document_ids)))
+    normalized: set[str] = set()
+    for document_id in document_ids:
+        knowledge_type, separator, raw_id = document_id.partition(':')
+        normalized.add(
+            f'{canonical_knowledge_type(knowledge_type)}:{raw_id}'
+            if separator
+            else document_id
+        )
+    return tuple(sorted(normalized))
 
 
 def _knowledge_model(knowledge_type: str) -> type:
-    try:
-        return {
-            'decision_record': DecisionRecord,
-            'decision': DecisionRecord,
-            'history_event': HistoryEvent,
-            'timeline_event': TimelineEvent,
-            'todo': Todo,
-        }[knowledge_type]
-    except KeyError:
-        raise ValueError('trusted knowledge type is unsupported') from None
+    return knowledge_model_for_type(knowledge_type)
 
 
 def _ensure_transaction_cleanup_listener(db: Session) -> None:

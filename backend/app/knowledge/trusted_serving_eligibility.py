@@ -134,7 +134,10 @@ class TrustedServingEligibilityService:
                 link.knowledge_id,
             )
             item = self._db.get(ReviewItem, link.review_item_id)
-            document_id = f'{link.knowledge_type}:{link.knowledge_id}'
+            document_id = canonical_knowledge_document_id(
+                link.knowledge_type,
+                link.knowledge_id,
+            )
             if (
                 target is None
                 or target.review_status != 'approved'
@@ -182,9 +185,13 @@ class TrustedServingEligibilityService:
     def _for_knowledge(
         self, knowledge_type: str, knowledge_id: int
     ) -> TrustedServingEligibility:
-        model = knowledge_model_for_type(knowledge_type)
+        canonical_type = canonical_knowledge_type(knowledge_type)
+        model = knowledge_model_for_type(canonical_type)
         target = self._db.get(model, knowledge_id)
-        document_id = f'{knowledge_type}:{knowledge_id}'
+        document_id = canonical_knowledge_document_id(
+            canonical_type,
+            knowledge_id,
+        )
         if (
             target is None
             or target.review_status != 'approved'
@@ -202,7 +209,9 @@ class TrustedServingEligibilityService:
             self._db.scalars(
                 select(TrustedKnowledgeApprovalLink)
                 .where(
-                    TrustedKnowledgeApprovalLink.knowledge_type == knowledge_type,
+                    TrustedKnowledgeApprovalLink.knowledge_type.in_(
+                        knowledge_type_storage_aliases(canonical_type)
+                    ),
                     TrustedKnowledgeApprovalLink.knowledge_id == knowledge_id,
                     TrustedKnowledgeApprovalLink.active.is_(True),
                 )
@@ -365,16 +374,34 @@ class _EvidenceEligibility:
 
 
 def knowledge_model_for_type(knowledge_type: str) -> type:
+    canonical_type = canonical_knowledge_type(knowledge_type)
     try:
         return {
             'decision_record': DecisionRecord,
-            'decision': DecisionRecord,
             'history_event': HistoryEvent,
             'timeline_event': TimelineEvent,
             'todo': Todo,
-        }[knowledge_type]
+        }[canonical_type]
     except KeyError:
         raise ValueError('trusted knowledge type is unsupported') from None
+
+
+def canonical_knowledge_type(knowledge_type: str) -> str:
+    return 'decision_record' if knowledge_type == 'decision' else knowledge_type
+
+
+def knowledge_type_storage_aliases(knowledge_type: str) -> tuple[str, ...]:
+    canonical_type = canonical_knowledge_type(knowledge_type)
+    if canonical_type == 'decision_record':
+        return ('decision', 'decision_record')
+    return (canonical_type,)
+
+
+def canonical_knowledge_document_id(
+    knowledge_type: str,
+    knowledge_id: int,
+) -> str:
+    return f'{canonical_knowledge_type(knowledge_type)}:{knowledge_id}'
 
 
 def canonical_evidence_version_is_current(

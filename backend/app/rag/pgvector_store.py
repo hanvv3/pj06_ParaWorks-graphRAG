@@ -12,6 +12,9 @@ from backend.app.core.demo_auth import DemoUser
 from backend.app.ingestion.source_authority import (
     postgres_exact_source_authority_sql,
 )
+from backend.app.knowledge.trusted_serving_eligibility import (
+    knowledge_type_storage_aliases,
+)
 from backend.app.rag.serving_locks import (
     VectorServingLockedContext,
     VectorServingLockManager,
@@ -382,6 +385,9 @@ class PgVectorStore:
         vector_rank: str,
         permission_rank: str,
     ) -> str:
+        stored_knowledge_types = ', '.join(
+            f"'{alias}'" for alias in knowledge_type_storage_aliases(knowledge_type)
+        )
         target_rank = permission_rank.format(
             value='knowledge_targets.permission_level'
         )
@@ -423,7 +429,7 @@ class PgVectorStore:
                       JOIN review_items effect_reviews
                         ON effect_reviews.id = approval_links.review_item_id
                       WHERE approval_links.active = true
-                        AND approval_links.knowledge_type = '{knowledge_type}'
+                        AND approval_links.knowledge_type IN ({stored_knowledge_types})
                         AND approval_links.knowledge_id = knowledge_targets.id
                         AND effect_reviews.status = 'approved'
                         AND effect_reviews.resolution_source = approval_links.resolution_source
