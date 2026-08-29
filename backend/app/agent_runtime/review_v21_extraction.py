@@ -53,6 +53,7 @@ from backend.app.models.auto_review import (
     AutoReviewExtractionCall,
     AutoReviewProviderSafetyEvent,
     AutoReviewProviderSafetyState,
+    AutoReviewRuntimeKeyState,
     AutoReviewValidationCall,
     ReviewItemEvidenceRef,
 )
@@ -2268,7 +2269,12 @@ class ExtractionCallStore:
 
     @staticmethod
     def _runtime_key_matches(db: Session, request: AgentWorkflowRequest) -> bool:
-        runtime = KeyedMutationGuard.lock_runtime_key_state(db, for_update=False)
+        runtime = db.scalar(
+            select(AutoReviewRuntimeKeyState).where(
+                AutoReviewRuntimeKeyState.component
+                == 'auto_review_trust_promotion'
+            )
+        )
         return bool(
             runtime is not None
             and runtime.ready
