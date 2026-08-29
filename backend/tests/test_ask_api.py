@@ -1,4 +1,49 @@
-from backend.app.models import AgentRun, DecisionRecord, ReviewItem, Source
+from hashlib import sha256
+
+from backend.app.models import (
+    AgentRun,
+    DecisionRecord,
+    Document,
+    DocumentChunk,
+    DocumentParserRun,
+    DocumentVersion,
+    ReviewItem,
+    Source,
+)
+
+
+def _establish_c5_source_authority(db_session) -> None:
+    for source in db_session.query(Source).all():
+        signature = sha256(source.source_id.encode()).hexdigest()
+        document = db_session.query(Document).filter_by(source_id=source.id).one()
+        version = (
+            db_session.query(DocumentVersion)
+            .filter_by(document_id=document.id)
+            .one()
+        )
+        parser_run = (
+            db_session.query(DocumentParserRun)
+            .filter_by(
+                document_id=document.id,
+                document_version_id=version.id,
+                source_id=source.id,
+            )
+            .one()
+        )
+        source.server_content_signature_schema = 'server-source-content:v1'
+        source.server_content_signature = signature
+        document.current_document_version_id = version.id
+        parser_run.server_content_signature_schema = 'server-source-content:v1'
+        parser_run.server_content_signature = signature
+        parser_run.parser_policy_version = 'parser-policy:v1'
+        parser_run.parser_version = 'source-event:v1'
+        parser_run.chunk_policy_version = 'chunk-policy:v1'
+        for chunk in db_session.query(DocumentChunk).filter_by(
+            source_id=source.id,
+            version_id=version.id,
+        ):
+            chunk.parser_run_id = parser_run.id
+    db_session.commit()
 
 
 def _human_approve_synced_sources(db_session) -> None:
@@ -20,6 +65,7 @@ def _human_approve_synced_sources(db_session) -> None:
 
 def test_ask_api_answers_with_visible_sources(client, db_session) -> None:
     client.post('/api/v1/integrations/gmail/sync')
+    _establish_c5_source_authority(db_session)
     _human_approve_synced_sources(db_session)
 
     response = client.post(
@@ -42,6 +88,7 @@ def test_ask_api_answers_with_visible_sources(client, db_session) -> None:
 
 def test_ask_api_respects_viewer_permissions(client, db_session) -> None:
     client.post('/api/v1/integrations/drive/sync')
+    _establish_c5_source_authority(db_session)
     _human_approve_synced_sources(db_session)
 
     response = client.post(

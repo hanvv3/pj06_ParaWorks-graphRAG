@@ -1,6 +1,6 @@
 from backend.app.api.v1 import search as search_api
 from backend.app.core.demo_auth import DemoUser
-from backend.app.models import DocumentChunk, ReviewItem, Source
+from backend.app.models import DocumentChunk
 from backend.app.rag.vector_store import VectorDocument, VectorMatch, VectorSearchResult
 from backend.tests.test_rag_orchestrator_service import seed_chunk
 
@@ -8,21 +8,13 @@ from backend.tests.test_rag_orchestrator_service import seed_chunk
 def test_search_response_discloses_default_deterministic_retrieval_backend(
     client, db_session
 ) -> None:
-    client.post('/api/v1/integrations/gmail/sync')
-    for source in db_session.query(Source).all():
-        db_session.add(
-            ReviewItem(
-                item_type='source_evidence',
-                payload={'source_ids': [source.source_id]},
-                source_links=[source.source_url],
-                source_snippets=[source.title],
-                confidence_score=1.0,
-                permission_level=source.permission_level,
-                status='approved',
-                resolution_source='human',
-            )
-        )
-    db_session.commit()
+    seed_chunk(
+        db_session,
+        'gmail',
+        'gmail-search-backend',
+        'Redis job state is stored as exact current evidence.',
+        'internal',
+    )
 
     response = client.post('/api/v1/search', json={'query': 'Redis job state'})
 

@@ -13,16 +13,17 @@ from backend.app.agent_runtime.fingerprints import (
 )
 from backend.app.agent_runtime.keyed_mutation_guard import (
     KeyedMutationGuard,
-    acquire_projection,
     lock_runtime_state,
 )
 from backend.app.core.config import Settings
 from backend.app.knowledge.trusted_provenance import has_legacy_human_base
 from backend.app.knowledge.trusted_serving_eligibility import (
+    TrustedServingEligibilityService,
     canonical_evidence_version_is_current,
     knowledge_model_for_type,
 )
 from backend.app.models import (
+    AutoReviewAuditCorrection,
     AutoReviewPostAudit,
     AutoReviewRevocationAssessment,
     AutoReviewValidation,
@@ -36,7 +37,10 @@ from backend.app.models import (
     VectorServingTombstone,
 )
 from backend.app.rag.indexing import VectorIndexWriter
-from backend.app.rag.serving_locks import VectorServingLockManager
+from backend.app.rag.serving_locks import (
+    ServingMutationLockCoordinator,
+    build_serving_lock_plan,
+)
 from backend.app.review.actors import (
     ReviewResolutionActor,
     _assert_review_resolution_actor,
@@ -177,17 +181,44 @@ class AutoReviewRevokeService:
             if reason_code != 'business_withdrawal':
                 raise AutoReviewRevokeRefused('quality_audit_required')
 
+        planned_links = tuple(
+            self._db.scalars(
+                select(TrustedKnowledgeApprovalLink).where(
+                    TrustedKnowledgeApprovalLink.review_item_id == review_item_id
+                )
+            ).all()
+        )
+        planned_documents = sorted({
+            f'{link.knowledge_type}:{link.knowledge_id}'
+            for link in planned_links
+        })
+        if not planned_documents:
+            raise AutoReviewRevokeRefused('incomplete_auto_approval')
+        plan = build_serving_lock_plan(
+            self._db,
+            planned_documents,
+            extra_review_item_ids=(review_item_id,),
+        )
+        self._db.rollback()
         with KeyedMutationGuard.generation_barrier(self._db):
             key_context = lock_runtime_state(self._db)
             if key_context is None:
                 raise AutoReviewRevokeRefused('key_runtime_unavailable')
-            acquire_projection(self._db, key_context)
-            item = self._lock_item(review_item_id)
+            locked_context = ServingMutationLockCoordinator(
+                db=self._db, settings=self._settings
+            ).acquire(key_context=key_context, plan=plan)
+            item = self._db.get(ReviewItem, review_item_id)
             if item is None:
                 raise AutoReviewRevokeRefused('not_found')
             if (
                 not system_invalidation
-                and item.permission_level not in actor.allowed_permission_levels
+                and (
+                    item.permission_level not in actor.allowed_permission_levels
+                    or (
+                        item.status != 'revoked'
+                        and not self._actor_can_access_current_evidence(item, actor)
+                    )
+                )
             ):
                 raise AutoReviewRevokeRefused('not_found')
 
@@ -257,19 +288,6 @@ class AutoReviewRevokeService:
                 )
 
             documents_to_revoke = sorted(set(documents_to_revoke))
-            lock_manager = VectorServingLockManager(
-                db=self._db,
-                settings=self._settings,
-            )
-            locked_context = None
-            if documents_to_revoke:
-                locked_context = lock_manager.acquire_documents(
-                    key_context, documents_to_revoke
-                )
-                lock_manager.validate_locked_context(
-                    locked_context, documents_to_revoke
-                )
-
             tombstone_count = 0
             for document_id in documents_to_revoke:
                 tombstone = self._db.scalar(
@@ -383,6 +401,13 @@ class AutoReviewRevokeService:
             raise AutoReviewRevokeRefused('incomplete_auto_approval')
 
     def _validate_audit_gate(self, review_item_id: int) -> None:
+        correction = self._db.scalar(
+            select(AutoReviewAuditCorrection).where(
+                AutoReviewAuditCorrection.review_item_id == review_item_id
+            )
+        )
+        if correction is not None:
+            raise AutoReviewRevokeRefused('audit_required')
         audit = self._db.scalar(
             select(AutoReviewPostAudit).where(
                 AutoReviewPostAudit.review_item_id == review_item_id
@@ -506,7 +531,7 @@ class AutoReviewRevokeService:
     def _target_has_other_provenance(
         self, selected: TrustedKnowledgeApprovalLink
     ) -> bool:
-        remaining = self._db.scalar(
+        remaining = tuple(self._db.scalars(
             select(TrustedKnowledgeApprovalLink.id).where(
                 TrustedKnowledgeApprovalLink.knowledge_type
                 == selected.knowledge_type,
@@ -514,12 +539,62 @@ class AutoReviewRevokeService:
                 TrustedKnowledgeApprovalLink.id != selected.id,
                 TrustedKnowledgeApprovalLink.active.is_(True),
             )
-        )
-        return remaining is not None or has_legacy_human_base(
+        ).all())
+        eligibility = TrustedServingEligibilityService(self._db)
+        return any(
+            eligibility.approval_link_is_live(link_id)
+            for link_id in remaining
+        ) or has_legacy_human_base(
             self._db,
             knowledge_type=selected.knowledge_type,
             knowledge_id=selected.knowledge_id,
         )
+
+    def _actor_can_access_current_evidence(
+        self,
+        item: ReviewItem,
+        actor: ReviewResolutionActor,
+    ) -> bool:
+        if item.permission_level not in actor.allowed_permission_levels:
+            return False
+        links = tuple(
+            self._db.scalars(
+                select(TrustedKnowledgeApprovalLink).where(
+                    TrustedKnowledgeApprovalLink.review_item_id == item.id,
+                    TrustedKnowledgeApprovalLink.active.is_(True),
+                )
+            ).all()
+        )
+        if not links:
+            return False
+        children = tuple(
+            self._db.scalars(
+                select(TrustedKnowledgeEvidenceLink).where(
+                    TrustedKnowledgeEvidenceLink.approval_link_id.in_(
+                        [link.id for link in links]
+                    )
+                )
+            ).all()
+        )
+        if not children:
+            return False
+        for child in children:
+            try:
+                source = self._db.get(Source, int(child.canonical_source_id))
+            except ValueError:
+                return False
+            if (
+                source is None
+                or source.permission_level not in actor.allowed_permission_levels
+                or source.source_type != child.canonical_source_kind
+                or not canonical_evidence_version_is_current(
+                    self._db,
+                    source=source,
+                    version_or_signature=child.canonical_version_or_signature,
+                )
+            ):
+                return False
+        return True
 
     def _create_assessment(
         self,

@@ -37,6 +37,7 @@ from backend.app.assistant.recipient_resolver import resolve_email_recipients
 from backend.app.assistant.service import (
     append_assistant_message,
     append_user_message,
+    assistant_message_evidence_is_live,
     build_contextual_question,
     create_conversation,
     eligible_context_messages,
@@ -646,6 +647,8 @@ def create_assistant_message(
             ),
         )
         rag_context = recent_assistant_context
+        email_serving_dependencies: tuple[object, ...] = ()
+        email_evidence_derived = False
         if email_intent.requires_rag_result:
             answer = _answer_question_or_raise(
                 db=db,
@@ -657,6 +660,8 @@ def create_assistant_message(
                 tool_logger=tool_logger,
             )
             rag_context = _render_rag_answer_for_email(answer)
+            email_serving_dependencies = answer.serving_dependencies
+            email_evidence_derived = True
 
         tool_logger.log(
             'email_draft_composer',
@@ -700,6 +705,8 @@ def create_assistant_message(
                     'confidence_score': email_decision.confidence_score,
                     'requires_rag_result': email_intent.requires_rag_result,
                 },
+                serving_dependencies=email_serving_dependencies,
+                evidence_derived=email_evidence_derived,
             )
             return {
                 'conversation': serialize_conversation(
@@ -840,6 +847,10 @@ def send_assistant_email_draft(
         }
     if metadata.get('status') != 'pending_approval':
         raise HTTPException(status_code=409, detail='email draft is not pending approval')
+    if metadata.get('evidence_derived') is True and not (
+        assistant_message_evidence_is_live(db, user=user, message=message)
+    ):
+        raise HTTPException(status_code=409, detail='email draft evidence is unavailable')
 
     try:
         result = GmailDraftSender(settings=settings).send(

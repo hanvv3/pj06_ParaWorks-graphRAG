@@ -123,11 +123,10 @@ def answer_question_with_rag(
     dependency_snapshots: list[ServingDependencySnapshot] = []
     for candidate in visible_candidates:
         snapshot = build_serving_dependency_snapshot(db, candidate)
-        if snapshot is None and _requires_exact_snapshot(db, candidate):
+        if snapshot is None:
             continue
         snapshotted_candidates.append(candidate)
-        if snapshot is not None:
-            dependency_snapshots.append(snapshot)
+        dependency_snapshots.append(snapshot)
     visible_candidates = snapshotted_candidates
     packet = build_rag_evidence_packet(
         candidates=visible_candidates,
@@ -414,51 +413,10 @@ def filter_live_serving_candidates(
         projected = replace(
             candidate, permission_level=result.effective_permission
         )
-        if (
-            _requires_exact_snapshot(db, projected)
-            and build_serving_dependency_snapshot(db, projected) is None
-        ):
+        if build_serving_dependency_snapshot(db, projected) is None:
             continue
         visible.append(projected)
     return visible
-
-def _requires_exact_snapshot(
-    db: Session, candidate: RagEvidenceCandidate
-) -> bool:
-    chunk_id = candidate.metadata.get('chunk_id')
-    if isinstance(chunk_id, int):
-        chunk = db.get(DocumentChunk, chunk_id)
-        source = db.get(Source, chunk.source_id) if chunk is not None else None
-        return bool(source is not None and source.server_content_signature_schema)
-    if ':' not in candidate.source_id:
-        return False
-    knowledge_type, raw_id = candidate.source_id.split(':', maxsplit=1)
-    try:
-        knowledge_id = int(raw_id)
-        target = db.get(knowledge_model_for_type(knowledge_type), knowledge_id)
-    except ValueError:
-        return False
-    if target is None:
-        return False
-    active_link = db.scalar(
-        select(TrustedKnowledgeApprovalLink.id).where(
-            TrustedKnowledgeApprovalLink.knowledge_type == knowledge_type,
-            TrustedKnowledgeApprovalLink.knowledge_id == knowledge_id,
-            TrustedKnowledgeApprovalLink.active.is_(True),
-        )
-    )
-    source_item = (
-        db.get(ReviewItem, target.source_review_item_id)
-        if target.source_review_item_id is not None
-        else None
-    )
-    return bool(
-        active_link is not None
-        or (
-            source_item is not None
-            and source_item.candidate_contract_version == 'c5-v1'
-        )
-    )
 
 
 def build_serving_dependency_snapshot(
@@ -479,10 +437,16 @@ def build_serving_dependency_snapshot(
             or parser_run is None
             or source is None
             or document is None
+            or document.source_id != source.id
             or document.current_document_version_id != version.id
+            or parser_run.document_id != document.id
+            or parser_run.document_version_id != version.id
+            or parser_run.source_id != source.id
             or source.server_content_signature_schema
             != 'server-source-content:v1'
             or source.server_content_signature is None
+            or parser_run.server_content_signature_schema
+            != 'server-source-content:v1'
             or parser_run.server_content_signature
             != source.server_content_signature
             or not parser_run.parser_policy_version
@@ -574,6 +538,16 @@ def build_serving_dependency_snapshot(
             )
     source_item_id = getattr(target, 'source_review_item_id', None)
     item = db.get(ReviewItem, source_item_id) if source_item_id else None
+    if source_item_id is None:
+        return ServingDependencySnapshot(
+            serving_document_id=candidate.source_id,
+            dependency_kind='trusted_knowledge',
+            serving_content_hash=content_hash,
+            permission_level=candidate.permission_level,
+            knowledge_type=knowledge_type,
+            knowledge_id=knowledge_id,
+            legacy_human_base=True,
+        )
     if (
         item is None
         or item.status != 'approved'

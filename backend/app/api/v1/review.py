@@ -60,7 +60,7 @@ def _review_item_response(
     evidence: ReviewEvidenceProjection | None = None,
 ) -> dict:
     agent_run_id = _agent_run_id(item)
-    
+
     # 에이전트 실행 상세 정보 추출
     agent_details = {
         'model_name': None,
@@ -68,7 +68,12 @@ def _review_item_response(
         'estimated_cost_usd': None,
         'total_tokens': 0,
     }
-    
+
+    evidence_available = evidence is None or evidence.evidence_available
+    if not evidence_available:
+        agent_run_id = None
+        agent_run = None
+
     if agent_run:
         agent_details.update({
             'model_name': agent_run.model_name or 'gpt-4o-mini',
@@ -77,7 +82,6 @@ def _review_item_response(
             'total_tokens': agent_run.total_tokens or 0,
         })
 
-    evidence_available = evidence is None or evidence.evidence_available
     return {
         'id': item.id,
         'item_type': item.item_type,
@@ -98,7 +102,7 @@ def _review_item_response(
         ),
         'action_required': evidence.action_required if evidence else False,
         'agent_run_id': agent_run_id,
-        'agent_run_details': agent_details, # 상세 정보 추가
+        'agent_run_details': agent_details,  # 상세 정보 추가
         'confidence_score': item.confidence_score,
         'permission_level': (
             evidence.effective_permission
@@ -112,11 +116,19 @@ def _review_item_response(
 
 def _payload_without_source_fields(payload: dict) -> dict:
     concealed_tokens = ('source', 'evidence', 'snippet', 'url', 'link')
-    return {
+    projected = {
         key: value
         for key, value in (payload or {}).items()
         if not any(token in key.lower() for token in concealed_tokens)
     }
+    request = (payload or {}).get('needs_more_evidence')
+    if isinstance(request, dict):
+        projected['needs_more_evidence'] = {
+            key: request[key]
+            for key in ('requested_at', 'requested_by', 'note', 'previous_status')
+            if key in request
+        }
+    return projected
 
 
 @router.get('')

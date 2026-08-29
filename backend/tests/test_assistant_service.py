@@ -289,6 +289,33 @@ def test_pre_c5_unbound_evidence_answer_is_audit_only_but_non_evidence_operation
     assert visible['content'] == 'Recipient clarification required'
 
 
+def test_evidence_derived_email_draft_without_exact_dependencies_fails_closed(
+    db_session: Session,
+) -> None:
+    viewer = USERS['viewer']
+    conversation = create_conversation(db_session, viewer, title='RAG email')
+
+    with pytest.raises(ValueError, match='complete serving dependencies'):
+        append_assistant_message(
+            db_session,
+            viewer,
+            conversation,
+            content='Evidence-derived email bytes',
+            citations=[],
+            source_ids=[],
+            source_links=[],
+            source_snippets=[],
+            permission_level=None,
+            hidden_match_count=0,
+            permission_notice=None,
+            agent_run_id=None,
+            metadata={'action_type': 'email_draft'},
+            evidence_derived=True,
+        )
+
+    assert db_session.query(AssistantMessage).count() == 0
+
+
 def test_rag_answer_persists_complete_exact_dependencies_with_message_atomically(
     db_session: Session,
 ) -> None:

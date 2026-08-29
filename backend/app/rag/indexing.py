@@ -29,7 +29,10 @@ from backend.app.models import (
     VectorServingTombstone,
 )
 from backend.app.rag.embeddings import EmbeddingBatchResult, EmbeddingModel
-from backend.app.rag.serving_locks import VectorServingLockManager
+from backend.app.rag.serving_locks import (
+    ServingMutationLockCoordinator,
+    build_serving_lock_plan,
+)
 from backend.app.rag.vector_store import VectorDocument
 
 
@@ -126,6 +129,20 @@ def index_changed_vector_documents(
     changed_documents: list[tuple[VectorDocument, str, VectorIndexState | None]] = []
     skipped_document_ids: list[str] = []
     embedding_dimensions = _model_dimensions(embedding_model)
+    production_pgvector = (
+        writer.__class__.__name__ == 'PgVectorStore'
+        and db.get_bind().dialect.name == 'postgresql'
+    )
+    if production_pgvector and settings is None:
+        raise ValueError('PostgreSQL indexing requires serving-lock settings')
+    canonical_live_documents = (
+        {
+            document.document_id: document
+            for document in build_rag_index_documents(db)
+        }
+        if production_pgvector
+        else {}
+    )
 
     tombstoned_document_ids = set(
         db.scalars(
@@ -141,6 +158,15 @@ def index_changed_vector_documents(
         if document.document_id in tombstoned_document_ids:
             skipped_document_ids.append(document.document_id)
             continue
+        if production_pgvector:
+            canonical = canonical_live_documents.get(document.document_id)
+            if (
+                canonical is None
+                or compute_vector_document_hash(canonical)
+                != compute_vector_document_hash(document)
+            ):
+                skipped_document_ids.append(document.document_id)
+                continue
         content_hash = compute_vector_document_hash(document)
         state = _get_index_state(
             db=db,
@@ -163,13 +189,7 @@ def index_changed_vector_documents(
     if enforce_embedding_budget and budget_decision['action'] == 'block':
         raise EmbeddingBudgetExceededError(budget_decision)
 
-    production_pgvector = (
-        writer.__class__.__name__ == 'PgVectorStore'
-        and db.get_bind().dialect.name == 'postgresql'
-    )
     if production_pgvector:
-        if settings is None:
-            raise ValueError('PostgreSQL indexing requires serving-lock settings')
         # Provider work must not hold an application transaction or advisory lock.
         db.rollback()
     batch = (
@@ -254,12 +274,32 @@ def _persist_locked_pgvector_batch(
             embedding_total_tokens=batch.total_tokens,
             embedding_budget=budget_decision,
         )
+    plan = build_serving_lock_plan(db, document_ids)
     with KeyedMutationGuard.generation_barrier(db):
         key_context = lock_runtime_state(db)
         if key_context is None:
             raise ValueError('PostgreSQL indexing key runtime unavailable')
-        lock_manager = VectorServingLockManager(db=db, settings=settings)
-        locked = lock_manager.acquire_documents(key_context, document_ids)
+        try:
+            locked = ServingMutationLockCoordinator(
+                db=db, settings=settings
+            ).acquire(key_context=key_context, plan=plan)
+        except RuntimeError as exc:
+            if str(exc) != 'Serving mutation dependency plan changed':
+                raise
+            db.rollback()
+            stale_skips.extend(document_ids)
+            return VectorIndexResult(
+                indexed_count=0,
+                document_ids=[],
+                embedding_dimensions=embedding_dimensions,
+                skipped_count=len(stale_skips),
+                skipped_document_ids=stale_skips,
+                saved_embedding_calls=len(stale_skips),
+                embedding_request_count=batch.request_count,
+                embedding_prompt_tokens=batch.prompt_tokens,
+                embedding_total_tokens=batch.total_tokens,
+                embedding_budget=budget_decision,
+            )
         eligibility = TrustedServingEligibilityService(db)
         for (document, content_hash, _), embedding in zip(
             changed_documents, embeddings, strict=True

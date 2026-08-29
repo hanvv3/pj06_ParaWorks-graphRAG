@@ -14,6 +14,7 @@ from backend.app.models import (
     AutoReviewRolloutState,
     AutoReviewRuntimeKeyState,
     AutoReviewValidation,
+    AutoReviewValidationCall,
     Document,
     DocumentParserRun,
     DocumentVersion,
@@ -81,13 +82,60 @@ def _seed_explicit_history(
         candidate_contract_version='c5-v1',
         resolution_source=resolution_source,
         resolution_policy_version='auto-review-policy:v1',
+        workflow_thread_id=(
+            'workflow-c5' if resolution_source == 'auto_policy' else None
+        ),
     )
     db.add_all([source, item])
     db.flush()
     if resolution_source == 'auto_policy':
+        validation_call_id = 1
+        if db.get_bind().dialect.name == 'postgresql':
+            call = AutoReviewValidationCall(
+                workflow_thread_id='workflow-c5',
+                batch_fingerprint='b' * 64,
+                status='failed',
+                candidate_count=1,
+                max_provider_attempts=1,
+                provider_attempt_count=0,
+                attempt_started_at=None,
+                reserved_input_tokens=0,
+                reserved_output_tokens=0,
+                reserved_cost_usd=Decimal('0'),
+                charged_input_tokens=0,
+                charged_output_tokens=0,
+                charged_cost_usd=Decimal('0'),
+                prepared_content_hmac='a' * 64,
+                serialized_character_count=1,
+                framed_input_token_count=1,
+                max_output_tokens=1,
+                token_estimator_version='test:v1',
+                tokenizer_encoding='test',
+                reply_priming_tokens=0,
+                framing_safety_tokens=0,
+                input_usd_per_1m=Decimal('0'),
+                output_usd_per_1m=Decimal('0'),
+                cost_policy_version='auto-review-cost:v1',
+                provider_safety_state_version=1,
+                fingerprint_key_version='v1',
+                fingerprint_key_material_verifier=key_verifier,
+                workflow_extraction_cost_ceiling_usd=Decimal('0'),
+                workflow_validation_cost_ceiling_usd=Decimal('0'),
+                workflow_total_cost_ceiling_usd=Decimal('0'),
+                provider_timeout_seconds=1,
+                provider_send_start_window_seconds=1,
+                provider_attempt_lease_seconds=1,
+                provider_commit_grace_seconds=1,
+                budget_overrun=False,
+                budget_overrun_cost_usd=Decimal('0'),
+                terminal_at=datetime.now(UTC),
+            )
+            db.add(call)
+            db.flush([call])
+            validation_call_id = call.id
         validation = AutoReviewValidation(
             review_item_id=item.id,
-            validation_call_id=1,
+            validation_call_id=validation_call_id,
             workflow_thread_id='workflow-c5',
             validation_key='validation-key',
             evidence_version_hash='e' * 64,
@@ -374,6 +422,44 @@ def test_public_to_internal_reconciliation_narrows_target_and_vector_without_emb
     assert writer.permission_narrowings == [(('history_event:1',), 'internal')]
 
 
+def test_committed_changed_state_dto_is_frozen_and_reconcile_is_the_public_handoff(
+    db_session: Session,
+) -> None:
+    from dataclasses import FrozenInstanceError
+
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+        CommittedSourceStateChange,
+    )
+
+    history, item, source, link = _seed_explicit_history(
+        db_session, resolution_source='auto_policy'
+    )
+    history.permission_level = 'public'
+    item.permission_level = 'public'
+    link.permission_level = 'public'
+    source.permission_level = 'internal'
+    db_session.commit()
+    changed = CommittedSourceStateChange(
+        source_id=source.id,
+        content_changed=False,
+        permission_changed=True,
+        parser_policy_changed=False,
+        primary_code='permission_changed',
+    )
+    with pytest.raises(FrozenInstanceError):
+        changed.permission_changed = False  # type: ignore[misc]
+
+    result = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=PreviewVectorIndexWriter(),
+    ).reconcile([changed])
+
+    assert result.reconciled_count == 1
+    assert history.permission_level == 'internal'
+
+
 def test_restricted_unknown_absent_or_superseded_source_revokes_exact_auto_effect(
     db_session: Session,
 ) -> None:
@@ -549,3 +635,108 @@ def test_source_invalidation_revoke_writes_no_human_revocation_assessment() -> N
             review_item_id=1,
             canonical_source_id='1',
         )
+
+
+def test_current_pointer_repair_is_exact_and_ambiguity_remains_fail_closed(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    settings = Settings(database_url='sqlite://')
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=(
+                settings.agent_runtime_fingerprint_key_version
+            ),
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    exact_source = Source(
+        source_type='drive',
+        source_id='drive:repair-exact',
+        source_url='https://drive.mock/repair-exact',
+        title='Exact repair',
+        permission_level='internal',
+        raw_metadata={},
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature='1' * 64,
+    )
+    ambiguous_source = Source(
+        source_type='drive',
+        source_id='drive:repair-ambiguous',
+        source_url='https://drive.mock/repair-ambiguous',
+        title='Ambiguous repair',
+        permission_level='internal',
+        raw_metadata={},
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature='2' * 64,
+    )
+    db_session.add_all([exact_source, ambiguous_source])
+    db_session.flush()
+    exact_document = Document(
+        source_id=exact_source.id,
+        title=exact_source.title,
+        current_version='display-only',
+    )
+    ambiguous_document = Document(
+        source_id=ambiguous_source.id,
+        title=ambiguous_source.title,
+        current_version='display-only',
+    )
+    db_session.add_all([exact_document, ambiguous_document])
+    db_session.flush()
+    exact_version = DocumentVersion(
+        document_id=exact_document.id, version='v1', body='exact'
+    )
+    ambiguous_versions = [
+        DocumentVersion(
+            document_id=ambiguous_document.id,
+            version=f'v{index}',
+            body=f'ambiguous {index}',
+        )
+        for index in (1, 2)
+    ]
+    db_session.add_all([exact_version, *ambiguous_versions])
+    db_session.flush()
+    for document, source, version in [
+        (exact_document, exact_source, exact_version),
+        *(
+            (ambiguous_document, ambiguous_source, version)
+            for version in ambiguous_versions
+        ),
+    ]:
+        db_session.add(
+            DocumentParserRun(
+                document_id=document.id,
+                document_version_id=version.id,
+                source_id=source.id,
+                parser_name='plain_text',
+                parser_status='parsed',
+                server_content_signature_schema='server-source-content:v1',
+                server_content_signature=source.server_content_signature,
+                parser_policy_version='parser-policy:v1',
+                parser_version='plain-text:v1',
+                chunk_policy_version='chunk-policy:v1',
+            )
+        )
+    db_session.commit()
+
+    result = AutoReviewSourceReconciliationService(
+        db_session, settings=settings
+    ).repair_current_document_versions(limit=2)
+
+    db_session.refresh(exact_document)
+    db_session.refresh(ambiguous_document)
+    assert result.repaired_count == 1
+    assert result.ambiguous_count == 1
+    assert result.readiness is False
+    assert exact_document.current_document_version_id == exact_version.id
+    assert ambiguous_document.current_document_version_id is None

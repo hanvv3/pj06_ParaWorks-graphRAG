@@ -8,7 +8,7 @@ from backend.app.core.config import Settings, get_settings
 from backend.app.core.demo_auth import DemoUser, get_demo_user
 from backend.app.core.demo_filters import filter_review_items
 from backend.app.db.session import get_db
-from backend.app.models import AgentRun, ReviewItem
+from backend.app.models import AgentRun, AgentWorkflowThread, ReviewItem
 from backend.app.review.evidence_visibility import (
     ReviewEvidenceNotFound,
     ReviewEvidenceVisibilityService,
@@ -25,7 +25,7 @@ def list_notifications(
     db: DbSession, settings: AppSettings, user: CurrentUser
 ) -> dict:
     review_notifications = _review_notifications(db, settings, user)
-    agent_run_notifications = _agent_run_notifications(db, user)
+    agent_run_notifications = _agent_run_notifications(db, settings, user)
     notifications = review_notifications + agent_run_notifications
     return {
         'counts': {
@@ -75,14 +75,25 @@ def _review_notifications(
 
 
 def _agent_run_notifications(
-    db: Session, user: DemoUser | None = None
+    db: Session,
+    settings: Settings,
+    user: DemoUser | None = None,
 ) -> list[dict]:
     if user is None:
         return []
     failed_runs = db.scalars(
         select(AgentRun)
+        .join(
+            AgentWorkflowThread,
+            AgentWorkflowThread.thread_id == AgentRun.workflow_thread_id,
+        )
         .where(AgentRun.status != 'complete')
         .where(AgentRun.permission_level.in_(tuple(user.permission_levels)))
+        .where(AgentWorkflowThread.owner_subject_id == user.id)
+        .where(
+            AgentWorkflowThread.security_scope_id
+            == settings.agent_runtime_security_scope_id
+        )
         .order_by(AgentRun.started_at.desc(), AgentRun.id.desc())
         .limit(5)
     ).all()
@@ -92,13 +103,21 @@ def _agent_run_notifications(
             'category': 'agent_run',
             'severity': 'error',
             'title': f'{run.agent_name} 실행 확인 필요',
-            'message': str(run.metadata_.get('failure_reason') or run.status),
+            'message': _bounded_agent_run_failure(run.status),
             'action_href': f'/agent-runs/{run.id}',
             'source_count': 1,
             'created_at': run.started_at.isoformat(),
         }
         for run in failed_runs
     ]
+
+
+def _bounded_agent_run_failure(status: str) -> str:
+    return {
+        'failed': 'Agent run failed',
+        'cancelled': 'Agent run cancelled',
+        'timed_out': 'Agent run timed out',
+    }.get(status, 'Agent run requires review')
 
 
 def _review_count(

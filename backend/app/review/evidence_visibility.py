@@ -66,7 +66,16 @@ class ReviewEvidenceVisibilityService:
         sources, complete, permission_snapshots = (
             self._resolve_current_sources(item)
         )
-        if not sources and item.candidate_contract_version != 'c5-v1':
+        evidence_shaped = bool(
+            (item.payload or {}).get('source_ids')
+            or item.source_links
+            or item.source_snippets
+        )
+        if (
+            not sources
+            and not evidence_shaped
+            and item.candidate_contract_version != 'c5-v1'
+        ):
             return ReviewEvidenceProjection(
                 review_item_id=item.id,
                 visible=True,
@@ -179,7 +188,21 @@ class ReviewEvidenceVisibilityService:
                 ).scalars().all()
             )
             if not refs:
-                return (), False, ()
+                external_ids = tuple(
+                    value
+                    for value in (item.payload or {}).get('source_ids', ())
+                    if isinstance(value, str)
+                )
+                if not external_ids:
+                    return (), False, ()
+                sources = tuple(
+                    self._db.scalars(
+                        select(Source)
+                        .where(Source.source_id.in_(external_ids))
+                        .order_by(Source.id)
+                    ).all()
+                )
+                return sources, len(sources) == len(set(external_ids)), ()
             sources_by_id: dict[int, Source] = {}
             complete = True
             for ref in refs:

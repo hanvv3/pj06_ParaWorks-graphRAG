@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from backend.app.core.demo_auth import USERS, DemoUser
-from backend.app.models import AutoReviewPostAudit
+from backend.app.models import AutoReviewPostAudit, ReviewItem
 from backend.tests.test_auto_review_source_reconciliation import (
     _seed_explicit_history,
 )
@@ -65,6 +65,36 @@ def test_missing_source_keeps_bounded_review_action_for_authorized_scope_but_con
     assert projected.source_links == ()
     assert projected.source_snippets == ()
     assert projected.evidence_status == 'evidence_unavailable'
+
+
+def test_evidence_shaped_legacy_item_without_current_source_is_concealed(
+    db_session: Session,
+) -> None:
+    from backend.app.review.evidence_visibility import (
+        ReviewEvidenceVisibilityService,
+    )
+
+    item = ReviewItem(
+        item_type='history_event',
+        payload={'source_ids': ['gmail:deleted-legacy']},
+        source_links=['https://gmail.invalid/deleted-legacy'],
+        source_snippets=['historical confidential bytes'],
+        confidence_score=0.8,
+        permission_level='internal',
+        status='pending_review',
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    projected = ReviewEvidenceVisibilityService(db_session).project(
+        item.id, USERS['viewer']
+    )
+
+    assert projected.evidence_status == 'evidence_unavailable'
+    assert projected.evidence_available is False
+    assert projected.source_ids == ()
+    assert projected.source_links == ()
+    assert projected.source_snippets == ()
 
 
 def test_critical_item_is_hidden_from_trusted_serving_but_visible_actionable_in_review_to_authorized_reviewer(

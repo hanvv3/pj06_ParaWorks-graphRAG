@@ -209,6 +209,7 @@ class PgVectorStore:
                 score=float(row['score']),
             )
             for row in rows
+            if row['document_id'] is not None
         ]
         hidden_match_count = int(rows[0]['hidden_match_count']) if rows else 0
         return VectorSearchResult(matches=matches, hidden_match_count=hidden_match_count)
@@ -216,6 +217,16 @@ class PgVectorStore:
     def _upsert_sql(self) -> str:
         table = self.config.table_name
         return f"""
+        WITH candidate AS (
+            SELECT
+                CAST(:document_id AS text) AS document_id,
+                CAST(:text AS text) AS text,
+                CAST(:source_url AS text) AS source_url,
+                CAST(:source_snippet AS text) AS source_snippet,
+                CAST(:permission_level AS text) AS permission_level,
+                CAST(:metadata_json AS jsonb) AS metadata_json,
+                CAST(:embedding AS vector) AS embedding
+        )
         INSERT INTO {table} (
             document_id,
             text,
@@ -227,19 +238,21 @@ class PgVectorStore:
             updated_at
         )
         SELECT
-            :document_id,
-            :text,
-            :source_url,
-            :source_snippet,
-            :permission_level,
-            CAST(:metadata_json AS jsonb),
-            CAST(:embedding AS vector),
+            candidate.document_id,
+            candidate.text,
+            candidate.source_url,
+            candidate.source_snippet,
+            candidate.permission_level,
+            candidate.metadata_json,
+            candidate.embedding,
             now()
+        FROM candidate
         WHERE NOT EXISTS (
             SELECT 1
             FROM vector_serving_tombstones
-            WHERE vector_serving_tombstones.document_id = :document_id
+            WHERE vector_serving_tombstones.document_id = candidate.document_id
         )
+        AND ({self._live_eligibility_sql('candidate')})
         ON CONFLICT (document_id) DO UPDATE SET
             text = EXCLUDED.text,
             source_url = EXCLUDED.source_url,
@@ -276,25 +289,30 @@ class PgVectorStore:
             SELECT count(*) AS hidden_match_count
             FROM ranked
             WHERE NOT is_visible
+        ),
+        visible AS (
+            SELECT *
+            FROM ranked
+            WHERE is_visible
+            ORDER BY distance
+            LIMIT :limit
         )
         SELECT
-            ranked.document_id,
-            ranked.text,
-            ranked.source_url,
-            ranked.source_snippet,
-            ranked.permission_level,
-            ranked.metadata_json,
-            ranked.score,
+            visible.document_id,
+            visible.text,
+            visible.source_url,
+            visible.source_snippet,
+            visible.permission_level,
+            visible.metadata_json,
+            visible.score,
             hidden.hidden_match_count
-        FROM ranked
-        CROSS JOIN hidden
-        WHERE permission_level = ANY(:allowed_permissions)
-        ORDER BY ranked.distance
-        LIMIT :limit;
+        FROM hidden
+        LEFT JOIN visible ON true
+        ORDER BY visible.distance;
         """
 
-    def _live_eligibility_sql(self) -> str:
-        table = self.config.table_name
+    def _live_eligibility_sql(self, table: str | None = None) -> str:
+        table = table or self.config.table_name
         permission_rank = (
             "CASE {value} WHEN 'public' THEN 0 WHEN 'internal' THEN 1 "
             "WHEN 'restricted' THEN 2 ELSE 99 END"
@@ -302,6 +320,21 @@ class PgVectorStore:
         vector_rank = permission_rank.format(value=f'{table}.permission_level')
         source_rank = permission_rank.format(value='sources.permission_level')
         chunk_rank = permission_rank.format(value='document_chunks.permission_level')
+        knowledge_branches = ' OR '.join(
+            self._knowledge_target_branch(
+                table=table,
+                knowledge_type=knowledge_type,
+                target_table=target_table,
+                vector_rank=vector_rank,
+                permission_rank=permission_rank,
+            )
+            for knowledge_type, target_table in (
+                ('decision_record', 'decision_records'),
+                ('history_event', 'history_events'),
+                ('timeline_event', 'timeline_events'),
+                ('todo', 'todos'),
+            )
+        )
         return f"""
         (
             {table}.document_id LIKE 'chunk:%'
@@ -342,111 +375,177 @@ class PgVectorStore:
                   )
                   AND {vector_rank} >= GREATEST({source_rank}, {chunk_rank})
             )
-        ) OR (
-            {table}.document_id NOT LIKE 'chunk:%'
-            AND EXISTS (
-                SELECT 1
-                FROM trusted_knowledge_approval_links approval_links
-                JOIN review_items ON review_items.id = approval_links.review_item_id
-                WHERE approval_links.active = true
-                  AND approval_links.knowledge_type = split_part({table}.document_id, ':', 1)
-                  AND approval_links.knowledge_id::text = split_part({table}.document_id, ':', 2)
-                  AND review_items.status = 'approved'
-                  AND review_items.resolution_source = approval_links.resolution_source
-                  AND NOT EXISTS (
-                      SELECT 1 FROM auto_review_post_audits audits
-                      WHERE audits.review_item_id = review_items.id
-                        AND (audits.status = 'remediation_required'
-                             OR audits.outcome IN ('incorrect', 'permission_violation',
-                                'source_version_violation', 'policy_violation'))
-                  )
-                  AND NOT EXISTS (
+        ) OR ({knowledge_branches})
+        """
+
+    def _knowledge_target_branch(
+        self,
+        *,
+        table: str,
+        knowledge_type: str,
+        target_table: str,
+        vector_rank: str,
+        permission_rank: str,
+    ) -> str:
+        target_rank = permission_rank.format(
+            value='knowledge_targets.permission_level'
+        )
+        item_rank = permission_rank.format(
+            value='effect_reviews.permission_level'
+        )
+        link_rank = permission_rank.format(
+            value='approval_links.permission_level'
+        )
+        source_rank = permission_rank.format(value='effect_sources.permission_level')
+        legacy_item_rank = permission_rank.format(
+            value='legacy_reviews.permission_level'
+        )
+        current_source = self._current_evidence_source_sql(
+            source_alias='effect_sources',
+            evidence_alias='evidence_links',
+            parser_prefix='effect',
+        )
+        expected_source = self._current_evidence_source_sql(
+            source_alias='expected_sources',
+            evidence_alias='expected_evidence',
+            parser_prefix='expected',
+        )
+        return f"""
+        EXISTS (
+            SELECT 1
+            FROM {target_table} knowledge_targets
+            WHERE {table}.document_id = '{knowledge_type}:' || knowledge_targets.id::text
+              AND knowledge_targets.review_status = 'approved'
+              AND knowledge_targets.permission_level IN ('public', 'internal', 'restricted')
+              AND {vector_rank} >= {target_rank}
+              AND (
+                  EXISTS (
                       SELECT 1
-                      FROM auto_review_audit_corrections corrections
-                      WHERE corrections.review_item_id = review_items.id
-                        AND corrections.effective_outcome IN (
-                            'incorrect', 'permission_violation',
-                            'source_version_violation', 'policy_violation'
-                        )
-                  )
-                  AND EXISTS (
-                      SELECT 1
-                      FROM trusted_knowledge_evidence_links evidence_links
-                      JOIN sources
-                        ON sources.id::text = evidence_links.canonical_source_id
-                       AND sources.source_type = evidence_links.canonical_source_kind
-                       AND sources.server_content_signature_schema = 'server-source-content:v1'
-                      WHERE evidence_links.approval_link_id = approval_links.id
+                      FROM trusted_knowledge_approval_links approval_links
+                      JOIN review_items effect_reviews
+                        ON effect_reviews.id = approval_links.review_item_id
+                      WHERE approval_links.active = true
+                        AND approval_links.knowledge_type = '{knowledge_type}'
+                        AND approval_links.knowledge_id = knowledge_targets.id
+                        AND effect_reviews.status = 'approved'
+                        AND effect_reviews.resolution_source = approval_links.resolution_source
+                        AND effect_reviews.permission_level IN ('public', 'internal', 'restricted')
+                        AND approval_links.permission_level IN ('public', 'internal', 'restricted')
+                        AND {vector_rank} >= GREATEST({item_rank}, {link_rank})
                         AND (
-                            sources.server_content_signature = evidence_links.canonical_version_or_signature
-                            OR EXISTS (
-                                SELECT 1
-                                FROM document_parser_runs evidence_parser_runs
-                                JOIN documents evidence_documents
-                                  ON evidence_documents.id = evidence_parser_runs.document_id
-                                 AND evidence_documents.source_id = sources.id
-                                 AND evidence_documents.current_document_version_id = evidence_parser_runs.document_version_id
-                                WHERE evidence_parser_runs.source_id = sources.id
-                                  AND evidence_parser_runs.server_content_signature_schema = 'server-source-content:v1'
-                                  AND evidence_parser_runs.server_content_signature = sources.server_content_signature
-                                  AND evidence_parser_runs.parser_policy_version IS NOT NULL
-                                  AND evidence_parser_runs.parser_version IS NOT NULL
-                                  AND evidence_parser_runs.chunk_policy_version IS NOT NULL
-                                  AND evidence_parser_runs.revision_id = evidence_links.canonical_version_or_signature
+                            (
+                                approval_links.resolution_source = 'human'
+                                AND effect_reviews.candidate_contract_version = 'c5-v1'
                             )
-                        )
-                        AND sources.permission_level IN ('public', 'internal', 'restricted')
-                        AND (
-                            approval_links.resolution_source = 'human'
                             OR (
                                 approval_links.resolution_source = 'auto_policy'
-                                AND sources.permission_level IN ('public', 'internal')
                                 AND EXISTS (
-                                    SELECT 1 FROM auto_review_validations validations
-                                    WHERE validations.id = review_items.auto_validation_id
-                                      AND validations.review_item_id = review_items.id
+                                    SELECT 1
+                                    FROM auto_review_validations validations
+                                    WHERE validations.id = effect_reviews.auto_validation_id
+                                      AND validations.review_item_id = effect_reviews.id
                                       AND validations.status = 'completed'
                                       AND validations.policy_decision IN ('auto_approve', 'reuse_trusted')
                                 )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM auto_review_post_audits audits
+                                    WHERE audits.review_item_id = effect_reviews.id
+                                      AND (
+                                          audits.status = 'remediation_required'
+                                          OR audits.outcome IN (
+                                              'incorrect', 'permission_violation',
+                                              'source_version_violation', 'policy_violation'
+                                          )
+                                      )
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM auto_review_audit_corrections corrections
+                                    WHERE corrections.review_item_id = effect_reviews.id
+                                      AND corrections.effective_outcome IN (
+                                          'incorrect', 'permission_violation',
+                                          'source_version_violation', 'policy_violation'
+                                      )
+                                )
                             )
                         )
-                        AND {vector_rank} >= {source_rank}
+                        AND EXISTS (
+                            SELECT 1
+                            FROM trusted_knowledge_evidence_links evidence_links
+                            JOIN sources effect_sources
+                              ON effect_sources.id::text = evidence_links.canonical_source_id
+                             AND effect_sources.source_type = evidence_links.canonical_source_kind
+                             AND {current_source}
+                            WHERE evidence_links.approval_link_id = approval_links.id
+                              AND effect_sources.permission_level IN ('public', 'internal', 'restricted')
+                              AND {vector_rank} >= {source_rank}
+                              AND (
+                                  approval_links.resolution_source = 'human'
+                                  OR effect_sources.permission_level IN ('public', 'internal')
+                              )
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM trusted_knowledge_evidence_links expected_evidence
+                            LEFT JOIN sources expected_sources
+                              ON expected_sources.id::text = expected_evidence.canonical_source_id
+                             AND expected_sources.source_type = expected_evidence.canonical_source_kind
+                             AND {expected_source}
+                            WHERE expected_evidence.approval_link_id = approval_links.id
+                              AND (
+                                  expected_sources.id IS NULL
+                                  OR expected_sources.permission_level NOT IN ('public', 'internal', 'restricted')
+                                  OR {vector_rank} < {permission_rank.format(value='expected_sources.permission_level')}
+                                  OR (
+                                      approval_links.resolution_source = 'auto_policy'
+                                      AND expected_sources.permission_level = 'restricted'
+                                  )
+                              )
+                        )
                   )
-                  AND NOT EXISTS (
+                  OR EXISTS (
                       SELECT 1
-                      FROM trusted_knowledge_evidence_links expected_evidence
-                      LEFT JOIN sources
-                        ON sources.id::text = expected_evidence.canonical_source_id
-                       AND sources.source_type = expected_evidence.canonical_source_kind
-                       AND sources.server_content_signature_schema = 'server-source-content:v1'
-                       AND (
-                           sources.server_content_signature = expected_evidence.canonical_version_or_signature
-                           OR EXISTS (
-                               SELECT 1
-                               FROM document_parser_runs expected_parser_runs
-                               JOIN documents expected_documents
-                                 ON expected_documents.id = expected_parser_runs.document_id
-                                AND expected_documents.source_id = sources.id
-                                AND expected_documents.current_document_version_id = expected_parser_runs.document_version_id
-                               WHERE expected_parser_runs.source_id = sources.id
-                                 AND expected_parser_runs.server_content_signature_schema = 'server-source-content:v1'
-                                 AND expected_parser_runs.server_content_signature = sources.server_content_signature
-                                 AND expected_parser_runs.parser_policy_version IS NOT NULL
-                                 AND expected_parser_runs.parser_version IS NOT NULL
-                                 AND expected_parser_runs.chunk_policy_version IS NOT NULL
-                                 AND expected_parser_runs.revision_id = expected_evidence.canonical_version_or_signature
-                           )
-                       )
-                       AND sources.permission_level IN ('public', 'internal', 'restricted')
-                      WHERE expected_evidence.approval_link_id = approval_links.id
+                      FROM review_items legacy_reviews
+                      WHERE legacy_reviews.id = knowledge_targets.source_review_item_id
+                        AND legacy_reviews.status = 'approved'
                         AND (
-                            sources.id IS NULL
-                            OR (
-                                approval_links.resolution_source = 'auto_policy'
-                                AND sources.permission_level = 'restricted'
-                            )
+                            legacy_reviews.resolution_source IS NULL
+                            OR legacy_reviews.resolution_source = 'human'
                         )
+                        AND legacy_reviews.candidate_contract_version IS DISTINCT FROM 'c5-v1'
+                        AND legacy_reviews.permission_level IN ('public', 'internal', 'restricted')
+                        AND {vector_rank} >= {legacy_item_rank}
                   )
+              )
+        )
+        """
+
+    def _current_evidence_source_sql(
+        self,
+        *,
+        source_alias: str,
+        evidence_alias: str,
+        parser_prefix: str,
+    ) -> str:
+        return f"""
+        {source_alias}.server_content_signature_schema = 'server-source-content:v1'
+        AND (
+            {source_alias}.server_content_signature = {evidence_alias}.canonical_version_or_signature
+            OR EXISTS (
+                SELECT 1
+                FROM document_parser_runs {parser_prefix}_parser_runs
+                JOIN documents {parser_prefix}_documents
+                  ON {parser_prefix}_documents.id = {parser_prefix}_parser_runs.document_id
+                 AND {parser_prefix}_documents.source_id = {source_alias}.id
+                 AND {parser_prefix}_documents.current_document_version_id = {parser_prefix}_parser_runs.document_version_id
+                WHERE {parser_prefix}_parser_runs.source_id = {source_alias}.id
+                  AND {parser_prefix}_parser_runs.server_content_signature_schema = 'server-source-content:v1'
+                  AND {parser_prefix}_parser_runs.server_content_signature = {source_alias}.server_content_signature
+                  AND {parser_prefix}_parser_runs.parser_policy_version IS NOT NULL
+                  AND {parser_prefix}_parser_runs.parser_version IS NOT NULL
+                  AND {parser_prefix}_parser_runs.chunk_policy_version IS NOT NULL
+                  AND {parser_prefix}_parser_runs.revision_id = {evidence_alias}.canonical_version_or_signature
             )
         )
         """

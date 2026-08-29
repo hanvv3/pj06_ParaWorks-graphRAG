@@ -789,7 +789,10 @@ def test_request_more_evidence_preserves_reviewer_note(client, db_session) -> No
     assert body['status'] == 'needs_more_evidence'
     assert body['payload']['needs_more_evidence']['note'] == '담당자 발언과 결정 근거를 하나 더 찾아주세요.'
     assert body['payload']['needs_more_evidence']['requested_by'] == 'demo-admin'
-    assert body['payload']['needs_more_evidence']['source_count'] == 1
+    assert 'source_count' not in body['payload']['needs_more_evidence']
+    assert body['evidence_status'] == 'evidence_unavailable'
+    assert body['source_links'] == []
+    assert body['source_snippets'] == []
 
 
 def test_review_item_preview_returns_promotion_shape(client, db_session) -> None:
@@ -879,26 +882,11 @@ def test_review_item_response_includes_structured_source_evidence(client, db_ses
 
     assert response.status_code == 200
     body = response.json()['items'][0]
-    assert body['agent_run_id'] == agent_run.id
-    assert body['source_evidence'] == [
-        {
-            'index': 1,
-            'rank': 1,
-            'source_id': 'slack:C123:1710000000.000100',
-            'source_url': 'https://slack.mock/archives/C123/p1710000000000100',
-            'source_type': 'slack',
-            'source_snippet': 'Redis rollout decision needs owner confirmation.',
-            'permission_level': 'internal',
-            'confidence_score': 0.91,
-            'importance_score': 95,
-            'timestamp': '1710000000.000100',
-            'author': 'U123',
-            'agent_run_id': agent_run.id,
-            'parser_status': 'parsed',
-            'section_path': '결정 사항',
-            'evidence_reason': 'Redis rollout owner를 직접 언급합니다.',
-        }
-    ]
+    assert body['evidence_status'] == 'evidence_unavailable'
+    assert body['agent_run_id'] is None
+    assert body['source_evidence'] == []
+    assert body['source_links'] == []
+    assert body['source_snippets'] == []
 
 
 def test_mail_document_review_source_evidence_uses_indexed_source_type_fallback(client, db_session) -> None:
@@ -924,12 +912,10 @@ def test_mail_document_review_source_evidence_uses_indexed_source_type_fallback(
 
     assert response.status_code == 200
     body = response.json()['items'][0]
-    assert [row['source_id'] for row in body['source_evidence']] == [
-        'gmail:message-1',
-        'drive:file-1',
-        'calendar:primary:event-1',
-    ]
-    assert [row['source_type'] for row in body['source_evidence']] == ['gmail', 'drive', 'calendar']
+    assert body['evidence_status'] == 'evidence_unavailable'
+    assert body['source_evidence'] == []
+    assert body['source_links'] == []
+    assert body['source_snippets'] == []
 
 
 def test_approve_review_item_rejects_missing_required_fields(client, db_session) -> None:

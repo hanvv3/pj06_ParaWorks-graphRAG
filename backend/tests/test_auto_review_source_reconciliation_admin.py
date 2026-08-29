@@ -1,3 +1,5 @@
+from sqlalchemy.exc import OperationalError
+
 from backend.app.admin.auto_review_source_reconciliation import (
     command_exit_code,
     format_aggregate_result,
@@ -23,3 +25,24 @@ def test_source_reconciliation_admin_has_fixed_actor_aggregate_output_and_exit_c
     assert 'source_id' not in output
     assert command_exit_code(clean) == 0
     assert command_exit_code(retained) == 3
+
+
+def test_source_reconciliation_admin_bounds_database_failures(
+    monkeypatch, capsys
+) -> None:
+    import backend.app.admin.auto_review_source_reconciliation as admin
+
+    class FailingSession:
+        def __enter__(self):
+            raise OperationalError('SELECT secret', {}, RuntimeError('boom'))
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(admin, 'SessionLocal', lambda: FailingSession())
+
+    assert admin.main(['status', '--limit', '1']) == 3
+    output = capsys.readouterr().out
+    assert 'failures=1' in output
+    assert 'readiness=false' in output
+    assert 'SELECT secret' not in output

@@ -2,6 +2,7 @@ import logging
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.api.v1 import assistant as assistant_api
@@ -14,7 +15,7 @@ from backend.app.assistant.service import (
     update_summary,
 )
 from backend.app.core.demo_auth import USERS
-from backend.app.models import AgentRun, AssistantMessage
+from backend.app.models import AgentRun, AssistantMessage, Source
 from backend.tests.test_rag_orchestrator_service import seed_chunk
 
 
@@ -406,11 +407,21 @@ def test_assistant_email_agent_uses_conversation_context_without_rag(
 def test_assistant_can_draft_email_from_rag_answer(
     client: TestClient,
     monkeypatch,
+    db_session,
 ) -> None:
+    from backend.tests.test_rag_orchestrator_service import seed_chunk
+
+    seed_chunk(
+        db_session,
+        'gmail',
+        'project-alpha-email',
+        'Project Alpha launch is Friday.',
+        'internal',
+    )
     def compose_from_rag(**kwargs):
         assert kwargs['intent'].requires_rag_result is True
         assert 'Project Alpha launch is Friday.' in kwargs['rag_context']
-        assert 'https://source.example/project-alpha' in kwargs['rag_context']
+        assert 'https://gmail.mock/project-alpha-email' in kwargs['rag_context']
         return assistant_api.EmailActionDecision(
             action_type='email_draft',
             to=['lead@example.com'],
@@ -418,28 +429,11 @@ def test_assistant_can_draft_email_from_rag_answer(
             body='Project Alpha launch is Friday.',
         )
 
-    def fake_rag_answer(**kwargs):
-        return SimpleNamespace(
-            answer='Project Alpha launch is Friday.',
-            citations=[],
-            source_ids=['source-1'],
-            source_links=['https://source.example/project-alpha'],
-            source_snippets=['Launch decision snippet'],
-            permission_level='internal',
-            hidden_match_count=0,
-            permission_notice=None,
-            agent_run_id=987,
-            agent_name='rag_orchestrator_agent',
-            prompt_version='rag-answer:v1',
-            question=kwargs['question'],
-        )
-
     _patch_email_flow(
         monkeypatch,
         intent_decision=_email_intent(email_intent=True, requires_rag_result=True),
         draft_decision=compose_from_rag,
     )
-    monkeypatch.setattr(assistant_api, 'answer_question_with_rag', fake_rag_answer)
     create_response = client.post(
         '/api/v1/assistant/conversations',
         json={'title': 'Email RAG result'},
@@ -458,6 +452,27 @@ def test_assistant_can_draft_email_from_rag_answer(
     assert assistant_message['metadata']['action_type'] == 'email_draft'
     assert assistant_message['metadata']['email_draft']['to'] == ['lead@example.com']
     assert assistant_message['metadata']['email_draft']['body'] == 'Project Alpha launch is Friday.'
+
+    class ProviderMustNotRun:
+        def __init__(self, **kwargs):
+            pass
+
+        def send(self, **kwargs):
+            raise AssertionError('revoked RAG-derived draft reached Gmail')
+
+    source = db_session.scalar(
+        select(Source).where(Source.source_id == 'project-alpha-email')
+    )
+    source.permission_level = 'unknown'
+    db_session.commit()
+    monkeypatch.setattr(assistant_api, 'GmailDraftSender', ProviderMustNotRun)
+
+    send_response = client.post(
+        f"/api/v1/assistant/messages/{assistant_message['id']}/email/send",
+        headers={'X-Demo-User': 'viewer'},
+    )
+    assert send_response.status_code == 409
+    assert send_response.json()['detail'] == 'email draft evidence is unavailable'
 
 
 def test_assistant_generates_requested_content_before_email_draft(

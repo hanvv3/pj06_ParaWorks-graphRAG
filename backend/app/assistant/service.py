@@ -157,11 +157,20 @@ def append_assistant_message(
     agent_run_id: int | None,
     metadata: dict,
     serving_dependencies: tuple[object, ...] = (),
+    evidence_derived: bool = False,
 ) -> AssistantMessage:
     _ensure_owned_conversation(user, conversation)
     normalized_content = content.strip()
     if not normalized_content:
         raise ValueError('assistant message content is required')
+    if evidence_derived and not serving_dependencies:
+        raise ValueError(
+            'evidence-derived message requires complete serving dependencies'
+        )
+
+    stored_metadata = dict(metadata)
+    if evidence_derived:
+        stored_metadata['evidence_derived'] = True
 
     message = AssistantMessage(
         conversation_id=conversation.id,
@@ -181,7 +190,7 @@ def append_assistant_message(
             else 'none-v1'
         ),
         serving_dependency_count=len(serving_dependencies),
-        metadata_=metadata,
+        metadata_=stored_metadata,
     )
     conversation.updated_at = datetime.now(UTC)
     conversation.summary = update_summary(conversation.summary, message.content)
@@ -302,6 +311,7 @@ def serialize_message(
         or message.source_links
         or message.source_snippets
         or message.hidden_match_count
+        or (message.metadata_ or {}).get('evidence_derived') is True
     )
     unavailable = (
         evidence_shaped and (db is None or user is None)
@@ -403,6 +413,7 @@ def _message_evidence_is_live(
         or message.source_links
         or message.source_snippets
         or message.hidden_match_count
+        or (message.metadata_ or {}).get('evidence_derived') is True
     )
     dependencies = tuple(
         db.scalars(
@@ -428,6 +439,13 @@ def _message_evidence_is_live(
         and _dependency_is_live(db, eligibility, message, dependency)
         for dependency in dependencies
     )
+
+
+def assistant_message_evidence_is_live(
+    db: Session, *, user: DemoUser, message: AssistantMessage
+) -> bool:
+    """Public fail-closed gate for operations that reuse stored answer bytes."""
+    return _message_evidence_is_live(db, user=user, message=message)
 
 
 def _dependency_is_live(
@@ -478,12 +496,35 @@ def _dependency_is_live(
             == dependency.serving_content_hash
         )
     if dependency.legacy_human_base:
-        item = db.get(ReviewItem, dependency.legacy_source_review_item_id)
+        if dependency.knowledge_type is None or dependency.knowledge_id is None:
+            return False
+        target = db.get(
+            knowledge_model_for_type(dependency.knowledge_type),
+            dependency.knowledge_id,
+        )
+        item = (
+            db.get(ReviewItem, dependency.legacy_source_review_item_id)
+            if dependency.legacy_source_review_item_id is not None
+            else None
+        )
+        legacy_base_is_live = bool(
+            target is not None
+            and (
+                (
+                    dependency.legacy_source_review_item_id is None
+                    and target.source_review_item_id is None
+                )
+                or (
+                    item is not None
+                    and target.source_review_item_id == item.id
+                    and item.status == 'approved'
+                    and item.resolution_source in {None, 'human'}
+                    and item.candidate_contract_version != 'c5-v1'
+                )
+            )
+        )
         return bool(
-            item is not None
-            and item.status == 'approved'
-            and item.resolution_source in {None, 'human'}
-            and item.candidate_contract_version != 'c5-v1'
+            legacy_base_is_live
             and _knowledge_dependency_content_hash(db, dependency)
             == dependency.serving_content_hash
         )

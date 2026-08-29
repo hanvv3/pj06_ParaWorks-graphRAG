@@ -8,6 +8,7 @@ from backend.app.models import (
     DecisionRecord,
     Document,
     DocumentChunk,
+    DocumentParserRun,
     DocumentVersion,
     HistoryEvent,
     ReviewItem,
@@ -76,6 +77,7 @@ def seed_chunk(
     *,
     approve_for_rag: bool = True,
 ) -> int:
+    signature = 'a' * 64
     source = Source(
         source_type='gmail',
         source_id=source_id,
@@ -84,6 +86,8 @@ def seed_chunk(
         author='owner@example.com',
         permission_level='internal',
         raw_metadata={'ts': '2026-04-30T10:00:00+00:00'},
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=signature,
     )
     db.add(source)
     db.flush()
@@ -96,9 +100,25 @@ def seed_chunk(
     db.add(version)
     db.flush()
 
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=version.id,
+        source_id=source.id,
+        parser_name='plain_text',
+        parser_status='parsed',
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=signature,
+        parser_policy_version='parser-policy:v1',
+        parser_version='plain-text:v1',
+        chunk_policy_version='chunk-policy:v1',
+    )
+    db.add(parser_run)
+    db.flush()
+
     chunk = DocumentChunk(
         version_id=version.id,
         source_id=source.id,
+        parser_run_id=parser_run.id,
         chunk_index=0,
         text=text,
         source_snippet=text[:240],
@@ -106,6 +126,8 @@ def seed_chunk(
         metadata_={'source_url': source.source_url, 'source_type': source.source_type},
     )
     db.add(chunk)
+    document.current_document_version_id = version.id
+    parser_run.chunk_count = 1
     if approve_for_rag:
         db.add(
             ReviewItem(
@@ -558,6 +580,8 @@ def test_build_rag_index_documents_includes_document_parser_metadata(db_session:
         author='owner@example.com',
         permission_level='restricted',
         raw_metadata={'sync_cursor': '2026-05-01T09:00:00Z'},
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature='b' * 64,
     )
     db_session.add(source)
     db_session.flush()
@@ -567,9 +591,25 @@ def test_build_rag_index_documents_includes_document_parser_metadata(db_session:
     version = DocumentVersion(document_id=document.id, version='43', body='휴가 신청 승인자가 인사팀으로 변경되었습니다.')
     db_session.add(version)
     db_session.flush()
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=version.id,
+        source_id=source.id,
+        parser_name='google_drive_text_export',
+        parser_status='parsed',
+        revision_id='rev-43',
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=source.server_content_signature,
+        parser_policy_version='parser-policy:v1',
+        parser_version='drive-text:v1',
+        chunk_policy_version='chunk-policy:v1',
+    )
+    db_session.add(parser_run)
+    db_session.flush()
     chunk = DocumentChunk(
         version_id=version.id,
         source_id=source.id,
+        parser_run_id=parser_run.id,
         chunk_index=0,
         text='휴가 신청 승인자가 인사팀으로 변경되었습니다.',
         source_snippet='휴가 신청 승인자가 인사팀으로 변경되었습니다.',
@@ -588,6 +628,8 @@ def test_build_rag_index_documents_includes_document_parser_metadata(db_session:
         },
     )
     db_session.add(chunk)
+    document.current_document_version_id = version.id
+    parser_run.chunk_count = 1
     db_session.add(
         ReviewItem(
             item_type='history_event',
@@ -656,6 +698,8 @@ def test_reindex_endpoint_reports_parser_status_counts(client: TestClient, db_se
         author='owner@example.com',
         permission_level='restricted',
         raw_metadata={},
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature='c' * 64,
     )
     metadata_source = Source(
         source_type='drive',
@@ -665,6 +709,8 @@ def test_reindex_endpoint_reports_parser_status_counts(client: TestClient, db_se
         author='owner@example.com',
         permission_level='restricted',
         raw_metadata={},
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature='d' * 64,
     )
     db_session.add_all([parsed_source, metadata_source])
     db_session.flush()
@@ -679,11 +725,39 @@ def test_reindex_endpoint_reports_parser_status_counts(client: TestClient, db_se
     db_session.add_all([parsed_version, metadata_version])
     db_session.flush()
 
+    parsed_run = DocumentParserRun(
+        document_id=parsed_document.id,
+        document_version_id=parsed_version.id,
+        source_id=parsed_source.id,
+        parser_name='plain_text',
+        parser_status='parsed',
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=parsed_source.server_content_signature,
+        parser_policy_version='parser-policy:v1',
+        parser_version='plain-text:v1',
+        chunk_policy_version='chunk-policy:v1',
+    )
+    metadata_run = DocumentParserRun(
+        document_id=metadata_document.id,
+        document_version_id=metadata_version.id,
+        source_id=metadata_source.id,
+        parser_name='metadata_only',
+        parser_status='metadata_only',
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=metadata_source.server_content_signature,
+        parser_policy_version='parser-policy:v1',
+        parser_version='metadata-only:v1',
+        chunk_policy_version='chunk-policy:v1',
+    )
+    db_session.add_all([parsed_run, metadata_run])
+    db_session.flush()
+
     db_session.add_all(
         [
             DocumentChunk(
                 version_id=parsed_version.id,
                 source_id=parsed_source.id,
+                parser_run_id=parsed_run.id,
                 chunk_index=0,
                 text='본문 파싱 완료',
                 source_snippet='본문 파싱 완료',
@@ -693,6 +767,7 @@ def test_reindex_endpoint_reports_parser_status_counts(client: TestClient, db_se
             DocumentChunk(
                 version_id=metadata_version.id,
                 source_id=metadata_source.id,
+                parser_run_id=metadata_run.id,
                 chunk_index=0,
                 text='Metadata-only Drive file changed.',
                 source_snippet='Metadata-only Drive file changed.',
@@ -716,6 +791,10 @@ def test_reindex_endpoint_reports_parser_status_counts(client: TestClient, db_se
             status='approved',
         )
     )
+    parsed_document.current_document_version_id = parsed_version.id
+    metadata_document.current_document_version_id = metadata_version.id
+    parsed_run.chunk_count = 1
+    metadata_run.chunk_count = 1
     db_session.commit()
 
     response = client.post('/api/v1/rag/reindex')

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from backend.app.core.config import get_settings
 from backend.app.db.session import SessionLocal
 from backend.app.review.auto_review_source_reconciliation import (
@@ -49,6 +51,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
     except (RuntimeError, ValueError):
         return 2
+    except SQLAlchemyError:
+        result = SourceReconciliationResult(
+            failure_count=1,
+            remaining_count=1,
+            readiness=False,
+        )
     print(format_aggregate_result(result))
     return command_exit_code(result)
 

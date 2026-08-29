@@ -8,6 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from backend.app.agent_runtime.keyed_mutation_guard import (
+    KeyedMutationGuard,
+    acquire_projection,
+    lock_runtime_state,
+)
 from backend.app.core.config import Settings
 from backend.app.knowledge.trusted_fingerprint_projection import (
     ProjectionSummary,
@@ -22,6 +27,7 @@ from backend.app.knowledge.trusted_serving_eligibility import (
 from backend.app.models import (
     Document,
     DocumentParserRun,
+    DocumentVersion,
     ReviewItem,
     Source,
     TrustedKnowledgeApprovalLink,
@@ -34,6 +40,10 @@ from backend.app.rag.indexing import (
     VectorIndexWriter,
     build_rag_index_documents,
     compute_vector_document_hash,
+)
+from backend.app.rag.serving_locks import (
+    ServingMutationLockCoordinator,
+    build_serving_lock_plan,
 )
 from backend.app.review.auto_review_revoke import (
     _SOURCE_INVALIDATION_CONTEXTS_INFO_KEY,
@@ -56,6 +66,39 @@ class SourceReconciliationResult:
     remaining_count: int = 0
     failure_count: int = 0
     readiness: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedSourceStateChange:
+    """Bounded post-commit handoff consumed from Task 6B ingestion."""
+
+    source_id: int
+    content_changed: bool
+    permission_changed: bool
+    parser_policy_changed: bool
+    primary_code: str
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.source_id, bool)
+            or not isinstance(self.source_id, int)
+            or self.source_id <= 0
+        ):
+            raise ValueError('source_id must be a positive integer')
+        flags = (
+            self.content_changed,
+            self.permission_changed,
+            self.parser_policy_changed,
+        )
+        if any(not isinstance(value, bool) for value in flags):
+            raise ValueError('source change flags must be booleans')
+        if (
+            not isinstance(self.primary_code, str)
+            or not self.primary_code
+            or len(self.primary_code) > 64
+            or (not any(flags)) != (self.primary_code == 'unchanged')
+        ):
+            raise ValueError('source change primary_code is inconsistent')
 
 
 class AutoReviewSourceReconciliationService:
@@ -124,7 +167,7 @@ class AutoReviewSourceReconciliationService:
                 reconciled += int(source_result[0])
                 revoked += source_result[1]
                 narrowed += source_result[2]
-            except (SQLAlchemyError, ValueError):
+            except (SQLAlchemyError, RuntimeError, TypeError, ValueError):
                 self._db.rollback()
                 failures += 1
         return SourceReconciliationResult(
@@ -136,54 +179,45 @@ class AutoReviewSourceReconciliationService:
             readiness=failures == 0,
         )
 
+    def reconcile(
+        self,
+        changed_states: Sequence[CommittedSourceStateChange],
+    ) -> SourceReconciliationResult:
+        if not isinstance(changed_states, Sequence):
+            raise TypeError('changed_states must be a bounded sequence')
+        normalized: list[CommittedSourceStateChange] = []
+        for changed in changed_states[:100]:
+            if not isinstance(changed, CommittedSourceStateChange):
+                raise TypeError('changed_states contains an invalid DTO')
+            changed.__post_init__()
+            if changed.primary_code != 'unchanged':
+                normalized.append(changed)
+        return self.reconcile_source_ids(
+            [changed.source_id for changed in normalized]
+        )
+
     def repair_current_document_versions(
         self, *, limit: int = 100
     ) -> SourceReconciliationResult:
         bounded = _validate_limit(limit)
-        documents = tuple(
-            self._db.scalars(
-                select(Document)
+        document_rows = tuple(
+            self._db.execute(
+                select(Document.id, Document.source_id)
                 .where(Document.current_document_version_id.is_(None))
                 .order_by(Document.id)
                 .limit(bounded)
             ).all()
         )
+        self._db.rollback()
         repaired = ambiguous = unresolved = 0
-        for document in documents:
-            source = self._db.get(Source, document.source_id)
-            if (
-                source is None
-                or source.server_content_signature_schema
-                != 'server-source-content:v1'
-                or source.server_content_signature is None
-            ):
-                unresolved += 1
-                continue
-            runs = tuple(
-                self._db.scalars(
-                    select(DocumentParserRun).where(
-                        DocumentParserRun.document_id == document.id,
-                        DocumentParserRun.source_id == source.id,
-                        DocumentParserRun.server_content_signature_schema
-                        == 'server-source-content:v1',
-                        DocumentParserRun.server_content_signature
-                        == source.server_content_signature,
-                        DocumentParserRun.parser_policy_version.is_not(None),
-                        DocumentParserRun.parser_version.is_not(None),
-                        DocumentParserRun.chunk_policy_version.is_not(None),
-                    )
-                ).all()
+        for document_id, source_id in document_rows:
+            outcome = self._repair_current_document_version(
+                document_id=document_id,
+                source_id=source_id,
             )
-            version_ids = {run.document_version_id for run in runs}
-            if len(version_ids) == 1 and len(runs) == 1:
-                document.current_document_version_id = version_ids.pop()
-                repaired += 1
-            elif len(version_ids) > 1 or len(runs) > 1:
-                ambiguous += 1
-            else:
-                unresolved += 1
-        if repaired:
-            self._db.commit()
+            repaired += int(outcome == 'repaired')
+            ambiguous += int(outcome == 'ambiguous')
+            unresolved += int(outcome == 'unresolved')
         remaining = ambiguous + unresolved
         return SourceReconciliationResult(
             repaired_count=repaired,
@@ -192,28 +226,120 @@ class AutoReviewSourceReconciliationService:
             readiness=remaining == 0,
         )
 
+    def _repair_current_document_version(
+        self, *, document_id: int, source_id: int
+    ) -> str:
+        with KeyedMutationGuard.generation_barrier(self._db):
+            key_context = lock_runtime_state(self._db)
+            if key_context is None:
+                self._db.rollback()
+                return 'unresolved'
+            acquire_projection(self._db, key_context)
+            source_statement = select(Source).where(Source.id == source_id)
+            document_statement = select(Document).where(
+                Document.id == document_id
+            )
+            if self._db.get_bind().dialect.name == 'postgresql':
+                source_statement = source_statement.with_for_update()
+                document_statement = document_statement.with_for_update()
+            source = self._db.scalar(source_statement)
+            document = self._db.scalar(document_statement)
+            if (
+                source is None
+                or document is None
+                or document.source_id != source.id
+                or document.current_document_version_id is not None
+                or source.server_content_signature_schema
+                != 'server-source-content:v1'
+                or source.server_content_signature is None
+            ):
+                self._db.rollback()
+                return 'unresolved'
+            runs_statement = (
+                select(DocumentParserRun)
+                .where(
+                    DocumentParserRun.document_id == document.id,
+                    DocumentParserRun.source_id == source.id,
+                    DocumentParserRun.server_content_signature_schema
+                    == 'server-source-content:v1',
+                    DocumentParserRun.server_content_signature
+                    == source.server_content_signature,
+                    DocumentParserRun.parser_policy_version.is_not(None),
+                    DocumentParserRun.parser_version.is_not(None),
+                    DocumentParserRun.chunk_policy_version.is_not(None),
+                )
+                .order_by(DocumentParserRun.id)
+            )
+            candidate_version_ids = tuple(
+                self._db.scalars(
+                    select(DocumentVersion.id)
+                    .where(DocumentVersion.document_id == document.id)
+                    .order_by(DocumentVersion.id)
+                ).all()
+            )
+            if self._db.get_bind().dialect.name == 'postgresql':
+                if candidate_version_ids:
+                    tuple(
+                        self._db.scalars(
+                            select(DocumentVersion)
+                            .where(
+                                DocumentVersion.id.in_(candidate_version_ids)
+                            )
+                            .order_by(DocumentVersion.id)
+                            .with_for_update()
+                        ).all()
+                    )
+                runs_statement = runs_statement.with_for_update()
+            runs = tuple(self._db.scalars(runs_statement).all())
+            version_ids = {run.document_version_id for run in runs}
+            if len(runs) != 1 or len(version_ids) != 1:
+                self._db.rollback()
+                return 'ambiguous' if runs else 'unresolved'
+            selected_version_id = next(iter(version_ids))
+            if selected_version_id not in candidate_version_ids:
+                self._db.rollback()
+                return 'unresolved'
+            document.current_document_version_id = selected_version_id
+            self._db.commit()
+            return 'repaired'
+
     def _stale_source_ids(self, *, limit: int) -> list[int]:
-        links = tuple(
-            self._db.scalars(
-                select(TrustedKnowledgeApprovalLink).where(
+        rows = tuple(
+            self._db.execute(
+                select(
+                    TrustedKnowledgeEvidenceLink,
+                    TrustedKnowledgeApprovalLink,
+                )
+                .join(
+                    TrustedKnowledgeApprovalLink,
+                    TrustedKnowledgeApprovalLink.id
+                    == TrustedKnowledgeEvidenceLink.approval_link_id,
+                )
+                .where(
                     TrustedKnowledgeApprovalLink.active.is_(True),
                     TrustedKnowledgeApprovalLink.resolution_source
                     == 'auto_policy',
                 )
+                .order_by(
+                    TrustedKnowledgeEvidenceLink.canonical_source_id,
+                    TrustedKnowledgeEvidenceLink.id,
+                )
+                .limit(min(400, limit * 4))
             ).all()
         )
         stale: set[int] = set()
-        for link in links:
-            for evidence in self._evidence(link.id):
-                source_id = _source_id(evidence.canonical_source_id)
-                if source_id is None:
-                    continue
-                source = self._db.get(Source, source_id)
-                if (
-                    not _evidence_is_current(self._db, source, evidence)
-                    or self._permission_reconciliation_needed(link, source)
-                ):
-                    stale.add(source_id)
+        for evidence, link in rows:
+            source_id = _source_id(evidence.canonical_source_id)
+            if source_id is None:
+                continue
+            source = self._db.get(Source, source_id)
+            if (
+                not _evidence_is_current(self._db, source, evidence)
+                or self._permission_reconciliation_needed(link, source)
+            ):
+                stale.add(source_id)
+            if len(stale) == limit:
+                break
         return sorted(stale)[:limit]
 
     def _permission_reconciliation_needed(
@@ -254,23 +380,29 @@ class AutoReviewSourceReconciliationService:
         return any(_strictest(level, desired) != level for level in current_levels)
 
     def _reconcile_source(self, source_id: int) -> tuple[bool, int, int]:
-        source = self._db.get(Source, source_id)
-        evidence_rows = tuple(
+        evidence_ids = tuple(
             self._db.scalars(
-                select(TrustedKnowledgeEvidenceLink).where(
+                select(TrustedKnowledgeEvidenceLink.id)
+                .where(
                     TrustedKnowledgeEvidenceLink.canonical_source_id
                     == str(source_id)
                 )
+                .order_by(TrustedKnowledgeEvidenceLink.id)
+                .limit(100)
             ).all()
         )
-        if not evidence_rows:
+        if not evidence_ids:
             return False, 0, 0
-        revoked = narrowed = 0
-        item_ids: set[int] = set()
-        narrowed_documents: set[str] = set()
-        for evidence in evidence_rows:
-            link = self._db.get(
-                TrustedKnowledgeApprovalLink, evidence.approval_link_id
+        reconciled = revoked = narrowed = 0
+        handled_items: set[int] = set()
+        for evidence_id in evidence_ids:
+            evidence = self._db.get(TrustedKnowledgeEvidenceLink, evidence_id)
+            link = (
+                self._db.get(
+                    TrustedKnowledgeApprovalLink, evidence.approval_link_id
+                )
+                if evidence is not None
+                else None
             )
             if (
                 link is None
@@ -278,56 +410,20 @@ class AutoReviewSourceReconciliationService:
                 or link.resolution_source != 'auto_policy'
             ):
                 continue
-            item_ids.add(link.review_item_id)
-            if _evidence_is_current(self._db, source, evidence):
-                target = self._db.get(
-                    knowledge_model_for_type(link.knowledge_type),
-                    link.knowledge_id,
-                )
-                if target is None:
-                    continue
-                current = target.permission_level
-                item = self._db.get(ReviewItem, link.review_item_id)
-                strictest = _strictest_many(
-                    current,
-                    link.permission_level,
-                    item.permission_level if item is not None else 'restricted',
-                    source.permission_level,
-                )
-                target_changed = strictest != current
-                link_changed = (
-                    _strictest(link.permission_level, strictest)
-                    != link.permission_level
-                )
-                item_changed = bool(
-                    item is not None
-                    and _strictest(item.permission_level, strictest)
-                    != item.permission_level
-                )
-                if target_changed:
-                    target.permission_level = strictest
-                link.permission_level = _strictest(
-                    link.permission_level, strictest
-                )
-                if item is not None:
-                    item.permission_level = _strictest(
-                        item.permission_level, strictest
-                    )
-                document_id = f'{link.knowledge_type}:{link.knowledge_id}'
-                changed = self._narrow_fingerprint(
-                    document_id=document_id,
-                    permission_level=strictest,
-                )
-                if target_changed or link_changed or item_changed or changed:
-                    if self._vector_writer is not None:
-                        self._vector_writer.narrow_permissions(
-                            [document_id], strictest
-                        )
-                    self._refresh_index_state_hash(document_id)
-                    if document_id not in narrowed_documents:
-                        narrowed += 1
-                        narrowed_documents.add(document_id)
+            reconciled = 1
+            if link.review_item_id in handled_items:
                 continue
+            outcome = self._narrow_current_effect(
+                source_id=source_id,
+                evidence_id=evidence_id,
+                approval_link_id=link.id,
+            )
+            if outcome == 'narrowed':
+                narrowed += 1
+                continue
+            if outcome in {'current', 'gone'}:
+                continue
+            handled_items.add(link.review_item_id)
             context = self._mint_source_invalidation_context(
                 review_item_id=link.review_item_id,
                 canonical_source_id=str(source_id),
@@ -336,13 +432,90 @@ class AutoReviewSourceReconciliationService:
                 self._db,
                 settings=self._settings,
                 vector_writer=self._vector_writer,
-            ).revoke_source_invalidated(
-                context=context,
-            )
+            ).revoke_source_invalidated(context=context)
             revoked += int(not result.replayed)
-        if narrowed:
+        return bool(reconciled), revoked, narrowed
+
+    def _narrow_current_effect(
+        self,
+        *,
+        source_id: int,
+        evidence_id: int,
+        approval_link_id: int,
+    ) -> str:
+        link = self._db.get(TrustedKnowledgeApprovalLink, approval_link_id)
+        if link is None:
+            return 'gone'
+        document_id = f'{link.knowledge_type}:{link.knowledge_id}'
+        plan = build_serving_lock_plan(self._db, [document_id])
+        self._db.rollback()
+        with KeyedMutationGuard.generation_barrier(self._db):
+            key_context = lock_runtime_state(self._db)
+            if key_context is None:
+                raise RuntimeError('key runtime unavailable')
+            locked_context = ServingMutationLockCoordinator(
+                db=self._db, settings=self._settings
+            ).acquire(key_context=key_context, plan=plan)
+            source = self._db.get(Source, source_id)
+            evidence = self._db.get(
+                TrustedKnowledgeEvidenceLink, evidence_id
+            )
+            link = self._db.get(
+                TrustedKnowledgeApprovalLink, approval_link_id
+            )
+            if (
+                evidence is None
+                or link is None
+                or not link.active
+                or evidence.approval_link_id != link.id
+            ):
+                self._db.rollback()
+                return 'gone'
+            if not _evidence_is_current(self._db, source, evidence):
+                self._db.rollback()
+                return 'stale'
+            target = self._db.get(
+                knowledge_model_for_type(link.knowledge_type),
+                link.knowledge_id,
+            )
+            item = self._db.get(ReviewItem, link.review_item_id)
+            if target is None or item is None:
+                self._db.rollback()
+                return 'gone'
+            strictest = _strictest_many(
+                target.permission_level,
+                link.permission_level,
+                item.permission_level,
+                source.permission_level,
+            )
+            target_changed = strictest != target.permission_level
+            link_changed = strictest != link.permission_level
+            item_changed = strictest != item.permission_level
+            target.permission_level = strictest
+            link.permission_level = strictest
+            item.permission_level = strictest
+            fingerprint_changed = self._narrow_fingerprint(
+                document_id=document_id,
+                permission_level=strictest,
+            )
+            changed = any(
+                (target_changed, link_changed, item_changed, fingerprint_changed)
+            )
+            if changed and self._vector_writer is not None:
+                if self._vector_writer.__class__.__name__ == 'PgVectorStore':
+                    self._vector_writer.narrow_permissions(
+                        [document_id],
+                        strictest,
+                        locked_context=locked_context,  # type: ignore[call-arg]
+                    )
+                else:
+                    self._vector_writer.narrow_permissions(
+                        [document_id], strictest
+                    )
+            if changed:
+                self._refresh_index_state_hash(document_id)
             self._db.commit()
-        return bool(item_ids), revoked, narrowed
+            return 'narrowed' if changed else 'current'
 
     def _narrow_fingerprint(
         self, *, document_id: str, permission_level: str

@@ -128,6 +128,39 @@ def test_rag_service_answers_from_visible_chunks(db_session: Session) -> None:
     assert answer.hidden_match_count == 0
 
 
+def test_unsigned_raw_evidence_is_never_new_trusted_serving_content(
+    db_session: Session,
+) -> None:
+    seed_chunk(
+        db_session,
+        'gmail',
+        'gmail-legacy-unsigned',
+        'Unsigned Project Ash launch evidence must remain audit-only.',
+        'internal',
+    )
+    source = db_session.query(Source).one()
+    parser_run = db_session.query(DocumentParserRun).one()
+    source.server_content_signature_schema = None
+    source.server_content_signature = None
+    parser_run.server_content_signature_schema = None
+    parser_run.server_content_signature = None
+    parser_run.parser_policy_version = None
+    parser_run.parser_version = None
+    parser_run.chunk_policy_version = None
+    db_session.commit()
+
+    answer = answer_question_with_rag(
+        db=db_session,
+        user=USERS['viewer'],
+        question='Project Ash launch evidence',
+    )
+
+    assert answer.answer == '권한 내에서 확인 가능한 근거를 찾지 못했습니다.'
+    assert answer.source_links == []
+    assert answer.source_snippets == []
+    assert answer.serving_dependencies == ()
+
+
 def test_rag_service_hides_restricted_chunks_for_viewer(db_session: Session) -> None:
     seed_chunk(
         db_session,

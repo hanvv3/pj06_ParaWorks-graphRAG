@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import math
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
@@ -66,15 +68,11 @@ class InMemoryVectorStore:
 
     def delete_many(self, document_ids: Sequence[str]) -> int:
         normalized = sorted(set(document_ids))
+        current = self._transaction_documents()
         existing = [
-            document_id for document_id in normalized if document_id in self._documents
+            document_id for document_id in normalized if document_id in current
         ]
-
-        def apply() -> None:
-            for document_id in existing:
-                self._documents.pop(document_id, None)
-
-        self._apply_or_queue(apply)
+        self._apply_or_queue(_MemoryMutation('delete', tuple(existing)))
         deleted = len(existing)
         return deleted
 
@@ -83,32 +81,37 @@ class InMemoryVectorStore:
     ) -> int:
         target_rank = _permission_rank(permission_level)
         normalized = sorted(set(document_ids))
+        current = self._transaction_documents()
         documents = [
-            self._documents[document_id]
+            current[document_id]
             for document_id in normalized
-            if document_id in self._documents
+            if document_id in current
         ]
         if any(_permission_rank(document.permission_level) > target_rank for document in documents):
             raise ValueError('permission broadening is not allowed')
-        def apply() -> None:
-            for document in documents:
-                self._documents[document.document_id] = VectorDocument(
-                    document_id=document.document_id,
-                    text=document.text,
-                    source_url=document.source_url,
-                    source_snippet=document.source_snippet,
-                    permission_level=permission_level,
-                    metadata=document.metadata,
-                )
-
-        self._apply_or_queue(apply)
+        self._apply_or_queue(
+            _MemoryMutation(
+                'narrow',
+                tuple(document.document_id for document in documents),
+                permission_level,
+            )
+        )
         return len(documents)
 
-    def _apply_or_queue(self, mutation: Callable[[], None]) -> None:
+    def _transaction_documents(self) -> dict[str, VectorDocument]:
+        projected = dict(self._documents)
         if self._session is None:
-            mutation()
+            return projected
+        for queued in self._session.info.get(_MEMORY_MUTATIONS_INFO_KEY, []):
+            if queued.store is self:
+                queued.mutation.apply(projected)
+        return projected
+
+    def _apply_or_queue(self, mutation: _MemoryMutation) -> None:
+        if self._session is None:
+            mutation.apply(self._documents)
             return
-        _queue_after_commit(self._session, mutation)
+        _queue_after_commit(self._session, self, mutation)
 
     def search(self, *, query: str, user: DemoUser, limit: int = 5) -> VectorSearchResult:
         query_vector = _term_frequency_vector(query)
@@ -165,21 +168,93 @@ def _permission_rank(permission_level: str) -> int:
 
 _MEMORY_MUTATIONS_INFO_KEY = 'paraworks_in_memory_vector_mutations'
 _MEMORY_LISTENERS_INFO_KEY = 'paraworks_in_memory_vector_listeners'
+_MEMORY_COMMITTING_INFO_KEY = 'paraworks_in_memory_vector_committing'
 
 
-def _queue_after_commit(session: Session, mutation: Callable[[], None]) -> None:
-    session.info.setdefault(_MEMORY_MUTATIONS_INFO_KEY, []).append(mutation)
+@dataclass(frozen=True)
+class _MemoryMutation:
+    kind: str
+    document_ids: tuple[str, ...]
+    permission_level: str | None = None
+
+    def apply(self, documents: dict[str, VectorDocument]) -> None:
+        if self.kind == 'delete':
+            for document_id in self.document_ids:
+                documents.pop(document_id, None)
+            return
+        if self.kind != 'narrow' or self.permission_level is None:
+            raise RuntimeError('invalid in-memory vector mutation')
+        for document_id in self.document_ids:
+            document = documents.get(document_id)
+            if document is None:
+                continue
+            documents[document_id] = VectorDocument(
+                document_id=document.document_id,
+                text=document.text,
+                source_url=document.source_url,
+                source_snippet=document.source_snippet,
+                permission_level=self.permission_level,
+                metadata=document.metadata,
+            )
+
+
+@dataclass(frozen=True)
+class _QueuedMemoryMutation:
+    store: InMemoryVectorStore
+    transaction_identity: int
+    mutation: _MemoryMutation
+
+
+def _queue_after_commit(
+    session: Session,
+    store: InMemoryVectorStore,
+    mutation: _MemoryMutation,
+) -> None:
+    transaction = session.get_nested_transaction() or session.get_transaction()
+    if transaction is None:
+        session.begin()
+        transaction = session.get_transaction()
+    assert transaction is not None
+    session.info.setdefault(_MEMORY_MUTATIONS_INFO_KEY, []).append(
+        _QueuedMemoryMutation(store, id(transaction), mutation)
+    )
     if session.info.get(_MEMORY_LISTENERS_INFO_KEY):
         return
 
-    def apply_after_commit(committed_session: Session) -> None:
-        mutations = committed_session.info.pop(_MEMORY_MUTATIONS_INFO_KEY, [])
+    def mark_committing(committing_session: Session) -> None:
+        transaction = (
+            committing_session.get_nested_transaction()
+            or committing_session.get_transaction()
+        )
+        if transaction is not None:
+            committing_session.info.setdefault(
+                _MEMORY_COMMITTING_INFO_KEY, set()
+            ).add(id(transaction))
+
+    def finish_transaction(ended_session: Session, transaction) -> None:
+        committing = ended_session.info.get(_MEMORY_COMMITTING_INFO_KEY, set())
+        if id(transaction) not in committing:
+            return
+        committing.discard(id(transaction))
+        if transaction.parent is not None:
+            return
+        mutations = ended_session.info.pop(_MEMORY_MUTATIONS_INFO_KEY, [])
         for pending in mutations:
-            pending()
+            pending.mutation.apply(pending.store._documents)
 
-    def discard_after_rollback(rolled_back_session: Session) -> None:
-        rolled_back_session.info.pop(_MEMORY_MUTATIONS_INFO_KEY, None)
+    def discard_soft_rollback(rolled_back_session: Session, transaction) -> None:
+        pending = rolled_back_session.info.get(_MEMORY_MUTATIONS_INFO_KEY, [])
+        if transaction.parent is None:
+            rolled_back_session.info.pop(_MEMORY_MUTATIONS_INFO_KEY, None)
+            rolled_back_session.info.pop(_MEMORY_COMMITTING_INFO_KEY, None)
+            return
+        rolled_back_session.info[_MEMORY_MUTATIONS_INFO_KEY] = [
+            queued
+            for queued in pending
+            if queued.transaction_identity != id(transaction)
+        ]
 
-    event.listen(session, 'after_commit', apply_after_commit)
-    event.listen(session, 'after_rollback', discard_after_rollback)
+    event.listen(session, 'before_commit', mark_committing)
+    event.listen(session, 'after_transaction_end', finish_transaction)
+    event.listen(session, 'after_soft_rollback', discard_soft_rollback)
     session.info[_MEMORY_LISTENERS_INFO_KEY] = True

@@ -38,8 +38,6 @@ class AutoReviewAuditTransitionStore:
         statement = select(AutoReviewPostAudit).where(
             AutoReviewPostAudit.review_item_id == review_item_id
         )
-        if self._db.get_bind().dialect.name == 'postgresql':
-            statement = statement.with_for_update()
         audit = self._db.scalar(statement)
         if audit is None:
             return SourceInvalidationAuditResult(
@@ -69,8 +67,6 @@ class AutoReviewAuditTransitionStore:
             == decision.security_scope_id,
             AutoReviewRolloutState.policy_version == decision.policy_version,
         )
-        if self._db.get_bind().dialect.name == 'postgresql':
-            rollout_statement = rollout_statement.with_for_update()
         rollout = self._db.scalar(rollout_statement)
         if rollout is None:
             raise ValueError('source invalidation audit rollout is missing')

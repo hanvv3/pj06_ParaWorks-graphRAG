@@ -98,8 +98,6 @@ class TrustedServingEligibilityService:
         effective = _strictest_permission(
             [source.permission_level, chunk.permission_level]
         )
-        if source.server_content_signature_schema is None:
-            return TrustedServingEligibility(True, effective)
         if (
             source.server_content_signature_schema != 'server-source-content:v1'
             or source.server_content_signature is None

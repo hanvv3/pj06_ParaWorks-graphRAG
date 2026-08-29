@@ -160,7 +160,7 @@ def test_pgvector_conditional_upsert_cannot_cross_a_tombstone() -> None:
     assert 'SELECT' in statement
     assert 'NOT EXISTS' in statement
     assert 'vector_serving_tombstones' in statement
-    assert 'document_id = :document_id' in statement
+    assert 'document_id = candidate.document_id' in statement
 
 
 def test_pgvector_search_excludes_stale_tombstoned_row_before_hidden_count() -> None:

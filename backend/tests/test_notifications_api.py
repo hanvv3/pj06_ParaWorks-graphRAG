@@ -1,7 +1,33 @@
-from backend.app.models import AgentRun, ReviewItem
+from backend.app.models import AgentRun, AgentWorkflowThread, ReviewItem
 
 
 def test_notifications_api_returns_review_and_agent_run_alerts(client, db_session) -> None:
+    db_session.add_all(
+        [
+            AgentWorkflowThread(
+                thread_id='viewer-failed-thread',
+                workflow_name='review_sources',
+                graph_version='v1',
+                checkpoint_thread_id='checkpoint:viewer-failed-thread',
+                checkpoint_store='database',
+                owner_subject_id='employee-mina',
+                security_scope_id='default',
+                input_hash='a' * 64,
+                evidence_version_hash='b' * 64,
+            ),
+            AgentWorkflowThread(
+                thread_id='other-failed-thread',
+                workflow_name='review_sources',
+                graph_version='v1',
+                checkpoint_thread_id='checkpoint:other-failed-thread',
+                checkpoint_store='database',
+                owner_subject_id='somebody-else',
+                security_scope_id='default',
+                input_hash='c' * 64,
+                evidence_version_hash='d' * 64,
+            ),
+        ]
+    )
     db_session.add_all(
         [
             ReviewItem(
@@ -31,12 +57,26 @@ def test_notifications_api_returns_review_and_agent_run_alerts(client, db_sessio
                 model_name='fake-model',
                 permission_level='internal',
                 metadata_={'failure_reason': 'provider timeout'},
+                workflow_thread_id='viewer-failed-thread',
+            ),
+            AgentRun(
+                agent_name='document_agent',
+                prompt_version='document:v1',
+                status='failed',
+                source_window='drive:secret',
+                cache_key='other-failed-run-cache',
+                model_name='fake-model',
+                permission_level='internal',
+                metadata_={'failure_reason': 'raw secret: do not expose'},
+                workflow_thread_id='other-failed-thread',
             ),
         ]
     )
     db_session.commit()
 
-    response = client.get('/api/v1/notifications')
+    response = client.get(
+        '/api/v1/notifications', headers={'X-Demo-User': 'viewer'}
+    )
 
     assert response.status_code == 200
     payload = response.json()
@@ -52,4 +92,8 @@ def test_notifications_api_returns_review_and_agent_run_alerts(client, db_sessio
     ]
     assert payload['notifications'][0]['action_href'] == '/review'
     assert payload['notifications'][1]['severity'] == 'warning'
-    assert payload['notifications'][2]['message'] == 'provider timeout'
+    assert payload['notifications'][2]['message'] == 'Agent run failed'
+    assert all(
+        'raw secret' not in item['message']
+        for item in payload['notifications']
+    )
