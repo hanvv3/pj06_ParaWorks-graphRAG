@@ -4432,6 +4432,7 @@ def test_key_admin_status_exit_code_tracks_fresh_readiness_without_key_output(
         action='approve',
         actor=human_review_actor(USERS['admin']),
     )
+    db.commit()
     assert key_admin.main(['status']) == 0
     healthy_output = capsys.readouterr().out
     assert '"projection_ready":true' in healthy_output
