@@ -155,13 +155,24 @@ Current state:
   adapter, and a separately owned key-admin CLI runtime with bounded,
   privacy-safe failure outcomes. Product Tasks 6–16 remain unstarted; no paid
   provider call or rollout enablement occurred.
+- A later Task 16 release-gate dry run exposed a test-infrastructure boundary,
+  not a Task 5 product regression: one shared PostgreSQL `public` schema caused
+  144 fresh-empty fixture errors, controller environment overrides caused six
+  Settings-contract failures, and six Review V2 PostgreSQL failures require a
+  clean targeted RED before their leading fixture-provenance hypothesis can be
+  accepted. The approved architecture is documented in
+  `docs/superpowers/specs/2026-08-29-whole-suite-postgresql-isolation-design.md`;
+  its written spec passed independent Spec/Quality review, is awaiting user
+  review, and no isolation implementation has started.
 
 Next priorities:
 
 1. Plan and implement C.5 product Task 6, precise revoke and non-resurrection,
    under its separate approval/review boundary.
 2. Continue C.5 product Tasks 7–16 in the approved order; keep rollout disabled
-   and live paid-provider benchmarks separately authorized.
+   and live paid-provider benchmarks separately authorized. At Task 16 entry,
+   first implement the separately approved whole-suite PostgreSQL isolation
+   boundary; planning it now does not reorder Tasks 6–15.
 3. After all C.5 product tasks are complete, plan Deliverable D Retriever Port
    and RAG Answer Graph V2, followed by Deliverable E Neo4j GraphRAG.
 4. Continue frontend consistency only in its planned C.5 tasks, and keep Slack

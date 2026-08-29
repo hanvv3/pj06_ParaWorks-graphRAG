@@ -2,6 +2,33 @@
 
 Updated: 2026-08-29
 
+## 2026-08-29 Whole-suite PostgreSQL isolation planning checkpoint
+
+- The approved-in-chat design is recorded at
+  `docs/superpowers/specs/2026-08-29-whole-suite-postgresql-isolation-design.md`;
+  it passed independent Spec/Quality review, awaits user review, and is not
+  implementation authorization.
+- Preserved non-Slack evidence is `1453 passed`, `1 skipped`, ten approved Slack
+  deselections, `12 failed`, `144 errors`, with owned database/role cleanup
+  `0:0:0:0` and the shared container left running healthy.
+- Root causes are separated: shared `public` schema ordering caused the 144
+  errors; controller-wide database/fingerprint environment caused six Settings
+  failures. A legacy Review V2 fake-draft provenance gap is the leading static
+  hypothesis for the remaining six, but a clean long-traceback RED must confirm
+  it before test fixture changes.
+- Approved architecture: one controller-owned `_test` database/role, unique
+  serial schema leases for PostgreSQL tests, a separate temporary SQLite app
+  database, allowlisted/hermetic child environments with an early test-only
+  dotenv guard, an exact node/lease sidecar, bounded process/schema cleanup, and
+  no additional Slack exclusion or production trigger relaxation.
+- Do not implement this boundary before its written spec and implementation
+  plan are separately approved. Planning now does not reorder C.5 Tasks 6–15.
+  Slack reconstruction/regression remains last after D and E.
+- The current C.5 Task 16 raw pytest Steps 4–7 and single-final-commit wording
+  are blocked for execution. The future isolation implementation plan must
+  amend those instructions to controller profiles and reviewed slice commits in
+  the same separately approved planning change.
+
 ## 2026-08-29 C.5 product Task 5 database boundary verified
 
 ### Current boundary and next work

@@ -6,6 +6,33 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-29 Whole-suite PostgreSQL isolation design approved in chat
+
+- A final non-Slack comparison run preserved `1453 passed`, `1 skipped`, the
+  exact ten approved Slack deselections, `12 failed`, and `144 errors`; owned
+  database/role cleanup still completed at `0:0:0:0`.
+- The 144 errors are two fresh-empty PostgreSQL fixture refusals fanning out
+  after earlier modules populated the shared `public` schema. Six direct
+  failures came from controller-wide database/fingerprint environment
+  contamination. Static code inspection suggests the remaining six may be a
+  legacy Review V2 fake-draft provenance gap, but the retained run lacks the
+  assertion trace; a clean targeted RED must confirm that diagnosis before any
+  fixture change.
+- The selected design keeps one controller-owned `_test` database/role while
+  assigning PostgreSQL modules unique serial schema leases. Ordinary app tests
+  use a separate temporary SQLite database. An allowlisted child environment,
+  an early test-only dotenv guard, effective-state probe, explicit pytest plugin
+  list, and exact node/lease sidecar prevent `.env`, fingerprint, rollout,
+  paid-provider, connector, or pytest-control inheritance.
+- The design preserves the single backend collection, exact ten Slack
+  exclusions, production triggers, permissions, trust boundaries, and
+  controller cleanup. It adds no product behavior and makes no provider call.
+- Written spec:
+  `docs/superpowers/specs/2026-08-29-whole-suite-postgresql-isolation-design.md`.
+  It passed independent Spec/Quality review and awaits user review;
+  implementation planning and code have not started. Product order remains C.5
+  Tasks 6–15, Task 16 isolation/release, D, E, then Slack recovery last.
+
 ## 2026-08-29 C.5 Tasks 1–5 verified and typed database boundary accepted
 
 - Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–5 are now
