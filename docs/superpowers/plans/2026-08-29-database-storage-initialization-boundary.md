@@ -10,7 +10,14 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-29-database-storage-initialization-boundary-design.md`
 
-**Status:** Planning complete — user-approved design; independent Spec and Execution reviews PASS; actual implementation authorization is still pending.
+**Status:** Implemented and verified — Task 5 PostgreSQL acceptance `551 passed, 0 skipped`; Ruff/compile/lock/diff PASS; cleanup `0:0:0:0`; public evidence commit `f09c48a9cb741d179bfe7531dad61fa5c2df645b`.
+
+**Execution note:** SDD execution rules forbid reading or writing another plan's
+ignored workspace. The canonical local evidence for this plan is therefore
+`.superpowers/sdd/2026-08-29-database-storage-initialization-boundary/`; the
+sibling `2026-08-28-auto-review-trust-promotion` workspace is not used by this
+plan. The execution checklists below remain historical/replayable instructions,
+with their local evidence paths corrected to this canonical workspace.
 
 ## Global Constraints
 
@@ -43,8 +50,8 @@
 | `plan.md` | Current C.5 execution truth after verified acceptance |
 | `docs/portfolio-log.md` | Architecture story and fresh verification evidence |
 | `docs/superpowers/runbooks/session-handoff.md` | Exact commits, runtime contract, commands, cleanup, and next C.5 product Task 6 boundary |
-| `.superpowers/sdd/2026-08-28-auto-review-trust-promotion/progress.md` | Local ignored C.5 task ledger |
-| `.superpowers/sdd/2026-08-28-auto-review-trust-promotion/task-5-report.md` | Local ignored Task 5 evidence report; historical failed reviews remain unchanged |
+| `.superpowers/sdd/2026-08-29-database-storage-initialization-boundary/progress.md` | Local ignored database-boundary task ledger |
+| `.superpowers/sdd/2026-08-29-database-storage-initialization-boundary/task-5-report.md` | Local ignored Task 5 evidence report; historical failed reviews remain unchanged |
 
 Dependency order is strict: Task 1 defines the nominal public runtime; Task 2 completes initializer availability/privacy/lifecycle with a real temporary dialect; Task 3 writes all in-process and true-`python -m` CLI RED cases before moving CLI ownership; Task 4 changes the application compatibility adapter and then proves the import matrix; Task 5 runs the fail-closed PostgreSQL regression/cleanup controller; Task 6 synchronizes evidence and obtains final review over unchanged content before committing it.
 
@@ -2127,9 +2134,9 @@ No Task 5 commit is expected because this is a verification-only checkpoint.
 - Modify after observed evidence: `plan.md`
 - Modify after observed evidence: `docs/portfolio-log.md`
 - Modify after observed evidence: `docs/superpowers/runbooks/session-handoff.md`
-- Modify locally after observed evidence: `.superpowers/sdd/2026-08-28-auto-review-trust-promotion/progress.md`
-- Modify locally after observed evidence: `.superpowers/sdd/2026-08-28-auto-review-trust-promotion/task-5-report.md`
-- Create locally: `.superpowers/sdd/2026-08-28-auto-review-trust-promotion/task-5-review-final-6.md`
+- Modify locally after observed evidence: `.superpowers/sdd/2026-08-29-database-storage-initialization-boundary/progress.md`
+- Modify locally after observed evidence: `.superpowers/sdd/2026-08-29-database-storage-initialization-boundary/task-5-report.md`
+- Create locally: `.superpowers/sdd/2026-08-29-database-storage-initialization-boundary/task-5-review-final-6.md`
 
 **Interfaces:**
 - Consumes: unchanged final implementation HEAD from Tasks 1–4 and the complete Task 5 controller evidence.
@@ -2247,7 +2254,7 @@ Only after independent Spec PASS and Quality PASS:
 ```powershell
 git diff --cached --check
 if ($LASTEXITCODE -ne 0) { throw 'Reviewed staged diff changed or is invalid' }
-$reviewReportPath = '.superpowers/sdd/2026-08-28-auto-review-trust-promotion/task-5-review-final-6.md'
+$reviewReportPath = '.superpowers/sdd/2026-08-29-database-storage-initialization-boundary/task-5-review-final-6.md'
 $reviewedHashLines = @(
     Select-String `
         -LiteralPath $reviewReportPath `
