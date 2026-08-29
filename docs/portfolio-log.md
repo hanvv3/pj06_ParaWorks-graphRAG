@@ -4913,3 +4913,34 @@ Cost/security note:
   skips. Barrier tests prove cancellation commits while success, failure, or
   timeout provider I/O remains blocked, after which E3/failure accounting is
   terminal and candidate-free.
+
+## 2026-08-29 C.5 Task 6 revocable trusted serving and source authority
+
+- Trusted GraphRAG serving is now revocable end to end. A source content,
+  permission, or parser-policy change synchronously reconciles its approved
+  knowledge effects, while tombstones and the shared PostgreSQL advisory-lock
+  order prevent stale vector writes from resurrecting revoked knowledge.
+- Knowledge, dashboard, projects, search, Ask, Assistant, and company-memory
+  projections share fail-closed serving eligibility. Review Queue evidence
+  remains separately visible only to authorized reviewers, so quarantined
+  evidence can be remediated without becoming trusted answer content.
+- Gmail, Gmail attachments, Drive, and Calendar now use server-computed
+  `server-source-content:v1` signatures, server-owned parser/chunk policy, an
+  exact current document-version pointer, and canonical `source_type:` ids.
+  Connector signatures and parser hints remain non-authoritative evidence.
+- Same-content permission changes narrow Source, chunk, and vector visibility
+  without another embedding call. Content/parser changes invalidate only the
+  affected current chunks and preserve incremental hash-skip accounting.
+- Mock/demo Google inputs now mirror the real adapter identity and semantic
+  timestamp contracts. Search and Ask tests consume the genuine ingestion
+  authority instead of installing synthetic hashes or parser identities.
+- Fresh isolated PostgreSQL + pgvector verification produced `384 passed, 4
+  deselected` for the exact non-Slack Task 6 gate. The raw comparison produced
+  `384 passed, 4 failed`, exactly the approved deferred Slack orchestration
+  nodes. Ruff, lockfile, and diff checks passed; the disposable DB and role
+  were removed with catalog counts `0/0`. No live connector, LLM, or embedding
+  provider was called.
+- Slack remains deliberately last and legacy-dedupe-only. Task 7 will also
+  replace the remaining Mail/Document legacy raw-signature resolver with the
+  server-signature-only canonical source contract before the wider endpoint
+  suite becomes green.

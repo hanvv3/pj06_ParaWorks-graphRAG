@@ -3126,3 +3126,35 @@ tests passed with 53 tests; ruff passed.
   tests, `220` Task 1/2 regressions, `118` service/API/integration tests, and
   `5` standalone migration tests, zero skips. Provider-blocking barriers cover
   success, failure, and timeout while concurrent cancellation still commits.
+
+## 2026-08-29 C.5 Task 6 handoff
+
+- Task 6 is integrated on `codex/rag-orchestrator-agent`. Task 6A's reviewed
+  serving/revoke head was `853f476`; the `primary_code` consumer amendment is
+  `d2085bc..2691691`; exact Task 6B green head `f356422` was merged by
+  `242c071`. Fixture/integration hardening is `445aaf1`, `7e1cc7f`, and
+  `59c7549`.
+- `CommittedSourceStateChange` booleans are the only reconciliation control
+  authority. `primary_code` is validated bounded observability and must never
+  be used to infer or suppress a change.
+- Supported Google/document ingestion requires exact canonical ids and
+  semantic authority: `gmail:`, `gmail_attachment:`, `drive:`, `calendar:`;
+  Gmail millisecond `internalDate`, Drive aware `modifiedTime`, and Calendar
+  exact start date/date-time. Server signature/parser/current-pointer fields
+  are authoritative; connector raw signatures and parser hints are not.
+- Retrieval and projection paths must continue using
+  `TrustedServingEligibilityService` and exact dependency snapshots. Review
+  Queue reads use `ReviewEvidenceVisibilityService`; do not merge these trust
+  boundaries.
+- Final Task 6 PostgreSQL evidence used one freshly empty pgvector DB with all
+  three database URLs pinned to it. Raw gate: `384 passed, 4 failed`, exactly
+  the approved Slack nodes. Non-Slack gate: `384 passed, 4 deselected`. Ruff,
+  `uv lock --check`, and diff checks passed; cleanup returned DB/role `0/0`.
+- Task 7 must remove the legacy raw `content_signature` lookup in
+  `backend/app/agent_runtime/canonical_sources.py` and consume the current
+  server-signature/current-version contract. Seven Mail/Document endpoint
+  tests currently stop at that known boundary. Do not restore raw connector
+  signature authority to make them pass.
+- Slack connector/agent/OAuth/data work remains last by explicit user choice.
+  Preserve the exact approved ten-node deselection list; Task 6 reaches four
+  of those nodes. No additional deselection is authorized.
