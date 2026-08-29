@@ -149,12 +149,12 @@ Current state:
 - PostgreSQL restart, reconciliation, exact-batch launch, concurrent Review
   transition, concurrent resume, terminal-race, checkpoint privacy, and exact
   cleanup coverage is release-verified with zero PostgreSQL skips.
-- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–6 are implemented
-  and independently verified. Task 6's implementation head is `a74cfeb`; exact
-  source/current-version authority, bounded reconciliation, revocable trusted
-  serving, canonical all-type serving text, and proof-based incremental vector
-  state transitions are complete. Product Tasks 7–16 remain unstarted; no paid
-  provider call or rollout enablement occurred.
+- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–8 are implemented
+  and independently verified. Deterministic eligibility/policy authority and
+  the isolated real LangChain `gpt-5.6-terra` validator boundary now join the
+  exact source/current-version, revocation, serving, and vector-state
+  contracts. Product Tasks 9–16 remain unstarted; no paid provider call or
+  rollout enablement occurred.
 - A later Task 16 release-gate dry run exposed a test-infrastructure boundary,
   not a Task 5 product regression: one shared PostgreSQL `public` schema caused
   144 fresh-empty fixture errors, controller environment overrides caused six
@@ -169,9 +169,10 @@ Current state:
 
 Next priorities:
 
-1. Implement C.5 product Task 7 as the next approved TDD slice, preserving the
-   Task 6 source-authority, permission, and trusted-serving boundaries.
-2. Continue C.5 product Tasks 8–16 in the approved order; keep rollout disabled
+1. Implement C.5 product Task 9 as the next approved TDD slice, adding the
+   persistent one-call validation lease, atomic cost ledger, replay, and
+   revalidation boundary around Task 8's isolated validator.
+2. Continue C.5 product Tasks 10–16 in the approved order; keep rollout disabled
    and live paid-provider benchmarks separately authorized. At Task 16 entry,
    first implement the whole-suite PostgreSQL isolation boundary after its
    detailed plan is separately approved; planning it now does not reorder
@@ -479,8 +480,8 @@ Tasks:
     checkpoint runtimes/pools/savers; A is closed and disposed before B exists.
   - This historical boundary is superseded: the C.5 design/spec, implementation
     plan, and exact execution profile are finalized.
-- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–6 implemented
-  and independently verified; product Task 7 is the next unstarted slice.
+- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–8 implemented
+  and independently verified; product Task 9 is the next unstarted slice.
   - Approved spec:
     `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
   - Implementation plan:
@@ -498,7 +499,9 @@ Tasks:
     5. Exact claim fingerprints, provenance, reaffirmation, and the database
        initialization acceptance boundary: complete and PostgreSQL-verified.
     6. Precise revoke and non-resurrection: complete and PostgreSQL-verified.
-    7. Tasks 7–16, Deliverable D/E, and Slack recovery: not started; Task 7 is
+    7. Deterministic eligibility and policy authority: complete.
+    8. Isolated real LangChain Terra validator boundary: complete.
+    9. Tasks 9–16, Deliverable D/E, and Slack recovery: not started; Task 9 is
        the next implementation slice.
   - Separates canonical source evidence, pending AI knowledge, and trusted
     knowledge. Raw evidence is not official knowledge and C.5 does not broaden
@@ -570,10 +573,18 @@ Tasks:
     is `230 passed, 58 skipped`; PostgreSQL projection/collision regression is
     `12 passed`; Ruff, compile, lock, and diff checks pass; disposable DB/role
     cleanup is `0/0`; independent review is PASS/APPROVED with zero open
-    Critical or Important findings. No live provider was called. Task 8 and
-    later work remain separately gated.
+    Critical or Important findings. Task 8 adds an OpenAI-only
+    `gpt-5.6-terra`/medium route with exact Responses JSON-schema framing,
+    frozen single-render HMAC input, 6,000/3,072 token caps, serialized 12,000
+    character cap, one provider start, zero SDK retry/fallback/cache/tracing,
+    bounded usage/cost capture, and sanitized whole-batch failure. Its exact
+    fake-model/dependency gate is `46 passed`; adjacent Task 3/7 regression is
+    `117 passed`; shared contracts are `41 passed`; Ruff, compile, lock, and
+    diff checks pass. Independent rereview is Spec PASS / Quality APPROVED with
+    zero open Critical or Important findings. No live provider was called.
+    Task 9 and later work remain separately gated.
 - User-directed execution order for the remaining program:
-  1. Deliverable C.5 Auto-Review Trust Promotion Tasks 7–16.
+  1. Deliverable C.5 Auto-Review Trust Promotion Tasks 9–16.
   2. Deliverable D Retriever Port and RAG Answer Graph V2 using Gmail, Drive,
      Calendar, trusted knowledge, and deterministic fixtures.
   3. Deliverable E Neo4j GraphRAG after D establishes the safe retriever and

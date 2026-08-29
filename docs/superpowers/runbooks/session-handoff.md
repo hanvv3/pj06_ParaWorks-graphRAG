@@ -3223,3 +3223,41 @@ tests passed with 53 tests; ruff passed.
   fake-model tests, zero fallback/retry/cache/tracing, and a server-owned
   one-dispatch fence. Task 8 must not enable rollout or make a live paid call.
   Slack recovery remains last.
+
+## 2026-08-30 C.5 Task 8 handoff
+
+- Task 8 is implementation-complete on `codex/rag-orchestrator-agent`.
+  `backend/app/agent_runtime/auto_review_validator.py` owns the immutable
+  two-phase validator protocol; `build_auto_review_validator_model_route()` is
+  the only Task 8 Terra construction boundary. Do not call it from routes or
+  connectors and do not reintroduce provider-order fallback.
+- Preparation serializes local-only claims/evidence once, freezes the exact
+  Responses JSON-schema framing and native estimator body, applies the 12,000
+  serialized-character and 6,000 framed-token caps, and signs the body with a
+  keyed HMAC. Invoke must bind the frozen dict rather than the Pydantic class;
+  otherwise schema rendering can drift after a Task 9 claim.
+- Invoke requires a dispatcher-held committed grant, rechecks provider logging
+  inside the dispatch boundary, permits one provider start, disables LangSmith
+  tracing/callbacks/cache, and records only bounded usage/cost after complete
+  batch integrity. `token_usage` and `usage`, when present together, must both
+  agree exactly with `usage_metadata`; ambiguity is a sanitized whole-batch
+  failure.
+- Task 8 intentionally does not own a database lease, attempt marker, replay,
+  permission/source revalidation, or `FencedOpenAITransport`. Task 9 must issue
+  the grant only after marker commit, validate the frozen invocation identity,
+  consume the one-use transport, call with no open DB transaction, then reopen
+  and revalidate before persisting bounded observations.
+- Final evidence: exact Task 8/dependency compatibility `46 passed`; adjacent
+  Task 3/7 regression `117 passed`; shared contracts `41 passed`; Ruff,
+  compile, `uv lock --check`, and `git diff --check` PASS. Independent rereview
+  is Spec PASS / Quality APPROVED with no Critical or Important findings. Tests
+  used fake models only; no live paid provider call or rollout enablement
+  occurred.
+- A usable `OPENAI_API_KEY` is stored only in ignored local `.env.local`; its
+  plaintext was never logged or committed. Current Settings load `.env` by
+  default, so Task 9 must not assume `.env.local` is implicitly loaded. Do not
+  make a paid/live validation call without separate authorization.
+- Next is C.5 Task 9, an actual implementation task, not planning: persistent
+  validation identities, one-call leases, atomic reservations/cost ledger,
+  replay, cancellation/crash handling, and post-provider permission/source
+  revalidation. Slack data reconstruction and Slack regressions remain last.

@@ -2,6 +2,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from backend.app.agent_runtime.auto_review_cost_policy import (
+    AUTO_REVIEW_MAX_OUTPUT_TOKENS,
+    AUTO_REVIEW_PROVIDER_TIMEOUT_SECONDS,
+    AUTO_REVIEW_REASONING_EFFORT,
+    AUTO_REVIEW_VALIDATOR_INPUT_USD_PER_1M,
+    AUTO_REVIEW_VALIDATOR_MODEL,
+    AUTO_REVIEW_VALIDATOR_OUTPUT_USD_PER_1M,
+    is_server_owned_fenced_send_hook,
+)
 from backend.app.agents.mail_document_agent import (
     DeterministicMailDocumentAgentModel,
     MailDocumentLlmProviderError,
@@ -9,6 +18,7 @@ from backend.app.agents.mail_document_agent import (
     build_langchain_mail_document_agent_model,
 )
 from backend.app.core.config import Settings
+from backend.app.schemas.auto_review import AUTO_REVIEW_VALIDATOR_PROMPT_VERSION
 
 MODEL_ROUTE_VERSION = 'review-model-route:v1'
 OPENAI_COMPATIBLE_PROVIDERS = frozenset({'openai', 'azure_openai'})
@@ -82,6 +92,54 @@ def build_memory_model_route(
         model=model,
         model_name=available[0][1],
         route_version=_route_version('memory-extraction', available),
+        deterministic=False,
+    )
+
+
+def build_auto_review_validator_model_route(
+    settings: Settings,
+    *,
+    timeout_seconds: int,
+    http_hook: object,
+    chat_model_builder: Callable[..., Any] | None = None,
+) -> RoutedReviewModel:
+    """Build the one exact Terra route after a committed attempt is admitted."""
+    if (
+        not settings.openai_api_key
+        or timeout_seconds != AUTO_REVIEW_PROVIDER_TIMEOUT_SECONDS
+        or settings.auto_review_validator_input_cost_per_1m_tokens
+        != AUTO_REVIEW_VALIDATOR_INPUT_USD_PER_1M
+        or settings.auto_review_validator_output_cost_per_1m_tokens
+        != AUTO_REVIEW_VALIDATOR_OUTPUT_USD_PER_1M
+        or not is_server_owned_fenced_send_hook(http_hook)
+    ):
+        raise ReviewModelUnavailableError('review model is unavailable')
+    try:
+        if chat_model_builder is None:
+            from langchain_openai import ChatOpenAI
+
+            chat_model_builder = ChatOpenAI
+        model = chat_model_builder(
+            model=AUTO_REVIEW_VALIDATOR_MODEL,
+            api_key=settings.openai_api_key,
+            reasoning_effort=AUTO_REVIEW_REASONING_EFFORT,
+            use_responses_api=True,
+            timeout=timeout_seconds,
+            max_retries=0,
+            max_completion_tokens=AUTO_REVIEW_MAX_OUTPUT_TOKENS,
+            verbose=False,
+            cache=False,
+        )
+        if bool(getattr(model, 'verbose', False)) or bool(
+            getattr(model, 'cache', False)
+        ):
+            raise ValueError('unsafe model controls')
+    except Exception:
+        raise ReviewModelUnavailableError('review model is unavailable') from None
+    return RoutedReviewModel(
+        model=model,
+        model_name=AUTO_REVIEW_VALIDATOR_MODEL,
+        route_version=AUTO_REVIEW_VALIDATOR_PROMPT_VERSION,
         deterministic=False,
     )
 

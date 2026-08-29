@@ -5013,3 +5013,35 @@ Cost/security note:
   Important findings. Task 8 is the next actual implementation slice and will
   add the real LangChain Terra validator boundary without making a live call
   during automated tests.
+
+## 2026-08-30 C.5 Task 8 real LangChain Terra validator boundary
+
+- Added an isolated OpenAI-only LangChain route fixed to
+  `gpt-5.6-terra`, medium reasoning, Responses API structured output, 60-second
+  timeout, `max_retries=0`, 3,072 total output tokens, and no provider-order or
+  model fallback. Every invocation builds a fresh model with explicit
+  `verbose=False` and `cache=False`.
+- The validator uses a two-phase immutable boundary: `prepare_many()` creates
+  bounded local candidate/evidence aliases, exact native JSON-schema framing,
+  token counts, and a keyed HMAC; `invoke_prepared()` accepts only a committed
+  dispatcher grant and allows one provider start. Task 9 still owns the
+  database attempt marker, lease, one-use transport, replay, and cost ledger.
+- Provider input contains only normalized claims and evidence under local
+  `Cxx`/`Exx` aliases. The serialized human JSON is capped at 12,000 characters,
+  the exact native request framing at 6,000 input tokens, and the batch at four
+  candidates/twelve evidence slots. Credential detection, unsafe debug/logging,
+  unapproved hooks, tracing, callbacks, and global cache access fail closed
+  before a provider call.
+- The exact prepared schema dict is reused at invoke time, so no post-claim
+  Pydantic schema render can diverge from the signed request. Returned batches
+  are reparsed and checked for exact candidate, claim-field, and evidence-slot
+  integrity. All simultaneous provider usage aliases must agree with bounded
+  authoritative usage before six-place cost recording; all errors are
+  sanitized and discard the whole batch.
+- Automated verification used fake models only: exact Task 8 and pinned
+  LangChain/OpenAI compatibility `46 passed`, adjacent provider-fence,
+  extraction, eligibility, policy, and memory-extraction regression `117
+  passed`, and shared contracts `41 passed`. Ruff, compile, lockfile, and diff
+  checks passed. Independent rereview returned Spec PASS / Quality APPROVED
+  with Critical `0`, Important `0`. No live LLM call or rollout enablement
+  occurred. Task 9 is the next actual implementation slice; Slack remains last.

@@ -33,6 +33,112 @@ def test_resolved_psycopg_meets_floor() -> None:
     assert _release_tuple('psycopg') >= (3, 3, 2)
 
 
+def test_dependency_compat_freezes_json_schema_strict_bound_kwargs_and_framing() -> None:
+    import json
+
+    from langchain_openai import ChatOpenAI
+    from openai.lib._parsing._responses import type_to_text_format_param
+
+    from backend.app.agent_runtime.auto_review_policy import (
+        CandidateValidationRequest,
+        ValidationClaimInput,
+        ValidationEvidenceSlot,
+    )
+    from backend.app.agent_runtime.auto_review_validator import (
+        AutoReviewValidatorFactory,
+    )
+    from backend.app.core.config import Settings
+    from backend.app.schemas.auto_review import CandidateValidationBatchResult
+
+    model = ChatOpenAI(
+        model='gpt-5.6-terra',
+        api_key='compat-openai-key-not-live',
+        reasoning_effort='medium',
+        use_responses_api=True,
+        timeout=60,
+        max_retries=0,
+        max_completion_tokens=3072,
+        verbose=False,
+        cache=False,
+    )
+    payload = model._get_request_payload(
+        (('system', 'system'), ('human', 'body')),
+        response_format=CandidateValidationBatchResult,
+    )
+    structured = model.with_structured_output(
+        CandidateValidationBatchResult,
+        method='json_schema',
+        strict=True,
+        include_raw=True,
+    )
+    raw_binding = structured.steps[0].steps__['raw']
+
+    class NoDispatch:
+        def dispatch_prepared_validation(self, **kwargs):
+            raise AssertionError(kwargs)
+
+    validator = AutoReviewValidatorFactory(
+        settings=Settings(
+            _env_file=None,
+            openai_api_key='compat-openai-key-not-live',
+            agent_runtime_fingerprint_secret='compat-secret-at-least-32-bytes-long',
+            auto_review_validator_input_cost_per_1m_tokens='2.000000',
+            auto_review_validator_output_cost_per_1m_tokens='12.000000',
+        ),
+        dispatcher=NoDispatch(),
+    ).create(lambda usage: None)
+    invocation = validator.prepare_many(
+        (
+            CandidateValidationRequest(
+                candidate_slot_id='C01',
+                item_type='timeline_event',
+                claims=(
+                    ValidationClaimInput(field_key='title', text='제목'),
+                    ValidationClaimInput(
+                        field_key='result_summary', text='직접 사실'
+                    ),
+                ),
+                evidence_slots=(
+                    ValidationEvidenceSlot(slot_id='E01', text='직접 근거'),
+                ),
+            ),
+        )
+    )
+    frozen_format = json.loads(invocation.response_schema_framing)
+    frozen_schema = {
+        key: frozen_format[key] for key in ('name', 'schema', 'strict')
+    }
+    frozen_structured = model.with_structured_output(
+        frozen_schema,
+        method='json_schema',
+        strict=True,
+        include_raw=True,
+    )
+    frozen_binding = frozen_structured.steps[0].steps__['raw']
+    frozen_payload = model._get_request_payload(
+        invocation.messages,
+        response_format=frozen_binding.kwargs['response_format'],
+    )
+
+    assert payload['model'] == 'gpt-5.6-terra'
+    assert payload['max_output_tokens'] == 3072
+    assert payload.get('max_completion_tokens') is None
+    assert payload['reasoning'] == {'effort': 'medium'}
+    assert raw_binding.kwargs['response_format'] is CandidateValidationBatchResult
+    assert raw_binding.kwargs['ls_structured_output_format']['kwargs'] == {
+        'method': 'json_schema',
+        'strict': True,
+    }
+    assert json.loads(invocation.response_schema_framing) == (
+        type_to_text_format_param(CandidateValidationBatchResult)
+    )
+    assert frozen_binding.kwargs['response_format'] == {
+        'type': 'json_schema',
+        'json_schema': frozen_schema,
+    }
+    assert frozen_payload['text']['format'] == frozen_format
+
+
 def test_checkpoint_and_pool_symbols_import_without_database_access() -> None:
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.checkpoint.postgres import PostgresSaver
