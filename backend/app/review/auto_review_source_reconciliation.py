@@ -216,7 +216,11 @@ class AutoReviewSourceReconciliationService:
             if not isinstance(changed, CommittedSourceStateChange):
                 raise TypeError('changed_states contains an invalid DTO')
             changed.__post_init__()
-            if changed.primary_code != 'unchanged':
+            if (
+                changed.content_changed
+                or changed.permission_changed
+                or changed.parser_policy_changed
+            ):
                 normalized.append(changed)
         return self.reconcile_source_ids(
             [changed.source_id for changed in normalized]

@@ -461,6 +461,45 @@ def test_committed_changed_state_dto_is_frozen_and_reconcile_is_the_public_hando
     assert history.permission_level == 'internal'
 
 
+def test_reconcile_uses_authoritative_flags_when_primary_code_is_forged_unchanged(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+        CommittedSourceStateChange,
+    )
+
+    history, item, source, link = _seed_explicit_history(
+        db_session, resolution_source='auto_policy'
+    )
+    history.permission_level = 'public'
+    item.permission_level = 'public'
+    link.permission_level = 'public'
+    source.permission_level = 'internal'
+    db_session.commit()
+
+    class ForgedProjection(CommittedSourceStateChange):
+        def __post_init__(self) -> None:
+            pass
+
+    changed = ForgedProjection(
+        source_id=source.id,
+        content_changed=False,
+        permission_changed=True,
+        parser_policy_changed=False,
+        primary_code='unchanged',
+    )
+
+    result = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=PreviewVectorIndexWriter(),
+    ).reconcile([changed])
+
+    assert result.reconciled_count == 1
+    assert history.permission_level == 'internal'
+
+
 def test_restricted_unknown_absent_or_superseded_source_revokes_exact_auto_effect(
     db_session: Session,
 ) -> None:
