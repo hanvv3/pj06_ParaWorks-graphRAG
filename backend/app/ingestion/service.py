@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
+from hashlib import sha256
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -20,12 +21,14 @@ from backend.app.documents.service import (
 )
 from backend.app.ingestion.source_content_signature import (
     CanonicalSourceContentSignature,
+    ServerParserPolicy,
     SourceStateChangeClassification,
     canonical_source_content_signature,
     classify_source_state_change,
     connector_content_signature,
     normalize_source_permission,
     server_parser_policy_for_event,
+    server_parser_run_matches_authority,
     source_state_primary_code,
 )
 from backend.app.ingestion.source_versions import SourceVersionRef, source_version_refs
@@ -69,19 +72,24 @@ _CONNECTOR_AUTHORITY_KEYS = frozenset(
         'server_content_signature_schema',
     }
 )
-_PERMISSION_RANK = {'public': 0, 'internal': 1, 'restricted': 2}
-_PARSER_METADATA_KEYS = (
-    'parser_name',
-    'parser_status',
-    'parser_status_reason',
-    'mime_type',
-    'document_version',
-    'revision_id',
-    'content_signature',
-    'content_hash',
-    'section_path',
-    'page_number',
+_CONNECTOR_PARSER_AUTHORITY_KEYS = frozenset(
+    {
+        'chunk_max_chars',
+        'chunk_policy',
+        'chunk_policy_version',
+        'content_hash',
+        'mime_type',
+        'page_number',
+        'parser_name',
+        'parser_policy_version',
+        'parser_status',
+        'parser_status_reason',
+        'parser_version',
+        'section_path',
+        'source_snippet',
+    }
 )
+_PERMISSION_RANK = {'public': 0, 'internal': 1, 'restricted': 2}
 
 
 @dataclass(frozen=True)
@@ -215,6 +223,7 @@ def _ingest_events_transaction(
             event=event,
             existing_source=existing_source,
             signature=computed_signature,
+            parser_policy=parser_policy,
             authenticated_metadata=authenticated_source_metadata_by_id.get(
                 event.source_id
             ),
@@ -253,6 +262,7 @@ def _ingest_events_transaction(
                         authenticated_metadata=authenticated_source_metadata_by_id.get(
                             event.source_id
                         ),
+                        parser_policy=parser_policy,
                     ),
                     'source_id': event.source_id,
                     'source_url': event.source_url,
@@ -406,6 +416,7 @@ def _upsert_c5_source(
     event: SourceEvent,
     existing_source: Source | None,
     signature: CanonicalSourceContentSignature,
+    parser_policy: ServerParserPolicy,
     authenticated_metadata: Mapping[str, object] | None,
 ) -> Source:
     previous_metadata = (
@@ -415,6 +426,7 @@ def _upsert_c5_source(
         event,
         existing_metadata=previous_metadata,
         authenticated_metadata=authenticated_metadata,
+        parser_policy=parser_policy,
     )
     permission = normalize_source_permission(event.permission_level)
     if existing_source is None:
@@ -450,11 +462,13 @@ def _canonical_source_metadata(
     *,
     existing_metadata: Mapping[str, object] | None,
     authenticated_metadata: Mapping[str, object] | None,
+    parser_policy: ServerParserPolicy,
 ) -> dict:
     incoming = {
         key: value
         for key, value in event.raw_metadata.items()
         if key not in _CONNECTOR_AUTHORITY_KEYS
+        and key not in _CONNECTOR_PARSER_AUTHORITY_KEYS
         and key not in _SERVER_RESOLVED_METADATA_KEYS
     }
     if existing_metadata is not None:
@@ -469,6 +483,7 @@ def _canonical_source_metadata(
             incoming.setdefault(key, value)
     incoming['participants'] = list(event.participants)
     incoming['semantic_timestamp_raw'] = event.semantic_timestamp_raw
+    incoming['mime_type'] = parser_policy.mime_type
     return incoming
 
 
@@ -601,9 +616,56 @@ def _refresh_chunk_index_state_hash(
     document_id: str,
     permission_level: str,
 ) -> None:
+    states = tuple(
+        db.scalars(
+            select(VectorIndexState).where(
+                VectorIndexState.document_id == document_id
+            )
+        ).all()
+    )
+    if not states:
+        return
     chunk = db.get(DocumentChunk, int(document_id.split(':', maxsplit=1)[1]))
     if chunk is None:
         return
+    version = db.get(DocumentVersion, chunk.version_id)
+    parser_run = (
+        db.get(DocumentParserRun, chunk.parser_run_id)
+        if chunk.parser_run_id is not None
+        else None
+    )
+    document = db.get(Document, version.document_id) if version is not None else None
+    if (
+        version is None
+        or parser_run is None
+        or document is None
+        or document.source_id != source.id
+        or document.current_document_version_id != version.id
+        or parser_run.document_id != document.id
+        or parser_run.document_version_id != version.id
+        or parser_run.source_id != source.id
+        or parser_run.document_version_label != version.version
+        or source.server_content_signature is None
+        or not server_parser_run_matches_authority(
+            source_type=source.source_type,
+            server_content_signature=source.server_content_signature,
+            parser_run=parser_run,
+        )
+    ):
+        raise RuntimeError('current server parser authority is unavailable')
+    parser_metadata: dict[str, object] = {
+        'parser_name': parser_run.parser_name,
+        'parser_status': parser_run.parser_status,
+        'parser_status_reason': parser_run.parser_status_reason,
+        'mime_type': parser_run.mime_type,
+        'document_version': version.version,
+        'revision_id': parser_run.revision_id,
+        'content_signature': parser_run.content_signature,
+        'content_hash': sha256(chunk.text.encode('utf-8')).hexdigest(),
+    }
+    for key in ('section_path', 'page_number'):
+        if key in chunk.metadata_:
+            parser_metadata[key] = chunk.metadata_[key]
     metadata = {
         'chunk_id': chunk.id,
         'source_pk': source.id,
@@ -620,11 +682,7 @@ def _refresh_chunk_index_state_hash(
         'topic_tag': chunk.metadata_.get('topic_tag'),
         'importance': chunk.metadata_.get('importance'),
         'scenario': source.raw_metadata.get('scenario'),
-        **{
-            key: chunk.metadata_.get(key)
-            for key in _PARSER_METADATA_KEYS
-            if key in chunk.metadata_
-        },
+        **parser_metadata,
     }
     content_hash = compute_vector_document_hash(
         VectorDocument(
@@ -636,11 +694,7 @@ def _refresh_chunk_index_state_hash(
             metadata=metadata,
         )
     )
-    for state in db.scalars(
-        select(VectorIndexState).where(
-            VectorIndexState.document_id == document_id
-        )
-    ).all():
+    for state in states:
         state.content_hash = content_hash
 
 

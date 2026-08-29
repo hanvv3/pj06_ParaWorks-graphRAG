@@ -104,13 +104,17 @@ def seed_chunk(
         document_id=document.id,
         document_version_id=version.id,
         source_id=source.id,
-        parser_name='plain_text',
+        parser_name='server_gmail_source_event',
         parser_status='parsed',
+        parser_status_reason=None,
+        mime_type='message/rfc822',
+        document_version_label='v1',
+        content_signature=signature,
         server_content_signature_schema='server-source-content:v1',
         server_content_signature=signature,
-        parser_policy_version='parser-policy:v1',
-        parser_version='plain-text:v1',
-        chunk_policy_version='chunk-policy:v1',
+        parser_policy_version='server-source-parser-policy:v1',
+        parser_version='source-event-paragraph-parser:v1',
+        chunk_policy_version='paragraph-chunks:1200:v1',
     )
     db.add(parser_run)
     db.flush()
@@ -595,14 +599,18 @@ def test_build_rag_index_documents_includes_document_parser_metadata(db_session:
         document_id=document.id,
         document_version_id=version.id,
         source_id=source.id,
-        parser_name='google_drive_text_export',
+        parser_name='server_drive_source_event',
         parser_status='parsed',
+        parser_status_reason=None,
+        mime_type='application/vnd.google-apps.document',
+        document_version_label='43',
         revision_id='rev-43',
+        content_signature=source.server_content_signature,
         server_content_signature_schema='server-source-content:v1',
         server_content_signature=source.server_content_signature,
-        parser_policy_version='parser-policy:v1',
-        parser_version='drive-text:v1',
-        chunk_policy_version='chunk-policy:v1',
+        parser_policy_version='server-source-parser-policy:v1',
+        parser_version='source-event-paragraph-parser:v1',
+        chunk_policy_version='paragraph-chunks:1200:v1',
     )
     db_session.add(parser_run)
     db_session.flush()
@@ -650,14 +658,14 @@ def test_build_rag_index_documents_includes_document_parser_metadata(db_session:
     vector_document = build_rag_index_documents(db_session)[0]
 
     assert vector_document.permission_level == 'restricted'
-    assert vector_document.metadata['parser_name'] == 'google_drive_text_export'
+    assert vector_document.metadata['parser_name'] == 'server_drive_source_event'
     assert vector_document.metadata['parser_status'] == 'parsed'
     assert vector_document.metadata['parser_status_reason'] is None
     assert vector_document.metadata['mime_type'] == 'application/vnd.google-apps.document'
     assert vector_document.metadata['document_version'] == '43'
     assert vector_document.metadata['revision_id'] == 'rev-43'
-    assert vector_document.metadata['content_signature'] == 'drive:file-1:43:rev-43'
-    assert vector_document.metadata['content_hash'] == 'hash-43'
+    assert vector_document.metadata['content_signature'] == source.server_content_signature
+    assert len(vector_document.metadata['content_hash']) == 64
     assert vector_document.metadata['section_path'] == '휴가 정책'
     assert vector_document.metadata['page_number'] is None
 
@@ -729,25 +737,33 @@ def test_reindex_endpoint_reports_parser_status_counts(client: TestClient, db_se
         document_id=parsed_document.id,
         document_version_id=parsed_version.id,
         source_id=parsed_source.id,
-        parser_name='plain_text',
+        parser_name='server_drive_source_event',
         parser_status='parsed',
+        parser_status_reason=None,
+        mime_type='application/octet-stream',
+        document_version_label='42',
+        content_signature=parsed_source.server_content_signature,
         server_content_signature_schema='server-source-content:v1',
         server_content_signature=parsed_source.server_content_signature,
-        parser_policy_version='parser-policy:v1',
-        parser_version='plain-text:v1',
-        chunk_policy_version='chunk-policy:v1',
+        parser_policy_version='server-source-parser-policy:v1',
+        parser_version='source-event-paragraph-parser:v1',
+        chunk_policy_version='paragraph-chunks:1200:v1',
     )
     metadata_run = DocumentParserRun(
         document_id=metadata_document.id,
         document_version_id=metadata_version.id,
         source_id=metadata_source.id,
-        parser_name='metadata_only',
-        parser_status='metadata_only',
+        parser_name='server_drive_source_event',
+        parser_status='parsed',
+        parser_status_reason=None,
+        mime_type='application/octet-stream',
+        document_version_label='42',
+        content_signature=metadata_source.server_content_signature,
         server_content_signature_schema='server-source-content:v1',
         server_content_signature=metadata_source.server_content_signature,
-        parser_policy_version='parser-policy:v1',
-        parser_version='metadata-only:v1',
-        chunk_policy_version='chunk-policy:v1',
+        parser_policy_version='server-source-parser-policy:v1',
+        parser_version='source-event-paragraph-parser:v1',
+        chunk_policy_version='paragraph-chunks:1200:v1',
     )
     db_session.add_all([parsed_run, metadata_run])
     db_session.flush()
@@ -800,10 +816,7 @@ def test_reindex_endpoint_reports_parser_status_counts(client: TestClient, db_se
     response = client.post('/api/v1/rag/reindex')
 
     assert response.status_code == 200
-    assert response.json()['parser_status_counts'] == {
-        'metadata_only': 1,
-        'parsed': 1,
-    }
+    assert response.json()['parser_status_counts'] == {'parsed': 2}
 
 
 def test_reindex_endpoint_requires_admin_role(client: TestClient, db_session: Session) -> None:

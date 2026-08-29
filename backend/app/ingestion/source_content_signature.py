@@ -63,9 +63,12 @@ class CurrentParserRunState(Protocol):
     server_content_signature: str | None
     parser_policy_version: str | None
     parser_name: str
+    parser_status: str
+    parser_status_reason: str | None
     parser_version: str | None
     chunk_policy_version: str | None
     mime_type: str
+    content_signature: str
 
 
 @dataclass(frozen=True)
@@ -142,7 +145,9 @@ def canonical_source_content_signature(
 
 
 def server_parser_policy_for_source(
-    *, source_type: str, mime_type: object = None
+    source_type: str,
+    *,
+    mime_type: object = None,
 ) -> ServerParserPolicy:
     if source_type not in _SEMANTIC_METADATA_KEYS:
         raise SourceContentUnverifiableError('unsupported source type')
@@ -176,6 +181,34 @@ def server_parser_policy_for_event(event: SourceEvent) -> ServerParserPolicy:
     return server_parser_policy_for_source(
         source_type=event.source_type,
         mime_type=event.raw_metadata.get('mime_type'),
+    )
+
+
+def server_parser_run_matches_authority(
+    *,
+    source_type: str,
+    server_content_signature: str,
+    parser_run: CurrentParserRunState,
+) -> bool:
+    try:
+        expected = server_parser_policy_for_source(
+            source_type=source_type,
+            mime_type=parser_run.mime_type,
+        )
+    except SourceContentUnverifiableError:
+        return False
+    return bool(
+        parser_run.server_content_signature_schema
+        == SERVER_SOURCE_CONTENT_SIGNATURE_SCHEMA
+        and parser_run.server_content_signature == server_content_signature
+        and parser_run.content_signature == server_content_signature
+        and parser_run.parser_policy_version == expected.parser_policy_version
+        and parser_run.parser_name == expected.parser_name
+        and parser_run.parser_status == 'parsed'
+        and parser_run.parser_status_reason is None
+        and parser_run.parser_version == expected.parser_version
+        and parser_run.chunk_policy_version == expected.chunk_policy_version
+        and parser_run.mime_type == expected.mime_type
     )
 
 

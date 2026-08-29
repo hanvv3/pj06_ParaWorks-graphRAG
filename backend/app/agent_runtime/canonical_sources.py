@@ -9,9 +9,16 @@ from backend.app.agent_runtime.fingerprints import (
 )
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
-from backend.app.ingestion.source_versions import SourceVersionRef
+from backend.app.ingestion.source_content_signature import (
+    server_parser_run_matches_authority,
+)
+from backend.app.ingestion.source_versions import (
+    SourceVersionRef,
+    current_content_signature,
+)
 from backend.app.models.source import (
     Document,
+    DocumentChunk,
     DocumentParserRun,
     DocumentVersion,
     Source,
@@ -89,77 +96,91 @@ def _resolve_source_version(
             'canonical source type does not match the request',
         )
 
-    metadata = source.raw_metadata or {}
-    content_signature = metadata.get('content_signature')
-    if not isinstance(content_signature, str) or not content_signature:
-        raise ReviewWorkflowPreflightError(
-            'evidence_changed',
-            'source evidence changed; synchronize again',
-        )
+    content_signature = current_content_signature(source)
+    if content_signature is None:
+        _raise_evidence_changed()
     if content_signature != ref.version_or_signature:
-        raise ReviewWorkflowPreflightError(
-            'evidence_changed',
-            'source evidence changed; synchronize again',
-        )
+        _raise_evidence_changed()
 
-    document_version_id: int | None = None
-    document_version_label: str | None = None
-    parser_name: str | None = None
-    parser_status: str | None = None
-    parser_version_label: str | None = None
-    parser_signature: str | None = None
-    external_revision = _optional_string(
-        metadata.get('revision_id') or metadata.get('external_revision')
+    documents = tuple(
+        db.scalars(
+            select(Document)
+            .where(Document.source_id == source.id)
+            .order_by(Document.id)
+        ).all()
     )
-    document = db.scalars(
-        select(Document)
-        .where(Document.source_id == source.id)
-        .order_by(Document.id.desc())
-    ).first()
-    if document is not None:
-        document_version = db.scalars(
-            select(DocumentVersion).where(
-                DocumentVersion.document_id == document.id,
-                DocumentVersion.version == document.current_version,
-            )
-        ).first()
-        if document_version is None:
-            raise ReviewWorkflowPreflightError(
-                'evidence_changed',
-                'source evidence changed; synchronize again',
-            )
-        document_version_id = document_version.id
-        document_version_label = document_version.version
-        parser_run = db.scalars(
+    if len(documents) != 1:
+        _raise_evidence_changed()
+    document = documents[0]
+    if document.current_document_version_id is None:
+        _raise_evidence_changed()
+    document_version = db.scalar(
+        select(DocumentVersion).where(
+            DocumentVersion.id == document.current_document_version_id,
+            DocumentVersion.document_id == document.id,
+        )
+    )
+    if document_version is None:
+        _raise_evidence_changed()
+    parser_runs = tuple(
+        db.scalars(
             select(DocumentParserRun)
             .where(
                 DocumentParserRun.source_id == source.id,
                 DocumentParserRun.document_id == document.id,
                 DocumentParserRun.document_version_id == document_version.id,
             )
-            .order_by(
-                DocumentParserRun.finished_at.desc(),
-                DocumentParserRun.id.desc(),
-            )
-        ).first()
-        if parser_run is not None:
-            parser_name = parser_run.parser_name
-            parser_status = parser_run.parser_status
-            parser_version_label = parser_run.document_version_label
-            parser_signature = parser_run.content_signature or None
-            external_revision = parser_run.revision_id or external_revision
+            .order_by(DocumentParserRun.id)
+        ).all()
+    )
+    if len(parser_runs) != 1:
+        _raise_evidence_changed()
+    parser_run = parser_runs[0]
+    if (
+        parser_run.document_version_label != document_version.version
+        or not server_parser_run_matches_authority(
+            source_type=source.source_type,
+            server_content_signature=content_signature,
+            parser_run=parser_run,
+        )
+    ):
+        _raise_evidence_changed()
+    chunks = tuple(
+        db.scalars(
+            select(DocumentChunk)
+            .where(DocumentChunk.version_id == document_version.id)
+            .order_by(DocumentChunk.chunk_index, DocumentChunk.id)
+        ).all()
+    )
+    if (
+        not chunks
+        or parser_run.chunk_count != len(chunks)
+        or [chunk.chunk_index for chunk in chunks] != list(range(len(chunks)))
+        or any(
+            chunk.source_id != source.id
+            or chunk.parser_run_id != parser_run.id
+            for chunk in chunks
+        )
+    ):
+        _raise_evidence_changed()
 
+    external_revision = _optional_string(parser_run.revision_id)
     fingerprint_value = {
         'canonical_row_id': source.id,
         'canonical_table': 'sources',
+        'chunk_ids': [chunk.id for chunk in chunks],
         'content_signature': content_signature,
-        'document_version': document_version_label,
-        'document_version_id': document_version_id,
+        'document_version': document_version.version,
+        'document_version_id': document_version.id,
         'external_revision': external_revision,
-        'parser_name': parser_name,
-        'parser_signature': parser_signature,
-        'parser_status': parser_status,
-        'parser_version_label': parser_version_label,
+        'parser_name': parser_run.parser_name,
+        'parser_policy_version': parser_run.parser_policy_version,
+        'parser_signature': parser_run.content_signature,
+        'parser_status': parser_run.parser_status,
+        'parser_version': parser_run.parser_version,
+        'parser_version_label': parser_run.document_version_label,
+        'chunk_policy_version': parser_run.chunk_policy_version,
+        'mime_type': parser_run.mime_type,
         'permission_level': source.permission_level,
         'source_type': ref.source_type,
     }
@@ -167,7 +188,7 @@ def _resolve_source_version(
         source_type=ref.source_type,
         canonical_table='sources',
         canonical_row_id=source.id,
-        document_version_id=document_version_id,
+        document_version_id=document_version.id,
         external_revision=external_revision,
         content_signature=content_signature,
         permission_level=source.permission_level,
@@ -177,6 +198,13 @@ def _resolve_source_version(
             schema_version=CANONICAL_SOURCE_FINGERPRINT_SCHEMA,
             policy_version=CANONICAL_SOURCE_FINGERPRINT_POLICY,
         ),
+    )
+
+
+def _raise_evidence_changed() -> None:
+    raise ReviewWorkflowPreflightError(
+        'evidence_changed',
+        'source evidence changed; synchronize again',
     )
 
 

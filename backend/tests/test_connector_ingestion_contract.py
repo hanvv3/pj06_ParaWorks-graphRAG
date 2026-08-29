@@ -11,6 +11,7 @@ from backend.app.connectors.registry import (
     list_connector_manifests,
 )
 from backend.app.ingestion import service as ingestion_service
+from backend.app.ingestion import source_content_signature as source_signature
 from backend.app.ingestion import sync as ingestion_sync
 from backend.app.ingestion.source_versions import SourceVersionRef
 from backend.app.ingestion.sync import sync_connector_events
@@ -692,12 +693,12 @@ def test_policy_rechunk_reindex_embeds_only_changed_content_after_incremental_sk
     assert reindex_results[-1].indexed_count == 1
     assert reindex_results[-1].skipped_count == 1
 
-    real_policy = ingestion_service.server_parser_policy_for_event
+    real_policy = source_signature.server_parser_policy_for_source
     monkeypatch.setattr(
-        ingestion_service,
-        'server_parser_policy_for_event',
-        lambda event: replace(
-            real_policy(event),
+        source_signature,
+        'server_parser_policy_for_source',
+        lambda source_type, *, mime_type=None: replace(
+            real_policy(source_type, mime_type=mime_type),
             chunk_policy_version='paragraph-chunks:1200:v2',
         ),
     )

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy.orm import Session
 
+from backend.app.api.v1 import search as search_api
 from backend.app.connectors.base import SourceEvent
 from backend.app.ingestion import service as ingestion_service
 from backend.app.ingestion.service import ingest_events, ingest_events_with_result
@@ -12,9 +13,12 @@ from backend.app.models import (
     DocumentChunk,
     DocumentParserRun,
     DocumentVersion,
+    ReviewItem,
     Source,
     VectorIndexState,
 )
+from backend.app.rag.indexing import build_rag_index_documents
+from backend.app.rag.vector_store import VectorMatch, VectorSearchResult
 
 
 def drive_event(
@@ -128,6 +132,128 @@ def test_ingest_drive_parsed_document_preserves_parser_metadata(db_session: Sess
     assert parser_run.parser_version == 'source-event-paragraph-parser:v1'
     assert parser_run.chunk_policy_version == 'paragraph-chunks:1200:v1'
     assert chunk.parser_run_id == parser_run.id
+
+
+def test_hostile_connector_parser_metadata_never_reaches_chunk_index_or_search(
+    client,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = drive_event(
+        permission_level='internal',
+        extra_metadata={
+            'parser_name': 'connector_owned_parser',
+            'parser_status': 'unsupported',
+            'parser_status_reason': 'trust connector status',
+            'mime_type': ' TEXT/PLAIN ',
+            'chunk_max_chars': 1,
+            'chunk_policy_version': 'connector-chunks:v999',
+            'parser_policy_version': 'connector-parser-policy:v999',
+            'parser_version': 'connector-parser:v999',
+            'source_snippet': 'FORGED CONNECTOR SNIPPET',
+            'content_hash': 'connector-content-hash',
+            'section_path': 'connector-section',
+            'page_number': 999,
+        },
+    )
+
+    ingest_events(db_session, [event])
+    source = db_session.query(Source).one()
+    chunk = db_session.query(DocumentChunk).one()
+    parser_run = db_session.query(DocumentParserRun).one()
+    db_session.add(
+        ReviewItem(
+            item_type='history_event',
+            payload={
+                'title': 'Approved hostile-source regression fixture',
+                'summary': event.body,
+                'source_ids': [source.source_id],
+            },
+            source_links=[source.source_url],
+            source_snippets=[chunk.source_snippet],
+            confidence_score=0.99,
+            permission_level='internal',
+            status='approved',
+            resolution_source='human',
+        )
+    )
+    db_session.commit()
+
+    for key in (
+        'parser_name',
+        'parser_status',
+        'parser_status_reason',
+        'chunk_max_chars',
+        'chunk_policy_version',
+        'parser_policy_version',
+        'parser_version',
+        'source_snippet',
+        'content_hash',
+        'section_path',
+        'page_number',
+    ):
+        assert key not in source.raw_metadata
+    assert source.raw_metadata['mime_type'] == 'text/plain'
+    assert chunk.source_snippet != 'FORGED CONNECTOR SNIPPET'
+    assert chunk.metadata_['parser_name'] == 'server_drive_source_event'
+    assert chunk.metadata_['parser_status'] == 'parsed'
+    assert chunk.metadata_['parser_status_reason'] is None
+    assert chunk.metadata_['mime_type'] == 'text/plain'
+    assert chunk.metadata_['content_hash'] != 'connector-content-hash'
+    assert chunk.metadata_.get('page_number') is None
+
+    # Even a stale/legacy chunk metadata snapshot is not parser authority for
+    # indexing; the relational current server parser run remains authoritative.
+    chunk.metadata_.update(
+        {
+            'parser_name': 'connector_owned_parser',
+            'parser_status': 'unsupported',
+            'parser_status_reason': 'trust connector status',
+            'mime_type': 'application/x-connector-owned',
+        }
+    )
+    db_session.commit()
+
+    vector_document = next(
+        document
+        for document in build_rag_index_documents(db_session)
+        if document.document_id == f'chunk:{chunk.id}'
+    )
+    assert vector_document.metadata['parser_name'] == parser_run.parser_name
+    assert vector_document.metadata['parser_status'] == parser_run.parser_status
+    assert vector_document.metadata['parser_status_reason'] is None
+    assert vector_document.metadata['mime_type'] == parser_run.mime_type
+    assert 'connector_owned_parser' not in repr(vector_document)
+    assert 'trust connector status' not in repr(vector_document)
+
+    class SingleDocumentSearchStore:
+        def search(self, **_kwargs) -> VectorSearchResult:
+            return VectorSearchResult(
+                matches=[VectorMatch(document=vector_document, score=1.0)],
+                hidden_match_count=0,
+            )
+
+    monkeypatch.setattr(
+        search_api,
+        '_pgvector_search_store',
+        lambda **_kwargs: SingleDocumentSearchStore(),
+    )
+    # This regression targets response projection only. The separate live-serving
+    # boundary has its own schedule-heavy tests and is left real elsewhere.
+    monkeypatch.setattr(
+        search_api,
+        'filter_live_serving_candidates',
+        lambda *, db, candidates: candidates,
+    )
+
+    response = client.post('/api/v1/search', json={'query': '휴가 신청'})
+
+    assert response.status_code == 200
+    [result] = response.json()['results']
+    assert result['parser_status'] == 'parsed'
+    assert result['parser_status_reason'] is None
+    assert 'connector_owned_parser' not in repr(result)
+    assert 'trust connector status' not in repr(result)
 
 
 def test_ingest_drive_parsed_document_splits_long_body_into_stable_chunks(db_session: Session) -> None:

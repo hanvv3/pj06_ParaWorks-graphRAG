@@ -6,7 +6,7 @@ from decimal import Decimal
 from hashlib import sha256
 from typing import Protocol
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.agent_runtime.keyed_mutation_guard import (
@@ -14,12 +14,19 @@ from backend.app.agent_runtime.keyed_mutation_guard import (
     lock_runtime_state,
 )
 from backend.app.core.config import Settings
+from backend.app.ingestion.source_content_signature import (
+    server_parser_run_matches_authority,
+)
+from backend.app.ingestion.source_versions import current_content_signature
 from backend.app.knowledge.trusted_serving_eligibility import (
     TrustedServingEligibilityService,
 )
 from backend.app.models import (
     DecisionRecord,
+    Document,
     DocumentChunk,
+    DocumentParserRun,
+    DocumentVersion,
     HistoryEvent,
     ReviewItem,
     Source,
@@ -495,17 +502,50 @@ def _chunk_documents(db: Session) -> list[VectorDocument]:
         return []
 
     rows = db.execute(
-        select(DocumentChunk, Source)
+        select(
+            DocumentChunk,
+            Source,
+            DocumentVersion,
+            Document,
+            DocumentParserRun,
+        )
         .join(Source, DocumentChunk.source_id == Source.id)
+        .join(DocumentVersion, DocumentVersion.id == DocumentChunk.version_id)
+        .join(
+            Document,
+            and_(
+                Document.id == DocumentVersion.document_id,
+                Document.source_id == Source.id,
+                Document.current_document_version_id == DocumentVersion.id,
+            ),
+        )
+        .join(
+            DocumentParserRun,
+            and_(
+                DocumentParserRun.id == DocumentChunk.parser_run_id,
+                DocumentParserRun.document_id == Document.id,
+                DocumentParserRun.document_version_id == DocumentVersion.id,
+                DocumentParserRun.source_id == Source.id,
+            ),
+        )
         .where(Source.source_id.in_(list(approved_sid_set)))
         .order_by(DocumentChunk.id)
     ).all()
     
     documents: list[VectorDocument] = []
     eligibility = TrustedServingEligibilityService(db)
-    for chunk, source in rows:
+    for chunk, source, version, document, parser_run in rows:
         serving = eligibility.for_document(f'chunk:{chunk.id}')
         if not serving.eligible or serving.effective_permission is None:
+            continue
+        if not _is_exact_current_server_chunk(
+            db,
+            source=source,
+            document=document,
+            version=version,
+            parser_run=parser_run,
+            chunk=chunk,
+        ):
             continue
         timestamp = source.raw_metadata.get('ts') or source.created_at.isoformat()
         
@@ -524,7 +564,11 @@ def _chunk_documents(db: Session) -> list[VectorDocument]:
             'topic_tag': chunk.metadata_.get('topic_tag'),
             'importance': chunk.metadata_.get('importance'),
             'scenario': source.raw_metadata.get('scenario'),
-            **_document_parser_metadata(chunk),
+            **_document_parser_metadata(
+                chunk=chunk,
+                version=version,
+                parser_run=parser_run,
+            ),
         }
         
         documents.append(
@@ -540,20 +584,81 @@ def _chunk_documents(db: Session) -> list[VectorDocument]:
     return documents
 
 
-def _document_parser_metadata(chunk: DocumentChunk) -> dict[str, object]:
-    keys = (
-        'parser_name',
-        'parser_status',
-        'parser_status_reason',
-        'mime_type',
-        'document_version',
-        'revision_id',
-        'content_signature',
-        'content_hash',
-        'section_path',
-        'page_number',
+def _is_exact_current_server_chunk(
+    db: Session,
+    *,
+    source: Source,
+    document: Document,
+    version: DocumentVersion,
+    parser_run: DocumentParserRun,
+    chunk: DocumentChunk,
+) -> bool:
+    signature = current_content_signature(source)
+    if (
+        signature is None
+        or document.current_document_version_id != version.id
+        or parser_run.document_version_label != version.version
+        or not server_parser_run_matches_authority(
+            source_type=source.source_type,
+            server_content_signature=signature,
+            parser_run=parser_run,
+        )
+    ):
+        return False
+    current_runs = tuple(
+        db.scalars(
+            select(DocumentParserRun)
+            .where(
+                DocumentParserRun.source_id == source.id,
+                DocumentParserRun.document_id == document.id,
+                DocumentParserRun.document_version_id == version.id,
+            )
+            .order_by(DocumentParserRun.id)
+        ).all()
     )
-    return {key: chunk.metadata_.get(key) for key in keys if key in chunk.metadata_}
+    if len(current_runs) != 1 or current_runs[0].id != parser_run.id:
+        return False
+    current_chunks = tuple(
+        db.scalars(
+            select(DocumentChunk)
+            .where(DocumentChunk.version_id == version.id)
+            .order_by(DocumentChunk.chunk_index, DocumentChunk.id)
+        ).all()
+    )
+    return bool(
+        current_chunks
+        and parser_run.chunk_count == len(current_chunks)
+        and [current.chunk_index for current in current_chunks]
+        == list(range(len(current_chunks)))
+        and all(
+            current.source_id == source.id
+            and current.parser_run_id == parser_run.id
+            for current in current_chunks
+        )
+        and chunk in current_chunks
+    )
+
+
+def _document_parser_metadata(
+    *,
+    chunk: DocumentChunk,
+    version: DocumentVersion,
+    parser_run: DocumentParserRun,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        'parser_name': parser_run.parser_name,
+        'parser_status': parser_run.parser_status,
+        'parser_status_reason': parser_run.parser_status_reason,
+        'mime_type': parser_run.mime_type,
+        'document_version': version.version,
+        'revision_id': parser_run.revision_id,
+        'content_signature': parser_run.content_signature,
+        'content_hash': sha256(chunk.text.encode('utf-8')).hexdigest(),
+    }
+    for key in ('section_path', 'page_number'):
+        if key in chunk.metadata_:
+            metadata[key] = chunk.metadata_[key]
+    return metadata
 
 
 def _decision_documents(

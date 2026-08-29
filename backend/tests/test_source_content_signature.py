@@ -101,12 +101,38 @@ def test_server_signature_normalization_boundary_vectors_are_frozen_for_every_so
         )
     )
 
-    assert '"filename":" budget\\n.pdf "' in attachment.canonical_json
-    assert '"mime_type":"application/pdf"' in attachment.canonical_json
-    assert '"mime_type":"text/plain"' in drive.canonical_json
-    assert '"semantic_timestamp":"2026-05-01T09:00:00.000000Z"' in drive.canonical_json
-    assert '"attendee_domains":["a.example","z.example"]' in calendar.canonical_json
-    assert '"start":{"kind":"date","value":"2026-05-02"}' in calendar.canonical_json
+    assert attachment.canonical_json == (
+        '{"author":"owner@example.com","body":"Body",'
+        '"filename":" budget\\n.pdf ","mime_type":"application/pdf",'
+        '"participants":[],"schema":"server-source-content:v1",'
+        '"semantic_timestamp":"1970-01-01T00:00:00.000000Z",'
+        '"source_type":"gmail_attachment","title":"Title"}'
+    )
+    assert attachment.signature == (
+        'd7660378218b53cddc1d616f976b14f389edc6a5df22b3c845505315b0de3a62'
+    )
+    assert drive.canonical_json == (
+        '{"author":"owner@example.com","body":"Body","mime_type":"text/plain",'
+        '"participants":[],"schema":"server-source-content:v1",'
+        '"semantic_timestamp":"2026-05-01T09:00:00.000000Z",'
+        '"source_type":"drive","title":"Title"}'
+    )
+    assert drive.signature == (
+        '7ed0cc1a39cb772ccbbf6a6c50a7ead9278b7dc19059328867911a446c240629'
+    )
+    assert calendar.canonical_json == (
+        '{"attendee_domains":["a.example","z.example"],'
+        '"author":"owner@example.com","body":"Body",'
+        '"end":{"kind":"date","value":"2026-05-03"},'
+        '"event_status":"confirmed","location":"","organizer_email":null,'
+        '"participants":[],"schema":"server-source-content:v1",'
+        '"semantic_timestamp":{"kind":"date","value":"2026-05-02"},'
+        '"source_type":"calendar",'
+        '"start":{"kind":"date","value":"2026-05-02"},"title":"Title"}'
+    )
+    assert calendar.signature == (
+        '696fa7832c0fb633b2312fb44ced32bb10e045e271c8511d6cb4ac97597dd1a3'
+    )
 
 
 def test_gmail_attachment_signature_uses_filename_not_nonexistent_attachment_name() -> None:

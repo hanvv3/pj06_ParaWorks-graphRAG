@@ -17,6 +17,26 @@ from backend.app.models import (
 
 DEFAULT_CHUNK_MAX_CHARS = 1_200
 SOURCE_SNIPPET_MAX_CHARS = 240
+_SERVER_PARSED_METADATA_AUTHORITY_KEYS = frozenset(
+    {
+        'chunk_max_chars',
+        'chunk_policy',
+        'chunk_policy_version',
+        'content_hash',
+        'content_signature',
+        'document_version',
+        'mime_type',
+        'page_number',
+        'parser_name',
+        'parser_policy_version',
+        'parser_status',
+        'parser_status_reason',
+        'parser_version',
+        'revision_id',
+        'section_path',
+        'source_snippet',
+    }
+)
 
 
 def parsed_document_from_source_event(
@@ -148,6 +168,25 @@ def persist_parsed_document(
     db.add(parser_run)
     db.flush()
 
+    chunk_base_metadata = metadata
+    if server_signature is not None:
+        chunk_base_metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key not in _SERVER_PARSED_METADATA_AUTHORITY_KEYS
+        }
+        chunk_base_metadata.update(
+            {
+                'parser_name': parser_run.parser_name,
+                'parser_status': parser_run.parser_status,
+                'parser_status_reason': parser_run.parser_status_reason,
+                'mime_type': parser_run.mime_type,
+                'document_version': parser_run.document_version_label,
+                'revision_id': parser_run.revision_id,
+                'content_signature': parser_run.content_signature,
+            }
+        )
+
     chunks: list[DocumentChunk] = []
     for parsed_chunk in parsed.chunks:
         chunk = DocumentChunk(
@@ -159,7 +198,7 @@ def persist_parsed_document(
             source_snippet=parsed_chunk.source_snippet,
             permission_level=parsed_chunk.permission_level,
             metadata_={
-                **metadata,
+                **chunk_base_metadata,
                 **parsed_chunk.metadata,
                 'content_hash': parsed_chunk.content_hash,
             },
