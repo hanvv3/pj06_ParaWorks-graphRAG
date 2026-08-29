@@ -49,6 +49,7 @@ class RagAnswer:
     cost: AgentRunCost
     cache_key: str
     agent_run_id: int | None = None
+    serving_dependencies: tuple[object, ...] = ()
 
 
 class RagOrchestratorModel(Protocol):

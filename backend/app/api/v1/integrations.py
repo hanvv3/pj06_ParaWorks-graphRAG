@@ -87,6 +87,10 @@ from backend.app.models import (
     SyncJob,
 )
 from backend.app.projects.classifier import create_project_assignment_review_items
+from backend.app.review.evidence_visibility import (
+    ReviewEvidenceNotFound,
+    ReviewEvidenceVisibilityService,
+)
 from backend.app.schemas.review_workflow import (
     DEFAULT_REVIEW_AGENT_NAMES,
     ReviewWorkflowRunRequest,
@@ -186,7 +190,7 @@ def get_slack_runtime_status(
         'latest_sync': _sync_job_response(db=db, user=user, job=latest_sync),
         'latest_sync_summary': _sync_job_summary(latest_sync),
         'last_error': _sync_error_response(latest_sync),
-        'agent_bridge': _slack_agent_bridge(db),
+        'agent_bridge': _slack_agent_bridge(db, user),
         'cost_policy': {
             'status_lookup_triggers_sync': False,
             'status_lookup_triggers_llm': False,
@@ -257,7 +261,7 @@ def sync_connector(
 
     if request is not None and request.run_async:
         job = _create_queued_sync_job(db=db, connector_type=connector_type)
-        pending_review_count = _pending_review_count(db)
+        pending_review_count = _pending_review_count(db, user)
         background_tasks.add_task(
             _run_connector_sync_background,
             db=db,
@@ -419,7 +423,7 @@ def _perform_connector_sync(
         result.created_review_items + agent_review_items + project_assignment_items
     )
     db.flush()
-    pending_review_count = _pending_review_count(db)
+    pending_review_count = _pending_review_count(db, user)
     sync_job = db.scalar(select(SyncJob).where(SyncJob.job_id == result.job_id))
     if sync_job is not None:
         sync_job.status = result.status
@@ -1500,15 +1504,27 @@ def _mark_sync_job_failed(*, db: Session, job_id: str, message: str) -> None:
     db.flush()
 
 
-def _pending_review_count(db: Session) -> int:
-    return (
-        db.scalar(
-            select(func.count())
-            .select_from(ReviewItem)
-            .where(ReviewItem.status == 'pending_review')
-        )
-        or 0
+def _pending_review_count(
+    db: Session, user: DemoUser | None = None
+) -> int:
+    if user is None:
+        return 0
+    items = tuple(
+        db.scalars(
+            select(ReviewItem).where(
+                ReviewItem.status == 'pending_review'
+            )
+        ).all()
     )
+    service = ReviewEvidenceVisibilityService(db)
+    count = 0
+    for item in items:
+        try:
+            service.project(item.id, user)
+        except ReviewEvidenceNotFound:
+            continue
+        count += 1
+    return count
 
 
 def _sync_job_summary(job: SyncJob | None) -> dict[str, int] | None:
@@ -1538,7 +1554,9 @@ def _sync_error_response(job: SyncJob | None) -> dict[str, str] | None:
     }
 
 
-def _slack_agent_bridge(db: Session) -> dict[str, int | bool]:
+def _slack_agent_bridge(
+    db: Session, user: DemoUser | None = None
+) -> dict[str, int | bool]:
     slack_source_count = (
         db.scalar(
             select(func.count())
@@ -1549,7 +1567,7 @@ def _slack_agent_bridge(db: Session) -> dict[str, int | bool]:
     )
     return {
         'slack_source_count': slack_source_count,
-        'pending_review_count': _pending_review_count(db),
+        'pending_review_count': _pending_review_count(db, user),
         'ready_for_agent_test': slack_source_count > 0,
     }
 

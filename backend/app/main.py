@@ -33,6 +33,10 @@ from backend.app.api.v1.router import api_router
 from backend.app.core.config import Settings, get_settings
 from backend.app.db.session import SessionLocal
 from backend.app.models.agent_workflows import AgentWorkflowThread
+from backend.app.review.auto_review_source_reconciliation import (
+    AutoReviewSourceReconciliationService,
+    SourceReconciliationResult,
+)
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
     COMPANY_MEMORY_REVIEW_WORKFLOW,
@@ -93,6 +97,9 @@ def create_app(
                 settings=settings,
             )
             key_bootstrap_result = key_bootstrap_service.ensure_initialized()
+            source_reconciliation = _recover_source_reconciliation_batch(
+                workflow_session_factory, settings=settings, limit=100
+            )
             try:
                 catalog = build_review_agent_catalog(settings)
                 agent_registry = catalog.registry
@@ -128,6 +135,7 @@ def create_app(
             app.state.review_model_readiness = model_readiness
             app.state.review_workflow_service = review_workflow_service
             app.state.auto_review_key_bootstrap = key_bootstrap_result
+            app.state.auto_review_source_reconciliation = source_reconciliation
             yield
         finally:
             checkpoint_runtime.close()
@@ -162,6 +170,25 @@ def _has_nonterminal_review_v2_threads(
             return existing is not None
     except SQLAlchemyError:
         return False
+
+
+def _recover_source_reconciliation_batch(
+    session_factory: WorkflowSessionFactory,
+    *,
+    settings: Settings,
+    limit: int,
+) -> SourceReconciliationResult:
+    try:
+        with session_factory() as db:
+            return AutoReviewSourceReconciliationService(
+                db, settings=settings
+            ).recover_stale_sources(limit=limit)
+    except (SQLAlchemyError, ValueError):
+        return SourceReconciliationResult(
+            failure_count=1,
+            remaining_count=1,
+            readiness=False,
+        )
 
 
 app = create_app()

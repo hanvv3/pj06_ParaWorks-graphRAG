@@ -1,8 +1,26 @@
-from backend.app.models import AgentRun, DecisionRecord
+from backend.app.models import AgentRun, DecisionRecord, ReviewItem, Source
+
+
+def _human_approve_synced_sources(db_session) -> None:
+    for source in db_session.query(Source).all():
+        db_session.add(
+            ReviewItem(
+                item_type='source_evidence',
+                payload={'source_ids': [source.source_id]},
+                source_links=[source.source_url],
+                source_snippets=[source.title],
+                confidence_score=1.0,
+                permission_level=source.permission_level,
+                status='approved',
+                resolution_source='human',
+            )
+        )
+    db_session.commit()
 
 
 def test_ask_api_answers_with_visible_sources(client, db_session) -> None:
     client.post('/api/v1/integrations/gmail/sync')
+    _human_approve_synced_sources(db_session)
 
     response = client.post(
         '/api/v1/ask',
@@ -22,8 +40,9 @@ def test_ask_api_answers_with_visible_sources(client, db_session) -> None:
     assert payload['agent_run_id'] == agent_run.id
 
 
-def test_ask_api_respects_viewer_permissions(client) -> None:
+def test_ask_api_respects_viewer_permissions(client, db_session) -> None:
     client.post('/api/v1/integrations/drive/sync')
+    _human_approve_synced_sources(db_session)
 
     response = client.post(
         '/api/v1/ask',

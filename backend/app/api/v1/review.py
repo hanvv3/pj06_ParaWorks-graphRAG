@@ -22,6 +22,11 @@ from backend.app.models import (
     Source,
 )
 from backend.app.review.actors import ReviewResolutionActor, human_review_actor
+from backend.app.review.evidence_visibility import (
+    ReviewEvidenceNotFound,
+    ReviewEvidenceProjection,
+    ReviewEvidenceVisibilityService,
+)
 from backend.app.review.transitions import (
     InvalidReviewTransition,
     ReviewAction,
@@ -49,7 +54,11 @@ CurrentUser = Annotated[DemoUser, Depends(get_demo_user)]
 AppSettings = Annotated[Settings, Depends(get_settings)]
 
 
-def _review_item_response(item: ReviewItem, agent_run: AgentRun | None = None) -> dict:
+def _review_item_response(
+    item: ReviewItem,
+    agent_run: AgentRun | None = None,
+    evidence: ReviewEvidenceProjection | None = None,
+) -> dict:
     agent_run_id = _agent_run_id(item)
     
     # 에이전트 실행 상세 정보 추출
@@ -68,19 +77,45 @@ def _review_item_response(item: ReviewItem, agent_run: AgentRun | None = None) -
             'total_tokens': agent_run.total_tokens or 0,
         })
 
+    evidence_available = evidence is None or evidence.evidence_available
     return {
         'id': item.id,
         'item_type': item.item_type,
-        'payload': item.payload,
-        'source_links': item.source_links,
-        'source_snippets': item.source_snippets,
-        'source_evidence': _source_evidence_response(item, agent_run),
+        'payload': (
+            item.payload
+            if evidence_available
+            else _payload_without_source_fields(item.payload)
+        ),
+        'source_links': item.source_links if evidence_available else [],
+        'source_snippets': item.source_snippets if evidence_available else [],
+        'source_evidence': (
+            _source_evidence_response(item, agent_run)
+            if evidence_available
+            else []
+        ),
+        'evidence_status': (
+            evidence.evidence_status if evidence is not None else 'available'
+        ),
+        'action_required': evidence.action_required if evidence else False,
         'agent_run_id': agent_run_id,
         'agent_run_details': agent_details, # 상세 정보 추가
         'confidence_score': item.confidence_score,
-        'permission_level': item.permission_level,
+        'permission_level': (
+            evidence.effective_permission
+            if evidence is not None
+            else item.permission_level
+        ),
         'status': item.status,
         'reviewer_id': item.reviewer_id,
+    }
+
+
+def _payload_without_source_fields(payload: dict) -> dict:
+    concealed_tokens = ('source', 'evidence', 'snippet', 'url', 'link')
+    return {
+        key: value
+        for key, value in (payload or {}).items()
+        if not any(token in key.lower() for token in concealed_tokens)
     }
 
 
@@ -98,7 +133,7 @@ def list_review_items(
     items = db.scalars(
         select(ReviewItem).order_by(ReviewItem.created_at.desc(), ReviewItem.id.desc())
     ).all()
-    all_visible_items = _visible_review_items(items, user, settings)
+    all_visible_items = _visible_review_items(db, items, user, settings)
     if workflow_thread_id is not None:
         all_visible_items = _visible_workflow_items(
             db,
@@ -113,11 +148,17 @@ def list_review_items(
     total_count = len(all_visible_items)
     visible_items = all_visible_items[offset : offset + limit]
     agent_runs = _agent_runs_by_id(db, visible_items)
+    evidence_by_id = {
+        item.id: ReviewEvidenceVisibilityService(db).project(item.id, user)
+        for item in visible_items
+    }
 
     groups: dict[str, dict] = {}
     for item in visible_items:
         agent_run = agent_runs.get(_agent_run_id(item) or -1)
-        response_item = _review_item_response(item, agent_run)
+        response_item = _review_item_response(
+            item, agent_run, evidence_by_id[item.id]
+        )
         title = review_item_display_title(item)
         group_key = f'{item.item_type}:{title}'
 
@@ -145,7 +186,14 @@ def list_review_items(
 
     return {
         'groups': result_groups,
-        'items': [_review_item_response(item, agent_runs.get(_agent_run_id(item) or -1)) for item in visible_items],
+        'items': [
+            _review_item_response(
+                item,
+                agent_runs.get(_agent_run_id(item) or -1),
+                evidence_by_id[item.id],
+            )
+            for item in visible_items
+        ],
         'total_count': total_count,
         'limit': limit,
         'offset': offset,
@@ -165,7 +213,7 @@ def approve_agent_review_candidates(
         .where(ReviewItem.status.in_(['pending_review', 'approved']))
         .order_by(ReviewItem.id)
     ).all()
-    visible_items = _visible_review_items(all_items, user, settings)
+    visible_items = _visible_review_items(db, all_items, user, settings)
     candidate_items = [item for item in visible_items if _is_agent_candidate(item)]
     actor = _human_actor_for_items(user, candidate_items)
     batch = ReviewTransitionService().transition_many(
@@ -276,7 +324,7 @@ def update_review_item(
     user: CurrentUser,
     settings: AppSettings,
 ) -> dict:
-    item = _get_review_item_for_action(db, item_id, settings)
+    item = _get_review_item_for_user(db, item_id, user, settings)
     ensure_can_review_permission(user, item.permission_level)
     if item.workflow_thread_id is not None and item.status != 'pending_review':
         _raise_invalid_transition_http()
@@ -295,7 +343,7 @@ def update_review_item(
 
     db.commit()
     db.refresh(item)
-    return _review_item_response(item, _agent_run_for_item(db, item))
+    return _projected_review_item_response(db, item, user)
 
 
 def _is_agent_candidate(item: ReviewItem) -> bool:
@@ -320,7 +368,7 @@ def approve_review_item(
     user: CurrentUser,
     settings: AppSettings,
 ) -> dict:
-    item = _get_review_item_for_action(db, item_id, settings)
+    item = _get_review_item_for_user(db, item_id, user, settings)
     actor = _human_actor_for_item(user, item)
     result = _transition_or_http(
         db=db,
@@ -339,7 +387,7 @@ def approve_review_item(
         )
     db.commit()
     db.refresh(item)
-    response = _review_item_response(item, _agent_run_for_item(db, item))
+    response = _projected_review_item_response(db, item, user)
     response['replayed'] = result.replayed
     response['promotion'] = _promotion_response(result)
     response['promotion_result'] = _legacy_promotion_response(item, result)
@@ -354,7 +402,7 @@ def request_more_evidence_for_review_item(
     settings: AppSettings,
     request: ReviewEvidenceRequest | None = None,
 ) -> dict:
-    item = _get_review_item_for_action(db, item_id, settings)
+    item = _get_review_item_for_user(db, item_id, user, settings)
     actor = _human_actor_for_item(user, item)
     note = (request.note or '').strip() if request else ''
     result = _transition_or_http(
@@ -375,7 +423,7 @@ def request_more_evidence_for_review_item(
     )
     db.commit()
     db.refresh(item)
-    response = _review_item_response(item, _agent_run_for_item(db, item))
+    response = _projected_review_item_response(db, item, user)
     response['replayed'] = result.replayed
     response['promotion'] = _promotion_response(result)
     return response
@@ -388,7 +436,7 @@ def reject_review_item(
     user: CurrentUser,
     settings: AppSettings,
 ) -> dict:
-    item = _get_review_item_for_action(db, item_id, settings)
+    item = _get_review_item_for_user(db, item_id, user, settings)
     actor = _human_actor_for_item(user, item)
     result = _transition_or_http(
         db=db,
@@ -406,7 +454,7 @@ def reject_review_item(
     )
     db.commit()
     db.refresh(item)
-    response = _review_item_response(item, _agent_run_for_item(db, item))
+    response = _projected_review_item_response(db, item, user)
     response['replayed'] = result.replayed
     response['promotion'] = _promotion_response(result)
     return response
@@ -555,9 +603,24 @@ def _human_actor_for_items(
     return human_review_actor(user)
 
 
-def _visible_review_items(items: list[ReviewItem], user: DemoUser, settings: Settings) -> list[ReviewItem]:
+def _visible_review_items(
+    db: Session,
+    items: list[ReviewItem],
+    user: DemoUser,
+    settings: Settings,
+) -> list[ReviewItem]:
     environment_items = items if settings.paraworks_demo_mode else filter_review_items(items)
-    return [item for item in environment_items if _user_can_see_review_item(user, item)]
+    service = ReviewEvidenceVisibilityService(db)
+    visible: list[ReviewItem] = []
+    for item in environment_items:
+        if not _user_can_see_review_item(user, item):
+            continue
+        try:
+            service.project(item.id, user)
+        except ReviewEvidenceNotFound:
+            continue
+        visible.append(item)
+    return visible
 
 
 def _visible_workflow_items(
@@ -652,7 +715,7 @@ def _bulk_action_items(
             .where(ReviewItem.status == 'pending_review')
             .order_by(ReviewItem.created_at.desc(), ReviewItem.id.desc())
         ).all()
-    return _visible_review_items(items, user, settings)
+    return _visible_review_items(db, items, user, settings)
 
 
 def _validate_payload_project_key(db: Session, payload: dict) -> None:
@@ -674,22 +737,29 @@ def _get_review_item_for_user(db: Session, item_id: int, user: DemoUser, setting
     item = db.get(ReviewItem, item_id)
     if item is None:
         raise HTTPException(status_code=404, detail='Review item not found')
-    if item not in _visible_review_items([item], user, settings):
-        raise HTTPException(status_code=404, detail='Review item not found')
-    return item
-
-
-def _get_review_item_for_action(db: Session, item_id: int, settings: Settings) -> ReviewItem:
-    item = db.get(ReviewItem, item_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail='Review item not found')
-    if not settings.paraworks_demo_mode and item not in filter_review_items([item]):
+    if item not in _visible_review_items(db, [item], user, settings):
         raise HTTPException(status_code=404, detail='Review item not found')
     return item
 
 
 def _user_can_see_review_item(user: DemoUser, item: ReviewItem) -> bool:
     return item.permission_level in user.permission_levels
+
+
+def _projected_review_item_response(
+    db: Session, item: ReviewItem, user: DemoUser
+) -> dict:
+    try:
+        evidence = ReviewEvidenceVisibilityService(db).project(item.id, user)
+    except ReviewEvidenceNotFound:
+        raise HTTPException(
+            status_code=404, detail='Review item not found'
+        ) from None
+    return _review_item_response(
+        item,
+        _agent_run_for_item(db, item),
+        evidence,
+    )
 
 
 def _agent_run_id(item: ReviewItem) -> int | None:

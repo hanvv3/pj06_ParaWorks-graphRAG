@@ -1,4 +1,36 @@
+from backend.app.api.v1.knowledge import _eligible_for_actor
+from backend.app.core.demo_auth import USERS
+from backend.app.knowledge.trusted_serving_eligibility import (
+    TrustedServingEligibility,
+)
 from backend.app.models import DecisionRecord, HistoryEvent, TimelineEvent, Todo
+
+
+def test_knowledge_visibility_projection_does_not_mutate_persisted_permission() -> None:
+    record = DecisionRecord(
+        id=41,
+        title='Permission drift',
+        decision_summary='Current evidence narrowed this record.',
+        source_links=['https://source.mock/41'],
+        source_snippets=['Current evidence'],
+        confidence_score=0.9,
+        permission_level='public',
+        review_status='approved',
+    )
+
+    class InternalEligibility:
+        def for_knowledge(self, knowledge_type: str, knowledge_id: int):
+            return TrustedServingEligibility(True, 'internal')
+
+    projected = _eligible_for_actor(
+        InternalEligibility(),
+        'decision_record',
+        [record],
+        USERS['viewer'],
+    )
+
+    assert record.permission_level == 'public'
+    assert projected[0].permission_level == 'internal'
 
 
 def test_knowledge_api_returns_approved_company_memory(client, db_session) -> None:

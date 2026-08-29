@@ -1,4 +1,5 @@
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from typing import Annotated
 from urllib.parse import urlparse
 
@@ -6,12 +7,26 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.core.demo_auth import DemoUser, get_demo_user
 from backend.app.db.session import get_db
+from backend.app.knowledge.trusted_serving_eligibility import (
+    TrustedServingEligibilityService,
+)
 from backend.app.models import DecisionRecord, HistoryEvent, TimelineEvent, Todo
 
 router = APIRouter(prefix='/knowledge', tags=['knowledge'])
 DbSession = Annotated[Session, Depends(get_db)]
+CurrentUser = Annotated[DemoUser, Depends(get_demo_user)]
 PERMISSION_RANK = {'public': 0, 'internal': 1, 'restricted': 2}
+
+
+@dataclass(frozen=True, slots=True)
+class _EligibleRecord:
+    record: object
+    permission_level: str
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.record, name)
 
 
 def _strictest_permission(levels: list[str]) -> str:
@@ -58,7 +73,9 @@ def _memory_node(
     }
 
 
-def _approved_memory_queries(db: Session) -> tuple[list[DecisionRecord], list[HistoryEvent], list[TimelineEvent], list[Todo]]:
+def _approved_memory_queries(
+    db: Session, user: DemoUser
+) -> tuple[list[DecisionRecord], list[HistoryEvent], list[TimelineEvent], list[Todo]]:
     decisions = db.scalars(
         select(DecisionRecord)
         .where(DecisionRecord.review_status == 'approved')
@@ -77,12 +94,20 @@ def _approved_memory_queries(db: Session) -> tuple[list[DecisionRecord], list[Hi
     todos = db.scalars(
         select(Todo).where(Todo.review_status == 'approved').order_by(Todo.created_at.desc(), Todo.id.desc())
     ).all()
-    return decisions, history_events, timeline_events, todos
+    service = TrustedServingEligibilityService(db)
+    return (
+        _eligible_for_actor(service, 'decision_record', decisions, user),
+        _eligible_for_actor(service, 'history_event', history_events, user),
+        _eligible_for_actor(service, 'timeline_event', timeline_events, user),
+        _eligible_for_actor(service, 'todo', todos, user),
+    )
 
 
 @router.get('/map')
-def knowledge_map(db: DbSession) -> dict:
-    decisions, history_events, timeline_events, todos = _approved_memory_queries(db)
+def knowledge_map(db: DbSession, user: CurrentUser) -> dict:
+    decisions, history_events, timeline_events, todos = _approved_memory_queries(
+        db, user
+    )
     memory_nodes: list[dict] = []
     edges: list[dict] = []
     source_permissions: dict[str, list[str]] = defaultdict(list)
@@ -226,11 +251,10 @@ def knowledge_map(db: DbSession) -> dict:
 
 
 @router.get('')
-def list_knowledge(db: DbSession) -> dict:
-    decisions = db.scalars(select(DecisionRecord).order_by(DecisionRecord.created_at.desc(), DecisionRecord.id.desc())).all()
-    history_events = db.scalars(select(HistoryEvent).order_by(HistoryEvent.created_at.desc(), HistoryEvent.id.desc())).all()
-    timeline_events = db.scalars(select(TimelineEvent).order_by(TimelineEvent.created_at.desc(), TimelineEvent.id.desc())).all()
-    todos = db.scalars(select(Todo).order_by(Todo.created_at.desc(), Todo.id.desc())).all()
+def list_knowledge(db: DbSession, user: CurrentUser) -> dict:
+    decisions, history_events, timeline_events, todos = _approved_memory_queries(
+        db, user
+    )
 
     return {
         'counts': {
@@ -297,3 +321,20 @@ def list_knowledge(db: DbSession) -> dict:
             for item in todos
         ],
     }
+
+
+def _eligible_for_actor(
+    service: TrustedServingEligibilityService,
+    knowledge_type: str,
+    records: list,
+    user: DemoUser,
+) -> list:
+    visible = []
+    for record in records:
+        result = service.for_knowledge(knowledge_type, record.id)
+        if (
+            result.eligible
+            and result.effective_permission in user.permission_levels
+        ):
+            visible.append(_EligibleRecord(record, result.effective_permission))
+    return visible

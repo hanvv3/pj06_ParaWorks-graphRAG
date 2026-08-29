@@ -157,6 +157,9 @@ def test_assistant_tool_middleware_logs_email_and_rag_tools_in_english(
     )
 
     assert turn_response.status_code == 200
+    projected = turn_response.json()['assistant_message']
+    assert projected['source_links'] == []
+    assert projected['metadata']['status'] == 'evidence_unavailable'
     log_text = caplog.text
     assert '[Tool: email_intent_gate] start' in log_text
     assert '[Tool: email_intent_gate] result email_intent=False confidence=0.2 requires_rag_result=False model=gpt-4.1-nano' in log_text

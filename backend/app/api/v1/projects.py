@@ -81,7 +81,7 @@ def define_project(
 
 @router.get('')
 def list_projects(db: DbSession, user: CurrentUser) -> dict:
-    projects = build_project_memory(db)
+    projects = build_project_memory(db, user)
     visible_projects = [_visible_project(project, user) for project in projects]
     hidden_evidence_count = sum(project.evidence_count - len(visible.evidence) for project, visible in zip(projects, visible_projects, strict=True))
     return {

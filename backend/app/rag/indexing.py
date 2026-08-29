@@ -1,13 +1,22 @@
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from backend.app.agent_runtime.keyed_mutation_guard import (
+    KeyedMutationGuard,
+    lock_runtime_state,
+)
+from backend.app.core.config import Settings
+from backend.app.knowledge.trusted_serving_eligibility import (
+    TrustedServingEligibilityService,
+)
 from backend.app.models import (
     DecisionRecord,
     DocumentChunk,
@@ -17,13 +26,23 @@ from backend.app.models import (
     TimelineEvent,
     Todo,
     VectorIndexState,
+    VectorServingTombstone,
 )
 from backend.app.rag.embeddings import EmbeddingBatchResult, EmbeddingModel
+from backend.app.rag.serving_locks import VectorServingLockManager
 from backend.app.rag.vector_store import VectorDocument
 
 
 class VectorIndexWriter(Protocol):
     def upsert_with_embedding(self, document: VectorDocument, embedding: list[float]) -> None:
+        raise NotImplementedError
+
+    def delete_many(self, document_ids: Sequence[str]) -> int:
+        raise NotImplementedError
+
+    def narrow_permissions(
+        self, document_ids: Sequence[str], permission_level: str
+    ) -> int:
         raise NotImplementedError
 
 
@@ -50,9 +69,23 @@ class VectorIndexResult:
 class PreviewVectorIndexWriter:
     def __init__(self) -> None:
         self.upserts: list[tuple[VectorDocument, list[float]]] = []
+        self.deletes: list[tuple[str, ...]] = []
+        self.permission_narrowings: list[tuple[tuple[str, ...], str]] = []
 
     def upsert_with_embedding(self, document: VectorDocument, embedding: list[float]) -> None:
         self.upserts.append((document, embedding))
+
+    def delete_many(self, document_ids: Sequence[str]) -> int:
+        normalized = tuple(sorted(set(document_ids)))
+        self.deletes.append(normalized)
+        return len(normalized)
+
+    def narrow_permissions(
+        self, document_ids: Sequence[str], permission_level: str
+    ) -> int:
+        normalized = tuple(sorted(set(document_ids)))
+        self.permission_narrowings.append((normalized, permission_level))
+        return len(normalized)
 
 
 def index_vector_documents(
@@ -88,12 +121,26 @@ def index_changed_vector_documents(
     embedding_cost_per_1m_tokens: float = 0.0,
     max_embedding_cost_usd: float | None = None,
     enforce_embedding_budget: bool = True,
+    settings: Settings | None = None,
 ) -> VectorIndexResult:
     changed_documents: list[tuple[VectorDocument, str, VectorIndexState | None]] = []
     skipped_document_ids: list[str] = []
     embedding_dimensions = _model_dimensions(embedding_model)
 
+    tombstoned_document_ids = set(
+        db.scalars(
+            select(VectorServingTombstone.document_id).where(
+                VectorServingTombstone.document_id.in_(
+                    [document.document_id for document in documents]
+                )
+            )
+        ).all()
+    )
+
     for document in documents:
+        if document.document_id in tombstoned_document_ids:
+            skipped_document_ids.append(document.document_id)
+            continue
         content_hash = compute_vector_document_hash(document)
         state = _get_index_state(
             db=db,
@@ -116,7 +163,35 @@ def index_changed_vector_documents(
     if enforce_embedding_budget and budget_decision['action'] == 'block':
         raise EmbeddingBudgetExceededError(budget_decision)
 
-    batch = _embed_many(embedding_model, changed_texts)
+    production_pgvector = (
+        writer.__class__.__name__ == 'PgVectorStore'
+        and db.get_bind().dialect.name == 'postgresql'
+    )
+    if production_pgvector:
+        if settings is None:
+            raise ValueError('PostgreSQL indexing requires serving-lock settings')
+        # Provider work must not hold an application transaction or advisory lock.
+        db.rollback()
+    batch = (
+        _embed_many(embedding_model, changed_texts)
+        if changed_texts
+        else EmbeddingBatchResult(embeddings=[], request_count=0)
+    )
+    if production_pgvector:
+        return _persist_locked_pgvector_batch(
+            db=db,
+            writer=writer,
+            settings=settings,
+            changed_documents=changed_documents,
+            embeddings=batch.embeddings,
+            skipped_document_ids=skipped_document_ids,
+            embedding_model_name=embedding_model_name,
+            embedding_dimensions=embedding_dimensions,
+            persist_state=persist_state,
+            batch=batch,
+            budget_decision=budget_decision,
+        )
+
     indexed_document_ids: list[str] = []
     for (document, content_hash, state), embedding in zip(changed_documents, batch.embeddings, strict=True):
         embedding_dimensions = len(embedding)
@@ -142,6 +217,102 @@ def index_changed_vector_documents(
         skipped_count=len(skipped_document_ids),
         skipped_document_ids=skipped_document_ids,
         saved_embedding_calls=len(skipped_document_ids),
+        embedding_request_count=batch.request_count,
+        embedding_prompt_tokens=batch.prompt_tokens,
+        embedding_total_tokens=batch.total_tokens,
+        embedding_budget=budget_decision,
+    )
+
+
+def _persist_locked_pgvector_batch(
+    *,
+    db: Session,
+    writer: VectorIndexWriter,
+    settings: Settings,
+    changed_documents: list[tuple[VectorDocument, str, VectorIndexState | None]],
+    embeddings: list[list[float]],
+    skipped_document_ids: list[str],
+    embedding_model_name: str,
+    embedding_dimensions: int,
+    persist_state: bool,
+    batch: EmbeddingBatchResult,
+    budget_decision: dict[str, float | int | str | None],
+) -> VectorIndexResult:
+    indexed: list[str] = []
+    stale_skips = list(skipped_document_ids)
+    document_ids = [document.document_id for document, _, _ in changed_documents]
+    if not document_ids:
+        return VectorIndexResult(
+            indexed_count=0,
+            document_ids=[],
+            embedding_dimensions=embedding_dimensions,
+            skipped_count=len(stale_skips),
+            skipped_document_ids=stale_skips,
+            saved_embedding_calls=len(stale_skips),
+            embedding_request_count=batch.request_count,
+            embedding_prompt_tokens=batch.prompt_tokens,
+            embedding_total_tokens=batch.total_tokens,
+            embedding_budget=budget_decision,
+        )
+    with KeyedMutationGuard.generation_barrier(db):
+        key_context = lock_runtime_state(db)
+        if key_context is None:
+            raise ValueError('PostgreSQL indexing key runtime unavailable')
+        lock_manager = VectorServingLockManager(db=db, settings=settings)
+        locked = lock_manager.acquire_documents(key_context, document_ids)
+        eligibility = TrustedServingEligibilityService(db)
+        for (document, content_hash, _), embedding in zip(
+            changed_documents, embeddings, strict=True
+        ):
+            live = eligibility.for_document(document.document_id)
+            if (
+                not live.eligible
+                or live.effective_permission is None
+                or db.scalar(
+                    select(VectorServingTombstone.id).where(
+                        VectorServingTombstone.document_id
+                        == document.document_id
+                    )
+                )
+                is not None
+            ):
+                stale_skips.append(document.document_id)
+                continue
+            narrowed = VectorDocument(
+                document_id=document.document_id,
+                text=document.text,
+                source_url=document.source_url,
+                source_snippet=document.source_snippet,
+                permission_level=live.effective_permission,
+                metadata=document.metadata,
+            )
+            writer.upsert_with_embedding(
+                narrowed, embedding, locked_context=locked  # type: ignore[call-arg]
+            )
+            indexed.append(document.document_id)
+            embedding_dimensions = len(embedding)
+            if persist_state:
+                state = _get_index_state(
+                    db=db,
+                    document_id=document.document_id,
+                    embedding_model_name=embedding_model_name,
+                )
+                _upsert_index_state(
+                    db=db,
+                    state=state,
+                    document=narrowed,
+                    embedding_model_name=embedding_model_name,
+                    embedding_dimensions=embedding_dimensions,
+                    content_hash=content_hash,
+                )
+        db.commit()
+    return VectorIndexResult(
+        indexed_count=len(indexed),
+        document_ids=indexed,
+        embedding_dimensions=embedding_dimensions,
+        skipped_count=len(stale_skips),
+        skipped_document_ids=stale_skips,
+        saved_embedding_calls=len(stale_skips),
         embedding_request_count=batch.request_count,
         embedding_prompt_tokens=batch.prompt_tokens,
         embedding_total_tokens=batch.total_tokens,
@@ -214,10 +385,11 @@ def estimate_embedding_budget(
 def build_rag_index_documents(db: Session) -> list[VectorDocument]:
     documents: list[VectorDocument] = []
     documents.extend(_chunk_documents(db))
-    documents.extend(_decision_documents(db))
-    documents.extend(_history_documents(db))
-    documents.extend(_timeline_documents(db))
-    documents.extend(_todo_documents(db))
+    eligibility = TrustedServingEligibilityService(db)
+    documents.extend(_decision_documents(db, eligibility))
+    documents.extend(_history_documents(db, eligibility))
+    documents.extend(_timeline_documents(db, eligibility))
+    documents.extend(_todo_documents(db, eligibility))
     return documents
 
 
@@ -225,7 +397,13 @@ def _chunk_documents(db: Session) -> list[VectorDocument]:
     # Phase 2: 승인 기반 RAG (Approval-only RAG)
     # 사람이 '승인(approved)'한 ReviewItem에 포함된 source_id 목록만 수집
     approved_payloads = db.execute(
-        select(ReviewItem.payload).where(ReviewItem.status == 'approved')
+        select(ReviewItem.payload).where(
+            ReviewItem.status == 'approved',
+            or_(
+                ReviewItem.resolution_source.is_(None),
+                ReviewItem.resolution_source == 'human',
+            ),
+        )
     ).scalars().all()
     
     approved_sid_set: set[str] = set()
@@ -252,7 +430,11 @@ def _chunk_documents(db: Session) -> list[VectorDocument]:
     ).all()
     
     documents: list[VectorDocument] = []
+    eligibility = TrustedServingEligibilityService(db)
     for chunk, source in rows:
+        serving = eligibility.for_document(f'chunk:{chunk.id}')
+        if not serving.eligible or serving.effective_permission is None:
+            continue
         timestamp = source.raw_metadata.get('ts') or source.created_at.isoformat()
         
         # 메타데이터 보강 (정적 태그 + 동적 태그)
@@ -279,7 +461,7 @@ def _chunk_documents(db: Session) -> list[VectorDocument]:
                 text=chunk.text,
                 source_url=source.source_url,
                 source_snippet=chunk.source_snippet,
-                permission_level=chunk.permission_level,
+                permission_level=serving.effective_permission,
                 metadata=metadata,
             )
         )
@@ -302,7 +484,9 @@ def _document_parser_metadata(chunk: DocumentChunk) -> dict[str, object]:
     return {key: chunk.metadata_.get(key) for key in keys if key in chunk.metadata_}
 
 
-def _decision_documents(db: Session) -> list[VectorDocument]:
+def _decision_documents(
+    db: Session, eligibility: TrustedServingEligibilityService
+) -> list[VectorDocument]:
     # 결정사항 테이블 조회 (이미 승인된 것만 저장됨)
     decisions = db.scalars(
         select(DecisionRecord)
@@ -317,15 +501,18 @@ def _decision_documents(db: Session) -> list[VectorDocument]:
             text=f'결정사항: {decision.title}\n내용: {decision.decision_summary}',
             source_links=decision.source_links,
             source_snippets=decision.source_snippets,
-            permission_level=decision.permission_level,
+            permission_level=result.effective_permission or 'restricted',
             timestamp=decision.created_at.isoformat(),
             project_key=decision.project_key,
         )
         for decision in decisions
+        if (result := eligibility.for_knowledge('decision_record', decision.id)).eligible
     ]
 
 
-def _history_documents(db: Session) -> list[VectorDocument]:
+def _history_documents(
+    db: Session, eligibility: TrustedServingEligibilityService
+) -> list[VectorDocument]:
     # 기록/공유 테이블 조회
     events = db.scalars(
         select(HistoryEvent)
@@ -340,15 +527,18 @@ def _history_documents(db: Session) -> list[VectorDocument]:
             text=f'기록/공유: {event.title}\n내용: {event.reason}',
             source_links=event.source_links,
             source_snippets=event.source_snippets,
-            permission_level=event.permission_level,
+            permission_level=result.effective_permission or 'restricted',
             timestamp=event.created_at.isoformat(),
             project_key=event.project_key,
         )
         for event in events
+        if (result := eligibility.for_knowledge('history_event', event.id)).eligible
     ]
 
 
-def _timeline_documents(db: Session) -> list[VectorDocument]:
+def _timeline_documents(
+    db: Session, eligibility: TrustedServingEligibilityService
+) -> list[VectorDocument]:
     events = db.scalars(
         select(TimelineEvent)
         .where(TimelineEvent.review_status == 'approved')
@@ -362,15 +552,18 @@ def _timeline_documents(db: Session) -> list[VectorDocument]:
             text=f'Timeline: {event.title}\nSummary: {event.result_summary}',
             source_links=event.source_links,
             source_snippets=event.source_snippets,
-            permission_level=event.permission_level,
+            permission_level=result.effective_permission or 'restricted',
             timestamp=event.created_at.isoformat(),
             project_key=event.project_key,
         )
         for event in events
+        if (result := eligibility.for_knowledge('timeline_event', event.id)).eligible
     ]
 
 
-def _todo_documents(db: Session) -> list[VectorDocument]:
+def _todo_documents(
+    db: Session, eligibility: TrustedServingEligibilityService
+) -> list[VectorDocument]:
     # 할 일 테이블 조회
     todos = db.scalars(
         select(Todo)
@@ -385,11 +578,12 @@ def _todo_documents(db: Session) -> list[VectorDocument]:
             text=f'할 일: {todo.title}\n우선순위: {todo.priority}\n상세: {todo.priority_reason}',
             source_links=todo.source_links,
             source_snippets=todo.source_snippets,
-            permission_level=todo.permission_level,
+            permission_level=result.effective_permission or 'restricted',
             timestamp=todo.created_at.isoformat(),
             project_key=todo.project_key,
         )
         for todo in todos
+        if (result := eligibility.for_knowledge('todo', todo.id)).eligible
     ]
 
 

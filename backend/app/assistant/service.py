@@ -1,10 +1,28 @@
 from datetime import UTC, datetime
+from hashlib import sha256
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.core.demo_auth import DemoUser
-from backend.app.models import AssistantConversation, AssistantMessage
+from backend.app.knowledge.trusted_serving_eligibility import (
+    TrustedServingEligibilityService,
+    knowledge_model_for_type,
+)
+from backend.app.models import (
+    AssistantConversation,
+    AssistantMessage,
+    AssistantMessageEvidenceDependency,
+    AssistantMessageKnowledgeEvidenceRef,
+    AutoReviewRuntimeKeyState,
+    Document,
+    DocumentChunk,
+    DocumentParserRun,
+    ReviewItem,
+    Source,
+    TrustedKnowledgeApprovalLink,
+    TrustedKnowledgeEvidenceLink,
+)
 
 RECENT_CONTEXT_MESSAGE_LIMIT = 6
 DEFAULT_CONVERSATION_TITLE = '새 대화'
@@ -138,6 +156,7 @@ def append_assistant_message(
     permission_notice: str | None,
     agent_run_id: int | None,
     metadata: dict,
+    serving_dependencies: tuple[object, ...] = (),
 ) -> AssistantMessage:
     _ensure_owned_conversation(user, conversation)
     normalized_content = content.strip()
@@ -156,13 +175,31 @@ def append_assistant_message(
         hidden_match_count=hidden_match_count,
         permission_notice=permission_notice,
         agent_run_id=agent_run_id,
+        evidence_contract_version=(
+            'assistant-evidence:v1'
+            if serving_dependencies
+            else 'none-v1'
+        ),
+        serving_dependency_count=len(serving_dependencies),
         metadata_=metadata,
     )
     conversation.updated_at = datetime.now(UTC)
     conversation.summary = update_summary(conversation.summary, message.content)
     conversation.summary_updated_at = datetime.now(UTC)
     db.add(message)
-    db.commit()
+    try:
+        db.flush([message])
+        _persist_serving_dependencies(
+            db, message=message, dependencies=serving_dependencies
+        )
+        if serving_dependencies and not _message_evidence_is_live(
+            db, user=user, message=message
+        ):
+            raise ValueError('assistant serving dependency changed before commit')
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(message)
     db.refresh(conversation)
     return message
@@ -173,10 +210,14 @@ def build_contextual_question(
     conversation: AssistantConversation,
     messages: list[AssistantMessage],
     new_message: str,
+    db: Session | None = None,
+    user: DemoUser | None = None,
 ) -> str:
+    if db is not None and user is not None:
+        messages = eligible_context_messages(db, user, messages)
     parts: list[str] = []
     seen_context: set[str] = set()
-    if conversation.summary:
+    if conversation.summary and (db is None or user is None):
         summary_lines = _dedupe_lines(conversation.summary.splitlines())
         if summary_lines:
             seen_context.update(f'assistant:{line}' for line in summary_lines)
@@ -204,18 +245,42 @@ def update_summary(existing_summary: str | None, latest_answer: str) -> str:
     return '\n'.join(_dedupe_lines(lines)[-MAX_SUMMARY_LINES:])[:1000]
 
 
-def serialize_conversation(conversation: AssistantConversation) -> dict:
+def serialize_conversation(
+    conversation: AssistantConversation,
+    *,
+    db: Session | None = None,
+    user: DemoUser | None = None,
+) -> dict:
+    summary = None
+    if db is not None and user is not None:
+        live_messages = eligible_context_messages(
+            db, user, list(conversation.messages)
+        )
+        summary = '\n'.join(
+            _dedupe_lines(
+                [
+                    message.content
+                    for message in live_messages
+                    if message.role == 'assistant'
+                ]
+            )[-MAX_SUMMARY_LINES:]
+        ) or None
     return {
         'id': conversation.id,
         'title': conversation.title,
-        'summary': conversation.summary,
+        'summary': summary,
         'created_at': conversation.created_at.isoformat(),
         'updated_at': conversation.updated_at.isoformat(),
     }
 
 
-def serialize_message(message: AssistantMessage) -> dict:
-    return {
+def serialize_message(
+    message: AssistantMessage,
+    *,
+    db: Session | None = None,
+    user: DemoUser | None = None,
+) -> dict:
+    response = {
         'id': message.id,
         'conversation_id': message.conversation_id,
         'role': message.role,
@@ -231,6 +296,301 @@ def serialize_message(message: AssistantMessage) -> dict:
         'metadata': message.metadata_,
         'created_at': message.created_at.isoformat(),
     }
+    evidence_shaped = bool(
+        message.citations
+        or message.source_ids
+        or message.source_links
+        or message.source_snippets
+        or message.hidden_match_count
+    )
+    unavailable = (
+        evidence_shaped and (db is None or user is None)
+    ) or (
+        db is not None
+        and user is not None
+        and not _message_evidence_is_live(db, user=user, message=message)
+    )
+    if unavailable:
+        response.update(
+            {
+                'content': '이 답변의 근거를 더 이상 확인할 수 없습니다. 다시 생성해 주세요.',
+                'citations': [],
+                'source_ids': [],
+                'source_links': [],
+                'source_snippets': [],
+                'permission_level': None,
+                'hidden_match_count': 0,
+                'permission_notice': 'evidence_unavailable',
+                'metadata': {
+                    'status': 'evidence_unavailable',
+                    'regeneration_required': True,
+                },
+            }
+        )
+    return response
+
+
+def eligible_context_messages(
+    db: Session,
+    user: DemoUser,
+    messages: list[AssistantMessage],
+) -> list[AssistantMessage]:
+    return [
+        message
+        for message in messages
+        if message.role != 'assistant'
+        or _message_evidence_is_live(db, user=user, message=message)
+    ]
+
+
+def _persist_serving_dependencies(
+    db: Session,
+    *,
+    message: AssistantMessage,
+    dependencies: tuple[object, ...],
+) -> None:
+    if not dependencies:
+        return
+    runtime = db.scalar(
+        select(AutoReviewRuntimeKeyState).where(
+            AutoReviewRuntimeKeyState.component
+            == 'auto_review_trust_promotion'
+        )
+    )
+    if runtime is None or not runtime.ready:
+        raise ValueError('assistant serving dependency key runtime unavailable')
+    for ordinal, snapshot in enumerate(dependencies):
+        values = vars(snapshot) if hasattr(snapshot, '__dict__') else {
+            name: getattr(snapshot, name)
+            for name in getattr(snapshot, '__slots__', ())
+        }
+        evidence_link_ids = tuple(values.pop('evidence_link_ids', ()))
+        identity = '|'.join(
+            f'{key}={values[key]!r}' for key in sorted(values)
+        )
+        dependency = AssistantMessageEvidenceDependency(
+            assistant_message_id=message.id,
+            candidate_ordinal=ordinal,
+            dependency_set_hmac=sha256(identity.encode('utf-8')).hexdigest(),
+            fingerprint_key_version=runtime.fingerprint_key_version,
+            fingerprint_key_material_verifier=(
+                runtime.fingerprint_key_material_verifier
+            ),
+            **values,
+        )
+        db.add(dependency)
+        db.flush([dependency])
+        if dependency.approval_link_id is not None:
+            refs = [
+                AssistantMessageKnowledgeEvidenceRef(
+                        dependency_id=dependency.id,
+                        assistant_message_id=message.id,
+                        approval_link_id=dependency.approval_link_id,
+                        trusted_knowledge_evidence_link_id=evidence_link_id,
+                )
+                for evidence_link_id in evidence_link_ids
+            ]
+            db.add_all(refs)
+            db.flush(refs)
+
+
+def _message_evidence_is_live(
+    db: Session, *, user: DemoUser, message: AssistantMessage
+) -> bool:
+    evidence_shaped = bool(
+        message.citations
+        or message.source_ids
+        or message.source_links
+        or message.source_snippets
+        or message.hidden_match_count
+    )
+    dependencies = tuple(
+        db.scalars(
+            select(AssistantMessageEvidenceDependency)
+            .where(
+                AssistantMessageEvidenceDependency.assistant_message_id
+                == message.id
+            )
+            .order_by(AssistantMessageEvidenceDependency.candidate_ordinal)
+        ).all()
+    )
+    if not evidence_shaped and not dependencies:
+        return message.evidence_contract_version in {None, 'none-v1'}
+    if (
+        message.evidence_contract_version != 'assistant-evidence:v1'
+        or message.serving_dependency_count != len(dependencies)
+        or not dependencies
+    ):
+        return False
+    eligibility = TrustedServingEligibilityService(db)
+    return all(
+        dependency.permission_level in user.permission_levels
+        and _dependency_is_live(db, eligibility, message, dependency)
+        for dependency in dependencies
+    )
+
+
+def _dependency_is_live(
+    db: Session,
+    eligibility: TrustedServingEligibilityService,
+    message: AssistantMessage,
+    dependency: AssistantMessageEvidenceDependency,
+) -> bool:
+    serving = eligibility.for_document(dependency.serving_document_id)
+    if (
+        not serving.eligible
+        or serving.effective_permission != dependency.permission_level
+    ):
+        return False
+    if dependency.dependency_kind == 'raw_chunk':
+        chunk = db.get(DocumentChunk, dependency.document_chunk_id)
+        source = db.get(Source, dependency.source_id)
+        parser_run = db.get(DocumentParserRun, dependency.parser_run_id)
+        document = (
+            db.get(Document, parser_run.document_id)
+            if parser_run is not None
+            else None
+        )
+        identity_is_current = bool(
+            chunk is not None
+            and source is not None
+            and parser_run is not None
+            and document is not None
+            and chunk.version_id == dependency.document_version_id
+            and chunk.parser_run_id == dependency.parser_run_id
+            and document.current_document_version_id
+            == dependency.current_document_version_id
+            and source.server_content_signature
+            == dependency.server_content_signature
+            and parser_run.parser_policy_version
+            == dependency.parser_policy_version
+            and parser_run.parser_version == dependency.parser_version
+            and parser_run.chunk_policy_version
+            == dependency.chunk_policy_version
+        )
+        return bool(
+            identity_is_current
+            and _raw_dependency_content_hash(
+                chunk=chunk,
+                source=source,
+                permission_level=dependency.permission_level,
+            )
+            == dependency.serving_content_hash
+        )
+    if dependency.legacy_human_base:
+        item = db.get(ReviewItem, dependency.legacy_source_review_item_id)
+        return bool(
+            item is not None
+            and item.status == 'approved'
+            and item.resolution_source in {None, 'human'}
+            and item.candidate_contract_version != 'c5-v1'
+            and _knowledge_dependency_content_hash(db, dependency)
+            == dependency.serving_content_hash
+        )
+    link = db.get(TrustedKnowledgeApprovalLink, dependency.approval_link_id)
+    if (
+        link is None
+        or not link.active
+        or link.knowledge_type != dependency.knowledge_type
+        or link.knowledge_id != dependency.knowledge_id
+        or not eligibility.approval_link_is_live(link.id)
+    ):
+        return False
+    current_children = set(
+        db.scalars(
+            select(TrustedKnowledgeEvidenceLink.id).where(
+                TrustedKnowledgeEvidenceLink.approval_link_id == link.id
+            )
+        ).all()
+    )
+    snapshot_children = set(
+        db.scalars(
+            select(
+                AssistantMessageKnowledgeEvidenceRef.trusted_knowledge_evidence_link_id
+            ).where(
+                AssistantMessageKnowledgeEvidenceRef.dependency_id
+                == dependency.id,
+                AssistantMessageKnowledgeEvidenceRef.assistant_message_id
+                == message.id,
+            )
+        ).all()
+    )
+    return bool(
+        current_children
+        and current_children == snapshot_children
+        and _knowledge_dependency_content_hash(db, dependency)
+        == dependency.serving_content_hash
+    )
+
+
+def _raw_dependency_content_hash(
+    *,
+    chunk: DocumentChunk,
+    source: Source,
+    permission_level: str,
+) -> str:
+    return _serving_content_hash(
+        source_id=source.source_id,
+        text=chunk.text,
+        source_url=source.source_url,
+        source_snippet=chunk.source_snippet,
+        permission_level=permission_level,
+    )
+
+
+def _knowledge_dependency_content_hash(
+    db: Session,
+    dependency: AssistantMessageEvidenceDependency,
+) -> str | None:
+    if dependency.knowledge_type is None or dependency.knowledge_id is None:
+        return None
+    try:
+        target = db.get(
+            knowledge_model_for_type(dependency.knowledge_type),
+            dependency.knowledge_id,
+        )
+    except (LookupError, ValueError):
+        return None
+    if target is None:
+        return None
+    title = str(target.title)
+    if dependency.knowledge_type in {'decision_record', 'decision'}:
+        text = f'{title}\n{target.decision_summary}'
+    elif dependency.knowledge_type == 'history_event':
+        text = f'{title}\n{target.reason}'
+    elif dependency.knowledge_type == 'timeline_event':
+        text = f'{title}\n{target.result_summary}'
+    elif dependency.knowledge_type == 'todo':
+        text = f'{title}\n{target.priority}\n{target.priority_reason}'
+    else:
+        return None
+    source_links = list(target.source_links or [])
+    source_snippets = list(target.source_snippets or [])
+    return _serving_content_hash(
+        source_id=dependency.serving_document_id,
+        text=text,
+        source_url=(
+            source_links[0]
+            if source_links
+            else f'knowledge://{dependency.serving_document_id}'
+        ),
+        source_snippet=(source_snippets[0] if source_snippets else text[:240]),
+        permission_level=dependency.permission_level,
+    )
+
+
+def _serving_content_hash(
+    *,
+    source_id: str,
+    text: str,
+    source_url: str,
+    source_snippet: str,
+    permission_level: str,
+) -> str:
+    value = '\n'.join(
+        (source_id, text, source_url, source_snippet, permission_level)
+    )
+    return sha256(value.encode('utf-8')).hexdigest()
 
 
 def _conversation_title(value: str | None) -> str:

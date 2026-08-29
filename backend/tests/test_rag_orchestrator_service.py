@@ -2,6 +2,9 @@ from contextlib import suppress
 
 from sqlalchemy.orm import Session
 
+from backend.app.admin.auto_review_keys import (
+    fingerprint_key_material_verifier,
+)
 from backend.app.agents.rag_orchestrator_agent import answer_question_with_rag
 from backend.app.agents.rag_orchestrator_agent.service import (
     build_default_rag_orchestrator_agent,
@@ -10,10 +13,13 @@ from backend.app.core.config import Settings
 from backend.app.core.demo_auth import USERS
 from backend.app.models import (
     AgentRun,
+    AutoReviewRuntimeKeyState,
     DecisionRecord,
     Document,
     DocumentChunk,
+    DocumentParserRun,
     DocumentVersion,
+    ReviewItem,
     Source,
     Todo,
 )
@@ -21,6 +27,24 @@ from backend.app.rag.vector_store import InMemoryVectorStore, VectorDocument
 
 
 def seed_chunk(db: Session, source_type: str, source_id: str, text: str, permission_level: str) -> None:
+    signature = 'a' * 64
+    settings = Settings(database_url='sqlite://')
+    if db.get(AutoReviewRuntimeKeyState, 'auto_review_trust_promotion') is None:
+        db.add(
+            AutoReviewRuntimeKeyState(
+                component='auto_review_trust_promotion',
+                fingerprint_key_version=(
+                    settings.agent_runtime_fingerprint_key_version
+                ),
+                fingerprint_key_material_verifier=(
+                    fingerprint_key_material_verifier(
+                        settings.agent_runtime_fingerprint_secret
+                    )
+                ),
+                generation=1,
+                ready=True,
+            )
+        )
     source = Source(
         source_type=source_type,
         source_id=source_id,
@@ -29,9 +53,23 @@ def seed_chunk(db: Session, source_type: str, source_id: str, text: str, permiss
         author='owner@example.com',
         permission_level=permission_level,
         raw_metadata={'ts': '2026-04-30T10:00:00+00:00'},
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=signature,
     )
     db.add(source)
     db.flush()
+    db.add(
+        ReviewItem(
+            item_type='source_evidence',
+            payload={'source_ids': [source.source_id]},
+            source_links=[source.source_url],
+            source_snippets=[text[:240]],
+            confidence_score=1.0,
+            permission_level=permission_level,
+            status='approved',
+            resolution_source='human',
+        )
+    )
 
     document = Document(source_id=source.id, title=source.title, current_version='v1')
     db.add(document)
@@ -41,10 +79,26 @@ def seed_chunk(db: Session, source_type: str, source_id: str, text: str, permiss
     db.add(version)
     db.flush()
 
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=version.id,
+        source_id=source.id,
+        parser_name='plain_text',
+        parser_status='parsed',
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=signature,
+        parser_policy_version='parser-policy:v1',
+        parser_version='plain-text:v1',
+        chunk_policy_version='chunk-policy:v1',
+    )
+    db.add(parser_run)
+    db.flush()
+
     db.add(
         DocumentChunk(
             version_id=version.id,
             source_id=source.id,
+            parser_run_id=parser_run.id,
             chunk_index=0,
             text=text,
             source_snippet=text[:240],
@@ -52,6 +106,8 @@ def seed_chunk(db: Session, source_type: str, source_id: str, text: str, permiss
             metadata_={'source_url': source.source_url, 'source_type': source_type},
         )
     )
+    document.current_document_version_id = version.id
+    parser_run.chunk_count = 1
     db.commit()
 
 
@@ -165,15 +221,31 @@ def test_rag_service_hides_restricted_approved_knowledge_for_viewer(db_session: 
 
 
 def test_rag_service_can_answer_from_vector_store_matches(db_session: Session) -> None:
+    text = (
+        'Project Alpha launch history came from the indexed company memory '
+        'vector store.'
+    )
+    seed_chunk(
+        db_session,
+        'gmail',
+        'gmail-vector-alpha',
+        text,
+        'internal',
+    )
+    chunk = db_session.query(DocumentChunk).one()
+    source = db_session.query(Source).one()
     vector_store = InMemoryVectorStore()
     vector_store.upsert(
         VectorDocument(
-            document_id='chunk:vector-alpha',
-            text='Project Alpha launch history came from the indexed company memory vector store.',
-            source_url='https://vector.mock/project-alpha',
-            source_snippet='Project Alpha launch history',
+            document_id=source.source_id,
+            text=text,
+            source_url=source.source_url,
+            source_snippet=chunk.source_snippet,
             permission_level='internal',
-            metadata={'source_type': 'vector_test'},
+            metadata={
+                'source_type': 'gmail',
+                'chunk_id': chunk.id,
+            },
         )
     )
 
@@ -185,8 +257,8 @@ def test_rag_service_can_answer_from_vector_store_matches(db_session: Session) -
     )
 
     assert answer.answer
-    assert answer.source_links == ['https://vector.mock/project-alpha']
-    assert answer.source_snippets == ['Project Alpha launch history']
+    assert answer.source_links == ['https://gmail.mock/gmail-vector-alpha']
+    assert answer.source_snippets == [text]
     assert answer.hidden_match_count == 0
 
 

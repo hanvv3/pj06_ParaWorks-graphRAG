@@ -7,6 +7,9 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.demo_auth import DemoUser, get_demo_user
 from backend.app.db.session import get_db
+from backend.app.knowledge.trusted_serving_eligibility import (
+    TrustedServingEligibilityService,
+)
 from backend.app.models import Todo
 from backend.app.permissions.service import can_access_permission
 
@@ -20,8 +23,15 @@ def complete_todo(todo_id: int, db: DbSession, user: CurrentUser) -> dict:
     todo = db.scalars(select(Todo).where(Todo.id == todo_id)).first()
     if todo is None:
         raise HTTPException(status_code=404, detail='Todo not found.')
-    if not can_access_permission(user, todo.permission_level):
-        raise HTTPException(status_code=403, detail='Todo permission denied.')
+    eligibility = TrustedServingEligibilityService(db).for_knowledge(
+        'todo', todo.id
+    )
+    if (
+        not eligibility.eligible
+        or eligibility.effective_permission is None
+        or not can_access_permission(user, eligibility.effective_permission)
+    ):
+        raise HTTPException(status_code=404, detail='Todo not found.')
 
     if todo.completed_at is None:
         todo.completed_at = datetime.now(UTC)

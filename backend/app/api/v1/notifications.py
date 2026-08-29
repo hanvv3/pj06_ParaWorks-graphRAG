@@ -5,19 +5,27 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import Settings, get_settings
+from backend.app.core.demo_auth import DemoUser, get_demo_user
 from backend.app.core.demo_filters import filter_review_items
 from backend.app.db.session import get_db
 from backend.app.models import AgentRun, ReviewItem
+from backend.app.review.evidence_visibility import (
+    ReviewEvidenceNotFound,
+    ReviewEvidenceVisibilityService,
+)
 
 router = APIRouter(prefix='/notifications', tags=['notifications'])
 DbSession = Annotated[Session, Depends(get_db)]
 AppSettings = Annotated[Settings, Depends(get_settings)]
+CurrentUser = Annotated[DemoUser, Depends(get_demo_user)]
 
 
 @router.get('')
-def list_notifications(db: DbSession, settings: AppSettings) -> dict:
-    review_notifications = _review_notifications(db, settings)
-    agent_run_notifications = _agent_run_notifications(db)
+def list_notifications(
+    db: DbSession, settings: AppSettings, user: CurrentUser
+) -> dict:
+    review_notifications = _review_notifications(db, settings, user)
+    agent_run_notifications = _agent_run_notifications(db, user)
     notifications = review_notifications + agent_run_notifications
     return {
         'counts': {
@@ -29,9 +37,13 @@ def list_notifications(db: DbSession, settings: AppSettings) -> dict:
     }
 
 
-def _review_notifications(db: Session, settings: Settings) -> list[dict]:
-    pending_count = _review_count(db, settings, 'pending_review')
-    needs_more_evidence_count = _review_count(db, settings, 'needs_more_evidence')
+def _review_notifications(
+    db: Session, settings: Settings, user: DemoUser
+) -> list[dict]:
+    pending_count = _review_count(db, settings, user, 'pending_review')
+    needs_more_evidence_count = _review_count(
+        db, settings, user, 'needs_more_evidence'
+    )
     notifications = []
     if pending_count:
         notifications.append(
@@ -62,10 +74,15 @@ def _review_notifications(db: Session, settings: Settings) -> list[dict]:
     return notifications
 
 
-def _agent_run_notifications(db: Session) -> list[dict]:
+def _agent_run_notifications(
+    db: Session, user: DemoUser | None = None
+) -> list[dict]:
+    if user is None:
+        return []
     failed_runs = db.scalars(
         select(AgentRun)
         .where(AgentRun.status != 'complete')
+        .where(AgentRun.permission_level.in_(tuple(user.permission_levels)))
         .order_by(AgentRun.started_at.desc(), AgentRun.id.desc())
         .limit(5)
     ).all()
@@ -84,8 +101,22 @@ def _agent_run_notifications(db: Session) -> list[dict]:
     ]
 
 
-def _review_count(db: Session, settings: Settings, status: str) -> int:
-    if settings.paraworks_demo_mode:
-        return len(db.scalars(select(ReviewItem.id).where(ReviewItem.status == status)).all())
+def _review_count(
+    db: Session,
+    settings: Settings,
+    user: DemoUser | None,
+    status: str,
+) -> int:
+    if user is None:
+        return 0
     items = db.scalars(select(ReviewItem).where(ReviewItem.status == status)).all()
-    return len(filter_review_items(items))
+    environment_items = items if settings.paraworks_demo_mode else filter_review_items(items)
+    service = ReviewEvidenceVisibilityService(db)
+    visible = 0
+    for item in environment_items:
+        try:
+            service.project(item.id, user)
+        except ReviewEvidenceNotFound:
+            continue
+        visible += 1
+    return visible

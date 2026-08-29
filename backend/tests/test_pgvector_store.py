@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from backend.app.core.demo_auth import USERS
 from backend.app.rag.pgvector_store import PgVectorConfig, PgVectorStore
 from backend.app.rag.vector_store import VectorDocument
@@ -33,6 +35,10 @@ class RecordingResult:
 
     def all(self):
         return self._rows
+
+    @property
+    def rowcount(self):
+        return len(self._rows)
 
 
 def test_pgvector_schema_sql_creates_extension_table_and_indexes() -> None:
@@ -97,3 +103,79 @@ def test_pgvector_search_filters_by_user_permission_and_tracks_hidden_matches() 
     assert result.hidden_match_count == 1
     assert [match.document.document_id for match in result.matches] == ['gmail:redis']
     assert result.matches[0].score == 0.92
+
+
+def test_pgvector_delete_many_uses_exact_document_ids() -> None:
+    session = RecordingSession(rows=[{'deleted': True}, {'deleted': True}])
+    store = PgVectorStore(session=session)
+
+    deleted = store.delete_many(['todo:2', 'todo:1', 'todo:2'])
+
+    statement, params = session.calls[0]
+    assert 'DELETE FROM rag_vector_documents' in statement
+    assert 'document_id = ANY(:document_ids)' in statement
+    assert params == {'document_ids': ['todo:1', 'todo:2']}
+    assert deleted == 2
+
+
+def test_pgvector_narrow_permissions_rejects_broadening() -> None:
+    session = RecordingSession(
+        rows=[{'document_id': 'todo:1', 'permission_level': 'restricted'}]
+    )
+    store = PgVectorStore(session=session)
+
+    with pytest.raises(ValueError, match='broadening'):
+        store.narrow_permissions(['todo:1'], 'internal')
+
+    assert len(session.calls) == 1
+
+    session = RecordingSession(
+        rows=[
+            {'document_id': 'todo:1', 'permission_level': 'public'},
+            {'document_id': 'todo:2', 'permission_level': 'internal'},
+        ]
+    )
+    store = PgVectorStore(session=session)
+
+    narrowed = store.narrow_permissions(['todo:2', 'todo:1'], 'restricted')
+
+    statement, params = session.calls[1]
+    assert 'UPDATE rag_vector_documents' in statement
+    assert "WHEN 'public' THEN 0" in statement
+    assert "WHEN 'internal' THEN 1" in statement
+    assert params == {
+        'document_ids': ['todo:1', 'todo:2'],
+        'permission_level': 'restricted',
+        'permission_rank': 2,
+    }
+    assert narrowed == 2
+
+
+def test_pgvector_conditional_upsert_cannot_cross_a_tombstone() -> None:
+    store = PgVectorStore(session=RecordingSession())
+
+    statement = store._upsert_sql()
+
+    assert 'INSERT INTO rag_vector_documents' in statement
+    assert 'SELECT' in statement
+    assert 'NOT EXISTS' in statement
+    assert 'vector_serving_tombstones' in statement
+    assert 'document_id = :document_id' in statement
+
+
+def test_pgvector_search_excludes_stale_tombstoned_row_before_hidden_count() -> None:
+    store = PgVectorStore(session=RecordingSession())
+
+    statement = store._search_sql()
+
+    ranked = statement.split('hidden AS', maxsplit=1)[0]
+    assert 'vector_serving_tombstones' in ranked
+    assert 'NOT EXISTS' in ranked
+
+
+def test_pgvector_search_excludes_critical_audit_correction_before_ranking() -> None:
+    statement = PgVectorStore(session=RecordingSession())._search_sql()
+
+    ranked = statement.split('hidden AS', maxsplit=1)[0]
+    assert 'auto_review_audit_corrections' in ranked
+    assert 'effective_outcome' in ranked

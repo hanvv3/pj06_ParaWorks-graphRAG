@@ -148,7 +148,7 @@ def test_complete_todo_rejects_inaccessible_permission(client, db_session) -> No
 
     response = client.post(f'/api/v1/todos/{todo.id}/complete', headers={'X-Demo-User': 'viewer'})
 
-    assert response.status_code == 403
+    assert response.status_code == 404
     db_session.refresh(todo)
     assert todo.completed_at is None
     assert todo.completed_by is None

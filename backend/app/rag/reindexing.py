@@ -38,6 +38,7 @@ def run_reindex(*, db: Session, settings: Settings, dry_run: bool) -> dict:
             embedding_cost_per_1m_tokens=settings.openai_embedding_input_cost_per_1m_tokens,
             max_embedding_cost_usd=settings.rag_embedding_max_estimated_cost_usd,
             enforce_embedding_budget=not dry_run,
+            settings=settings,
         )
     except EmbeddingBudgetExceededError as exc:
         decision = exc.decision
@@ -102,8 +103,10 @@ def reindex_components(
     writer = PgVectorStore(
         session=db,
         config=PgVectorConfig(embedding_dimensions=settings.openai_embedding_dimensions),
+        settings=settings,
     )
     writer.ensure_schema()
+    db.commit()
     return (
         writer,
         OpenAIEmbeddingModel(

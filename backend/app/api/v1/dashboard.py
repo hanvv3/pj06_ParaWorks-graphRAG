@@ -7,8 +7,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import Settings, get_settings
+from backend.app.core.demo_auth import DemoUser, get_demo_user
 from backend.app.core.demo_filters import filter_review_items
 from backend.app.db.session import get_db
+from backend.app.knowledge.trusted_serving_eligibility import (
+    TrustedServingEligibilityService,
+)
 from backend.app.models import (
     DecisionRecord,
     Project,
@@ -19,26 +23,45 @@ from backend.app.models import (
     Todo,
 )
 from backend.app.projects import build_project_memory
+from backend.app.review.evidence_visibility import (
+    ReviewEvidenceNotFound,
+    ReviewEvidenceVisibilityService,
+)
 from backend.app.services.review_display import review_item_display_title
 
 router = APIRouter(prefix='/dashboard', tags=['dashboard'])
 DbSession = Annotated[Session, Depends(get_db)]
 AppSettings = Annotated[Settings, Depends(get_settings)]
+CurrentUser = Annotated[DemoUser, Depends(get_demo_user)]
 
 
 @router.get('')
-def get_dashboard(db: DbSession, settings: AppSettings) -> dict:
+def get_dashboard(
+    db: DbSession, settings: AppSettings, user: CurrentUser
+) -> dict:
     source_counts = dict(
-        db.execute(select(Source.source_type, func.count(Source.id)).group_by(Source.source_type)).all()
+        db.execute(
+            select(Source.source_type, func.count(Source.id))
+            .where(Source.permission_level.in_(tuple(user.permission_levels)))
+            .group_by(Source.source_type)
+        ).all()
     )
     raw_pending_review_items = db.scalars(
         select(ReviewItem).where(ReviewItem.status == 'pending_review')
     ).all()
-    visible_pending_review_items = (
+    environment_items = (
         raw_pending_review_items
         if settings.paraworks_demo_mode
         else filter_review_items(raw_pending_review_items)
     )
+    evidence_service = ReviewEvidenceVisibilityService(db)
+    visible_pending_review_items = []
+    for item in environment_items:
+        try:
+            evidence_service.project(item.id, user)
+        except ReviewEvidenceNotFound:
+            continue
+        visible_pending_review_items.append(item)
     sorted_pending_review_items = _sort_review_items_for_queue(visible_pending_review_items)
     pending_review_count = len(sorted_pending_review_items)
     recent_jobs = db.scalars(select(SyncJob).order_by(SyncJob.created_at.desc()).limit(5)).all()
@@ -52,29 +75,43 @@ def get_dashboard(db: DbSession, settings: AppSettings) -> dict:
         .where(Todo.completed_at.is_(None))
         .order_by(Todo.id.desc())
     ).all()
+    eligibility = TrustedServingEligibilityService(db)
     todo_items = sorted(
-        [item for item in todo_candidates if _is_due_from_today(item.due_date or '', today)],
+        [
+            item
+            for item in todo_candidates
+            if _is_due_from_today(item.due_date or '', today)
+            and _trusted_for_actor(eligibility, 'todo', item, user)
+        ],
         key=lambda item: (item.due_date or '', item.id),
     )[:5]
-    calendar_events = _calendar_events(db)
+    calendar_events = _calendar_events(db, user)
     today_events = _today_calendar_events(db, calendar_events)
     project_names = _project_names_by_key(db)
 
-    assigned_projects = build_project_memory(db)
+    assigned_projects = build_project_memory(db, user)
 
     recent_decisions = db.scalars(
         select(DecisionRecord)
         .where(DecisionRecord.review_status == 'approved')
         .order_by(DecisionRecord.created_at.desc())
-        .limit(3)
     ).all()
+    recent_decisions = [
+        item
+        for item in recent_decisions
+        if _trusted_for_actor(eligibility, 'decision_record', item, user)
+    ][:3]
 
     recent_timeline = db.scalars(
         select(TimelineEvent)
         .where(TimelineEvent.review_status == 'approved')
         .order_by(TimelineEvent.created_at.desc())
-        .limit(3)
     ).all()
+    recent_timeline = [
+        item
+        for item in recent_timeline
+        if _trusted_for_actor(eligibility, 'timeline_event', item, user)
+    ][:3]
 
     return {
         'source_counts': source_counts,
@@ -198,13 +235,15 @@ def _today_calendar_events(db: Session, calendar_events: list[dict] | None = Non
     return [event for _, event in sorted(today_events, key=lambda item: (item[0], item[1]['id']))[:5]]
 
 
-def _calendar_events(db: Session) -> list[dict]:
+def _calendar_events(db: Session, user: DemoUser | None = None) -> list[dict]:
     kst = ZoneInfo('Asia/Seoul')
     calendar_sources = db.scalars(
         select(Source).where(Source.source_type == 'calendar')
     ).all()
     events: list[tuple[datetime, dict]] = []
     for source in calendar_sources:
+        if user is not None and source.permission_level not in user.permission_levels:
+            continue
         metadata = source.raw_metadata or {}
         starts_at = _parse_calendar_datetime(metadata.get('event_start') or metadata.get('start'))
         if starts_at is None:
@@ -227,6 +266,19 @@ def _calendar_events(db: Session) -> list[dict]:
             )
         )
     return [event for _, event in sorted(events, key=lambda item: (item[0], item[1]['id']))[:200]]
+
+
+def _trusted_for_actor(
+    service: TrustedServingEligibilityService,
+    knowledge_type: str,
+    item: object,
+    user: DemoUser,
+) -> bool:
+    result = service.for_knowledge(knowledge_type, item.id)
+    return bool(
+        result.eligible
+        and result.effective_permission in user.permission_levels
+    )
 
 
 def _parse_calendar_datetime(value: object) -> datetime | None:

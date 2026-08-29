@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from backend.app.agents.rag_orchestrator_agent.service import (
     candidates_from_vector_matches,
     citation_from_candidate,
+    filter_live_serving_candidates,
     retrieve_matching_evidence_candidates,
 )
 from backend.app.core.config import Settings, get_settings
@@ -31,6 +32,7 @@ def search_knowledge(
     vector_store = _pgvector_search_store(db=db, settings=settings)
     if vector_store is None:
         candidates = retrieve_matching_evidence_candidates(db=db, question=request.query)
+        candidates = filter_live_serving_candidates(db=db, candidates=candidates)
         visible_candidates = [
             candidate for candidate in candidates if can_access_permission(user, candidate.permission_level)
         ]
@@ -40,6 +42,9 @@ def search_knowledge(
     else:
         vector_result = vector_store.search(query=request.query, user=user, limit=5)
         visible_candidates = candidates_from_vector_matches(vector_result.matches)
+        visible_candidates = filter_live_serving_candidates(
+            db=db, candidates=visible_candidates
+        )
         hidden_matches = vector_result.hidden_match_count
         retrieval_backend = 'pgvector'
         embedding_query_call = True

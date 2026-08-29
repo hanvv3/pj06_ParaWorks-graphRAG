@@ -39,6 +39,7 @@ from backend.app.assistant.service import (
     append_user_message,
     build_contextual_question,
     create_conversation,
+    eligible_context_messages,
     find_reusable_empty_conversation,
     get_owned_conversation,
     get_owned_message,
@@ -125,6 +126,7 @@ def _answer_question_or_raise(
             settings=settings,
             vector_store=vector_store,
             tool_logger=tool_logger,
+            commit_agent_run=False,
         )
     except Exception as exc:
         append_failed_assistant_message(
@@ -304,7 +306,8 @@ def list_assistant_conversations(db: DbSession, user: CurrentUser) -> dict:
     conversations = list_conversations(db, user)
     return {
         'conversations': [
-            serialize_conversation(conversation) for conversation in conversations
+            serialize_conversation(conversation, db=db, user=user)
+            for conversation in conversations
         ]
     }
 
@@ -318,10 +321,18 @@ def create_assistant_conversation(
     if request.title is None or request.title.strip() == '새 대화':
         reusable_conversation = find_reusable_empty_conversation(db, user)
         if reusable_conversation is not None:
-            return {'conversation': serialize_conversation(reusable_conversation)}
+            return {
+                'conversation': serialize_conversation(
+                    reusable_conversation, db=db, user=user
+                )
+            }
 
     conversation = create_conversation(db, user, title=request.title)
-    return {'conversation': serialize_conversation(conversation)}
+    return {
+        'conversation': serialize_conversation(
+            conversation, db=db, user=user
+        )
+    }
 
 
 @router.get(
@@ -336,8 +347,13 @@ def list_assistant_messages(
     conversation = require_conversation(db, user, conversation_id)
     messages = list_messages(db, user, conversation.id)
     return {
-        'conversation': serialize_conversation(conversation),
-        'messages': [serialize_message(message) for message in messages],
+        'conversation': serialize_conversation(
+            conversation, db=db, user=user
+        ),
+        'messages': [
+            serialize_message(message, db=db, user=user)
+            for message in messages
+        ],
     }
 
 
@@ -359,6 +375,7 @@ def create_assistant_message(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     messages = list_messages(db, user, conversation.id)
+    messages = eligible_context_messages(db, user, messages)
     tool_logger = AssistantToolLogger()
     email_context = render_email_action_context(
         messages=messages[:-1],
@@ -379,9 +396,15 @@ def create_assistant_message(
             correction=True,
         )
         return {
-            'conversation': serialize_conversation(conversation),
-            'user_message': serialize_message(user_message),
-            'assistant_message': serialize_message(assistant_message),
+            'conversation': serialize_conversation(
+                conversation, db=db, user=user
+            ),
+            'user_message': serialize_message(
+                user_message, db=db, user=user
+            ),
+            'assistant_message': serialize_message(
+                assistant_message, db=db, user=user
+            ),
         }
 
     contact_lookup = detect_contact_lookup_request(
@@ -428,9 +451,15 @@ def create_assistant_message(
             },
         )
         return {
-            'conversation': serialize_conversation(conversation),
-            'user_message': serialize_message(user_message),
-            'assistant_message': serialize_message(assistant_message),
+            'conversation': serialize_conversation(
+                conversation, db=db, user=user
+            ),
+            'user_message': serialize_message(
+                user_message, db=db, user=user
+            ),
+            'assistant_message': serialize_message(
+                assistant_message, db=db, user=user
+            ),
         }
 
     generated_source_request = build_generated_email_source_request(
@@ -451,9 +480,15 @@ def create_assistant_message(
                 recipient_resolution=recipient_resolution,
             )
             return {
-                'conversation': serialize_conversation(conversation),
-                'user_message': serialize_message(user_message),
-                'assistant_message': serialize_message(assistant_message),
+                'conversation': serialize_conversation(
+                    conversation, db=db, user=user
+                ),
+                'user_message': serialize_message(
+                    user_message, db=db, user=user
+                ),
+                'assistant_message': serialize_message(
+                    assistant_message, db=db, user=user
+                ),
             }
 
         tool_logger.log(
@@ -490,9 +525,15 @@ def create_assistant_message(
         )
         if assistant_message is not None:
             return {
-                'conversation': serialize_conversation(conversation),
-                'user_message': serialize_message(user_message),
-                'assistant_message': serialize_message(assistant_message),
+                'conversation': serialize_conversation(
+                    conversation, db=db, user=user
+                ),
+                'user_message': serialize_message(
+                    user_message, db=db, user=user
+                ),
+                'assistant_message': serialize_message(
+                    assistant_message, db=db, user=user
+                ),
             }
 
     source_context = build_email_source_context(
@@ -518,9 +559,15 @@ def create_assistant_message(
                 source_context=source_context,
             )
             return {
-                'conversation': serialize_conversation(conversation),
-                'user_message': serialize_message(user_message),
-                'assistant_message': serialize_message(assistant_message),
+                'conversation': serialize_conversation(
+                    conversation, db=db, user=user
+                ),
+                'user_message': serialize_message(
+                    user_message, db=db, user=user
+                ),
+                'assistant_message': serialize_message(
+                    assistant_message, db=db, user=user
+                ),
             }
 
         tool_logger.log(
@@ -543,9 +590,15 @@ def create_assistant_message(
         )
         if assistant_message is not None:
             return {
-                'conversation': serialize_conversation(conversation),
-                'user_message': serialize_message(user_message),
-                'assistant_message': serialize_message(assistant_message),
+                'conversation': serialize_conversation(
+                    conversation, db=db, user=user
+                ),
+                'user_message': serialize_message(
+                    user_message, db=db, user=user
+                ),
+                'assistant_message': serialize_message(
+                    assistant_message, db=db, user=user
+                ),
             }
 
     tool_logger.log(
@@ -570,6 +623,8 @@ def create_assistant_message(
         conversation=conversation,
         messages=messages,
         new_message=user_message.content,
+        db=db,
+        user=user,
     )
     vector_store = build_pgvector_search_store(db=db, settings=settings)
     confident_email_intent = (
@@ -647,9 +702,15 @@ def create_assistant_message(
                 },
             )
             return {
-                'conversation': serialize_conversation(conversation),
-                'user_message': serialize_message(user_message),
-                'assistant_message': serialize_message(assistant_message),
+                'conversation': serialize_conversation(
+                    conversation, db=db, user=user
+                ),
+                'user_message': serialize_message(
+                    user_message, db=db, user=user
+                ),
+                'assistant_message': serialize_message(
+                    assistant_message, db=db, user=user
+                ),
             }
 
         if email_decision.action_type == 'needs_clarification' and email_decision.clarification_question:
@@ -677,9 +738,15 @@ def create_assistant_message(
                 },
             )
             return {
-                'conversation': serialize_conversation(conversation),
-                'user_message': serialize_message(user_message),
-                'assistant_message': serialize_message(assistant_message),
+                'conversation': serialize_conversation(
+                    conversation, db=db, user=user
+                ),
+                'user_message': serialize_message(
+                    user_message, db=db, user=user
+                ),
+                'assistant_message': serialize_message(
+                    assistant_message, db=db, user=user
+                ),
             }
 
     try:
@@ -690,6 +757,7 @@ def create_assistant_message(
             settings=settings,
             vector_store=vector_store,
             tool_logger=tool_logger,
+            commit_agent_run=False,
         )
     except Exception as exc:
         append_failed_assistant_message(
@@ -723,6 +791,7 @@ def create_assistant_message(
                 'prompt_version': answer.prompt_version,
                 'question': answer.question,
             },
+            serving_dependencies=getattr(answer, 'serving_dependencies', ()),
         )
     except ValueError as exc:
         append_failed_assistant_message(
@@ -738,9 +807,13 @@ def create_assistant_message(
             detail='assistant answer generation failed',
         ) from exc
     return {
-        'conversation': serialize_conversation(conversation),
-        'user_message': serialize_message(user_message),
-        'assistant_message': serialize_message(assistant_message),
+        'conversation': serialize_conversation(
+            conversation, db=db, user=user
+        ),
+        'user_message': serialize_message(user_message, db=db, user=user),
+        'assistant_message': serialize_message(
+            assistant_message, db=db, user=user
+        ),
     }
 
 
@@ -761,7 +834,10 @@ def send_assistant_email_draft(
     if metadata.get('action_type') != 'email_draft' or not isinstance(draft, dict):
         raise HTTPException(status_code=422, detail='assistant message is not an email draft')
     if metadata.get('status') == 'sent':
-        return {'message': serialize_message(message), 'status': 'sent'}
+        return {
+            'message': serialize_message(message, db=db, user=user),
+            'status': 'sent',
+        }
     if metadata.get('status') != 'pending_approval':
         raise HTTPException(status_code=409, detail='email draft is not pending approval')
 
@@ -784,7 +860,7 @@ def send_assistant_email_draft(
     }
     updated_message = update_message_metadata(db, user, message, next_metadata)
     return {
-        'message': serialize_message(updated_message),
+        'message': serialize_message(updated_message, db=db, user=user),
         'status': 'sent',
         'gmail_message_id': result.message_id,
     }

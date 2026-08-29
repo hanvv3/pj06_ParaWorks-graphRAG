@@ -16,6 +16,7 @@ from backend.app.models import (
     TimelineEvent,
     Todo,
     VectorIndexState,
+    VectorServingTombstone,
 )
 from backend.app.rag.embeddings import (
     DeterministicHashEmbeddingModel,
@@ -160,6 +161,79 @@ def test_index_vector_documents_writes_embeddings() -> None:
     assert result.document_ids == ['chunk:1']
     assert writer.upserts[0][0] == documents[0]
     assert len(writer.upserts[0][1]) == 8
+
+
+def test_raw_chunks_exclude_auto_policy_approval(db_session: Session) -> None:
+    chunk_id = seed_chunk(db_session, 'Auto-approved raw evidence must not serve.')
+    item = db_session.query(ReviewItem).one()
+    item.resolution_source = 'auto_policy'
+    db_session.commit()
+
+    documents = build_rag_index_documents(db_session)
+
+    assert f'chunk:{chunk_id}' not in {document.document_id for document in documents}
+
+
+def test_human_approved_deferred_slack_chunk_never_gains_trusted_serving_authority(
+    db_session: Session,
+) -> None:
+    chunk_id = seed_chunk(
+        db_session,
+        'Deferred Slack evidence remains legacy-dedupe-only.',
+        source_id='slack-deferred-source',
+    )
+    source = db_session.query(Source).one()
+    source.source_type = 'slack'
+    db_session.commit()
+
+    documents = build_rag_index_documents(db_session)
+
+    assert f'chunk:{chunk_id}' not in {
+        document.document_id for document in documents
+    }
+
+
+def test_tombstoned_documents_are_skipped_before_embedding(db_session: Session) -> None:
+    document = VectorDocument(
+        document_id='history_event:41',
+        text='Revoked knowledge must never reach the embedding provider.',
+        source_url='knowledge://history_event:41',
+        source_snippet='Revoked knowledge',
+        permission_level='internal',
+        metadata={'source_type': 'history_event'},
+    )
+    item = ReviewItem(
+        item_type='history_event',
+        payload={'title': 'Revoked knowledge'},
+        source_links=['knowledge://history_event:41'],
+        source_snippets=['Revoked knowledge'],
+        confidence_score=1.0,
+        permission_level='internal',
+        status='revoked',
+    )
+    db_session.add(item)
+    db_session.flush()
+    db_session.add(
+        VectorServingTombstone(
+            document_id=document.document_id,
+            source_review_item_id=item.id,
+            reason_code='business_withdrawal',
+        )
+    )
+    db_session.commit()
+    embedding_model = RecordingBatchEmbeddingModel()
+
+    result = index_changed_vector_documents(
+        db=db_session,
+        documents=[document],
+        writer=RecordingVectorWriter(),
+        embedding_model=embedding_model,
+        embedding_model_name='deterministic-hash:v1',
+    )
+
+    assert embedding_model.batches == []
+    assert result.indexed_count == 0
+    assert result.skipped_document_ids == ['history_event:41']
 
 
 def test_vector_document_hash_changes_when_serving_content_changes() -> None:

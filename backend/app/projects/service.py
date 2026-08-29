@@ -4,6 +4,10 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.core.demo_auth import DemoUser
+from backend.app.knowledge.trusted_serving_eligibility import (
+    TrustedServingEligibilityService,
+)
 from backend.app.models import (
     DecisionRecord,
     HistoryEvent,
@@ -12,6 +16,10 @@ from backend.app.models import (
     Source,
     TimelineEvent,
     Todo,
+)
+from backend.app.review.evidence_visibility import (
+    ReviewEvidenceNotFound,
+    ReviewEvidenceVisibilityService,
 )
 
 PERMISSION_RANK = {'public': 0, 'internal': 1, 'restricted': 2}
@@ -66,7 +74,22 @@ class ProjectMemory:
     activity_items: list[ProjectTimelineItem]
 
 
-def build_project_memory(db: Session) -> list[ProjectMemory]:
+@dataclass(frozen=True)
+class _VisibleReviewItem:
+    item: ReviewItem
+    permission_level: str
+    source_links: list[str]
+    source_snippets: list[str]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.item, name)
+
+
+def build_project_memory(
+    db: Session, user: DemoUser | None = None
+) -> list[ProjectMemory]:
+    if user is None:
+        return []
     approved_assignments = db.scalars(
         select(ReviewItem)
         .where(ReviewItem.item_type == 'project_assignment', ReviewItem.status == 'approved')
@@ -76,8 +99,15 @@ def build_project_memory(db: Session) -> list[ProjectMemory]:
         select(ReviewItem)
         .where(ReviewItem.item_type.in_(['decision_record', 'history_event', 'timeline_event', 'todo']), ReviewItem.status == 'approved')
     ).all()
-    pending_counts = _pending_assignment_counts(db)
-    memory_records = _approved_memory_records(db)
+    evidence_service = ReviewEvidenceVisibilityService(db)
+    approved_assignments = _visible_review_items(
+        evidence_service, approved_assignments, user
+    )
+    approved_knowledge_items = _visible_review_items(
+        evidence_service, approved_knowledge_items, user
+    )
+    pending_counts = _pending_assignment_counts(db, user)
+    memory_records = _approved_memory_records(db, user)
     db_projects = db.scalars(select(Project).order_by(Project.created_at.desc(), Project.id.desc())).all()
 
     projects: list[ProjectMemory] = []
@@ -126,12 +156,21 @@ def build_project_memory(db: Session) -> list[ProjectMemory]:
     return projects
 
 
-def _pending_assignment_counts(db: Session) -> dict[str, int]:
+def _pending_assignment_counts(
+    db: Session, user: DemoUser | None
+) -> dict[str, int]:
+    if user is None:
+        return {}
     pending = db.scalars(
         select(ReviewItem).where(ReviewItem.status == 'pending_review')
     ).all()
     counts: dict[str, int] = {}
+    service = ReviewEvidenceVisibilityService(db)
     for item in pending:
+        try:
+            service.project(item.id, user)
+        except ReviewEvidenceNotFound:
+            continue
         project_key = item.payload.get('project_key')
         if isinstance(project_key, str) and project_key:
             counts[project_key] = counts.get(project_key, 0) + 1
@@ -170,9 +209,12 @@ def _evidence_from_assignments(assignments: list[ReviewItem]) -> list[ProjectEvi
     return sorted(evidence, key=lambda item: (item.timestamp, item.id), reverse=True)
 
 
-def _approved_memory_records(db: Session) -> list[ProjectTimelineItem]:
+def _approved_memory_records(
+    db: Session, user: DemoUser
+) -> list[ProjectTimelineItem]:
     records: list[ProjectTimelineItem] = []
     source_by_url = _source_lookup_by_url(db)
+    eligibility = TrustedServingEligibilityService(db)
     records.extend(
         ProjectTimelineItem(
             id=f'decision_record:{item.id}',
@@ -182,7 +224,7 @@ def _approved_memory_records(db: Session) -> list[ProjectTimelineItem]:
             source_links=item.source_links,
             source_snippets=item.source_snippets,
             confidence_score=item.confidence_score,
-            permission_level=item.permission_level,
+            permission_level=effective_permission,
             review_status=item.review_status,
             created_at=item.created_at.isoformat(),
             occurred_at=_occurred_at_from_source_links(item.source_links, source_by_url, item.created_at),
@@ -192,6 +234,11 @@ def _approved_memory_records(db: Session) -> list[ProjectTimelineItem]:
             completed_by=None,
         )
         for item in db.scalars(select(DecisionRecord).where(DecisionRecord.review_status == 'approved')).all()
+        if (
+            effective_permission := _knowledge_permission(
+                eligibility, 'decision_record', item, user
+            )
+        ) is not None
     )
     records.extend(
         ProjectTimelineItem(
@@ -202,7 +249,7 @@ def _approved_memory_records(db: Session) -> list[ProjectTimelineItem]:
             source_links=item.source_links,
             source_snippets=item.source_snippets,
             confidence_score=item.confidence_score,
-            permission_level=item.permission_level,
+            permission_level=effective_permission,
             review_status=item.review_status,
             created_at=item.created_at.isoformat(),
             occurred_at=_occurred_at_from_source_links(item.source_links, source_by_url, item.created_at),
@@ -212,6 +259,11 @@ def _approved_memory_records(db: Session) -> list[ProjectTimelineItem]:
             completed_by=None,
         )
         for item in db.scalars(select(HistoryEvent).where(HistoryEvent.review_status == 'approved')).all()
+        if (
+            effective_permission := _knowledge_permission(
+                eligibility, 'history_event', item, user
+            )
+        ) is not None
     )
     records.extend(
         ProjectTimelineItem(
@@ -222,7 +274,7 @@ def _approved_memory_records(db: Session) -> list[ProjectTimelineItem]:
             source_links=item.source_links,
             source_snippets=item.source_snippets,
             confidence_score=item.confidence_score,
-            permission_level=item.permission_level,
+            permission_level=effective_permission,
             review_status=item.review_status,
             created_at=item.created_at.isoformat(),
             occurred_at=_occurred_at_from_source_links(item.source_links, source_by_url, item.created_at),
@@ -232,6 +284,11 @@ def _approved_memory_records(db: Session) -> list[ProjectTimelineItem]:
             completed_by=None,
         )
         for item in db.scalars(select(TimelineEvent).where(TimelineEvent.review_status == 'approved')).all()
+        if (
+            effective_permission := _knowledge_permission(
+                eligibility, 'timeline_event', item, user
+            )
+        ) is not None
     )
     records.extend(
         ProjectTimelineItem(
@@ -242,7 +299,7 @@ def _approved_memory_records(db: Session) -> list[ProjectTimelineItem]:
             source_links=item.source_links,
             source_snippets=item.source_snippets,
             confidence_score=item.confidence_score,
-            permission_level=item.permission_level,
+            permission_level=effective_permission,
             review_status=item.review_status,
             created_at=item.created_at.isoformat(),
             occurred_at=_occurred_at_from_source_links(item.source_links, source_by_url, item.created_at),
@@ -252,8 +309,47 @@ def _approved_memory_records(db: Session) -> list[ProjectTimelineItem]:
             completed_by=item.completed_by,
         )
         for item in db.scalars(select(Todo).where(Todo.review_status == 'approved')).all()
+        if (
+            effective_permission := _knowledge_permission(
+                eligibility, 'todo', item, user
+            )
+        ) is not None
     )
     return records
+
+
+def _visible_review_items(
+    service: ReviewEvidenceVisibilityService,
+    items: list[ReviewItem],
+    user: DemoUser,
+) -> list[_VisibleReviewItem]:
+    visible: list[_VisibleReviewItem] = []
+    for item in items:
+        try:
+            projection = service.project(item.id, user)
+        except ReviewEvidenceNotFound:
+            continue
+        visible.append(
+            _VisibleReviewItem(
+                item=item,
+                permission_level=projection.effective_permission,
+                source_links=list(projection.source_links),
+                source_snippets=list(projection.source_snippets),
+            )
+        )
+    return visible
+
+
+def _knowledge_permission(
+    service: TrustedServingEligibilityService,
+    knowledge_type: str,
+    item: object,
+    user: DemoUser,
+) -> str | None:
+    result = service.for_knowledge(knowledge_type, item.id)
+    if not result.eligible or result.effective_permission not in user.permission_levels:
+        return None
+    return result.effective_permission
 
 
 def _memory_records_for_project(

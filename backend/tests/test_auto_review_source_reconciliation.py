@@ -1,0 +1,551 @@
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
+from backend.app.core.config import Settings
+from backend.app.models import (
+    AutoReviewPostAudit,
+    AutoReviewPromotionDecision,
+    AutoReviewRevocationAssessment,
+    AutoReviewRolloutState,
+    AutoReviewRuntimeKeyState,
+    AutoReviewValidation,
+    Document,
+    DocumentParserRun,
+    DocumentVersion,
+    HistoryEvent,
+    ReviewItem,
+    Source,
+    TrustedKnowledgeApprovalLink,
+    TrustedKnowledgeEvidenceLink,
+    TrustedKnowledgeFingerprint,
+    VectorIndexState,
+)
+from backend.app.rag.indexing import PreviewVectorIndexWriter
+from backend.app.review.auto_review_revoke import (
+    SourceInvalidationRevokeContext,
+)
+
+
+def _seed_explicit_history(
+    db: Session,
+    *,
+    resolution_source: str,
+    current_signature: str = 'a' * 64,
+    evidence_signature: str = 'a' * 64,
+) -> tuple[HistoryEvent, ReviewItem, Source, TrustedKnowledgeApprovalLink]:
+    settings = Settings(database_url='sqlite://')
+    key_verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    if db.scalar(
+        select(AutoReviewRuntimeKeyState).where(
+            AutoReviewRuntimeKeyState.component
+            == 'auto_review_trust_promotion'
+        )
+    ) is None:
+        db.add(
+            AutoReviewRuntimeKeyState(
+                component='auto_review_trust_promotion',
+                fingerprint_key_version=(
+                    settings.agent_runtime_fingerprint_key_version
+                ),
+                fingerprint_key_material_verifier=key_verifier,
+                generation=1,
+                ready=True,
+            )
+        )
+    source = Source(
+        source_type='gmail',
+        source_id=f'gmail:{resolution_source}:{evidence_signature[:8]}',
+        source_url='https://gmail.mock/evidence',
+        title='Current evidence',
+        author='owner@example.com',
+        permission_level='internal',
+        raw_metadata={},
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=current_signature,
+    )
+    item = ReviewItem(
+        item_type='history_event',
+        payload={'title': 'Trusted history', 'summary': 'Exact current evidence'},
+        source_links=[source.source_url],
+        source_snippets=['Exact current evidence'],
+        confidence_score=0.99,
+        permission_level='internal',
+        status='approved',
+        candidate_contract_version='c5-v1',
+        resolution_source=resolution_source,
+        resolution_policy_version='auto-review-policy:v1',
+    )
+    db.add_all([source, item])
+    db.flush()
+    if resolution_source == 'auto_policy':
+        validation = AutoReviewValidation(
+            review_item_id=item.id,
+            validation_call_id=1,
+            workflow_thread_id='workflow-c5',
+            validation_key='validation-key',
+            evidence_version_hash='e' * 64,
+            candidate_generation_fingerprint='c' * 64,
+            status='completed',
+            validator_provider='openai',
+            validator_model='gpt-5.6-terra',
+            reasoning_effort='medium',
+            validator_prompt_version='auto-review-validation:v1',
+            validator_output_contract_version='candidate-validation-batch:v1',
+            policy_version='auto-review-policy:v1',
+            fingerprint_key_version='v1',
+            fingerprint_key_material_verifier=key_verifier,
+            cost_policy_version='auto-review-cost:v1',
+            confirmed_validation_cost_ceiling_usd=Decimal('0.010000'),
+            claim_results=[],
+            minimum_entailment_score=Decimal('0.9900'),
+            uncertainty_codes=[],
+            conflict_codes=[],
+            policy_decision='auto_approve',
+            policy_reason_codes=['direct_fact_supported'],
+            input_tokens=10,
+            output_tokens=5,
+            estimated_cost_usd=Decimal('0.000100'),
+            cache_hit=False,
+            completed_at=datetime.now(UTC),
+        )
+        db.add(validation)
+        db.flush()
+        item.auto_validation_id = validation.id
+    history = HistoryEvent(
+        project_key='project-a',
+        title='Trusted history',
+        reason='Exact current evidence',
+        source_links=[source.source_url],
+        source_snippets=['Exact current evidence'],
+        confidence_score=0.99,
+        permission_level='internal',
+        review_status='approved',
+        source_review_item_id=item.id,
+    )
+    db.add(history)
+    db.flush()
+    link = TrustedKnowledgeApprovalLink(
+        knowledge_type='history_event',
+        knowledge_id=history.id,
+        review_item_id=item.id,
+        security_scope_id='workspace-a',
+        promotion_effect_kind='primary',
+        resolution_source=resolution_source,
+        claim_fingerprint='d' * 64,
+        permission_level='internal',
+        fingerprint_key_version='v1',
+        fingerprint_key_material_verifier=key_verifier,
+        active=True,
+    )
+    db.add(link)
+    db.flush()
+    db.add(
+        TrustedKnowledgeEvidenceLink(
+            approval_link_id=link.id,
+            canonical_source_kind='gmail',
+            canonical_source_id=str(source.id),
+            canonical_version_or_signature=evidence_signature,
+            evidence_hash='e' * 64,
+            fingerprint_key_version='v1',
+            fingerprint_key_material_verifier=key_verifier,
+        )
+    )
+    db.commit()
+    return history, item, source, link
+
+
+def test_post_c5_human_only_and_pre_c5_legacy_human_serving_semantics_are_compatible(
+    db_session: Session,
+) -> None:
+    from backend.app.knowledge.trusted_serving_eligibility import (
+        TrustedServingEligibilityService,
+    )
+
+    explicit, _, _, _ = _seed_explicit_history(
+        db_session, resolution_source='human'
+    )
+    legacy_item = ReviewItem(
+        item_type='history_event',
+        payload={'title': 'Legacy human history'},
+        source_links=['https://legacy.mock/evidence'],
+        source_snippets=['Legacy evidence'],
+        confidence_score=0.8,
+        permission_level='restricted',
+        status='approved',
+        resolution_source='human',
+    )
+    db_session.add(legacy_item)
+    db_session.flush()
+    legacy = HistoryEvent(
+        project_key='project-legacy',
+        title='Legacy human history',
+        reason='Legacy evidence',
+        source_links=legacy_item.source_links,
+        source_snippets=legacy_item.source_snippets,
+        confidence_score=0.8,
+        permission_level='restricted',
+        review_status='approved',
+        source_review_item_id=legacy_item.id,
+    )
+    db_session.add(legacy)
+    db_session.commit()
+    service = TrustedServingEligibilityService(db_session)
+
+    assert service.for_knowledge('history_event', explicit.id).eligible is True
+    legacy_result = service.for_knowledge('history_event', legacy.id)
+    assert legacy_result.eligible is True
+    assert legacy_result.effective_permission == 'restricted'
+
+
+def test_current_verified_parser_revision_is_valid_explicit_evidence_identity(
+    db_session: Session,
+) -> None:
+    from backend.app.knowledge.trusted_serving_eligibility import (
+        TrustedServingEligibilityService,
+    )
+
+    history, _, source, link = _seed_explicit_history(
+        db_session, resolution_source='auto_policy'
+    )
+    evidence = db_session.scalar(
+        select(TrustedKnowledgeEvidenceLink).where(
+            TrustedKnowledgeEvidenceLink.approval_link_id == link.id
+        )
+    )
+    evidence.canonical_version_or_signature = 'gmail-revision-41'
+    document = Document(
+        source_id=source.id,
+        title=source.title,
+        current_version='v41',
+    )
+    db_session.add(document)
+    db_session.flush([document])
+    version = DocumentVersion(
+        document_id=document.id,
+        version='v41',
+        body='Exact current evidence',
+    )
+    db_session.add(version)
+    db_session.flush([version])
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=version.id,
+        source_id=source.id,
+        parser_name='plain_text',
+        parser_status='parsed',
+        revision_id='gmail-revision-41',
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=source.server_content_signature,
+        parser_policy_version='parser-policy:v1',
+        parser_version='plain-text:v1',
+        chunk_policy_version='chunk-policy:v1',
+    )
+    db_session.add(parser_run)
+    db_session.flush([parser_run])
+    document.current_document_version_id = version.id
+    db_session.commit()
+
+    result = TrustedServingEligibilityService(db_session).for_knowledge(
+        'history_event', history.id
+    )
+
+    assert result.eligible is True
+    assert result.effective_permission == 'internal'
+
+
+def test_auto_trusted_vector_is_excluded_before_ranking_while_reconciliation_is_pending(
+    db_session: Session,
+) -> None:
+    from backend.app.knowledge.trusted_serving_eligibility import (
+        TrustedServingEligibilityService,
+    )
+
+    history, _, _, _ = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+        current_signature='a' * 64,
+        evidence_signature='b' * 64,
+    )
+
+    result = TrustedServingEligibilityService(db_session).for_knowledge(
+        'history_event', history.id
+    )
+
+    assert result.eligible is False
+    assert result.effective_permission is None
+
+
+def test_any_critical_or_remediation_audit_quarantines_only_its_auto_effect_before_revoke_cleanup(
+    db_session: Session,
+) -> None:
+    from backend.app.knowledge.trusted_serving_eligibility import (
+        TrustedServingEligibilityService,
+    )
+
+    history, item, _, _ = _seed_explicit_history(
+        db_session, resolution_source='auto_policy'
+    )
+    db_session.add(
+        AutoReviewPostAudit(
+            review_item_id=item.id,
+            promotion_decision_id=1,
+            sample_cohort='manual',
+            status='remediation_required',
+            outcome='incorrect',
+            system_resolution_code='revoke_pending',
+            remediation_code='exact_revoke_required',
+            auditor_subject_hmac='a' * 64,
+            auditor_fingerprint_key_version='v1',
+            auditor_fingerprint_key_material_verifier='b' * 64,
+            audit_reason='Incorrect evidence',
+            audited_at=datetime.now(UTC),
+        )
+    )
+    db_session.commit()
+
+    result = TrustedServingEligibilityService(db_session).for_knowledge(
+        'history_event', history.id
+    )
+
+    assert result.eligible is False
+    assert result.effective_permission is None
+
+
+def test_public_to_internal_reconciliation_narrows_target_and_vector_without_embedding(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    history, item, source, link = _seed_explicit_history(
+        db_session, resolution_source='auto_policy'
+    )
+    history.permission_level = 'public'
+    item.permission_level = 'public'
+    link.permission_level = 'public'
+    source.permission_level = 'internal'
+    fingerprint = TrustedKnowledgeFingerprint(
+        knowledge_type='history_event',
+        knowledge_id=history.id,
+        security_scope_id='workspace-a',
+        scope_resolution='exact',
+        project_scope_hmac='a' * 64,
+        normalized_title_bucket_hmac='b' * 64,
+        normalized_claim_fingerprint='c' * 64,
+        fingerprint_key_version=link.fingerprint_key_version,
+        fingerprint_key_material_verifier=(
+            link.fingerprint_key_material_verifier
+        ),
+        permission_level='public',
+        review_status='approved',
+    )
+    index_state = VectorIndexState(
+        document_id=f'history_event:{history.id}',
+        embedding_model='fake:8',
+        embedding_dimensions=8,
+        content_hash='0' * 64,
+        status='indexed',
+    )
+    db_session.add_all([fingerprint, index_state])
+    writer = PreviewVectorIndexWriter()
+    db_session.commit()
+
+    result = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=writer,
+    ).reconcile_source_ids([source.id])
+
+    assert result.reconciled_count == 1
+    assert result.revoked_count == 0
+    assert history.permission_level == 'internal'
+    assert item.permission_level == 'internal'
+    assert link.permission_level == 'internal'
+    assert fingerprint.permission_level == 'internal'
+    assert index_state.content_hash != '0' * 64
+    assert writer.permission_narrowings == [(('history_event:1',), 'internal')]
+
+
+def test_restricted_unknown_absent_or_superseded_source_revokes_exact_auto_effect(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    history, item, source, link = _seed_explicit_history(
+        db_session, resolution_source='auto_policy'
+    )
+    source.permission_level = 'restricted'
+    writer = PreviewVectorIndexWriter()
+    db_session.commit()
+
+    result = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=writer,
+    ).reconcile_source_ids([source.id])
+
+    db_session.refresh(item)
+    db_session.refresh(link)
+    db_session.refresh(history)
+    assert result.revoked_count == 1
+    assert item.status == 'revoked'
+    assert link.active is False
+    assert history.review_status == 'revoked'
+    assert writer.deletes == [('history_event:1',)]
+
+
+def test_source_reconciliation_recovery_is_bounded_idempotent_and_restart_safe(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    _, _, source, _ = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+        current_signature='a' * 64,
+        evidence_signature='b' * 64,
+    )
+    service = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=PreviewVectorIndexWriter(),
+    )
+
+    status = service.status(limit=1)
+    first = service.recover_stale_sources(limit=1)
+    replay = service.recover_stale_sources(limit=1)
+
+    assert status.stale_count == 1
+    assert first.reconciled_count == 1
+    assert first.remaining_count == 0
+    assert replay.reconciled_count == 0
+    assert replay.remaining_count == 0
+
+
+def test_crash_after_source_document_commit_before_reconciliation_is_fail_closed_and_recoverable(
+    db_session: Session,
+) -> None:
+    from backend.app.knowledge.trusted_serving_eligibility import (
+        TrustedServingEligibilityService,
+    )
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    history, item, source, link = _seed_explicit_history(
+        db_session, resolution_source='auto_policy'
+    )
+    history.permission_level = 'public'
+    item.permission_level = 'public'
+    link.permission_level = 'public'
+    source.permission_level = 'internal'
+    db_session.commit()
+    writer = PreviewVectorIndexWriter()
+    service = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=writer,
+    )
+
+    serving = TrustedServingEligibilityService(db_session).for_knowledge(
+        'history_event', history.id
+    )
+    status = service.status(limit=100)
+    recovered = service.recover_stale_sources(limit=100)
+
+    assert serving.eligible is True
+    assert serving.effective_permission == 'internal'
+    assert status.stale_count == 1
+    assert recovered.reconciled_count == 1
+    assert recovered.remaining_count == 0
+    assert history.permission_level == 'internal'
+    assert writer.permission_narrowings == [
+        (('history_event:1',), 'internal')
+    ]
+
+
+def test_selected_pending_audit_is_system_invalidated_and_no_longer_blocks_rollout_gate(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    _, item, source, _ = _seed_explicit_history(
+        db_session, resolution_source='auto_policy'
+    )
+    verifier = fingerprint_key_material_verifier(
+        Settings(database_url='sqlite://').agent_runtime_fingerprint_secret
+    )
+    rollout = AutoReviewRolloutState(
+        security_scope_id='workspace-a',
+        policy_version='auto-review-policy:v1',
+        pending_mandatory_audit_count=1,
+    )
+    db_session.add(rollout)
+    db_session.flush([rollout])
+    decision = AutoReviewPromotionDecision(
+        review_item_id=item.id,
+        security_scope_id=rollout.security_scope_id,
+        policy_version=rollout.policy_version,
+        rollout_authorization_generation=1,
+        promotion_ordinal=1,
+        requested_percentage=0,
+        stored_percentage=0,
+        authorized_percentage=0,
+        enforce_selection_fingerprint='a' * 64,
+        audit_selection_fingerprint='b' * 64,
+        selection_result='first_50',
+        fingerprint_key_version='v1',
+        fingerprint_key_material_verifier=verifier,
+    )
+    db_session.add(decision)
+    db_session.flush([decision])
+    audit = AutoReviewPostAudit(
+        review_item_id=item.id,
+        promotion_decision_id=decision.id,
+        sample_cohort='first_50',
+        status='pending',
+        outcome=None,
+    )
+    db_session.add(audit)
+    source.permission_level = 'restricted'
+    db_session.commit()
+
+    result = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=PreviewVectorIndexWriter(),
+    ).reconcile_source_ids([source.id])
+
+    db_session.refresh(audit)
+    db_session.refresh(rollout)
+    assert result.revoked_count == 1
+    assert audit.status == 'completed'
+    assert audit.outcome is None
+    assert audit.system_resolution_code == 'source_invalidated_before_audit'
+    assert rollout.pending_mandatory_audit_count == 0
+    assert rollout.confirmed_mandatory_audit_count == 0
+    assert rollout.invalidated_before_audit_count == 1
+    assert db_session.query(AutoReviewRevocationAssessment).count() == 0
+
+
+def test_source_invalidation_revoke_writes_no_human_revocation_assessment() -> None:
+    with pytest.raises(TypeError, match='minted only by reconciliation'):
+        SourceInvalidationRevokeContext(
+            session_identity=1,
+            review_item_id=1,
+            canonical_source_id='1',
+        )
