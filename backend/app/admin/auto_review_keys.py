@@ -4,12 +4,21 @@ import hmac
 import json
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
 from pydantic import SecretStr
 from sqlalchemy import func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import (
+    DBAPIError,
+    DisconnectionError,
+    InterfaceError,
+    OperationalError,
+)
+from sqlalchemy.exc import (
+    TimeoutError as SQLAlchemyTimeoutError,
+)
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.admin.auto_review_retained_state import (
@@ -445,8 +454,39 @@ class _CliArgumentError(ValueError):
     pass
 
 
-class _CliStorageInitializationError(RuntimeError):
-    pass
+@dataclass(frozen=True, slots=True)
+class _CliOutcome:
+    payload: dict[str, object]
+    exit_code: int
+    sort_keys: bool
+
+
+class _CliDatabaseRuntime(Protocol):
+    session_factory: sessionmaker[Session]
+
+    def dispose(self) -> None:
+        pass
+
+
+@dataclass(frozen=True, slots=True)
+class _LoadedDatabaseContract:
+    initialize: Callable[[str], _CliDatabaseRuntime]
+    configuration_error: type[Exception]
+    initialization_error: type[Exception]
+
+
+def _load_database_contract() -> _LoadedDatabaseContract:
+    from backend.app.db.initialization import (
+        DatabaseConfigurationError,
+        DatabaseInitializationError,
+        initialize_database_runtime,
+    )
+
+    return _LoadedDatabaseContract(
+        initialize=initialize_database_runtime,
+        configuration_error=DatabaseConfigurationError,
+        initialization_error=DatabaseInitializationError,
+    )
 
 
 class _BoundedArgumentParser(argparse.ArgumentParser):
@@ -499,6 +539,20 @@ class _EnvironmentKeyRingSource:
             next_version=next_version or '',
             next_secret=SecretStr(next_secret or ''),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _FixedKeyRingSource:
+    key_ring: FingerprintKeyRing
+
+    def load(self) -> FingerprintKeyRing:
+        return self.key_ring
+
+
+def _prepare_cli_key_ring(args: argparse.Namespace) -> FingerprintKeyRingSource | None:
+    if args.command != 'rotate':
+        return None
+    return _FixedKeyRingSource(_EnvironmentKeyRingSource().load())
 
 
 def status(
@@ -573,29 +627,41 @@ def _default_service(
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    try:
-        return _run_cli(argv)
-    except (_CliStorageInitializationError, SQLAlchemyError):
-        return _emit_cli_error(code='storage_unavailable', exit_code=3)
-    except (AutoReviewKeyAdminError, AutoReviewKeyBootstrapError, ValueError) as exc:
-        code = getattr(exc, 'code', None)
-        bounded_code = code if code in _CLI_ADMIN_ERROR_CODES else 'configuration_refused'
-        return _emit_cli_error(code=bounded_code, exit_code=2)
-    except Exception:
-        return _emit_cli_error(code='configuration_refused', exit_code=2)
-
-
-def _run_cli(argv: list[str] | None) -> int:
-    args = build_cli_parser().parse_args(argv)
-    settings = Settings()
-    session_factory = _initialize_cli_storage()
-
-    service = AutoReviewKeyAdminService(
-        session_factory=session_factory,
-        settings=settings,
-        key_ring_source=_EnvironmentKeyRingSource(),
+def _error_outcome(*, code: str, exit_code: int) -> _CliOutcome:
+    return _CliOutcome(
+        payload={'ok': False, 'code': code},
+        exit_code=exit_code,
+        sort_keys=False,
     )
+
+
+def _allowlisted_admin_outcome(error: Exception) -> _CliOutcome | None:
+    if not isinstance(error, (AutoReviewKeyAdminError, AutoReviewKeyBootstrapError)):
+        return None
+    code = getattr(error, 'code', None)
+    if code not in _CLI_ADMIN_ERROR_CODES:
+        return None
+    return _error_outcome(code=code, exit_code=2)
+
+
+def _is_command_storage_unavailable(error: Exception) -> bool:
+    if isinstance(error, DBAPIError) and bool(error.connection_invalidated):
+        return True
+    return isinstance(
+        error,
+        (
+            OperationalError,
+            InterfaceError,
+            SQLAlchemyTimeoutError,
+            DisconnectionError,
+        ),
+    )
+
+
+def _dispatch_cli_command(
+    args: argparse.Namespace,
+    service: AutoReviewKeyAdminService,
+) -> _CliOutcome:
     if args.command == 'status':
         result = service.status()
         payload = {
@@ -629,21 +695,86 @@ def _run_cli(argv: list[str] | None) -> int:
         )
         payload = _rebuild_payload(result)
         ready = result.ready
-    print(json.dumps(payload, separators=(',', ':'), sort_keys=True))
-    return 0 if ready else 3
+    return _CliOutcome(
+        payload=payload,
+        exit_code=0 if ready else 3,
+        sort_keys=True,
+    )
 
 
-def _initialize_cli_storage() -> sessionmaker:
+def _run_cli(argv: list[str] | None) -> _CliOutcome:
     try:
-        from backend.app.db.session import SessionLocal
-    except (ModuleNotFoundError, SQLAlchemyError) as exc:
-        raise _CliStorageInitializationError from exc
-    return SessionLocal
+        args = build_cli_parser().parse_args(argv)
+        settings = Settings()
+        key_ring_source = _prepare_cli_key_ring(args)
+        database_url = settings.resolved_database_url()
+        contract = _load_database_contract()
+    except (AutoReviewKeyAdminError, AutoReviewKeyBootstrapError) as error:
+        return _allowlisted_admin_outcome(error) or _error_outcome(
+            code='configuration_refused',
+            exit_code=2,
+        )
+    except Exception:
+        return _error_outcome(code='configuration_refused', exit_code=2)
+
+    try:
+        runtime = contract.initialize(database_url)
+    except contract.configuration_error:
+        return _error_outcome(code='configuration_refused', exit_code=2)
+    except contract.initialization_error:
+        return _error_outcome(code='storage_unavailable', exit_code=3)
+    except Exception:
+        return _error_outcome(code='operation_failed', exit_code=3)
+
+    command_outcome: _CliOutcome | None = None
+    command_failure: Exception | None = None
+    try:
+        service = AutoReviewKeyAdminService(
+            session_factory=runtime.session_factory,
+            settings=settings,
+            key_ring_source=key_ring_source,
+        )
+        command_outcome = _dispatch_cli_command(args, service)
+    except Exception as error:
+        command_failure = error
+
+    cleanup_failure: Exception | None = None
+    try:
+        runtime.dispose()
+    except Exception as error:
+        cleanup_failure = error
+
+    if cleanup_failure is not None:
+        if isinstance(cleanup_failure, contract.initialization_error):
+            return _error_outcome(code='storage_unavailable', exit_code=3)
+        return _error_outcome(code='operation_failed', exit_code=3)
+
+    if command_failure is not None:
+        admin_outcome = _allowlisted_admin_outcome(command_failure)
+        if admin_outcome is not None:
+            return admin_outcome
+        if _is_command_storage_unavailable(command_failure):
+            return _error_outcome(code='storage_unavailable', exit_code=3)
+        return _error_outcome(code='operation_failed', exit_code=3)
+
+    if command_outcome is None:
+        return _error_outcome(code='operation_failed', exit_code=3)
+    return command_outcome
 
 
-def _emit_cli_error(*, code: str, exit_code: int) -> int:
-    print(json.dumps({'ok': False, 'code': code}, separators=(',', ':')))
-    return exit_code
+def main(argv: list[str] | None = None) -> int:
+    try:
+        outcome = _run_cli(argv)
+    except Exception:
+        outcome = _error_outcome(code='operation_failed', exit_code=3)
+    print(
+        json.dumps(
+            outcome.payload,
+            separators=(',', ':'),
+            sort_keys=outcome.sort_keys,
+        )
+    )
+    return outcome.exit_code
 
 
 def _rebuild_payload(result: ProjectionRebuildResult) -> dict[str, object]:

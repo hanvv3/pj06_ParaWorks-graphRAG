@@ -4,12 +4,13 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from threading import Event, Thread
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -19,7 +20,19 @@ from pydantic import SecretStr
 from sqlalchemy import create_engine, event, insert, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import (
+    DataError,
+    DBAPIError,
+    DisconnectionError,
+    IntegrityError,
+    InterfaceError,
+    InvalidRequestError,
+    OperationalError,
+    ProgrammingError,
+    SQLAlchemyError,
+    StatementError,
+)
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.admin.auto_review_keys import (
@@ -38,6 +51,10 @@ from backend.app.agent_runtime.keyed_mutation_guard import (
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.demo_auth import USERS
 from backend.app.db.base import Base
+from backend.app.db.initialization import (
+    DatabaseConfigurationError,
+    DatabaseInitializationError,
+)
 from backend.app.knowledge.claim_fingerprints import (
     normalized_claim_fingerprint,
     promoted_effect_fingerprint,
@@ -3266,18 +3283,651 @@ def test_reaffirmed_bundle_revoke_is_atomic_for_primary_and_companion(
     )
 
 
+class _OwnedRuntimeProbe:
+    def __init__(
+        self,
+        session_factory: sessionmaker,
+        *,
+        dispose_failure: Exception | None = None,
+    ) -> None:
+        self.session_factory = session_factory
+        self.dispose_failure = dispose_failure
+        self.dispose_calls = 0
+
+    def dispose(self) -> None:
+        self.dispose_calls += 1
+        if self.dispose_failure is not None:
+            raise self.dispose_failure
+
+
+def _install_owned_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    key_admin: object,
+    runtime: _OwnedRuntimeProbe,
+    initialize_calls: list[str],
+) -> None:
+    def initialize(database_url: str) -> _OwnedRuntimeProbe:
+        initialize_calls.append(database_url)
+        return runtime
+
+    if hasattr(key_admin, '_load_database_contract'):
+        contract = SimpleNamespace(
+            initialize=initialize,
+            configuration_error=DatabaseConfigurationError,
+            initialization_error=DatabaseInitializationError,
+        )
+        monkeypatch.setattr(key_admin, '_load_database_contract', lambda: contract)
+        return
+
+    def initialize_legacy() -> sessionmaker:
+        initialize('legacy-db-session-path')
+        return runtime.session_factory
+
+    monkeypatch.setattr(key_admin, '_initialize_cli_storage', initialize_legacy)
+
+
+def _install_database_boundary_counter(
+    monkeypatch: pytest.MonkeyPatch,
+    key_admin: object,
+    calls: list[str],
+) -> None:
+    def boundary_called() -> object:
+        calls.append('called')
+        raise AssertionError('database boundary must not run')
+
+    if hasattr(key_admin, '_load_database_contract'):
+        monkeypatch.setattr(key_admin, '_load_database_contract', boundary_called)
+    else:
+        monkeypatch.setattr(key_admin, '_initialize_cli_storage', boundary_called)
+
+
+def _valid_cli_key_ring() -> FingerprintKeyRing:
+    return FingerprintKeyRing(
+        current_version='v1',
+        current_secret=SecretStr('c' * 48),
+        next_version='v2',
+        next_secret=SecretStr('n' * 48),
+    )
+
+
+def _install_cli_service_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    key_admin: object,
+    *,
+    command_calls: list[str] | None = None,
+    construction_failure: Exception | None = None,
+    command_failure: Exception | None = None,
+    ready: bool = True,
+) -> None:
+    calls = command_calls if command_calls is not None else []
+
+    class _ServiceProbe:
+        def __init__(self, **_kwargs: object) -> None:
+            if construction_failure is not None:
+                raise construction_failure
+
+        def _record(self, command: str) -> None:
+            calls.append(command)
+            if command_failure is not None:
+                raise command_failure
+
+        def status(self) -> object:
+            self._record('status')
+            return SimpleNamespace(
+                runtime_generation=7,
+                runtime_version='v1',
+                runtime_ready=ready,
+                projection_ready=ready,
+                projection_rebuild_required=not ready,
+                nonterminal_extraction_count=2,
+                nonterminal_validation_count=3,
+            )
+
+        def bootstrap(self) -> object:
+            self._record('bootstrap')
+            return SimpleNamespace(
+                schema_available=True,
+                initialized=True,
+                ready=ready,
+            )
+
+        def rebuild_trusted_fingerprint_projection(self) -> object:
+            self._record('rebuild')
+            return self._rebuild_result()
+
+        def rotate_fingerprint_key(self, **_kwargs: object) -> object:
+            self._record('rotate')
+            return self._rebuild_result()
+
+        @staticmethod
+        def _rebuild_result() -> object:
+            return SimpleNamespace(
+                source_count=4,
+                projected_count=4,
+                source_checksum='source-checksum',
+                projected_checksum='projected-checksum',
+                replayed=False,
+                ready=ready,
+            )
+
+    monkeypatch.setattr(key_admin, 'AutoReviewKeyAdminService', _ServiceProbe)
+
+
+def _install_cli_settings(monkeypatch: pytest.MonkeyPatch, key_admin: object) -> None:
+    settings = SimpleNamespace(
+        resolved_database_url=lambda: 'sqlite:///:memory:',
+    )
+    monkeypatch.setattr(key_admin, 'Settings', lambda: settings)
+
+
+def _assert_in_process_cli_error(
+    captured: pytest.CaptureResult[str],
+    *,
+    result: int,
+    code: str,
+    exit_code: int,
+    forbidden: tuple[str, ...] = (),
+) -> None:
+    expected = json.dumps({'ok': False, 'code': code}, separators=(',', ':'))
+    assert result == exit_code
+    assert captured.out == f'{expected}\n'
+    assert captured.err == ''
+    assert captured.out.count('\n') == 1
+    assert set(json.loads(captured.out)) == {'ok', 'code'}
+    combined_output = captured.out + captured.err
+    for value in (
+        'Traceback',
+        'usage:',
+        str(Path(__file__).resolve().parents[2]),
+        *forbidden,
+    ):
+        assert value not in combined_output
+
+
+@pytest.mark.parametrize(
+    ('command', 'argv'),
+    (
+        ('status', ['status']),
+        ('bootstrap', ['bootstrap']),
+        ('rebuild', ['rebuild']),
+        (
+            'rotate',
+            [
+                'rotate',
+                '--expected-version',
+                'v1',
+                '--next-version',
+                'v2',
+                '--reason',
+                'runtime-ownership',
+            ],
+        ),
+    ),
+)
+def test_key_admin_runtime_owned_and_disposed_once_for_each_command(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    argv: list[str],
+) -> None:
+    from backend.app.admin import auto_review_keys as key_admin
+
+    runtime = _OwnedRuntimeProbe(sessionmaker())
+    initialize_calls: list[str] = []
+    command_calls: list[str] = []
+    _install_cli_settings(monkeypatch, key_admin)
+    _install_owned_runtime(monkeypatch, key_admin, runtime, initialize_calls)
+    _install_cli_service_probe(
+        monkeypatch,
+        key_admin,
+        command_calls=command_calls,
+    )
+    monkeypatch.setattr(
+        key_admin._EnvironmentKeyRingSource,
+        'load',
+        lambda _self: _valid_cli_key_ring(),
+    )
+
+    result = key_admin.main(argv)
+    captured = capsys.readouterr()
+
+    assert result == 0
+    assert captured.err == ''
+    assert captured.out.count('\n') == 1
+    assert initialize_calls == ['sqlite:///:memory:']
+    assert command_calls == [command]
+    assert runtime.dispose_calls == 1
+
+
+def test_key_admin_runtime_disposes_before_readiness_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from backend.app.admin import auto_review_keys as key_admin
+
+    runtime = _OwnedRuntimeProbe(sessionmaker())
+    initialize_calls: list[str] = []
+    emissions: list[str] = []
+    _install_cli_settings(monkeypatch, key_admin)
+    _install_owned_runtime(monkeypatch, key_admin, runtime, initialize_calls)
+    _install_cli_service_probe(monkeypatch, key_admin, ready=False)
+    real_print = print
+
+    def print_after_dispose(*values: object, **kwargs: object) -> None:
+        assert runtime.dispose_calls == 1
+        emissions.append(str(values[0]))
+        real_print(*values, **kwargs)
+
+    monkeypatch.setattr('builtins.print', print_after_dispose)
+
+    result = key_admin.main(['status'])
+    captured = capsys.readouterr()
+
+    expected_payload = {
+        'runtime_generation': 7,
+        'runtime_version': 'v1',
+        'runtime_ready': False,
+        'projection_ready': False,
+        'projection_rebuild_required': True,
+        'nonterminal_extraction_count': 2,
+        'nonterminal_validation_count': 3,
+    }
+    assert result == 3
+    assert captured.out == (
+        json.dumps(expected_payload, separators=(',', ':'), sort_keys=True) + '\n'
+    )
+    assert captured.err == ''
+    assert emissions == [captured.out.rstrip('\n')]
+    assert initialize_calls == ['sqlite:///:memory:']
+    assert runtime.dispose_calls == 1
+
+
+@pytest.mark.parametrize(
+    ('failure_origin', 'failure', 'expected_code', 'expected_exit_code'),
+    (
+        (
+            'command',
+            AutoReviewKeyAdminError('projection_state_missing', 'sensitive-admin'),
+            'projection_state_missing',
+            2,
+        ),
+        ('construction', ValueError('sensitive-construction'), 'operation_failed', 3),
+        ('command', TypeError('sensitive-dispatch'), 'operation_failed', 3),
+    ),
+)
+def test_key_admin_runtime_disposes_on_admin_service_and_command_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_origin: str,
+    failure: Exception,
+    expected_code: str,
+    expected_exit_code: int,
+) -> None:
+    from backend.app.admin import auto_review_keys as key_admin
+
+    runtime = _OwnedRuntimeProbe(sessionmaker())
+    initialize_calls: list[str] = []
+    _install_cli_settings(monkeypatch, key_admin)
+    _install_owned_runtime(monkeypatch, key_admin, runtime, initialize_calls)
+    _install_cli_service_probe(
+        monkeypatch,
+        key_admin,
+        construction_failure=failure if failure_origin == 'construction' else None,
+        command_failure=failure if failure_origin == 'command' else None,
+    )
+
+    result = key_admin.main(['status'])
+    captured = capsys.readouterr()
+
+    _assert_in_process_cli_error(
+        captured,
+        result=result,
+        code=expected_code,
+        exit_code=expected_exit_code,
+        forbidden=(str(failure),),
+    )
+    assert initialize_calls == ['sqlite:///:memory:']
+    assert runtime.dispose_calls == 1
+
+
+@pytest.mark.parametrize('command_failure', (None, ValueError('prior-command-error')))
+def test_key_admin_cleanup_availability_overrides_command_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command_failure: Exception | None,
+) -> None:
+    from backend.app.admin import auto_review_keys as key_admin
+
+    runtime = _OwnedRuntimeProbe(
+        sessionmaker(),
+        dispose_failure=DatabaseInitializationError(),
+    )
+    initialize_calls: list[str] = []
+    _install_cli_settings(monkeypatch, key_admin)
+    _install_owned_runtime(monkeypatch, key_admin, runtime, initialize_calls)
+    _install_cli_service_probe(
+        monkeypatch,
+        key_admin,
+        command_failure=command_failure,
+    )
+
+    result = key_admin.main(['status'])
+    captured = capsys.readouterr()
+
+    _assert_in_process_cli_error(
+        captured,
+        result=result,
+        code='storage_unavailable',
+        exit_code=3,
+        forbidden=('prior-command-error',),
+    )
+    assert runtime.dispose_calls == 1
+
+
+@pytest.mark.parametrize('command_failure', (None, ValueError('prior-command-error')))
+def test_key_admin_cleanup_programmer_failure_overrides_command_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command_failure: Exception | None,
+) -> None:
+    from backend.app.admin import auto_review_keys as key_admin
+
+    cleanup_failure = TypeError('sensitive-cleanup-programmer-failure')
+    runtime = _OwnedRuntimeProbe(sessionmaker(), dispose_failure=cleanup_failure)
+    initialize_calls: list[str] = []
+    _install_cli_settings(monkeypatch, key_admin)
+    _install_owned_runtime(monkeypatch, key_admin, runtime, initialize_calls)
+    _install_cli_service_probe(
+        monkeypatch,
+        key_admin,
+        command_failure=command_failure,
+    )
+
+    result = key_admin.main(['status'])
+    captured = capsys.readouterr()
+
+    _assert_in_process_cli_error(
+        captured,
+        result=result,
+        code='operation_failed',
+        exit_code=3,
+        forbidden=(str(cleanup_failure), 'prior-command-error'),
+    )
+    assert runtime.dispose_calls == 1
+
+
+@pytest.mark.parametrize(
+    'resolver_failure',
+    (
+        ValueError('resolver-sensitive-value'),
+        DatabaseInitializationError(),
+    ),
+)
+def test_key_admin_resolved_url_failure_keeps_configuration_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    resolver_failure: Exception,
+) -> None:
+    from backend.app.admin import auto_review_keys as key_admin
+
+    calls: list[str] = []
+
+    def resolved_database_url() -> str:
+        raise resolver_failure
+
+    monkeypatch.setattr(
+        key_admin,
+        'Settings',
+        lambda: SimpleNamespace(resolved_database_url=resolved_database_url),
+    )
+    _install_database_boundary_counter(monkeypatch, key_admin, calls)
+
+    result = key_admin.main(['status'])
+    captured = capsys.readouterr()
+
+    _assert_in_process_cli_error(
+        captured,
+        result=result,
+        code='configuration_refused',
+        exit_code=2,
+        forbidden=('resolver-sensitive-value',),
+    )
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ('case', 'expected_code'),
+    (
+        ('missing', 'key_ring_unavailable'),
+        ('blank-version', 'configuration_refused'),
+        ('short-secret', 'configuration_refused'),
+        ('equal-secret', 'configuration_refused'),
+    ),
+)
+def test_key_admin_rotate_configuration_precedes_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
+    expected_code: str,
+) -> None:
+    from backend.app.admin import auto_review_keys as key_admin
+
+    names = (
+        'PARAWORKS_AUTO_REVIEW_CURRENT_KEY_VERSION',
+        'PARAWORKS_AUTO_REVIEW_CURRENT_KEY_SECRET',
+        'PARAWORKS_AUTO_REVIEW_NEXT_KEY_VERSION',
+        'PARAWORKS_AUTO_REVIEW_NEXT_KEY_SECRET',
+    )
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    values: dict[str, str] = {}
+    if case != 'missing':
+        values = {
+            names[0]: '' if case == 'blank-version' else 'v1',
+            names[1]: 'short-sensitive' if case == 'short-secret' else 'c' * 48,
+            names[2]: 'v2',
+            names[3]: 'c' * 48 if case == 'equal-secret' else 'n' * 48,
+        }
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+    calls: list[str] = []
+    _install_cli_settings(monkeypatch, key_admin)
+    _install_database_boundary_counter(monkeypatch, key_admin, calls)
+    reason = 'test-key-validation'
+    argv = [
+        'rotate',
+        '--expected-version',
+        'v1',
+        '--next-version',
+        'v2',
+        '--reason',
+        reason,
+    ]
+
+    result = key_admin.main(argv)
+    captured = capsys.readouterr()
+
+    _assert_in_process_cli_error(
+        captured,
+        result=result,
+        code=expected_code,
+        exit_code=2,
+        forbidden=(reason, *argv, *(value for value in values.values() if value)),
+    )
+    assert calls == []
+
+
+@pytest.mark.parametrize('command', ('status', 'bootstrap', 'rebuild'))
+def test_key_admin_nonrotate_never_loads_environment_key_ring(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    from backend.app.admin import auto_review_keys as key_admin
+
+    runtime = _OwnedRuntimeProbe(sessionmaker())
+    initialize_calls: list[str] = []
+    _install_cli_settings(monkeypatch, key_admin)
+    _install_owned_runtime(monkeypatch, key_admin, runtime, initialize_calls)
+    _install_cli_service_probe(monkeypatch, key_admin)
+
+    def unexpected_load(_self: object) -> FingerprintKeyRing:
+        raise AssertionError('nonrotate-key-ring-sensitive-sentinel')
+
+    monkeypatch.setattr(key_admin._EnvironmentKeyRingSource, 'load', unexpected_load)
+
+    result = key_admin.main([command])
+    captured = capsys.readouterr()
+
+    assert result == 0
+    assert captured.err == ''
+    assert captured.out.count('\n') == 1
+    assert 'nonrotate-key-ring-sensitive-sentinel' not in captured.out
+
+
+def _key_admin_command_failure(failure_kind: str) -> Exception:
+    dbapi_types: dict[str, type[DBAPIError]] = {
+        'dbapi': DBAPIError,
+        'integrity': IntegrityError,
+        'programming': ProgrammingError,
+        'data': DataError,
+        'operational': OperationalError,
+        'interface': InterfaceError,
+    }
+    for suffix, connection_invalidated in (('-true', True), ('-false', False)):
+        if failure_kind.endswith(suffix):
+            error_type = dbapi_types[failure_kind.removesuffix(suffix)]
+            return error_type(
+                'SELECT sensitive-command-statement',
+                {'secret': 'sensitive-command-parameter'},
+                RuntimeError('sensitive-command-dbapi-original'),
+                connection_invalidated=connection_invalidated,
+            )
+    if failure_kind == 'timeout':
+        return SQLAlchemyTimeoutError('sensitive-command-timeout')
+    if failure_kind == 'disconnection':
+        return DisconnectionError('sensitive-command-disconnection')
+    if failure_kind == 'invalid-request':
+        return InvalidRequestError('sensitive-command-invalid-request')
+    if failure_kind == 'statement':
+        return StatementError(
+            'sensitive-command-statement-error',
+            'SELECT sensitive',
+            {'secret': 'sensitive'},
+            RuntimeError('sensitive-command-statement-original'),
+        )
+    if failure_kind == 'sqlalchemy':
+        return SQLAlchemyError('sensitive-command-sqlalchemy')
+    if failure_kind == 'value':
+        return ValueError('sensitive-command-value')
+    if failure_kind == 'type':
+        return TypeError('sensitive-command-type')
+    raise AssertionError(f'unknown failure kind: {failure_kind}')
+
+
+@pytest.mark.parametrize('failure_origin', ('construction', 'dispatch'))
+@pytest.mark.parametrize(
+    ('failure_kind', 'expected_code'),
+    (
+        ('dbapi-true', 'storage_unavailable'),
+        ('integrity-true', 'storage_unavailable'),
+        ('programming-true', 'storage_unavailable'),
+        ('data-true', 'storage_unavailable'),
+        ('operational-true', 'storage_unavailable'),
+        ('operational-false', 'storage_unavailable'),
+        ('interface-true', 'storage_unavailable'),
+        ('interface-false', 'storage_unavailable'),
+        ('timeout', 'storage_unavailable'),
+        ('disconnection', 'storage_unavailable'),
+        ('dbapi-false', 'operation_failed'),
+        ('integrity-false', 'operation_failed'),
+        ('programming-false', 'operation_failed'),
+        ('data-false', 'operation_failed'),
+        ('invalid-request', 'operation_failed'),
+        ('statement', 'operation_failed'),
+        ('sqlalchemy', 'operation_failed'),
+        ('value', 'operation_failed'),
+        ('type', 'operation_failed'),
+    ),
+)
+def test_key_admin_command_failure_first_match_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_origin: str,
+    failure_kind: str,
+    expected_code: str,
+) -> None:
+    from backend.app.admin import auto_review_keys as key_admin
+
+    runtime = _OwnedRuntimeProbe(sessionmaker())
+    initialize_calls: list[str] = []
+    failure = _key_admin_command_failure(failure_kind)
+    _install_cli_settings(monkeypatch, key_admin)
+    _install_owned_runtime(monkeypatch, key_admin, runtime, initialize_calls)
+    _install_cli_service_probe(
+        monkeypatch,
+        key_admin,
+        construction_failure=failure if failure_origin == 'construction' else None,
+        command_failure=failure if failure_origin == 'dispatch' else None,
+    )
+
+    result = key_admin.main(['status'])
+    captured = capsys.readouterr()
+
+    _assert_in_process_cli_error(
+        captured,
+        result=result,
+        code=expected_code,
+        exit_code=3,
+        forbidden=('sensitive-command',),
+    )
+    assert initialize_calls == ['sqlite:///:memory:']
+    assert runtime.dispose_calls == 1
+
+
 def _run_key_admin_module_cli(
     *args: str,
     env_updates: dict[str, str] | None = None,
     env_removals: tuple[str, ...] = (),
+    pythonpath_entries: Sequence[Path] = (),
 ) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
+    repository_root = Path(__file__).resolve().parents[2]
+    isolated_cwd = Path(__file__).resolve().parent
+    assert not (isolated_cwd / '.env').exists()
+    allowed_parent_names = (
+        'COMSPEC',
+        'PATH',
+        'PATHEXT',
+        'SYSTEMROOT',
+        'TEMP',
+        'TMP',
+        'WINDIR',
+    )
+    env = {
+        name: os.environ[name]
+        for name in allowed_parent_names
+        if name in os.environ
+    }
+    env.update(
+        {
+            'AUTO_REVIEW_MODE': 'disabled',
+            'AUTO_REVIEW_PROVIDER_TIMEOUT_SECONDS': '60',
+            'AUTO_REVIEW_PROVIDER_SEND_START_WINDOW_SECONDS': '5',
+            'AUTO_REVIEW_PROVIDER_ATTEMPT_LEASE_SECONDS': '120',
+            'AUTO_REVIEW_PROVIDER_COMMIT_GRACE_SECONDS': '30',
+            'PARAWORKS_DEMO_MODE': 'false',
+            'PARAWORKS_DATABASE_URL': 'sqlite:///:memory:',
+            'DATABASE_URL': 'sqlite:///:memory:',
+        }
+    )
     env.update(env_updates or {})
     for name in env_removals:
         env.pop(name, None)
+    pythonpath = [*(str(path) for path in pythonpath_entries), str(repository_root)]
+    env['PYTHONPATH'] = os.pathsep.join(pythonpath)
     return subprocess.run(
         [sys.executable, '-m', 'backend.app.admin.auto_review_keys', *args],
-        cwd=Path(__file__).resolve().parents[2],
+        cwd=isolated_cwd,
         env=env,
         check=False,
         capture_output=True,
@@ -3315,6 +3965,64 @@ def _assert_bounded_cli_error(
         *forbidden,
     ):
         assert value not in combined_output
+
+
+def _write_database_cli_probe(tmp_path: Path) -> Path:
+    (tmp_path / 'sitecustomize.py').write_text(
+        """
+import os
+import sys
+
+from sqlalchemy.dialects import registry
+
+registry.register(
+    'paraworks_probe',
+    'paraworks_probe_dialect',
+    'ProbeDialect',
+)
+
+if os.getenv('PARAWORKS_TEST_BLOCK_DB_INITIALIZER') == '1':
+    class _InitializerBlocker:
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname == 'backend.app.db.initialization':
+                raise ModuleNotFoundError('non-storage-import-sensitive-sentinel')
+            return None
+
+    sys.meta_path.insert(0, _InitializerBlocker())
+""".strip()
+        + '\n',
+        encoding='utf-8',
+    )
+    (tmp_path / 'paraworks_probe_dialect.py').write_text(
+        """
+import os
+from pathlib import Path
+
+from sqlalchemy.engine.default import DefaultDialect
+
+
+class ProbeDialect(DefaultDialect):
+    name = 'paraworks_probe'
+    driver = 'probe'
+
+    @classmethod
+    def import_dbapi(cls):
+        marker = os.getenv('PARAWORKS_TEST_DBAPI_MARKER')
+        if marker:
+            Path(marker).write_text('called', encoding='utf-8')
+        failure = os.environ['PARAWORKS_TEST_DBAPI_FAILURE']
+        if failure == 'module':
+            raise ModuleNotFoundError('dbapi-module-sensitive-sentinel')
+        if failure == 'import':
+            raise ImportError('dbapi-native-sensitive-sentinel')
+        if failure == 'oserror':
+            raise OSError('dbapi-loader-sensitive-sentinel')
+        raise RuntimeError('unknown probe failure')
+""".strip()
+        + '\n',
+        encoding='utf-8',
+    )
+    return tmp_path
 
 
 @pytest.mark.parametrize('unknown_option', ('--secret', '--definitely-unknown'))
@@ -3356,8 +4064,16 @@ def test_key_admin_module_cli_bounds_malformed_settings_before_initialization() 
     )
 
 
-def test_key_admin_module_cli_bounds_storage_initialization_failure() -> None:
-    invalid_database_url = 'not-a-storage-url-sensitive'
+@pytest.mark.parametrize(
+    'invalid_database_url',
+    (
+        'not-a-storage-url-sensitive',
+        'paraworks_unknown_dialect://role:password@127.0.0.1/database',
+    ),
+)
+def test_key_admin_module_cli_bounds_storage_initialization_failure(
+    invalid_database_url: str,
+) -> None:
     completed = _run_key_admin_module_cli(
         'status',
         env_updates={
@@ -3371,28 +4087,36 @@ def test_key_admin_module_cli_bounds_storage_initialization_failure() -> None:
 
     _assert_bounded_cli_error(
         completed,
-        code='storage_unavailable',
-        exit_code=3,
-        forbidden=(invalid_database_url, 'Could not parse SQLAlchemy URL'),
+        code='configuration_refused',
+        exit_code=2,
+        forbidden=(
+            invalid_database_url,
+            'Could not parse SQLAlchemy URL',
+            'paraworks_unknown_dialect',
+        ),
     )
 
 
-def test_key_admin_module_cli_classifies_missing_dbapi_as_storage_failure() -> None:
-    fake_secret = 'z' * 48
-    missing_driver_url = (
-        'postgresql+psycopg2://final4_fake_role_test:'
-        'final4_fake_password@127.0.0.1:55432/final4_fake_database_test'
+@pytest.mark.parametrize('failure', ('module', 'import', 'oserror'))
+def test_key_admin_module_cli_classifies_owned_dbapi_load_failure_as_storage(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    probe_path = _write_database_cli_probe(tmp_path)
+    sensitive_url = (
+        'paraworks_probe://probe_role_test:probe_password@'
+        '127.0.0.1:55432/probe_database_test'
     )
     completed = _run_key_admin_module_cli(
         'status',
         env_updates={
             'AUTO_REVIEW_MODE': 'disabled',
             'PARAWORKS_DEMO_MODE': 'false',
-            'PARAWORKS_DATABASE_URL': missing_driver_url,
-            'DATABASE_URL': missing_driver_url,
-            'AGENT_RUNTIME_FINGERPRINT_SECRET': fake_secret,
+            'PARAWORKS_DATABASE_URL': sensitive_url,
+            'DATABASE_URL': sensitive_url,
+            'PARAWORKS_TEST_DBAPI_FAILURE': failure,
         },
-        env_removals=('PARAWORKS_DEMO_DATABASE_URL',),
+        pythonpath_entries=(probe_path,),
     )
 
     _assert_bounded_cli_error(
@@ -3400,15 +4124,71 @@ def test_key_admin_module_cli_classifies_missing_dbapi_as_storage_failure() -> N
         code='storage_unavailable',
         exit_code=3,
         forbidden=(
-            missing_driver_url,
-            'psycopg2',
-            'ModuleNotFoundError',
-            'final4_fake_role_test',
-            'final4_fake_password',
-            'final4_fake_database_test',
-            fake_secret,
+            sensitive_url,
+            'paraworks_probe',
+            'probe_password',
+            'sensitive-sentinel',
         ),
     )
+
+
+def test_key_admin_module_cli_classifies_initializer_import_failure_as_configuration(
+    tmp_path: Path,
+) -> None:
+    probe_path = _write_database_cli_probe(tmp_path)
+    completed = _run_key_admin_module_cli(
+        'status',
+        env_updates={
+            'PARAWORKS_TEST_BLOCK_DB_INITIALIZER': '1',
+        },
+        pythonpath_entries=(probe_path,),
+    )
+
+    _assert_bounded_cli_error(
+        completed,
+        code='configuration_refused',
+        exit_code=2,
+        forbidden=('non-storage-import-sensitive-sentinel',),
+    )
+
+
+def test_key_admin_module_cli_validates_rotate_before_storage(tmp_path: Path) -> None:
+    probe_path = _write_database_cli_probe(tmp_path)
+    marker = tmp_path / 'dbapi-marker.txt'
+    sensitive_url = (
+        'paraworks_probe://rotate_role_test:rotate_password@'
+        '127.0.0.1:55432/rotate_database_test'
+    )
+    invalid_secret = 'short-rotate-sensitive'
+    reason = 'subprocess-key-validation-sensitive'
+    completed = _run_key_admin_module_cli(
+        'rotate',
+        '--expected-version',
+        'v1',
+        '--next-version',
+        'v2',
+        '--reason',
+        reason,
+        env_updates={
+            'PARAWORKS_DATABASE_URL': sensitive_url,
+            'DATABASE_URL': sensitive_url,
+            'PARAWORKS_TEST_DBAPI_FAILURE': 'module',
+            'PARAWORKS_TEST_DBAPI_MARKER': str(marker),
+            'PARAWORKS_AUTO_REVIEW_CURRENT_KEY_VERSION': 'v1',
+            'PARAWORKS_AUTO_REVIEW_CURRENT_KEY_SECRET': invalid_secret,
+            'PARAWORKS_AUTO_REVIEW_NEXT_KEY_VERSION': 'v2',
+            'PARAWORKS_AUTO_REVIEW_NEXT_KEY_SECRET': 'n' * 48,
+        },
+        pythonpath_entries=(probe_path,),
+    )
+
+    _assert_bounded_cli_error(
+        completed,
+        code='configuration_refused',
+        exit_code=2,
+        forbidden=(sensitive_url, invalid_secret, reason, str(marker)),
+    )
+    assert not marker.exists()
 
 
 def test_key_admin_module_cli_bounds_lazy_rebuild_refusal(
@@ -3458,9 +4238,15 @@ def test_key_admin_module_cli_bounds_projection_admin_errors(
     current_secret = ('t' if current_secret_matches else 'w') * 48
     next_secret = 'u' * 48
     reason = 'subprocess-negative-safety'
-    env = os.environ.copy()
-    env.update(
-        {
+    completed = _run_key_admin_module_cli(
+        'rotate',
+        '--expected-version',
+        expected_version,
+        '--next-version',
+        'v2',
+        '--reason',
+        reason,
+        env_updates={
             'PARAWORKS_DEMO_MODE': 'false',
             'PARAWORKS_DATABASE_URL': settings.database_url,
             'AGENT_RUNTIME_FINGERPRINT_KEY_VERSION': 'v1',
@@ -3470,17 +4256,7 @@ def test_key_admin_module_cli_bounds_projection_admin_errors(
             'PARAWORKS_AUTO_REVIEW_CURRENT_KEY_SECRET': current_secret,
             'PARAWORKS_AUTO_REVIEW_NEXT_KEY_VERSION': 'v2',
             'PARAWORKS_AUTO_REVIEW_NEXT_KEY_SECRET': next_secret,
-        }
-    )
-    completed = _run_key_admin_module_cli(
-        'rotate',
-        '--expected-version',
-        expected_version,
-        '--next-version',
-        'v2',
-        '--reason',
-        reason,
-        env_updates=env,
+        },
     )
 
     _assert_bounded_cli_error(
@@ -3529,11 +4305,12 @@ def test_key_admin_status_exit_code_tracks_fresh_readiness_without_key_output(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from backend.app.admin import auto_review_keys as key_admin
-    from backend.app.db import session as db_session_module
 
     db, settings = auto_review_db_session
     factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
-    monkeypatch.setattr(db_session_module, 'SessionLocal', factory)
+    runtime = _OwnedRuntimeProbe(factory)
+    initialize_calls: list[str] = []
+    _install_owned_runtime(monkeypatch, key_admin, runtime, initialize_calls)
     monkeypatch.setattr(key_admin, 'Settings', lambda: settings)
     assert key_admin.main(['status']) == 0
     healthy_output = capsys.readouterr().out
@@ -3557,6 +4334,7 @@ def test_key_admin_status_exit_code_tracks_fresh_readiness_without_key_output(
     assert '"projection_ready":false' in unhealthy_output
     assert '"projection_rebuild_required":true' in unhealthy_output
     assert len(unhealthy_output) < 500
+    assert runtime.dispose_calls == 2
 
 
 def test_projection_rebuild_cli_reports_exact_summary_and_replay(
