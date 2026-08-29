@@ -853,6 +853,56 @@ def test_unavailable_legacy_review_payload_serializes_only_safe_workflow_state(
     assert secret_source_id not in serialized
 
 
+def test_unavailable_review_payload_omits_containers_under_nested_allowed_keys(
+    client,
+    db_session,
+) -> None:
+    secret_url = 'https://mail.example.test/raw/nested-allowed-secret'
+    secret_body = 'private body nested under an allowed workflow key'
+    secret_source_id = 'gmail:nested-allowed-secret-message-id'
+    item = ReviewItem(
+        item_type='history_event',
+        payload={
+            'title': 'Bounded unavailable workflow state',
+            'needs_more_evidence': {
+                'requested_at': {'origin': secret_url},
+                'requested_by': [secret_source_id],
+                'note': {'raw_body': secret_body},
+                'previous_status': [
+                    secret_url,
+                    secret_body,
+                    secret_source_id,
+                ],
+            },
+        },
+        source_links=[secret_url],
+        source_snippets=[secret_body],
+        confidence_score=0.6,
+        permission_level='internal',
+        status='needs_more_evidence',
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    response = client.get('/api/v1/review?status=needs_more_evidence')
+
+    assert response.status_code == 200
+    body = next(
+        candidate
+        for candidate in response.json()['items']
+        if candidate['id'] == item.id
+    )
+    assert body['evidence_status'] == 'evidence_unavailable'
+    assert body['payload'] == {
+        'title': 'Bounded unavailable workflow state',
+        'needs_more_evidence': {},
+    }
+    serialized = response.text
+    assert secret_url not in serialized
+    assert secret_body not in serialized
+    assert secret_source_id not in serialized
+
+
 def test_review_item_preview_returns_promotion_shape(client, db_session) -> None:
     item = ReviewItem(
         item_type='todo',

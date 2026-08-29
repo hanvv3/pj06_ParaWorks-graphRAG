@@ -102,6 +102,36 @@ def test_shared_key_context_refuses_second_transaction_binding(
     assert first.session_identity == id(db_session)
 
 
+def test_shared_key_context_cannot_rebind_after_its_root_transaction_ends(
+    db_session: Session,
+) -> None:
+    from backend.app.rag.serving_locks import VectorServingLockManager
+
+    settings = Settings(database_url='sqlite://')
+    _seed_runtime(db_session, settings)
+    manager = VectorServingLockManager(db=db_session, settings=settings)
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        manager.bind_transaction(key_context)
+        original_transaction_id = id(db_session.get_transaction())
+        db_session.commit()
+
+        assert db_session.scalar(
+            select(AutoReviewRuntimeKeyState.generation)
+        ) == 1
+        assert id(db_session.get_transaction()) != original_transaction_id
+        with pytest.raises(TypeError, match='already bound'):
+            manager.bind_transaction(key_context)
+        db_session.rollback()
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        fresh_key_context = lock_runtime_state(db_session)
+        fresh_bound = manager.bind_transaction(fresh_key_context)
+
+    assert fresh_bound.session_identity == id(db_session)
+
+
 def test_key_context_cannot_mint_document_locks_after_its_transaction_commits(
     db_session: Session,
 ) -> None:

@@ -329,14 +329,16 @@ class VectorServingLockManager:
         shared_bindings = self._db.info.setdefault(
             _BOUND_SHARED_KEY_CONTEXTS_INFO_KEY, {}
         )
-        existing = shared_bindings.get(id(key_context))
-        if (
-            existing is not None
-            and existing[0] is key_context
-            and existing[1] == transaction_identity
+        latest = self._db.info.get(_LATEST_KEY_CONTEXT_INFO_KEY)
+        for context_id, (issued_context, _) in tuple(
+            shared_bindings.items()
         ):
+            if issued_context is not latest:
+                shared_bindings.pop(context_id, None)
+        existing = shared_bindings.get(id(key_context))
+        if existing is not None and existing[0] is key_context:
             raise TypeError(
-                'Key-generation context was already bound for this transaction'
+                'Key-generation context was already bound for document serving'
             )
         shared_bindings[id(key_context)] = (
             key_context,
@@ -527,14 +529,6 @@ def _ensure_transaction_cleanup_listener(db: Session) -> None:
         ended_session: Session, transaction: object
     ) -> None:
         transaction_identity = id(transaction)
-        shared_bindings = ended_session.info.get(
-            _BOUND_SHARED_KEY_CONTEXTS_INFO_KEY, {}
-        )
-        for context_id, (_, binding_transaction) in tuple(
-            shared_bindings.items()
-        ):
-            if binding_transaction == transaction_identity:
-                shared_bindings.pop(context_id, None)
         bound_contexts = ended_session.info.get(
             _BOUND_KEY_CONTEXTS_INFO_KEY, {}
         )

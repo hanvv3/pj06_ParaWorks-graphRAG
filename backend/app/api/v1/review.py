@@ -140,7 +140,7 @@ def _payload_without_source_fields(payload: dict) -> dict:
         key: value
         for key, value in (payload or {}).items()
         if key in _SAFE_UNAVAILABLE_PAYLOAD_FIELDS
-        and (value is None or isinstance(value, (bool, float, int, str)))
+        and _is_safe_unavailable_scalar(value)
     }
     request = (payload or {}).get('needs_more_evidence')
     if isinstance(request, dict):
@@ -148,8 +148,13 @@ def _payload_without_source_fields(payload: dict) -> dict:
             key: request[key]
             for key in ('requested_at', 'requested_by', 'note', 'previous_status')
             if key in request
+            and _is_safe_unavailable_scalar(request[key])
         }
     return projected
+
+
+def _is_safe_unavailable_scalar(value: object) -> bool:
+    return value is None or isinstance(value, (bool, float, int, str))
 
 
 @router.get('')
