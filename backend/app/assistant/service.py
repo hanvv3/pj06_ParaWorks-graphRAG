@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app.core.demo_auth import DemoUser
+from backend.app.knowledge.serving_text import canonical_knowledge_text
 from backend.app.knowledge.trusted_serving_eligibility import (
     TrustedServingEligibilityService,
     knowledge_model_for_type,
@@ -594,16 +595,9 @@ def _knowledge_dependency_content_hash(
         return None
     if target is None:
         return None
-    title = str(target.title)
-    if dependency.knowledge_type in {'decision_record', 'decision'}:
-        text = f'{title}\n{target.decision_summary}'
-    elif dependency.knowledge_type == 'history_event':
-        text = f'{title}\n{target.reason}'
-    elif dependency.knowledge_type == 'timeline_event':
-        text = f'{title}\n{target.result_summary}'
-    elif dependency.knowledge_type == 'todo':
-        text = f'{title}\n{target.priority}\n{target.priority_reason}'
-    else:
+    try:
+        text = canonical_knowledge_text(dependency.knowledge_type, target)
+    except (AttributeError, ValueError):
         return None
     source_links = list(target.source_links or [])
     source_snippets = list(target.source_snippets or [])

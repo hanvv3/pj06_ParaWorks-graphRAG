@@ -42,6 +42,8 @@ from backend.app.models import (
     ReviewItem,
     ReviewItemEvidenceRef,
     Source,
+    TimelineEvent,
+    Todo,
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
     TrustedKnowledgeFingerprint,
@@ -242,6 +244,78 @@ def _seed_pg_decision_schedule(
         permission_level=permission_level,
     )
     return decision, item, source, link, fingerprint, store, document
+
+
+def _seed_pg_canonical_knowledge_schedule(
+    db,
+    *,
+    table_name: str,
+    settings: Settings,
+    knowledge_type: str,
+):
+    history, item, source, store, history_document = _seed_pg_schedule(
+        db,
+        table_name=table_name,
+        settings=settings,
+    )
+    link = (
+        db.query(TrustedKnowledgeApprovalLink)
+        .filter_by(knowledge_type='history_event', knowledge_id=history.id)
+        .one()
+    )
+    if knowledge_type == 'history_event':
+        return history, link, store, history_document
+    if knowledge_type == 'decision_record':
+        decision, link, document = _convert_pg_schedule_to_decision(
+            db,
+            history=history,
+            item=item,
+            knowledge_type='decision_record',
+            permission_level='internal',
+        )
+        return decision, link, store, document
+    if knowledge_type == 'timeline_event':
+        target = TimelineEvent(
+            project_key='project-a',
+            title='Canonical timeline',
+            result_summary='Canonical timeline serving evidence',
+            source_links=list(item.source_links),
+            source_snippets=list(item.source_snippets),
+            confidence_score=0.99,
+            permission_level='internal',
+            review_status='approved',
+            source_review_item_id=item.id,
+        )
+    elif knowledge_type == 'todo':
+        target = Todo(
+            project_key='project-a',
+            title='Canonical todo',
+            assignee=None,
+            due_date=None,
+            priority='high',
+            priority_reason='Canonical todo serving evidence',
+            source_links=list(item.source_links),
+            source_snippets=list(item.source_snippets),
+            confidence_score=0.99,
+            permission_level='internal',
+            review_status='approved',
+            source_review_item_id=item.id,
+        )
+    else:
+        raise AssertionError(f'unsupported test knowledge type: {knowledge_type}')
+    db.add(target)
+    db.flush([target])
+    item.item_type = knowledge_type
+    link.knowledge_type = knowledge_type
+    link.knowledge_id = target.id
+    db.commit()
+    document_id = f'{knowledge_type}:{target.id}'
+    document = next(
+        candidate
+        for candidate in build_rag_index_documents(db)
+        if candidate.document_id == document_id
+    )
+    return target, link, store, document
 
 
 def _index_pg_test_document(
@@ -769,6 +843,95 @@ def test_pgvector_candidate_persists_exact_decision_link_dependency(
         assert stored_dependency.knowledge_type == stored_knowledge_type
         assert stored_dependency.approval_link_id == link.id
         assert {ref.approval_link_id for ref in refs} == {link.id}
+        assert assistant_message_evidence_is_live(
+            db, user=USERS['viewer'], message=message
+        )
+
+
+@pytest.mark.skipif(
+    not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'),
+    reason='set PARAWORKS_PGVECTOR_TEST_DATABASE_URL to run pgvector integration test',
+)
+@pytest.mark.parametrize(
+    ('knowledge_type', 'expected_text'),
+    [
+        (
+            'decision_record',
+            'Canonical decision\nLegacy decision mutation evidence',
+        ),
+        ('history_event', 'Trusted history\nExact current evidence'),
+        (
+            'timeline_event',
+            'Canonical timeline\nCanonical timeline serving evidence',
+        ),
+        ('todo', 'Canonical todo\nhigh\nCanonical todo serving evidence'),
+    ],
+)
+def test_pgvector_candidate_snapshot_uses_canonical_text_for_every_knowledge_type(
+    knowledge_type: str,
+    expected_text: str,
+) -> None:
+    database_url = os.environ['PARAWORKS_PGVECTOR_TEST_DATABASE_URL']
+    with _pgvector_test_db(database_url) as (db, table_name, settings):
+        target, link, store, document = _seed_pg_canonical_knowledge_schedule(
+            db,
+            table_name=table_name,
+            settings=settings,
+            knowledge_type=knowledge_type,
+        )
+        assert document.text == expected_text
+        assert document.metadata['title'] == target.title
+        assert document.source_snippet == 'Exact current evidence'
+        _index_pg_test_document(
+            db,
+            document=document,
+            store=store,
+            model_name=f'deterministic-hash:canonical-{knowledge_type}',
+            settings=settings,
+        )
+        result = store.search_with_embedding(
+            query_embedding=DeterministicHashEmbeddingModel(
+                dimensions=8
+            ).embed(expected_text),
+            user=USERS['viewer'],
+            limit=5,
+        )
+        vector_candidates = candidates_from_vector_matches(result.matches)
+        assert [row.source_id for row in vector_candidates] == [
+            f'{knowledge_type}:{target.id}'
+        ]
+        assert vector_candidates[0].source_snippet == 'Exact current evidence'
+        candidates = filter_live_serving_candidates(
+            db=db,
+            candidates=vector_candidates,
+        )
+        assert len(candidates) == 1
+        dependency = build_serving_dependency_snapshot(db, candidates[0])
+
+        assert dependency is not None
+        assert dependency.serving_document_id == f'{knowledge_type}:{target.id}'
+        assert dependency.knowledge_type == knowledge_type
+        assert dependency.approval_link_id == link.id
+
+        conversation = create_conversation(
+            db, USERS['viewer'], title=f'PG {knowledge_type} dependency'
+        )
+        message = append_assistant_message(
+            db,
+            USERS['viewer'],
+            conversation,
+            content=f'Bound {knowledge_type} answer',
+            citations=[{'source_id': candidates[0].source_id}],
+            source_ids=[candidates[0].source_id],
+            source_links=[candidates[0].source_url],
+            source_snippets=[candidates[0].source_snippet],
+            permission_level='internal',
+            hidden_match_count=0,
+            permission_notice=None,
+            agent_run_id=None,
+            metadata={},
+            serving_dependencies=(dependency,),
+        )
         assert assistant_message_evidence_is_live(
             db, user=USERS['viewer'], message=message
         )

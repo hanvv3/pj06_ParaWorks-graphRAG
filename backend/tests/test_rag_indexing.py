@@ -576,6 +576,133 @@ def test_build_rag_index_documents_includes_approved_timeline_events(
     assert documents[0].metadata['source_type'] == 'timeline_event'
 
 
+def test_approved_knowledge_documents_use_exact_authoritative_text_without_display_labels(
+    db_session: Session,
+) -> None:
+    records = [
+        DecisionRecord(
+            title='Canonical decision title',
+            decision_summary='Canonical decision summary',
+            source_links=['https://knowledge.mock/decision'],
+            source_snippets=['Decision source snippet'],
+            confidence_score=0.91,
+            permission_level='internal',
+            review_status='approved',
+        ),
+        HistoryEvent(
+            title='Canonical history title',
+            reason='Canonical history reason',
+            source_links=['https://knowledge.mock/history'],
+            source_snippets=['History source snippet'],
+            confidence_score=0.92,
+            permission_level='internal',
+            review_status='approved',
+        ),
+        TimelineEvent(
+            title='Canonical timeline title',
+            result_summary='Canonical timeline summary',
+            source_links=['https://knowledge.mock/timeline'],
+            source_snippets=['Timeline source snippet'],
+            confidence_score=0.93,
+            permission_level='internal',
+            review_status='approved',
+        ),
+        Todo(
+            title='Canonical todo title',
+            priority='high',
+            priority_reason='Canonical todo reason',
+            source_links=['https://knowledge.mock/todo'],
+            source_snippets=['Todo source snippet'],
+            confidence_score=0.94,
+            permission_level='internal',
+            review_status='approved',
+        ),
+    ]
+    db_session.add_all(records)
+    db_session.commit()
+
+    documents = build_rag_index_documents(db_session)
+
+    assert [document.text for document in documents] == [
+        'Canonical decision title\nCanonical decision summary',
+        'Canonical history title\nCanonical history reason',
+        'Canonical timeline title\nCanonical timeline summary',
+        'Canonical todo title\nhigh\nCanonical todo reason',
+    ]
+    assert [document.metadata['title'] for document in documents] == [
+        'Canonical decision title',
+        'Canonical history title',
+        'Canonical timeline title',
+        'Canonical todo title',
+    ]
+    assert [document.source_snippet for document in documents] == [
+        'Decision source snippet',
+        'History source snippet',
+        'Timeline source snippet',
+        'Todo source snippet',
+    ]
+
+
+def test_canonical_knowledge_text_reindexes_a_legacy_display_labeled_hash_once(
+    db_session: Session,
+) -> None:
+    history = HistoryEvent(
+        title='Canonical reindex history',
+        reason='Canonical reindex reason',
+        source_links=['https://knowledge.mock/reindex-history'],
+        source_snippets=['Reindex source snippet'],
+        confidence_score=0.95,
+        permission_level='internal',
+        review_status='approved',
+    )
+    db_session.add(history)
+    db_session.commit()
+    canonical = build_rag_index_documents(db_session)[0]
+    legacy = VectorDocument(
+        document_id=canonical.document_id,
+        text='기록/공유: Canonical reindex history\n내용: Canonical reindex reason',
+        source_url=canonical.source_url,
+        source_snippet=canonical.source_snippet,
+        permission_level=canonical.permission_level,
+        metadata=canonical.metadata,
+    )
+    assert compute_vector_document_hash(legacy) != (
+        compute_vector_document_hash(canonical)
+    )
+    writer = RecordingVectorWriter()
+    embedding_model = DeterministicHashEmbeddingModel(dimensions=16)
+    index_changed_vector_documents(
+        db=db_session,
+        documents=[legacy],
+        writer=writer,
+        embedding_model=embedding_model,
+        embedding_model_name='deterministic-hash:canonical-transition',
+    )
+
+    changed = index_changed_vector_documents(
+        db=db_session,
+        documents=[canonical],
+        writer=writer,
+        embedding_model=embedding_model,
+        embedding_model_name='deterministic-hash:canonical-transition',
+    )
+    replay = index_changed_vector_documents(
+        db=db_session,
+        documents=[canonical],
+        writer=writer,
+        embedding_model=embedding_model,
+        embedding_model_name='deterministic-hash:canonical-transition',
+    )
+
+    assert changed.indexed_count == 1
+    assert changed.skipped_count == 0
+    assert replay.indexed_count == 0
+    assert replay.skipped_count == 1
+    assert db_session.query(VectorIndexState).one().content_hash == (
+        compute_vector_document_hash(canonical)
+    )
+
+
 def test_build_rag_index_documents_preserves_project_key_on_approved_knowledge(
     db_session: Session,
 ) -> None:

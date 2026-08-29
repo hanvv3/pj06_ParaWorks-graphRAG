@@ -23,6 +23,7 @@ from backend.app.ingestion.source_authority import (
     exact_authority_contains_chunk,
     resolve_exact_source_authority,
 )
+from backend.app.knowledge.serving_text import canonical_knowledge_text
 from backend.app.knowledge.trusted_serving_eligibility import (
     TrustedServingEligibilityService,
     knowledge_model_for_type,
@@ -35,6 +36,7 @@ from backend.app.models import (
     HistoryEvent,
     ReviewItem,
     Source,
+    TimelineEvent,
     Todo,
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
@@ -442,7 +444,7 @@ def retrieve_matching_knowledge_candidates(*, db: Session, question: str) -> lis
         serving = eligibility.for_knowledge('decision_record', decision.id)
         if not serving.eligible or serving.effective_permission is None:
             continue
-        text = f'{decision.title}\n{decision.decision_summary}'
+        text = canonical_knowledge_text('decision_record', decision)
         score, matched_terms = score_rag_candidate(question=question, text=text, title=decision.title)
         if matched_terms:
             candidates.append(
@@ -465,7 +467,7 @@ def retrieve_matching_knowledge_candidates(*, db: Session, question: str) -> lis
         serving = eligibility.for_knowledge('history_event', event.id)
         if not serving.eligible or serving.effective_permission is None:
             continue
-        text = f'{event.title}\n{event.reason}'
+        text = canonical_knowledge_text('history_event', event)
         score, matched_terms = score_rag_candidate(question=question, text=text, title=event.title)
         if matched_terms:
             candidates.append(
@@ -483,12 +485,39 @@ def retrieve_matching_knowledge_candidates(*, db: Session, question: str) -> lis
                 )
             )
 
+    timeline_events = db.scalars(
+        select(TimelineEvent).where(TimelineEvent.review_status == 'approved')
+    ).all()
+    for event in timeline_events:
+        serving = eligibility.for_knowledge('timeline_event', event.id)
+        if not serving.eligible or serving.effective_permission is None:
+            continue
+        text = canonical_knowledge_text('timeline_event', event)
+        score, matched_terms = score_rag_candidate(
+            question=question, text=text, title=event.title
+        )
+        if matched_terms:
+            candidates.append(
+                _knowledge_candidate(
+                    source_id=f'timeline_event:{event.id}',
+                    source_type='timeline_event',
+                    title=event.title,
+                    text=text,
+                    source_links=event.source_links,
+                    source_snippets=event.source_snippets,
+                    permission_level=serving.effective_permission,
+                    created_at=event.created_at.isoformat(),
+                    relevance_score=score,
+                    matched_terms=matched_terms,
+                )
+            )
+
     todos = db.scalars(select(Todo).where(Todo.review_status == 'approved')).all()
     for todo in todos:
         serving = eligibility.for_knowledge('todo', todo.id)
         if not serving.eligible or serving.effective_permission is None:
             continue
-        text = f'{todo.title}\n{todo.priority}\n{todo.priority_reason}'
+        text = canonical_knowledge_text('todo', todo)
         score, matched_terms = score_rag_candidate(question=question, text=text, title=todo.title)
         if matched_terms:
             candidates.append(
@@ -689,16 +718,7 @@ def _knowledge_serving_content_hash(
     serving_document_id: str,
     permission_level: str,
 ) -> str:
-    if knowledge_type in {'decision_record', 'decision'}:
-        text = f'{target.title}\n{target.decision_summary}'
-    elif knowledge_type == 'history_event':
-        text = f'{target.title}\n{target.reason}'
-    elif knowledge_type == 'timeline_event':
-        text = f'{target.title}\n{target.result_summary}'
-    elif knowledge_type == 'todo':
-        text = f'{target.title}\n{target.priority}\n{target.priority_reason}'
-    else:
-        raise ValueError('trusted knowledge type is unsupported')
+    text = canonical_knowledge_text(knowledge_type, target)
     source_links = list(target.source_links or ())
     source_snippets = list(target.source_snippets or ())
     return _serving_content_hash(

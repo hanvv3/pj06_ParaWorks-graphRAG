@@ -18,6 +18,7 @@ from backend.app.ingestion.source_authority import (
     exact_authority_contains_chunk,
     resolve_exact_source_authority,
 )
+from backend.app.knowledge.serving_text import canonical_knowledge_text
 from backend.app.knowledge.trusted_serving_eligibility import (
     TrustedServingEligibilityService,
 )
@@ -639,7 +640,7 @@ def _decision_documents(
             document_id=f'decision_record:{decision.id}',
             source_type='decision_record',
             title=decision.title,
-            text=f'{decision.title}\n{decision.decision_summary}',
+            text=canonical_knowledge_text('decision_record', decision),
             source_links=decision.source_links,
             source_snippets=decision.source_snippets,
             permission_level=result.effective_permission or 'restricted',
@@ -665,7 +666,7 @@ def _history_documents(
             document_id=f'history_event:{event.id}',
             source_type='history_event',
             title=event.title,
-            text=f'기록/공유: {event.title}\n내용: {event.reason}',
+            text=canonical_knowledge_text('history_event', event),
             source_links=event.source_links,
             source_snippets=event.source_snippets,
             permission_level=result.effective_permission or 'restricted',
@@ -690,7 +691,7 @@ def _timeline_documents(
             document_id=f'timeline_event:{event.id}',
             source_type='timeline_event',
             title=event.title,
-            text=f'Timeline: {event.title}\nSummary: {event.result_summary}',
+            text=canonical_knowledge_text('timeline_event', event),
             source_links=event.source_links,
             source_snippets=event.source_snippets,
             permission_level=result.effective_permission or 'restricted',
@@ -716,7 +717,7 @@ def _todo_documents(
             document_id=f'todo:{todo.id}',
             source_type='todo',
             title=todo.title,
-            text=f'할 일: {todo.title}\n우선순위: {todo.priority}\n상세: {todo.priority_reason}',
+            text=canonical_knowledge_text('todo', todo),
             source_links=todo.source_links,
             source_snippets=todo.source_snippets,
             permission_level=result.effective_permission or 'restricted',

@@ -8,6 +8,8 @@ from backend.app.admin.auto_review_keys import (
 from backend.app.agents.rag_orchestrator_agent import answer_question_with_rag
 from backend.app.agents.rag_orchestrator_agent.service import (
     build_default_rag_orchestrator_agent,
+    retrieve_matching_knowledge_candidates,
+    vector_documents_from_candidates,
 )
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import USERS
@@ -19,8 +21,10 @@ from backend.app.models import (
     DocumentChunk,
     DocumentParserRun,
     DocumentVersion,
+    HistoryEvent,
     ReviewItem,
     Source,
+    TimelineEvent,
     Todo,
 )
 from backend.app.rag.vector_store import InMemoryVectorStore, VectorDocument
@@ -245,6 +249,98 @@ def test_rag_service_answers_from_approved_knowledge_records(db_session: Session
     assert answer.source_snippets == ['Approved Redis decision snippet']
     assert answer.hidden_match_count == 0
     assert answer.permission_notice is None
+
+
+def test_keyword_knowledge_candidates_share_exact_authoritative_text_for_all_types(
+    db_session: Session,
+) -> None:
+    records = [
+        DecisionRecord(
+            title='Decision shared canonical marker',
+            decision_summary='Decision authoritative body',
+            source_links=['https://knowledge.mock/decision-candidate'],
+            source_snippets=['Decision user snippet'],
+            confidence_score=0.91,
+            permission_level='internal',
+            review_status='approved',
+        ),
+        HistoryEvent(
+            title='History shared canonical marker',
+            reason='History authoritative body',
+            source_links=['https://knowledge.mock/history-candidate'],
+            source_snippets=['History user snippet'],
+            confidence_score=0.92,
+            permission_level='internal',
+            review_status='approved',
+        ),
+        TimelineEvent(
+            title='Timeline shared canonical marker',
+            result_summary='Timeline authoritative body',
+            source_links=['https://knowledge.mock/timeline-candidate'],
+            source_snippets=['Timeline user snippet'],
+            confidence_score=0.93,
+            permission_level='internal',
+            review_status='approved',
+        ),
+        Todo(
+            title='Todo shared canonical marker',
+            priority='medium',
+            priority_reason='Todo authoritative body',
+            source_links=['https://knowledge.mock/todo-candidate'],
+            source_snippets=['Todo user snippet'],
+            confidence_score=0.94,
+            permission_level='internal',
+            review_status='approved',
+        ),
+    ]
+    db_session.add_all(records)
+    db_session.commit()
+
+    candidates = retrieve_matching_knowledge_candidates(
+        db=db_session,
+        question='shared canonical marker',
+    )
+
+    assert {candidate.metadata['source_type']: candidate.text for candidate in candidates} == {
+        'decision_record': (
+            'Decision shared canonical marker\nDecision authoritative body'
+        ),
+        'history_event': (
+            'History shared canonical marker\nHistory authoritative body'
+        ),
+        'timeline_event': (
+            'Timeline shared canonical marker\nTimeline authoritative body'
+        ),
+        'todo': 'Todo shared canonical marker\nmedium\nTodo authoritative body',
+    }
+    assert {candidate.source_snippet for candidate in candidates} == {
+        'Decision user snippet',
+        'History user snippet',
+        'Timeline user snippet',
+        'Todo user snippet',
+    }
+
+    vector_store = InMemoryVectorStore()
+    vector_store.upsert_many(vector_documents_from_candidates(candidates))
+    answer = answer_question_with_rag(
+        db=db_session,
+        user=USERS['viewer'],
+        question='shared canonical marker',
+        vector_store=vector_store,
+    )
+
+    assert set(answer.source_ids) == {
+        f'decision_record:{records[0].id}',
+        f'history_event:{records[1].id}',
+        f'timeline_event:{records[2].id}',
+        f'todo:{records[3].id}',
+    }
+    assert set(answer.source_snippets) == {
+        'Decision user snippet',
+        'History user snippet',
+        'Timeline user snippet',
+        'Todo user snippet',
+    }
 
 
 def test_rag_service_hides_restricted_approved_knowledge_for_viewer(db_session: Session) -> None:
