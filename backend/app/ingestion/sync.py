@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -6,7 +7,12 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.connectors.base import Connector
+from backend.app.connectors.base import Connector, SourceEvent
+from backend.app.connectors.google import (
+    GOOGLE_CONNECTOR_SCOPES,
+    GoogleConnector,
+)
+from backend.app.core.config import Settings, get_settings
 from backend.app.ingestion.service import ingest_events_with_result
 from backend.app.ingestion.source_versions import (
     ReviewBatchMode,
@@ -14,6 +20,13 @@ from backend.app.ingestion.source_versions import (
     with_review_batch_marker,
 )
 from backend.app.models import Source, SyncJob
+from backend.app.rag.indexing import VectorIndexWriter
+from backend.app.rag.pgvector_store import PgVectorConfig, PgVectorStore
+from backend.app.review.auto_review_source_reconciliation import (
+    AutoReviewSourceReconciliationService,
+    CommittedSourceStateChange,
+)
+from backend.app.tasks.rag_indexing import enqueue_rag_reindex_job
 
 
 @dataclass(frozen=True)
@@ -34,7 +47,11 @@ def sync_connector_events(
     connector: Connector,
     job_id: str | None = None,
     review_batch_mode: ReviewBatchMode | None = None,
+    settings: Settings | None = None,
+    vector_writer: VectorIndexWriter | None = None,
+    incremental_reindex_enqueuer: Callable[[str], None] | None = None,
 ) -> ConnectorSyncResult:
+    resolved_settings = settings or get_settings()
     job = (
         db.scalar(select(SyncJob).where(SyncJob.job_id == job_id))
         if job_id is not None
@@ -63,10 +80,25 @@ def sync_connector_events(
             events = connector.fetch_events_since(_latest_cursors_by_partition(db, connector.source_type))
         else:
             events = connector.fetch_events()
-        changed_events = _changed_content_signature_events(db, events)
-        skipped_events = len(events) - len(changed_events)
         parser_status_counts = _parser_status_counts(events)
-        ingestion_result = ingest_events_with_result(db, changed_events)
+        resolved_writer = vector_writer or _source_mutation_vector_writer(
+            db,
+            settings=resolved_settings,
+        )
+        ingestion_result = ingest_events_with_result(
+            db,
+            events,
+            vector_writer=resolved_writer,
+            settings=resolved_settings,
+            authenticated_source_metadata_by_id=(
+                _authenticated_source_metadata_by_id(
+                    connector,
+                    events=events,
+                    settings=resolved_settings,
+                )
+            ),
+        )
+        skipped_events = ingestion_result.skipped_events
         job.status = 'complete'
         job.message = (
             f'fetched={len(events)} '
@@ -82,6 +114,23 @@ def sync_connector_events(
             review_batch_mode=review_batch_mode,
         )
         db.commit()
+        if ingestion_result.changed_source_states:
+            AutoReviewSourceReconciliationService(
+                db,
+                settings=resolved_settings,
+                vector_writer=resolved_writer,
+            ).reconcile(ingestion_result.changed_source_states)
+        if _requires_incremental_reindex(ingestion_result.changed_source_states):
+            resolved_enqueuer = _incremental_reindex_enqueuer(
+                db,
+                settings=resolved_settings,
+                explicit=incremental_reindex_enqueuer,
+            )
+            if resolved_enqueuer is not None:
+                _enqueue_incremental_reindex(
+                    db,
+                    enqueuer=resolved_enqueuer,
+                )
     except Exception as exc:
         db.rollback()
         failed_job = db.scalar(select(SyncJob).where(SyncJob.job_id == job.job_id))
@@ -151,30 +200,86 @@ def _latest_cursors_by_partition(db: Session, source_type: str) -> dict[str, str
     return {partition: cursor for partition, (_, cursor) in latest.items()}
 
 
-def _changed_content_signature_events(db: Session, events: list) -> list:
-    if not events:
-        return []
-    sources_by_id = {
-        source.source_id: source
-        for source in db.scalars(
-            select(Source).where(Source.source_id.in_([event.source_id for event in events]))
-        ).all()
-    }
-    changed = []
+def _source_mutation_vector_writer(
+    db: Session,
+    *,
+    settings: Settings,
+) -> VectorIndexWriter | None:
+    if db.get_bind().dialect.name != 'postgresql':
+        return None
+    return PgVectorStore(
+        session=db,
+        config=PgVectorConfig(
+            embedding_dimensions=settings.openai_embedding_dimensions
+        ),
+        settings=settings,
+    )
+
+
+def _authenticated_source_metadata_by_id(
+    connector: Connector,
+    *,
+    events: list[SourceEvent],
+    settings: Settings,
+) -> dict[str, dict[str, object]]:
+    if not isinstance(connector, GoogleConnector):
+        return {}
+    result: dict[str, dict[str, object]] = {}
     for event in events:
-        source = sources_by_id.get(event.source_id)
-        if source is None:
-            changed.append(event)
+        connector_type = (
+            'gmail'
+            if event.source_type == 'gmail_attachment'
+            else event.source_type
+        )
+        scopes = GOOGLE_CONNECTOR_SCOPES.get(connector_type)
+        if scopes is None:
             continue
-        existing_signature = (source.raw_metadata or {}).get('content_signature')
-        incoming_signature = event.raw_metadata.get('content_signature')
-        if existing_signature and incoming_signature:
-            if existing_signature != incoming_signature:
-                changed.append(event)
-            continue
-        # Without a comparable signature, the ingestion boundary treats the
-        # existing source as unchanged to avoid repeated review extraction.
-    return changed
+        result[event.source_id] = {
+            'account_id': connector.config.account_id,
+            'required_scopes': list(scopes),
+            'security_scope_id': settings.agent_runtime_security_scope_id,
+        }
+    return result
+
+
+def _requires_incremental_reindex(
+    changed_states: list[CommittedSourceStateChange],
+) -> bool:
+    return any(
+        state.content_changed or state.parser_policy_changed
+        for state in changed_states
+    )
+
+
+def _incremental_reindex_enqueuer(
+    db: Session,
+    *,
+    settings: Settings,
+    explicit: Callable[[str], None] | None,
+) -> Callable[[str], None] | None:
+    if explicit is not None:
+        return explicit
+    if db.get_bind().dialect.name != 'postgresql' or not settings.openai_api_key:
+        return None
+    return lambda job_id: enqueue_rag_reindex_job(job_id=job_id, dry_run=False)
+
+
+def _enqueue_incremental_reindex(
+    db: Session,
+    *,
+    enqueuer: Callable[[str], None],
+) -> None:
+    job = SyncJob(
+        job_id=f'rag-index-{uuid4().hex}',
+        connector_type='rag-index',
+        status='queued',
+        message='incremental source reindex queued',
+        progress_pct=0,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    enqueuer(job.job_id)
 
 
 def _parser_status_counts(events: list) -> dict[str, int]:
