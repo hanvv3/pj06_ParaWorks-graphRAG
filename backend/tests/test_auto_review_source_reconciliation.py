@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -21,6 +21,7 @@ from backend.app.models import (
     AutoReviewRuntimeKeyState,
     AutoReviewValidation,
     AutoReviewValidationCall,
+    DecisionRecord,
     Document,
     DocumentChunk,
     DocumentParserRun,
@@ -50,12 +51,14 @@ def _seed_explicit_history(
     key_verifier = fingerprint_key_material_verifier(
         settings.agent_runtime_fingerprint_secret
     )
-    if db.scalar(
-        select(AutoReviewRuntimeKeyState).where(
-            AutoReviewRuntimeKeyState.component
-            == 'auto_review_trust_promotion'
+    if (
+        db.scalar(
+            select(AutoReviewRuntimeKeyState).where(
+                AutoReviewRuntimeKeyState.component == 'auto_review_trust_promotion'
+            )
         )
-    ) is None:
+        is None
+    ):
         db.add(
             AutoReviewRuntimeKeyState(
                 component='auto_review_trust_promotion',
@@ -270,9 +273,7 @@ def test_post_c5_human_only_and_pre_c5_legacy_human_serving_semantics_are_compat
         TrustedServingEligibilityService,
     )
 
-    explicit, _, _, _ = _seed_explicit_history(
-        db_session, resolution_source='human'
-    )
+    explicit, _, _, _ = _seed_explicit_history(db_session, resolution_source='human')
     legacy_item = ReviewItem(
         item_type='history_event',
         payload={'title': 'Legacy human history'},
@@ -323,9 +324,7 @@ def test_current_verified_parser_revision_is_valid_explicit_evidence_identity(
     )
     evidence.canonical_version_or_signature = 'gmail-revision-41'
     parser_run = (
-        db_session.query(DocumentParserRun)
-        .filter_by(source_id=source.id)
-        .one()
+        db_session.query(DocumentParserRun).filter_by(source_id=source.id).one()
     )
     parser_run.revision_id = 'gmail-revision-41'
     db_session.commit()
@@ -473,9 +472,7 @@ def test_public_to_internal_reconciliation_narrows_target_and_vector_without_emb
         normalized_title_bucket_hmac='b' * 64,
         normalized_claim_fingerprint='c' * 64,
         fingerprint_key_version=link.fingerprint_key_version,
-        fingerprint_key_material_verifier=(
-            link.fingerprint_key_material_verifier
-        ),
+        fingerprint_key_material_verifier=(link.fingerprint_key_material_verifier),
         permission_level='public',
         review_status='approved',
     )
@@ -705,6 +702,337 @@ def test_relational_stale_scan_finds_late_row_after_high_cardinality_fresh_prefi
     assert result.readiness is False
 
 
+def test_relational_stale_scan_has_constant_query_count_for_large_source(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    _, _, source, link = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+        current_signature='a' * 64,
+        evidence_signature='a' * 64,
+    )
+    for ordinal in range(450):
+        db_session.add(
+            TrustedKnowledgeEvidenceLink(
+                approval_link_id=link.id,
+                canonical_source_kind='gmail',
+                canonical_source_id=str(source.id),
+                canonical_version_or_signature='a' * 64,
+                evidence_hash=f'{ordinal:064x}',
+                fingerprint_key_version=link.fingerprint_key_version,
+                fingerprint_key_material_verifier=(
+                    link.fingerprint_key_material_verifier
+                ),
+            )
+        )
+    db_session.add(
+        TrustedKnowledgeEvidenceLink(
+            approval_link_id=link.id,
+            canonical_source_kind='gmail',
+            canonical_source_id=str(source.id),
+            canonical_version_or_signature='c' * 64,
+            evidence_hash='f' * 64,
+            fingerprint_key_version=link.fingerprint_key_version,
+            fingerprint_key_material_verifier=(link.fingerprint_key_material_verifier),
+        )
+    )
+    db_session.commit()
+    select_count = 0
+
+    def count_selects(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        nonlocal select_count
+        if statement.lstrip().upper().startswith('SELECT'):
+            select_count += 1
+
+    bind = db_session.get_bind()
+    event.listen(bind, 'before_cursor_execute', count_selects)
+    try:
+        result = AutoReviewSourceReconciliationService(
+            db_session,
+            settings=Settings(database_url='sqlite://'),
+        ).status(limit=1)
+    finally:
+        event.remove(bind, 'before_cursor_execute', count_selects)
+
+    assert result.stale_count == 1
+    assert select_count <= 12
+
+
+def test_recovery_reaches_late_stale_auto_evidence_after_irrelevant_prefix(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    history, item, source, auto_link = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+        current_signature='a' * 64,
+        evidence_signature='a' * 64,
+    )
+    inactive_item = ReviewItem(
+        item_type='history_event',
+        payload={'title': 'Inactive prefix'},
+        source_links=[source.source_url],
+        source_snippets=['Inactive prefix evidence'],
+        confidence_score=0.99,
+        permission_level='internal',
+        status='revoked',
+        resolution_source='auto_policy',
+    )
+    human_item = ReviewItem(
+        item_type='history_event',
+        payload={'title': 'Human prefix'},
+        source_links=[source.source_url],
+        source_snippets=['Human prefix evidence'],
+        confidence_score=0.99,
+        permission_level='internal',
+        status='approved',
+        resolution_source='human',
+    )
+    db_session.add_all([inactive_item, human_item])
+    db_session.flush()
+    inactive_history = HistoryEvent(
+        project_key='project-a',
+        title='Inactive prefix',
+        reason='Inactive prefix evidence',
+        source_links=inactive_item.source_links,
+        source_snippets=inactive_item.source_snippets,
+        confidence_score=0.99,
+        permission_level='internal',
+        review_status='revoked',
+        source_review_item_id=inactive_item.id,
+    )
+    human_history = HistoryEvent(
+        project_key='project-a',
+        title='Human prefix',
+        reason='Human prefix evidence',
+        source_links=human_item.source_links,
+        source_snippets=human_item.source_snippets,
+        confidence_score=0.99,
+        permission_level='internal',
+        review_status='approved',
+        source_review_item_id=human_item.id,
+    )
+    db_session.add_all([inactive_history, human_history])
+    db_session.flush()
+    inactive_link = TrustedKnowledgeApprovalLink(
+        knowledge_type='history_event',
+        knowledge_id=inactive_history.id,
+        review_item_id=inactive_item.id,
+        security_scope_id='workspace-a',
+        promotion_effect_kind='primary',
+        resolution_source='auto_policy',
+        claim_fingerprint='1' * 64,
+        permission_level='internal',
+        fingerprint_key_version='v1',
+        fingerprint_key_material_verifier='b' * 64,
+        active=False,
+    )
+    human_link = TrustedKnowledgeApprovalLink(
+        knowledge_type='history_event',
+        knowledge_id=human_history.id,
+        review_item_id=human_item.id,
+        security_scope_id='workspace-a',
+        promotion_effect_kind='primary',
+        resolution_source='human',
+        claim_fingerprint='2' * 64,
+        permission_level='internal',
+        fingerprint_key_version='v1',
+        fingerprint_key_material_verifier='b' * 64,
+        active=True,
+    )
+    db_session.add_all([inactive_link, human_link])
+    db_session.flush()
+    prefix_links = (
+        [(inactive_link, 'inactive')] * 40
+        + [(human_link, 'human')] * 40
+        + [(auto_link, 'current')] * 40
+    )
+    for ordinal, (link, category) in enumerate(prefix_links):
+        db_session.add(
+            TrustedKnowledgeEvidenceLink(
+                approval_link_id=link.id,
+                canonical_source_kind='gmail',
+                canonical_source_id=str(source.id),
+                canonical_version_or_signature='a' * 64,
+                evidence_hash=f'{category}:{ordinal}'.encode().hex().ljust(64, '0'),
+                fingerprint_key_version=link.fingerprint_key_version,
+                fingerprint_key_material_verifier=(
+                    link.fingerprint_key_material_verifier
+                ),
+            )
+        )
+    db_session.add(
+        TrustedKnowledgeEvidenceLink(
+            approval_link_id=auto_link.id,
+            canonical_source_kind='gmail',
+            canonical_source_id=str(source.id),
+            canonical_version_or_signature='c' * 64,
+            evidence_hash='f' * 64,
+            fingerprint_key_version=auto_link.fingerprint_key_version,
+            fingerprint_key_material_verifier=(
+                auto_link.fingerprint_key_material_verifier
+            ),
+        )
+    )
+    db_session.commit()
+
+    writer = PreviewVectorIndexWriter()
+    first = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=writer,
+    ).recover_stale_sources(limit=1)
+    replay_after_restart = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=writer,
+    ).recover_stale_sources(limit=1)
+
+    db_session.refresh(history)
+    db_session.refresh(item)
+    db_session.refresh(auto_link)
+    assert first.stale_count == 1
+    assert first.reconciled_count == 1
+    assert first.revoked_count == 1
+    assert first.remaining_count == 0
+    assert first.readiness is True
+    assert history.review_status == 'revoked'
+    assert item.status == 'revoked'
+    assert auto_link.active is False
+    assert writer.deletes == [(f'history_event:{history.id}',)]
+    assert replay_after_restart.reconciled_count == 0
+    assert replay_after_restart.remaining_count == 0
+    assert replay_after_restart.readiness is True
+
+
+def test_recovery_reaches_permission_drift_after_one_hundred_current_links(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    _, _, source, _ = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+        current_signature='a' * 64,
+        evidence_signature='a' * 64,
+    )
+    drift_target: DecisionRecord | None = None
+    for ordinal in range(101):
+        permission = 'public' if ordinal == 100 else 'internal'
+        item_type = 'decision_record' if ordinal == 100 else 'history_event'
+        item = ReviewItem(
+            item_type=item_type,
+            payload={'title': f'Permission candidate {ordinal}'},
+            source_links=[source.source_url],
+            source_snippets=[f'Permission evidence {ordinal}'],
+            confidence_score=0.99,
+            permission_level=permission,
+            status='approved',
+            resolution_source='auto_policy',
+        )
+        db_session.add(item)
+        db_session.flush()
+        if ordinal == 100:
+            target = DecisionRecord(
+                project_key='project-a',
+                title=f'Permission candidate {ordinal}',
+                decision_summary=f'Permission evidence {ordinal}',
+                source_links=item.source_links,
+                source_snippets=item.source_snippets,
+                confidence_score=0.99,
+                permission_level=permission,
+                review_status='approved',
+                source_review_item_id=item.id,
+            )
+            knowledge_type = 'decision'
+        else:
+            target = HistoryEvent(
+                project_key='project-a',
+                title=f'Permission candidate {ordinal}',
+                reason=f'Permission evidence {ordinal}',
+                source_links=item.source_links,
+                source_snippets=item.source_snippets,
+                confidence_score=0.99,
+                permission_level=permission,
+                review_status='approved',
+                source_review_item_id=item.id,
+            )
+            knowledge_type = 'history_event'
+        db_session.add(target)
+        db_session.flush()
+        link = TrustedKnowledgeApprovalLink(
+            knowledge_type=knowledge_type,
+            knowledge_id=target.id,
+            review_item_id=item.id,
+            security_scope_id='workspace-a',
+            promotion_effect_kind='primary',
+            resolution_source='auto_policy',
+            claim_fingerprint=f'{ordinal + 10:064x}',
+            permission_level=permission,
+            fingerprint_key_version='v1',
+            fingerprint_key_material_verifier=(
+                fingerprint_key_material_verifier(
+                    Settings(database_url='sqlite://').agent_runtime_fingerprint_secret
+                )
+            ),
+            active=True,
+        )
+        db_session.add(link)
+        db_session.flush()
+        db_session.add(
+            TrustedKnowledgeEvidenceLink(
+                approval_link_id=link.id,
+                canonical_source_kind='gmail',
+                canonical_source_id=str(source.id),
+                canonical_version_or_signature='a' * 64,
+                evidence_hash=f'{ordinal + 1000:064x}',
+                fingerprint_key_version=link.fingerprint_key_version,
+                fingerprint_key_material_verifier=(
+                    link.fingerprint_key_material_verifier
+                ),
+            )
+        )
+        if ordinal == 100:
+            drift_target = target
+    db_session.commit()
+    assert drift_target is not None
+
+    first = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=PreviewVectorIndexWriter(),
+    ).recover_stale_sources(limit=1)
+    replay_after_restart = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=PreviewVectorIndexWriter(),
+    ).recover_stale_sources(limit=1)
+
+    db_session.refresh(drift_target)
+    assert first.stale_count == 1
+    assert first.narrowed_count == 1
+    assert first.remaining_count == 0
+    assert drift_target.permission_level == 'internal'
+    assert replay_after_restart.reconciled_count == 0
+    assert replay_after_restart.remaining_count == 0
+
+
 def test_recovery_initial_scan_database_failure_is_bounded() -> None:
     from backend.app.review.auto_review_source_reconciliation import (
         AutoReviewSourceReconciliationService,
@@ -824,15 +1152,11 @@ def test_repair_row_database_failure_is_counted_and_later_rows_continue(
 
     def fail_first_row(*, document_id: int, source_id: int) -> str:
         if document_id == documents[0].id:
-            raise OperationalError(
-                'SELECT repair row', {}, RuntimeError('boom')
-            )
+            raise OperationalError('SELECT repair row', {}, RuntimeError('boom'))
         assert source_id == sources[1].id
         return 'repaired'
 
-    monkeypatch.setattr(
-        service, '_repair_current_document_version', fail_first_row
-    )
+    monkeypatch.setattr(service, '_repair_current_document_version', fail_first_row)
 
     result = service.repair_current_document_versions(limit=2)
 
@@ -879,9 +1203,7 @@ def test_crash_after_source_document_commit_before_reconciliation_is_fail_closed
     assert recovered.reconciled_count == 1
     assert recovered.remaining_count == 0
     assert history.permission_level == 'internal'
-    assert writer.permission_narrowings == [
-        (('history_event:1',), 'internal')
-    ]
+    assert writer.permission_narrowings == [(('history_event:1',), 'internal')]
 
 
 def test_selected_pending_audit_is_system_invalidated_and_no_longer_blocks_rollout_gate(
@@ -1038,9 +1360,7 @@ def _seed_runtime_key(db: Session, settings: Settings) -> None:
     db.add(
         AutoReviewRuntimeKeyState(
             component='auto_review_trust_promotion',
-            fingerprint_key_version=(
-                settings.agent_runtime_fingerprint_key_version
-            ),
+            fingerprint_key_version=(settings.agent_runtime_fingerprint_key_version),
             fingerprint_key_material_verifier=fingerprint_key_material_verifier(
                 settings.agent_runtime_fingerprint_secret
             ),
@@ -1217,9 +1537,7 @@ def test_current_pointer_repair_limit_reports_unscanned_continuation(
     first, _ = _seed_pointer_repair_candidate(db_session, ordinal=4)
     second, _ = _seed_pointer_repair_candidate(db_session, ordinal=5)
     db_session.commit()
-    service = AutoReviewSourceReconciliationService(
-        db_session, settings=settings
-    )
+    service = AutoReviewSourceReconciliationService(db_session, settings=settings)
 
     first_result = service.repair_current_document_versions(limit=1)
     second_result = service.repair_current_document_versions(limit=1)

@@ -4,9 +4,20 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import (
+    Boolean,
+    String,
+    and_,
+    cast,
+    func,
+    literal,
+    literal_column,
+    or_,
+    select,
+)
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
+from sqlalchemy.sql.elements import ColumnElement
 
 from backend.app.agent_runtime.keyed_mutation_guard import (
     KeyedMutationGuard,
@@ -14,6 +25,7 @@ from backend.app.agent_runtime.keyed_mutation_guard import (
     lock_runtime_state,
 )
 from backend.app.core.config import Settings
+from backend.app.ingestion.source_authority import postgres_exact_source_authority_sql
 from backend.app.ingestion.source_content_signature import (
     server_parser_run_matches_authority,
 )
@@ -28,12 +40,16 @@ from backend.app.knowledge.trusted_serving_eligibility import (
     knowledge_model_for_type,
 )
 from backend.app.models import (
+    DecisionRecord,
     Document,
     DocumentChunk,
     DocumentParserRun,
     DocumentVersion,
+    HistoryEvent,
     ReviewItem,
     Source,
+    TimelineEvent,
+    Todo,
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
     TrustedKnowledgeFingerprint,
@@ -442,105 +458,60 @@ class AutoReviewSourceReconciliationService:
     def _stale_source_ids(self, *, limit: int) -> list[int]:
         evidence = TrustedKnowledgeEvidenceLink
         link = TrustedKnowledgeApprovalLink
-        canonical_source_ids = self._db.scalars(
-            select(evidence.canonical_source_id)
-            .select_from(evidence)
-            .join(link, link.id == evidence.approval_link_id)
-            .where(
-                link.active.is_(True),
-                link.resolution_source == 'auto_policy',
-            )
-            .distinct()
-            .order_by(evidence.canonical_source_id)
-        )
-        stale_source_ids: set[int] = set()
-        for canonical_source_id in canonical_source_ids:
-            source_id = _source_id(canonical_source_id)
-            if source_id is None:
-                continue
-            source = self._db.get(Source, source_id)
-            evidence_rows = tuple(
-                self._db.scalars(
-                    select(evidence)
-                    .join(link, link.id == evidence.approval_link_id)
-                    .where(
-                        evidence.canonical_source_id == canonical_source_id,
-                        link.active.is_(True),
-                        link.resolution_source == 'auto_policy',
-                    )
-                    .order_by(evidence.id)
-                ).all()
-            )
-            if any(
-                not _evidence_is_current(self._db, source, evidence_row)
-                for evidence_row in evidence_rows
-            ):
-                stale_source_ids.add(source_id)
-                if len(stale_source_ids) >= limit:
-                    break
-                continue
-            if any(
-                (
-                    approval_link := self._db.get(
-                        TrustedKnowledgeApprovalLink,
-                        evidence_row.approval_link_id,
-                    )
-                )
-                is not None
-                and self._permission_reconciliation_needed(
-                    approval_link,
+        source = Source
+        canonical_source_ids = tuple(
+            self._db.scalars(
+                select(evidence.canonical_source_id)
+                .select_from(evidence)
+                .join(link, link.id == evidence.approval_link_id)
+                .outerjoin(
                     source,
+                    cast(source.id, String) == evidence.canonical_source_id,
                 )
-                for evidence_row in evidence_rows
-            ):
-                stale_source_ids.add(source_id)
-            if len(stale_source_ids) >= limit:
-                break
-        return sorted(stale_source_ids)[:limit]
-
-    def _permission_reconciliation_needed(
-        self,
-        link: TrustedKnowledgeApprovalLink,
-        source: Source | None,
-    ) -> bool:
-        if source is None:
-            return False
-        target = self._db.get(
-            knowledge_model_for_type(link.knowledge_type),
-            link.knowledge_id,
+                .where(
+                    link.active.is_(True),
+                    link.resolution_source == 'auto_policy',
+                    _actionable_evidence_predicate(
+                        source=source,
+                        evidence=evidence,
+                        link=link,
+                    ),
+                )
+                .group_by(evidence.canonical_source_id)
+                .order_by(func.min(evidence.id))
+                .limit(limit)
+            ).all()
         )
-        item = self._db.get(ReviewItem, link.review_item_id)
-        if target is None or item is None:
-            return False
-        desired = _strictest_many(
-            target.permission_level,
-            link.permission_level,
-            item.permission_level,
-            source.permission_level,
-        )
-        current_levels = [
-            target.permission_level,
-            link.permission_level,
-            item.permission_level,
+        return [
+            source_id
+            for canonical_source_id in canonical_source_ids
+            if (source_id := _source_id(canonical_source_id)) is not None
         ]
-        fingerprint = self._db.scalar(
-            select(TrustedKnowledgeFingerprint).where(
-                TrustedKnowledgeFingerprint.knowledge_type == link.knowledge_type,
-                TrustedKnowledgeFingerprint.knowledge_id == link.knowledge_id,
-            )
-        )
-        if fingerprint is not None:
-            current_levels.append(fingerprint.permission_level)
-        return any(_strictest(level, desired) != level for level in current_levels)
 
     def _reconcile_source(self, source_id: int) -> tuple[bool, int, int]:
+        evidence = TrustedKnowledgeEvidenceLink
+        link = TrustedKnowledgeApprovalLink
+        source = Source
         evidence_ids = tuple(
             self._db.scalars(
-                select(TrustedKnowledgeEvidenceLink.id)
-                .where(
-                    TrustedKnowledgeEvidenceLink.canonical_source_id == str(source_id)
+                select(evidence.id)
+                .select_from(evidence)
+                .join(link, link.id == evidence.approval_link_id)
+                .outerjoin(
+                    source,
+                    cast(source.id, String) == evidence.canonical_source_id,
                 )
-                .order_by(TrustedKnowledgeEvidenceLink.id)
+                .where(
+                    evidence.canonical_source_id == str(source_id),
+                    link.active.is_(True),
+                    link.resolution_source == 'auto_policy',
+                    _actionable_evidence_predicate(
+                        source=source,
+                        evidence=evidence,
+                        link=link,
+                    ),
+                )
+                .order_by(evidence.id)
                 .limit(100)
             ).all()
         )
@@ -760,6 +731,135 @@ class AutoReviewSourceReconciliationService:
                 )
             ).all()
         )
+
+
+def _actionable_evidence_predicate(
+    *,
+    source: type[Source],
+    evidence: type[TrustedKnowledgeEvidenceLink],
+    link: type[TrustedKnowledgeApprovalLink],
+) -> ColumnElement[bool]:
+    return or_(
+        source.id.is_(None),
+        evidence.canonical_source_kind != source.source_type,
+        source.permission_level.not_in(tuple(_KNOWN_SERVING_PERMISSIONS)),
+        literal_column(
+            'NOT ('
+            + postgres_exact_source_authority_sql(
+                source_alias='sources',
+                prefix='reconciliation_authority',
+                evidence_ref_sql=(
+                    'trusted_knowledge_evidence_links.canonical_version_or_signature'
+                ),
+            )
+            + ')',
+            type_=Boolean,
+        ),
+        _permission_reconciliation_exists(source=source, link=link),
+    )
+
+
+def _permission_reconciliation_exists(
+    *,
+    source: type[Source],
+    link: type[TrustedKnowledgeApprovalLink],
+) -> ColumnElement[bool]:
+    predicates: list[ColumnElement[bool]] = []
+    for knowledge_type, model in (
+        ('decision', DecisionRecord),
+        ('decision_record', DecisionRecord),
+        ('history_event', HistoryEvent),
+        ('timeline_event', TimelineEvent),
+        ('todo', Todo),
+    ):
+        target = aliased(model, name=f'actionable_{knowledge_type}_target')
+        item = aliased(ReviewItem, name=f'actionable_{knowledge_type}_item')
+        fingerprint = aliased(
+            TrustedKnowledgeFingerprint,
+            name=f'actionable_{knowledge_type}_fingerprint',
+        )
+        predicates.append(
+            select(literal(1))
+            .select_from(target)
+            .join(item, item.id == link.review_item_id)
+            .outerjoin(
+                fingerprint,
+                and_(
+                    fingerprint.knowledge_type == link.knowledge_type,
+                    fingerprint.knowledge_id == link.knowledge_id,
+                ),
+            )
+            .where(
+                link.knowledge_type == knowledge_type,
+                target.id == link.knowledge_id,
+                _permission_drift_predicate(
+                    source_permission=source.permission_level,
+                    required_permissions=(
+                        target.permission_level,
+                        link.permission_level,
+                        item.permission_level,
+                    ),
+                    optional_permissions=(fingerprint.permission_level,),
+                ),
+            )
+            .correlate(source, link)
+            .exists()
+        )
+    return or_(*predicates)
+
+
+def _permission_drift_predicate(
+    *,
+    source_permission: ColumnElement[str],
+    required_permissions: tuple[ColumnElement[str], ...],
+    optional_permissions: tuple[ColumnElement[str], ...],
+) -> ColumnElement[bool]:
+    known_permissions = tuple(_PERMISSION_RANK)
+    columns = tuple((permission, False) for permission in required_permissions) + tuple(
+        (permission, True) for permission in optional_permissions
+    )
+    predicates: list[ColumnElement[bool]] = []
+    for permission, optional in columns:
+        present = permission.is_not(None) if optional else literal(True)
+        predicates.append(and_(present, permission.not_in(known_permissions)))
+        predicates.append(
+            and_(
+                present,
+                or_(
+                    and_(
+                        permission == 'public',
+                        source_permission.in_(('internal', 'restricted')),
+                    ),
+                    and_(
+                        permission == 'internal',
+                        source_permission == 'restricted',
+                    ),
+                    source_permission.not_in(known_permissions),
+                ),
+            )
+        )
+        for other, other_optional in columns:
+            if other is permission:
+                continue
+            other_present = other.is_not(None) if other_optional else literal(True)
+            predicates.append(
+                and_(
+                    present,
+                    other_present,
+                    or_(
+                        and_(
+                            permission == 'public',
+                            other.in_(('internal', 'restricted')),
+                        ),
+                        and_(
+                            permission == 'internal',
+                            other == 'restricted',
+                        ),
+                        other.not_in(known_permissions),
+                    ),
+                )
+            )
+    return or_(*predicates)
 
 
 def _validate_limit(limit: int) -> int:
