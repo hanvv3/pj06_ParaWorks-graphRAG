@@ -84,6 +84,50 @@ class PreparedValidationInvocation:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ValidationFrameSize:
+    character_count: int
+    encoded_input_tokens: int
+    framed_input_tokens: int
+    max_output_tokens: int
+    evidence_slot_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class _RenderedValidationFrame:
+    canonical_text: str
+    estimator_text: str
+    response_schema_framing: str
+    character_count: int
+    encoded_input_tokens: int
+    framed_input_tokens: int
+    max_output_tokens: int
+    candidate_slot_ids: tuple[str, ...]
+    evidence_slot_ids: tuple[str, ...]
+    expected_claim_fields: tuple[tuple[str, str], ...]
+    candidate_evidence_slot_ids: tuple[tuple[str, ...], ...]
+
+
+class ValidationFrameSizer:
+    """Uses the frozen renderer/tokenizer contract without model construction."""
+
+    def __init__(self, *, settings: Settings) -> None:
+        self._settings = settings
+
+    def measure(
+        self,
+        requests: Sequence[CandidateValidationRequest],
+    ) -> ValidationFrameSize:
+        frame = _render_validation_frame(requests)
+        return ValidationFrameSize(
+            character_count=frame.character_count,
+            encoded_input_tokens=frame.encoded_input_tokens,
+            framed_input_tokens=frame.framed_input_tokens,
+            max_output_tokens=frame.max_output_tokens,
+            evidence_slot_count=len(frame.evidence_slot_ids),
+        )
+
+
 class ValidationDispatcher(Protocol):
     def dispatch_prepared_validation(
         self,
@@ -216,11 +260,9 @@ class AutoReviewValidator:
         return list(parsed.results)
 
 
-def _prepare_many(
+def _render_validation_frame(
     requests: Sequence[CandidateValidationRequest],
-    *,
-    settings: Settings,
-) -> PreparedValidationInvocation:
+) -> _RenderedValidationFrame:
     values = tuple(requests)
     if not 1 <= len(values) <= AUTO_REVIEW_MAX_CANDIDATES_PER_BATCH:
         raise AutoReviewValidationError('validation candidate count is invalid')
@@ -323,17 +365,10 @@ def _prepare_many(
     )
     if framed > AUTO_REVIEW_MAX_INPUT_TOKENS:
         raise AutoReviewValidationError('validation input token cap exceeded')
-    return PreparedValidationInvocation(
-        messages=messages,
+    return _RenderedValidationFrame(
         canonical_text=canonical_text,
-        canonical_bytes=estimator_text.encode('utf-8'),
         response_schema_framing=schema_framing,
-        prepared_content_hmac=build_keyed_fingerprint(
-            estimator_text,
-            settings=settings,
-            schema_version='auto-review-validation-content:v1',
-            policy_version=AUTO_REVIEW_TOKEN_ESTIMATOR_VERSION,
-        ),
+        estimator_text=estimator_text,
         character_count=character_count,
         encoded_input_tokens=encoded,
         framed_input_tokens=framed,
@@ -342,6 +377,37 @@ def _prepare_many(
         evidence_slot_ids=tuple(evidence_slots),
         expected_claim_fields=tuple(claim_fields),
         candidate_evidence_slot_ids=tuple(per_candidate_evidence),
+    )
+
+
+def _prepare_many(
+    requests: Sequence[CandidateValidationRequest],
+    *,
+    settings: Settings,
+) -> PreparedValidationInvocation:
+    frame = _render_validation_frame(requests)
+    return PreparedValidationInvocation(
+        messages=(
+            ('system', _SYSTEM_INSTRUCTION),
+            ('human', frame.canonical_text),
+        ),
+        canonical_text=frame.canonical_text,
+        canonical_bytes=frame.estimator_text.encode('utf-8'),
+        response_schema_framing=frame.response_schema_framing,
+        prepared_content_hmac=build_keyed_fingerprint(
+            frame.estimator_text,
+            settings=settings,
+            schema_version='auto-review-validation-content:v1',
+            policy_version=AUTO_REVIEW_TOKEN_ESTIMATOR_VERSION,
+        ),
+        character_count=frame.character_count,
+        encoded_input_tokens=frame.encoded_input_tokens,
+        framed_input_tokens=frame.framed_input_tokens,
+        max_output_tokens=frame.max_output_tokens,
+        candidate_slot_ids=frame.candidate_slot_ids,
+        evidence_slot_ids=frame.evidence_slot_ids,
+        expected_claim_fields=frame.expected_claim_fields,
+        candidate_evidence_slot_ids=frame.candidate_evidence_slot_ids,
     )
 
 

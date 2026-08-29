@@ -2241,7 +2241,7 @@ git commit -m "feat: validate review candidates with langchain terra"
 - Persists observations only in this slice. Until Task 10 injects the locked rollout/audit authority, even a stored `enforce` request is effectively shadow and cannot call the internal approval service. Provider/model/parse failures leave items pending; canonically proven source drift uses Task 4's internal `mark_evidence_stale` boundary.
 - Resolves the workflow owner's current server-side `PermissionContext` before input assembly and again after the provider call. The internal auto actor can narrow that context but can never substitute its own public/internal capability for access the owner has lost.
 
-- [ ] **Step 1: Write key, lease, restart, cost, and transaction-boundary tests**
+- [x] **Step 1: Write key, lease, restart, cost, and transaction-boundary tests**
 
 Cover:
 
@@ -2300,13 +2300,13 @@ Cover:
 
 The PostgreSQL test uses two sessions and barriers rather than sleeps to prove one batch lease/result, one charged call, one budget winner, and later—after Task 10—one transition winner.
 
-- [ ] **Step 2: Run validation-store/orchestrator tests and observe RED**
+- [x] **Step 2: Run validation-store/orchestrator tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_validation_store.py backend/tests/test_auto_review_orchestrator.py backend/tests/test_auto_review_postgres.py -q
 ```
 
-- [ ] **Step 3: Implement canonical claim/replay/CAS operations**
+- [x] **Step 3: Implement canonical claim/replay/CAS operations**
 
 Expose operations with no provider dependency:
 
@@ -2490,7 +2490,7 @@ The call row is authoritative for provider usage. `complete`/`fail` accept token
 
 Define `budget_overrun` with like-for-like comparisons: actual provider input tokens exceed the stored framed-input cap; actual output tokens exceed the stored output cap; recomputed USD charge exceeds this call's USD reserve; the workflow's post-completion sum of final validation charges plus other non-final validation reserves exceeds the signed validation ceiling; or the authoritative final extraction charge sum plus that validation obligation exceeds the signed total ceiling or stored exact V2.1 total budget. Any one condition opens the same purpose-specific validation breaker. Never compare tokens directly with USD, reuse a float mirror, or ignore a workflow-level overrun because the individual call stayed below its local reserve.
 
-- [ ] **Step 4: Implement provider-outside-transaction orchestration**
+- [x] **Step 4: Implement provider-outside-transaction orchestration**
 
 Use this exact phase boundary:
 
@@ -2563,14 +2563,14 @@ Keeping the bounded plaintext prepared object in process only through claim/admi
 
 `complete()`/`fail()` receive an internal already-held `ValidationLockedContext` proving the workflow row precedes call/children; recovery uses the same order and no store method may lock the workflow after a call row. `ValidationClaimResult(disposition='busy')` is not a human fallback. The V2.1 service returns bounded in-progress/`concurrent_resume`, does not execute `refresh_review_resolution`, does not create a human interrupt, and permits only the same `run_auto_review` node to be retried after the canonical owner completes or the lease is finalized. A replayed completed/failed canonical result may then advance normally; this prevents a late owner from auto-approving behind an already-presented human boundary.
 
-- [ ] **Step 5: Run validation-store/orchestrator tests and lint GREEN**
+- [x] **Step 5: Run validation-store/orchestrator tests and lint GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_validation_store.py backend/tests/test_auto_review_orchestrator.py backend/tests/test_auto_review_postgres.py -q
 uv run --locked ruff check backend/app/agent_runtime/auto_review_validation_store.py backend/app/agent_runtime/auto_review_orchestrator.py backend/app/review/auto_review_resolution.py backend/app/main.py backend/tests/test_auto_review_validation_store.py backend/tests/test_auto_review_orchestrator.py backend/tests/test_auto_review_postgres.py
 ```
 
-- [ ] **Step 6: Commit validation coordination**
+- [x] **Step 6: Commit validation coordination**
 
 ```powershell
 git add backend/app/agent_runtime/auto_review_validation_store.py backend/app/agent_runtime/auto_review_orchestrator.py backend/app/review/auto_review_resolution.py backend/app/main.py backend/tests/test_auto_review_validation_store.py backend/tests/test_auto_review_orchestrator.py backend/tests/test_auto_review_postgres.py

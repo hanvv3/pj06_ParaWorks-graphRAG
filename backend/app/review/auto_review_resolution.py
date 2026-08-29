@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from backend.app.agent_runtime.auto_review_orchestrator import (
+    AutoReviewValidationOrchestrator,
+    PreparedValidationBatch,
+    ValidationOrchestrationResult,
+)
 from backend.app.core.config import Settings
 from backend.app.knowledge.trusted_provenance import TrustedProvenanceMismatch
 from backend.app.review.actors import ReuseExistingPromotion, auto_review_actor
@@ -25,11 +30,22 @@ class AutoReviewResolutionService:
         *,
         settings: Settings,
         current_permission_resolver: CurrentPermissionResolver,
+        validation_orchestrator: AutoReviewValidationOrchestrator | None = None,
     ) -> None:
         self._transitions = ReviewTransitionService(
             settings=settings,
             current_permission_resolver=current_permission_resolver,
         )
+        self._validation_orchestrator = validation_orchestrator
+
+    def validate_prepared(
+        self,
+        batch: PreparedValidationBatch,
+    ) -> ValidationOrchestrationResult:
+        """Persist a bounded observation; Task 10 remains approval authority."""
+        if self._validation_orchestrator is None:
+            raise AutoReviewHumanOnly('automatic validation is unavailable')
+        return self._validation_orchestrator.execute(batch)
 
     def resolve(
         self,

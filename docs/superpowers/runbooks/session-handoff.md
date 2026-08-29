@@ -3261,3 +3261,34 @@ tests passed with 53 tests; ruff passed.
   validation identities, one-call leases, atomic reservations/cost ledger,
   replay, cancellation/crash handling, and post-provider permission/source
   revalidation. Slack data reconstruction and Slack regressions remain last.
+
+## 2026-08-30 C.5 Task 9 handoff
+
+- Task 9 is implementation-complete on `codex/rag-orchestrator-agent`.
+  `auto_review_validation_store.py` owns PostgreSQL-authoritative validation
+  leases, committed one-attempt markers, exact Decimal reservations/charges,
+  restart replay, cancellation/recovery, and bounded child observations.
+- Every claim/attempt/dispatch/completion path acquires the shared key-generation
+  barrier and runtime row. Provider safety, projection/rollout, current Source,
+  workflow, call, and child state are rechecked in fixed order. Runtime-key,
+  price/cost-policy, owner-permission, source-content, cancellation, or rollout
+  drift fails closed without promotion; pre-attempt refusals charge zero.
+- `ValidationFrameSizer` now shares a pure renderer/tokenizer frame with the
+  final immutable invocation without constructing that invocation. Final
+  batches are deterministic under candidate permutation and are prepared once.
+- Provider dispatch occurs only after the attempt marker commits and after a
+  second one-use fence check with no database transaction held during the fake
+  or real provider callback. Unknown usage charges the reserve once; known
+  overrun records actual usage and atomically opens the validation safety
+  breaker with one call-attributed event.
+- Validation tables persist only allowlisted decisions, scores, counters,
+  tokens, costs, and keyed identities. Regression coverage proves raw evidence
+  URLs and provider exception text are absent. This slice stores observations
+  only and cannot approve ReviewItems.
+- Fresh automated evidence used fake providers only: Task 9 unit/lifespan
+  regression `63 passed`; isolated PostgreSQL integration `13 passed`; existing
+  provenance regression retained its established SQLite pass/skip boundary.
+  No paid provider call or rollout enablement occurred.
+- Next is C.5 Task 10, an actual implementation task: locked rollout/canary
+  authority, deterministic audit selection, breaker handling, promotion
+  coordination, and quality revoke. Slack remains last.

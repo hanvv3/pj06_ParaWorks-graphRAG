@@ -5045,3 +5045,30 @@ Cost/security note:
   checks passed. Independent rereview returned Spec PASS / Quality APPROVED
   with Critical `0`, Important `0`. No live LLM call or rollout enablement
   occurred. Task 9 is the next actual implementation slice; Slack remains last.
+
+## 2026-08-30 C.5 Task 9 persistent validation coordination
+
+- Added restart-safe PostgreSQL validation calls with one committed provider
+  attempt, short database-clock leases, atomic per-workflow cost reservations,
+  deterministic cache replay, and exact six-place token/cost allocation.
+- Added fixed-order runtime-key, provider-safety, projection/rollout, source,
+  workflow, and call locking. Key, price/cost-policy, permission, source,
+  cancellation, or authority drift prevents promotion and preserves the human
+  Review Queue path; pre-send drift is zero-call/zero-charge.
+- Moved batch measurement onto a pure shared render/tokenizer frame so sizing
+  and final prepared invocation remain byte/token equivalent without producing
+  an extra prepared invocation. Candidate permutation yields the same batches,
+  aliases, fingerprints, and reservations.
+- Provider execution is outside database transactions and behind a committed,
+  one-use send permit. Crash/timeout/cancel recovery never retries; ambiguous
+  usage charges the signed reserve once. Actual overrun atomically opens the
+  validation provider-safety breaker and produces one bounded call-attributed
+  event.
+- Persisted validation rows contain no source URL, evidence plaintext, rendered
+  prompt, model rationale, provider exception, or secret. Task 9 records
+  validation observations only; Task 10 remains the sole planned rollout/audit
+  promotion authority.
+- Automated verification used only fake providers and a disposable PostgreSQL
+  schema: Task 9 unit/lifespan `63 passed`, PostgreSQL integration `13 passed`,
+  plus the existing provenance regression boundary. No live LLM, connector, or
+  embedding call and no rollout enablement occurred.

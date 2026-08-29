@@ -7,6 +7,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.app.admin.auto_review_keys import AutoReviewKeyBootstrapService
+from backend.app.agent_runtime.auto_review_orchestrator import (
+    AutoReviewValidationOrchestrator,
+)
+from backend.app.agent_runtime.auto_review_validation_store import (
+    AutoReviewValidationStore,
+)
+from backend.app.agent_runtime.auto_review_validator import (
+    AutoReviewValidatorFactory,
+)
 from backend.app.agent_runtime.checkpointing import (
     CheckpointRuntime,
     build_checkpoint_runtime,
@@ -97,6 +106,17 @@ def create_app(
                 settings=settings,
             )
             key_bootstrap_result = key_bootstrap_service.ensure_initialized()
+            validation_store = AutoReviewValidationStore(
+                session_factory=workflow_session_factory,
+                settings=settings,
+            )
+            validation_orchestrator = AutoReviewValidationOrchestrator(
+                store=validation_store,
+                validator_factory=AutoReviewValidatorFactory(
+                    settings=settings,
+                    dispatcher=validation_store,
+                ),
+            )
             source_reconciliation = _recover_source_reconciliation_batch(
                 workflow_session_factory, settings=settings, limit=100
             )
@@ -135,6 +155,8 @@ def create_app(
             app.state.review_model_readiness = model_readiness
             app.state.review_workflow_service = review_workflow_service
             app.state.auto_review_key_bootstrap = key_bootstrap_result
+            app.state.auto_review_validation_store = validation_store
+            app.state.auto_review_validation_orchestrator = validation_orchestrator
             app.state.auto_review_source_reconciliation = source_reconciliation
             yield
         finally:

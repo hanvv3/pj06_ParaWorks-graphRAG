@@ -23,6 +23,7 @@ from backend.app.agent_runtime.auto_review_policy import (
 from backend.app.agent_runtime.auto_review_validator import (
     AutoReviewValidationError,
     AutoReviewValidatorFactory,
+    ValidationFrameSizer,
     ValidationUsage,
 )
 from backend.app.core.config import Settings
@@ -316,6 +317,30 @@ def test_four_candidate_twelve_slot_and_input_bounds() -> None:
         validator.prepare_many(
             (_request(evidence=tuple(f'x-{i}' for i in range(12))), _request())
         )
+
+
+def test_frame_sizer_matches_final_prepared_invocation_without_preparing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    requests = (_request(), _request(title='두 번째 후보', fact='두 번째 사실'))
+    validator, _, _ = _validator()
+    invocation = validator.prepare_many(requests)
+    sizer = ValidationFrameSizer(settings=settings)
+
+    monkeypatch.setattr(
+        'backend.app.agent_runtime.auto_review_validator._prepare_many',
+        lambda *_args, **_kwargs: pytest.fail(
+            'frame sizing must not construct a prepared invocation'
+        ),
+    )
+    measured = sizer.measure(requests)
+
+    assert measured.character_count == invocation.character_count
+    assert measured.encoded_input_tokens == invocation.encoded_input_tokens
+    assert measured.framed_input_tokens == invocation.framed_input_tokens
+    assert measured.max_output_tokens == invocation.max_output_tokens
+    assert measured.evidence_slot_count == len(invocation.evidence_slot_ids)
 
 
 def test_character_and_framed_token_caps_fail_before_dispatch(monkeypatch) -> None:
