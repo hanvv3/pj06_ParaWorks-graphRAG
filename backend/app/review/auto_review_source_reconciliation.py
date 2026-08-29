@@ -100,7 +100,6 @@ class CommittedSourceStateChange:
             not isinstance(self.primary_code, str)
             or not self.primary_code
             or len(self.primary_code) > 64
-            or (not any(flags)) != (self.primary_code == 'unchanged')
         ):
             raise ValueError('source change primary_code is inconsistent')
 

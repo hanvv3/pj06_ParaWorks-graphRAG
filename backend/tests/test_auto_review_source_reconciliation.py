@@ -478,11 +478,7 @@ def test_reconcile_uses_authoritative_flags_when_primary_code_is_forged_unchange
     source.permission_level = 'internal'
     db_session.commit()
 
-    class ForgedProjection(CommittedSourceStateChange):
-        def __post_init__(self) -> None:
-            pass
-
-    changed = ForgedProjection(
+    changed = CommittedSourceStateChange(
         source_id=source.id,
         content_changed=False,
         permission_changed=True,
@@ -498,6 +494,24 @@ def test_reconcile_uses_authoritative_flags_when_primary_code_is_forged_unchange
 
     assert result.reconciled_count == 1
     assert history.permission_level == 'internal'
+
+
+@pytest.mark.parametrize('primary_code', [None, '', 'x' * 65, object()])
+def test_committed_changed_state_rejects_unbounded_primary_code(
+    primary_code: object,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        CommittedSourceStateChange,
+    )
+
+    with pytest.raises(ValueError, match='primary_code is inconsistent'):
+        CommittedSourceStateChange(
+            source_id=1,
+            content_changed=False,
+            permission_changed=False,
+            parser_policy_changed=False,
+            primary_code=primary_code,  # type: ignore[arg-type]
+        )
 
 
 def test_restricted_unknown_absent_or_superseded_source_revokes_exact_auto_effect(
