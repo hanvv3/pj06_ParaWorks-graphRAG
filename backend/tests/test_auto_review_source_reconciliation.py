@@ -2,8 +2,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
 from backend.app.core.config import Settings
@@ -518,6 +519,191 @@ def test_source_reconciliation_recovery_is_bounded_idempotent_and_restart_safe(
     assert first.remaining_count == 0
     assert replay.reconciled_count == 0
     assert replay.remaining_count == 0
+
+
+def test_relational_stale_scan_finds_late_row_after_high_cardinality_fresh_prefix(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    _, _, source, link = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+        current_signature='a' * 64,
+        evidence_signature='a' * 64,
+    )
+    for ordinal in range(450):
+        db_session.add(
+            TrustedKnowledgeEvidenceLink(
+                approval_link_id=link.id,
+                canonical_source_kind='gmail',
+                canonical_source_id=str(source.id),
+                canonical_version_or_signature='a' * 64,
+                evidence_hash=f'{ordinal:064x}',
+                fingerprint_key_version='v1',
+                fingerprint_key_material_verifier='b' * 64,
+            )
+        )
+    db_session.add(
+        TrustedKnowledgeEvidenceLink(
+            approval_link_id=link.id,
+            canonical_source_kind='gmail',
+            canonical_source_id=str(source.id),
+            canonical_version_or_signature='c' * 64,
+            evidence_hash='d' * 64,
+            fingerprint_key_version='v1',
+            fingerprint_key_material_verifier='b' * 64,
+        )
+    )
+    db_session.commit()
+
+    result = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+    ).status(limit=1)
+
+    assert result.stale_count == 1
+    assert result.remaining_count == 1
+    assert result.readiness is False
+
+
+def test_recovery_initial_scan_database_failure_is_bounded() -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    engine = create_engine('sqlite://')
+    try:
+        with sessionmaker(bind=engine)() as db:
+            result = AutoReviewSourceReconciliationService(
+                db,
+                settings=Settings(database_url='sqlite://'),
+            ).recover_stale_sources(limit=1)
+    finally:
+        engine.dispose()
+
+    assert result.failure_count == 1
+    assert result.remaining_count == 1
+    assert result.readiness is False
+
+
+def test_recovery_final_scan_database_failure_is_bounded(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    _, _, source, _ = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+        current_signature='a' * 64,
+        evidence_signature='b' * 64,
+    )
+    service = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=PreviewVectorIndexWriter(),
+    )
+    original_scan = service._stale_source_ids
+    scan_count = 0
+
+    def fail_final_scan(*, limit: int) -> list[int]:
+        nonlocal scan_count
+        scan_count += 1
+        if scan_count == 1:
+            return original_scan(limit=limit)
+        raise OperationalError('SELECT bounded stale work', {}, RuntimeError('boom'))
+
+    monkeypatch.setattr(service, '_stale_source_ids', fail_final_scan)
+
+    result = service.recover_stale_sources(limit=1)
+
+    assert result.stale_count == 1
+    assert result.reconciled_count == 1
+    assert result.failure_count == 1
+    assert result.remaining_count == 1
+    assert result.readiness is False
+    assert source.id > 0
+
+
+def test_repair_initial_scan_database_failure_is_bounded() -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    engine = create_engine('sqlite://')
+    try:
+        with sessionmaker(bind=engine)() as db:
+            result = AutoReviewSourceReconciliationService(
+                db,
+                settings=Settings(database_url='sqlite://'),
+            ).repair_current_document_versions(limit=1)
+    finally:
+        engine.dispose()
+
+    assert result.failure_count == 1
+    assert result.remaining_count == 1
+    assert result.readiness is False
+
+
+def test_repair_row_database_failure_is_counted_and_later_rows_continue(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    sources = [
+        Source(
+            source_type='drive',
+            source_id=f'drive:repair-failure:{ordinal}',
+            source_url=f'https://drive.mock/repair-failure/{ordinal}',
+            title=f'Repair failure {ordinal}',
+            permission_level='internal',
+            raw_metadata={},
+        )
+        for ordinal in range(2)
+    ]
+    db_session.add_all(sources)
+    db_session.flush()
+    documents = [
+        Document(
+            source_id=source.id,
+            title=source.title,
+            current_version='display-only',
+        )
+        for source in sources
+    ]
+    db_session.add_all(documents)
+    db_session.commit()
+    service = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+    )
+
+    def fail_first_row(*, document_id: int, source_id: int) -> str:
+        if document_id == documents[0].id:
+            raise OperationalError(
+                'SELECT repair row', {}, RuntimeError('boom')
+            )
+        assert source_id == sources[1].id
+        return 'repaired'
+
+    monkeypatch.setattr(
+        service, '_repair_current_document_version', fail_first_row
+    )
+
+    result = service.repair_current_document_versions(limit=2)
+
+    assert result.repaired_count == 1
+    assert result.failure_count == 1
+    assert result.remaining_count == 1
+    assert result.readiness is False
 
 
 def test_crash_after_source_document_commit_before_reconciliation_is_fail_closed_and_recoverable(

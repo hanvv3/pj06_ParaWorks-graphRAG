@@ -83,6 +83,25 @@ def test_consumed_key_context_refuses_second_document_lock_acquisition(
     assert reindex_context.document_ids == ('history_event:7',)
 
 
+def test_shared_key_context_refuses_second_transaction_binding(
+    db_session: Session,
+) -> None:
+    from backend.app.rag.serving_locks import VectorServingLockManager
+
+    settings = Settings(database_url='sqlite://')
+    _seed_runtime(db_session, settings)
+    manager = VectorServingLockManager(db=db_session, settings=settings)
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        first = manager.bind_transaction(key_context)
+
+        with pytest.raises(TypeError, match='already bound'):
+            manager.bind_transaction(key_context)
+
+    assert first.session_identity == id(db_session)
+
+
 def test_key_context_cannot_mint_document_locks_after_its_transaction_commits(
     db_session: Session,
 ) -> None:

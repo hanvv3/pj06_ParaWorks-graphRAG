@@ -795,6 +795,64 @@ def test_request_more_evidence_preserves_reviewer_note(client, db_session) -> No
     assert body['source_snippets'] == []
 
 
+def test_unavailable_legacy_review_payload_serializes_only_safe_workflow_state(
+    client,
+    db_session,
+) -> None:
+    secret_url = 'https://mail.example.test/raw/legacy-secret'
+    secret_snippet = 'private nested source body must never serialize'
+    secret_source_id = 'gmail:legacy-secret-message-id'
+    item = ReviewItem(
+        item_type='history_event',
+        payload={
+            'title': 'Legacy evidence candidate',
+            'details': {
+                'origin': secret_url,
+                'body': secret_snippet,
+                'identifier': secret_source_id,
+            },
+            'renamed_context': [secret_url, secret_snippet, secret_source_id],
+            'needs_more_evidence': {
+                'requested_at': '2026-08-29T00:00:00+00:00',
+                'requested_by': 'demo-admin',
+                'note': 'Ask the owner for one more confirmation.',
+                'previous_status': 'pending_review',
+                'renamed_private_context': secret_snippet,
+            },
+        },
+        source_links=[secret_url],
+        source_snippets=[secret_snippet],
+        confidence_score=0.61,
+        permission_level='internal',
+        status='needs_more_evidence',
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    response = client.get('/api/v1/review?status=needs_more_evidence')
+
+    assert response.status_code == 200
+    body = next(
+        candidate
+        for candidate in response.json()['items']
+        if candidate['id'] == item.id
+    )
+    assert body['evidence_status'] == 'evidence_unavailable'
+    assert body['payload'] == {
+        'title': 'Legacy evidence candidate',
+        'needs_more_evidence': {
+            'requested_at': '2026-08-29T00:00:00+00:00',
+            'requested_by': 'demo-admin',
+            'note': 'Ask the owner for one more confirmation.',
+            'previous_status': 'pending_review',
+        }
+    }
+    serialized = response.text
+    assert secret_url not in serialized
+    assert secret_snippet not in serialized
+    assert secret_source_id not in serialized
+
+
 def test_review_item_preview_returns_promotion_shape(client, db_session) -> None:
     item = ReviewItem(
         item_type='todo',

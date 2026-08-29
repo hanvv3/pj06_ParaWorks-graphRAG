@@ -17,6 +17,7 @@ from backend.app.core.config import Settings
 from backend.app.core.demo_auth import USERS
 from backend.app.db.base import Base
 from backend.app.models import (
+    AgentWorkflowEvidenceRef,
     AutoReviewRuntimeKeyState,
     Document,
     DocumentChunk,
@@ -24,6 +25,7 @@ from backend.app.models import (
     DocumentVersion,
     HistoryEvent,
     ReviewItem,
+    ReviewItemEvidenceRef,
     Source,
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
@@ -523,6 +525,117 @@ def test_pgvector_knowledge_permission_is_strict_before_ranking_and_hidden_count
             )
             assert hidden.matches == []
             assert hidden.hidden_match_count == 1
+            db.execute(text(f'DROP TABLE IF EXISTS {table_name}'))
+            db.commit()
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'),
+    reason='set PARAWORKS_PGVECTOR_TEST_DATABASE_URL to run pgvector integration test',
+)
+def test_pgvector_workflow_evidence_snapshot_is_strict_before_rank_and_hidden_count() -> None:
+    database_url = os.environ['PARAWORKS_PGVECTOR_TEST_DATABASE_URL']
+    engine = create_engine(database_url)
+    session_local = sessionmaker(bind=engine)
+    test_id = uuid4().hex[:8]
+    table_name = f'rag_vector_documents_test_{test_id}'
+    Base.metadata.create_all(engine)
+    try:
+        with session_local() as db:
+            history, item, source, link = _seed_explicit_history(
+                db,
+                resolution_source='auto_policy',
+                current_signature='f' * 64,
+                evidence_signature='f' * 64,
+            )
+            history.permission_level = 'public'
+            item.permission_level = 'public'
+            source.permission_level = 'public'
+            link.permission_level = 'public'
+            workflow_evidence = AgentWorkflowEvidenceRef(
+                workflow_thread_id=item.workflow_thread_id,
+                ordinal=1,
+                canonical_source_type='gmail',
+                canonical_table='sources',
+                canonical_row_id=source.id,
+                document_version_id=None,
+                external_revision=None,
+                content_signature=source.server_content_signature,
+                permission_level_snapshot='restricted',
+                content_fingerprint='1' * 64,
+            )
+            db.add(workflow_evidence)
+            db.flush([workflow_evidence])
+            db.add(
+                ReviewItemEvidenceRef(
+                    review_item_id=item.id,
+                    workflow_thread_id=item.workflow_thread_id,
+                    workflow_evidence_ref_id=workflow_evidence.id,
+                    candidate_slot_ordinal=1,
+                    message_content_fingerprint='2' * 64,
+                    fingerprint_key_version='v1',
+                    fingerprint_key_material_verifier='3' * 64,
+                )
+            )
+            store = PgVectorStore(
+                session=db,
+                config=PgVectorConfig(
+                    table_name=table_name, embedding_dimensions=8
+                ),
+            )
+            store.ensure_schema()
+            document_id = f'history_event:{history.id}'
+            db.execute(
+                text(
+                    f'INSERT INTO {table_name} '
+                    '(document_id, text, source_url, source_snippet, '
+                    'permission_level, metadata_json, embedding) VALUES '
+                    '(:document_id, :body, :url, :snippet, '
+                    ":permission, '{}'::jsonb, CAST(:embedding AS vector))"
+                ),
+                {
+                    'document_id': document_id,
+                    'body': history.reason,
+                    'url': source.source_url,
+                    'snippet': 'Immutable restricted workflow evidence',
+                    'permission': 'public',
+                    'embedding': '[1,0,0,0,0,0,0,0]',
+                },
+            )
+            db.commit()
+
+            stale_broad = store.search_with_embedding(
+                query_embedding=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                user=USERS['viewer'],
+            )
+            assert stale_broad.matches == []
+            assert stale_broad.hidden_match_count == 0
+
+            db.execute(
+                text(
+                    f'UPDATE {table_name} SET permission_level = '
+                    "'restricted' WHERE document_id = :document_id"
+                ),
+                {'document_id': document_id},
+            )
+            db.commit()
+            hidden = store.search_with_embedding(
+                query_embedding=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                user=USERS['viewer'],
+            )
+            visible = store.search_with_embedding(
+                query_embedding=[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                user=USERS['admin'],
+            )
+            assert hidden.matches == []
+            assert hidden.hidden_match_count == 1
+            assert [
+                match.document.document_id for match in visible.matches
+            ] == [document_id]
+            assert visible.hidden_match_count == 0
             db.execute(text(f'DROP TABLE IF EXISTS {table_name}'))
             db.commit()
     finally:

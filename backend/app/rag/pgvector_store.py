@@ -397,6 +397,9 @@ class PgVectorStore:
             value='approval_links.permission_level'
         )
         source_rank = permission_rank.format(value='effect_sources.permission_level')
+        workflow_snapshot_rank = permission_rank.format(
+            value='workflow_evidence.permission_level_snapshot'
+        )
         legacy_item_rank = permission_rank.format(
             value='legacy_reviews.permission_level'
         )
@@ -432,6 +435,19 @@ class PgVectorStore:
                         AND effect_reviews.permission_level IN ('public', 'internal', 'restricted')
                         AND approval_links.permission_level IN ('public', 'internal', 'restricted')
                         AND {vector_rank} >= GREATEST({item_rank}, {link_rank})
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM review_item_evidence_refs workflow_links
+                            JOIN agent_workflow_evidence_refs workflow_evidence
+                              ON workflow_evidence.id = workflow_links.workflow_evidence_ref_id
+                             AND workflow_evidence.workflow_thread_id = workflow_links.workflow_thread_id
+                            WHERE workflow_links.review_item_id = effect_reviews.id
+                              AND workflow_links.workflow_thread_id = effect_reviews.workflow_thread_id
+                              AND (
+                                  workflow_evidence.permission_level_snapshot NOT IN ('public', 'internal', 'restricted')
+                                  OR {vector_rank} < {workflow_snapshot_rank}
+                              )
+                        )
                         AND (
                             (
                                 approval_links.resolution_source = 'human'

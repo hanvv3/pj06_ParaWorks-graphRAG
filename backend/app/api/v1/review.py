@@ -114,12 +114,33 @@ def _review_item_response(
     }
 
 
+_SAFE_UNAVAILABLE_PAYLOAD_FIELDS = frozenset({
+    'agent_name',
+    'assignee',
+    'decision_summary',
+    'due_date',
+    'priority',
+    'priority_reason',
+    'project_assignment_method',
+    'project_assignment_reason',
+    'project_assignment_summary',
+    'project_key',
+    'project_name',
+    'project_needs_user_selection',
+    'reason',
+    'result_summary',
+    'summary',
+    'task_summary',
+    'title',
+})
+
+
 def _payload_without_source_fields(payload: dict) -> dict:
-    concealed_tokens = ('source', 'evidence', 'snippet', 'url', 'link')
     projected = {
         key: value
         for key, value in (payload or {}).items()
-        if not any(token in key.lower() for token in concealed_tokens)
+        if key in _SAFE_UNAVAILABLE_PAYLOAD_FIELDS
+        and (value is None or isinstance(value, (bool, float, int, str)))
     }
     request = (payload or {}).get('needs_more_evidence')
     if isinstance(request, dict):

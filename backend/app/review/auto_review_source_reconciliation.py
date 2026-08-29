@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import String, and_, case, cast, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -25,11 +25,15 @@ from backend.app.knowledge.trusted_serving_eligibility import (
     knowledge_model_for_type,
 )
 from backend.app.models import (
+    DecisionRecord,
     Document,
     DocumentParserRun,
     DocumentVersion,
+    HistoryEvent,
     ReviewItem,
     Source,
+    TimelineEvent,
+    Todo,
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
     TrustedKnowledgeFingerprint,
@@ -140,11 +144,33 @@ class AutoReviewSourceReconciliationService:
         self, *, limit: int = 100
     ) -> SourceReconciliationResult:
         bounded = _validate_limit(limit)
-        stale = self._stale_source_ids(limit=bounded)
+        try:
+            stale = self._stale_source_ids(limit=bounded)
+        except SQLAlchemyError:
+            self._db.rollback()
+            return SourceReconciliationResult(
+                failure_count=1,
+                remaining_count=1,
+                readiness=False,
+            )
         if not stale:
             return SourceReconciliationResult()
         result = self.reconcile_source_ids(stale)
-        remaining = len(self._stale_source_ids(limit=bounded))
+        try:
+            remaining = len(self._stale_source_ids(limit=bounded))
+        except SQLAlchemyError:
+            self._db.rollback()
+            return SourceReconciliationResult(
+                stale_count=len(stale),
+                reconciled_count=result.reconciled_count,
+                revoked_count=result.revoked_count,
+                narrowed_count=result.narrowed_count,
+                repaired_count=result.repaired_count,
+                ambiguous_count=result.ambiguous_count,
+                remaining_count=max(1, result.remaining_count),
+                failure_count=result.failure_count + 1,
+                readiness=False,
+            )
         return SourceReconciliationResult(
             stale_count=len(stale),
             reconciled_count=result.reconciled_count,
@@ -200,30 +226,44 @@ class AutoReviewSourceReconciliationService:
         self, *, limit: int = 100
     ) -> SourceReconciliationResult:
         bounded = _validate_limit(limit)
-        document_rows = tuple(
-            self._db.execute(
-                select(Document.id, Document.source_id)
-                .where(Document.current_document_version_id.is_(None))
-                .order_by(Document.id)
-                .limit(bounded)
-            ).all()
-        )
-        self._db.rollback()
-        repaired = ambiguous = unresolved = 0
-        for document_id, source_id in document_rows:
-            outcome = self._repair_current_document_version(
-                document_id=document_id,
-                source_id=source_id,
+        try:
+            document_rows = tuple(
+                self._db.execute(
+                    select(Document.id, Document.source_id)
+                    .where(Document.current_document_version_id.is_(None))
+                    .order_by(Document.id)
+                    .limit(bounded)
+                ).all()
             )
+        except SQLAlchemyError:
+            self._db.rollback()
+            return SourceReconciliationResult(
+                failure_count=1,
+                remaining_count=1,
+                readiness=False,
+            )
+        self._db.rollback()
+        repaired = ambiguous = unresolved = failures = 0
+        for document_id, source_id in document_rows:
+            try:
+                outcome = self._repair_current_document_version(
+                    document_id=document_id,
+                    source_id=source_id,
+                )
+            except (SQLAlchemyError, RuntimeError, TypeError, ValueError):
+                self._db.rollback()
+                failures += 1
+                continue
             repaired += int(outcome == 'repaired')
             ambiguous += int(outcome == 'ambiguous')
             unresolved += int(outcome == 'unresolved')
-        remaining = ambiguous + unresolved
+        remaining = ambiguous + unresolved + failures
         return SourceReconciliationResult(
             repaired_count=repaired,
             ambiguous_count=ambiguous,
             remaining_count=remaining,
-            readiness=remaining == 0,
+            failure_count=failures,
+            readiness=remaining == 0 and failures == 0,
         )
 
     def _repair_current_document_version(
@@ -304,43 +344,127 @@ class AutoReviewSourceReconciliationService:
             return 'repaired'
 
     def _stale_source_ids(self, *, limit: int) -> list[int]:
-        rows = tuple(
-            self._db.execute(
-                select(
-                    TrustedKnowledgeEvidenceLink,
-                    TrustedKnowledgeApprovalLink,
-                )
-                .join(
-                    TrustedKnowledgeApprovalLink,
-                    TrustedKnowledgeApprovalLink.id
-                    == TrustedKnowledgeEvidenceLink.approval_link_id,
-                )
+        evidence = TrustedKnowledgeEvidenceLink
+        link = TrustedKnowledgeApprovalLink
+        source_join = cast(Source.id, String(128)) == evidence.canonical_source_id
+        parser_match_count = (
+            select(func.count(DocumentParserRun.id))
+            .select_from(DocumentParserRun)
+            .join(Document, Document.id == DocumentParserRun.document_id)
+            .where(
+                Document.source_id == Source.id,
+                Document.current_document_version_id
+                == DocumentParserRun.document_version_id,
+                DocumentParserRun.source_id == Source.id,
+                DocumentParserRun.server_content_signature_schema
+                == 'server-source-content:v1',
+                DocumentParserRun.server_content_signature
+                == Source.server_content_signature,
+                DocumentParserRun.parser_policy_version.is_not(None),
+                DocumentParserRun.parser_version.is_not(None),
+                DocumentParserRun.chunk_policy_version.is_not(None),
+                DocumentParserRun.revision_id
+                == evidence.canonical_version_or_signature,
+            )
+            .correlate(Source, evidence)
+            .scalar_subquery()
+        )
+        evidence_is_current = and_(
+            Source.id.is_not(None),
+            Source.source_type == evidence.canonical_source_kind,
+            Source.server_content_signature_schema
+            == 'server-source-content:v1',
+            Source.server_content_signature.is_not(None),
+            Source.permission_level.in_(_KNOWN_SERVING_PERMISSIONS),
+            or_(
+                evidence.canonical_version_or_signature
+                == Source.server_content_signature,
+                parser_match_count == 1,
+            ),
+        )
+        stale_source_ids = set(
+            self._db.scalars(
+                select(evidence.canonical_source_id)
+                .select_from(evidence)
+                .join(link, link.id == evidence.approval_link_id)
+                .outerjoin(Source, source_join)
                 .where(
-                    TrustedKnowledgeApprovalLink.active.is_(True),
-                    TrustedKnowledgeApprovalLink.resolution_source
-                    == 'auto_policy',
+                    link.active.is_(True),
+                    link.resolution_source == 'auto_policy',
+                    ~evidence_is_current,
                 )
-                .order_by(
-                    TrustedKnowledgeEvidenceLink.canonical_source_id,
-                    TrustedKnowledgeEvidenceLink.id,
-                )
-                .limit(min(400, limit * 4))
+                .distinct()
+                .order_by(evidence.canonical_source_id)
+                .limit(limit)
             ).all()
         )
-        stale: set[int] = set()
-        for evidence, link in rows:
-            source_id = _source_id(evidence.canonical_source_id)
-            if source_id is None:
-                continue
-            source = self._db.get(Source, source_id)
-            if (
-                not _evidence_is_current(self._db, source, evidence)
-                or self._permission_reconciliation_needed(link, source)
-            ):
-                stale.add(source_id)
-            if len(stale) == limit:
-                break
-        return sorted(stale)[:limit]
+        target_branches = (
+            (DecisionRecord, ('decision_record', 'decision')),
+            (HistoryEvent, ('history_event',)),
+            (TimelineEvent, ('timeline_event',)),
+            (Todo, ('todo',)),
+        )
+        for target, knowledge_types in target_branches:
+            fingerprint = TrustedKnowledgeFingerprint
+            permission_rank = _permission_rank_expression
+            core_permissions = (
+                target.permission_level,
+                ReviewItem.permission_level,
+                link.permission_level,
+            )
+            authoritative_permissions = (*core_permissions, Source.permission_level)
+            permission_is_stale = or_(
+                *(level.not_in(_PERMISSION_RANK) for level in core_permissions),
+                and_(
+                    fingerprint.id.is_not(None),
+                    fingerprint.permission_level.not_in(_PERMISSION_RANK),
+                ),
+                *(
+                    permission_rank(current) < permission_rank(authority)
+                    for current in core_permissions
+                    for authority in authoritative_permissions
+                ),
+                *(
+                    and_(
+                        fingerprint.id.is_not(None),
+                        permission_rank(fingerprint.permission_level)
+                        < permission_rank(authority),
+                    )
+                    for authority in authoritative_permissions
+                ),
+            )
+            stale_source_ids.update(
+                self._db.scalars(
+                    select(evidence.canonical_source_id)
+                    .select_from(evidence)
+                    .join(link, link.id == evidence.approval_link_id)
+                    .join(Source, source_join)
+                    .join(ReviewItem, ReviewItem.id == link.review_item_id)
+                    .join(target, target.id == link.knowledge_id)
+                    .outerjoin(
+                        fingerprint,
+                        and_(
+                            fingerprint.knowledge_type == link.knowledge_type,
+                            fingerprint.knowledge_id == link.knowledge_id,
+                        ),
+                    )
+                    .where(
+                        link.active.is_(True),
+                        link.resolution_source == 'auto_policy',
+                        link.knowledge_type.in_(knowledge_types),
+                        evidence_is_current,
+                        permission_is_stale,
+                    )
+                    .distinct()
+                    .order_by(evidence.canonical_source_id)
+                    .limit(limit)
+                ).all()
+            )
+        return sorted(
+            source_id
+            for value in stale_source_ids
+            if (source_id := _source_id(value)) is not None
+        )[:limit]
 
     def _permission_reconciliation_needed(
         self,
@@ -664,3 +788,12 @@ def _strictest_many(*levels: str) -> str:
     if any(level not in _PERMISSION_RANK for level in levels):
         return 'restricted'
     return max(levels, key=_PERMISSION_RANK.__getitem__)
+
+
+def _permission_rank_expression(column: object) -> object:
+    return case(
+        (column == 'public', _PERMISSION_RANK['public']),
+        (column == 'internal', _PERMISSION_RANK['internal']),
+        (column == 'restricted', _PERMISSION_RANK['restricted']),
+        else_=len(_PERMISSION_RANK),
+    )
