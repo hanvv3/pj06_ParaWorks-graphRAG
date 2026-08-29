@@ -18,6 +18,7 @@ from backend.app.models import (
     AutoReviewPostAudit,
     AutoReviewRevocationAssessment,
     AutoReviewRuntimeKeyState,
+    DecisionRecord,
     HistoryEvent,
     ReviewItem,
     Source,
@@ -482,6 +483,58 @@ def test_revoke_marks_only_the_selected_reaffirmation_link(
     assert db_session.get(TrustedKnowledgeApprovalLink, selected.id).active is False
     assert db_session.get(TrustedKnowledgeApprovalLink, other_link.id).active is True
     assert db_session.get(HistoryEvent, history.id).review_status == 'approved'
+
+
+def test_legacy_decision_revoke_counts_canonical_same_target_provenance(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_revoke import AutoReviewRevokeService
+
+    settings = Settings(database_url='sqlite://')
+    _, selected_item, _, selected_link = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+    )
+    decision = DecisionRecord(
+        project_key='project-a',
+        title='Shared canonical decision',
+        decision_summary='Two alias spellings prove one target',
+        source_links=selected_item.source_links,
+        source_snippets=selected_item.source_snippets,
+        confidence_score=0.99,
+        permission_level='internal',
+        review_status='approved',
+        source_review_item_id=selected_item.id,
+    )
+    db_session.add(decision)
+    db_session.flush()
+    selected_item.item_type = 'decision_record'
+    selected_link.knowledge_type = 'decision'
+    selected_link.knowledge_id = decision.id
+    _, survivor_item, _, survivor_link = _seed_explicit_history(
+        db_session,
+        resolution_source='human',
+        current_signature='b' * 64,
+        evidence_signature='b' * 64,
+    )
+    survivor_item.item_type = 'decision_record'
+    survivor_link.knowledge_type = 'decision_record'
+    survivor_link.knowledge_id = decision.id
+    db_session.commit()
+    _seed_revoke_runtime(db_session, settings)
+
+    result = AutoReviewRevokeService(db_session, settings=settings).revoke(
+        review_item_id=selected_item.id,
+        actor=human_review_actor(USERS['admin']),
+        reason_code='business_withdrawal',
+    )
+
+    assert result.knowledge_remains_trusted is True
+    assert result.revoked_document_count == 0
+    assert selected_link.active is False
+    assert survivor_link.active is True
+    assert decision.review_status == 'approved'
+    assert db_session.query(VectorServingTombstone).count() == 0
 
 
 def test_broken_active_row_is_not_surviving_provenance(

@@ -504,6 +504,83 @@ def test_public_to_internal_reconciliation_narrows_target_and_vector_without_emb
     assert writer.permission_narrowings == [(('history_event:1',), 'internal')]
 
 
+def test_legacy_decision_narrowing_updates_canonical_fingerprint(
+    db_session: Session,
+) -> None:
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    _, item, source, link = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+    )
+    decision = DecisionRecord(
+        project_key='project-a',
+        title='Canonical decision permission',
+        decision_summary='Legacy alias permission evidence',
+        source_links=item.source_links,
+        source_snippets=item.source_snippets,
+        confidence_score=0.99,
+        permission_level='public',
+        review_status='approved',
+        source_review_item_id=item.id,
+    )
+    db_session.add(decision)
+    db_session.flush()
+    link.knowledge_type = 'decision'
+    link.knowledge_id = decision.id
+    link.permission_level = 'public'
+    item.item_type = 'decision_record'
+    item.permission_level = 'public'
+    fingerprint = TrustedKnowledgeFingerprint(
+        knowledge_type='decision_record',
+        knowledge_id=decision.id,
+        security_scope_id='workspace-a',
+        scope_resolution='exact',
+        project_scope_hmac='a' * 64,
+        normalized_title_bucket_hmac='b' * 64,
+        normalized_claim_fingerprint='c' * 64,
+        fingerprint_key_version=link.fingerprint_key_version,
+        fingerprint_key_material_verifier=(link.fingerprint_key_material_verifier),
+        permission_level='public',
+        review_status='approved',
+    )
+    document_id = f'decision_record:{decision.id}'
+    index_state = VectorIndexState(
+        document_id=document_id,
+        embedding_model='fake:8',
+        embedding_dimensions=8,
+        content_hash='0' * 64,
+        status='indexed',
+    )
+    db_session.add_all([fingerprint, index_state])
+    db_session.commit()
+    writer = PreviewVectorIndexWriter()
+
+    first = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=writer,
+    ).recover_stale_sources(limit=1)
+    replay = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=writer,
+    ).recover_stale_sources(limit=1)
+
+    assert first.narrowed_count == 1
+    assert first.remaining_count == 0
+    assert decision.permission_level == 'internal'
+    assert link.permission_level == 'internal'
+    assert item.permission_level == 'internal'
+    assert fingerprint.permission_level == 'internal'
+    assert writer.permission_narrowings == [((document_id,), 'internal')]
+    assert index_state.content_hash != '0' * 64
+    assert replay.reconciled_count == 0
+    assert replay.remaining_count == 0
+
+
 def test_stricter_fingerprint_is_not_permission_authority_or_recovery_work(
     db_session: Session,
 ) -> None:

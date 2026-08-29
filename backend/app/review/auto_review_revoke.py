@@ -20,7 +20,10 @@ from backend.app.knowledge.trusted_provenance import has_legacy_human_base
 from backend.app.knowledge.trusted_serving_eligibility import (
     TrustedServingEligibilityService,
     canonical_evidence_version_is_current,
+    canonical_knowledge_document_id,
+    canonical_knowledge_type,
     knowledge_model_for_type,
+    knowledge_type_storage_aliases,
 )
 from backend.app.models import (
     AutoReviewAuditCorrection,
@@ -189,7 +192,10 @@ class AutoReviewRevokeService:
             ).all()
         )
         planned_documents = sorted({
-            f'{link.knowledge_type}:{link.knowledge_id}'
+            canonical_knowledge_document_id(
+                link.knowledge_type,
+                link.knowledge_id,
+            )
             for link in planned_links
         })
         if not planned_documents:
@@ -284,7 +290,10 @@ class AutoReviewRevokeService:
                     raise AutoReviewRevokeRefused('provenance_target_missing')
                 target.review_status = 'revoked'
                 documents_to_revoke.append(
-                    f'{link.knowledge_type}:{link.knowledge_id}'
+                    canonical_knowledge_document_id(
+                        link.knowledge_type,
+                        link.knowledge_id,
+                    )
                 )
 
             documents_to_revoke = sorted(set(documents_to_revoke))
@@ -533,8 +542,9 @@ class AutoReviewRevokeService:
     ) -> bool:
         remaining = tuple(self._db.scalars(
             select(TrustedKnowledgeApprovalLink.id).where(
-                TrustedKnowledgeApprovalLink.knowledge_type
-                == selected.knowledge_type,
+                TrustedKnowledgeApprovalLink.knowledge_type.in_(
+                    knowledge_type_storage_aliases(selected.knowledge_type)
+                ),
                 TrustedKnowledgeApprovalLink.knowledge_id == selected.knowledge_id,
                 TrustedKnowledgeApprovalLink.id != selected.id,
                 TrustedKnowledgeApprovalLink.active.is_(True),
@@ -546,7 +556,7 @@ class AutoReviewRevokeService:
             for link_id in remaining
         ) or has_legacy_human_base(
             self._db,
-            knowledge_type=selected.knowledge_type,
+            knowledge_type=canonical_knowledge_type(selected.knowledge_type),
             knowledge_id=selected.knowledge_id,
         )
 

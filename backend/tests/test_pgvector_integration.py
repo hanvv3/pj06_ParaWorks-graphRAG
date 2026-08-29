@@ -1,4 +1,5 @@
 import os
+from contextlib import contextmanager
 from dataclasses import replace
 from uuid import uuid4
 
@@ -31,7 +32,9 @@ from backend.app.models import (
     Source,
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
+    TrustedKnowledgeFingerprint,
     VectorIndexState,
+    VectorServingTombstone,
 )
 from backend.app.rag.embeddings import DeterministicHashEmbeddingModel
 from backend.app.rag.indexing import (
@@ -110,6 +113,142 @@ def _seed_pg_schedule(
         if candidate.document_id == document_id
     )
     return history, item, source, store, document
+
+
+def _convert_pg_schedule_to_decision(
+    db,
+    *,
+    history: HistoryEvent,
+    item: ReviewItem,
+    knowledge_type: str,
+    permission_level: str,
+) -> tuple[DecisionRecord, TrustedKnowledgeApprovalLink, VectorDocument]:
+    decision = DecisionRecord(
+        project_key='project-a',
+        title='Canonical decision',
+        decision_summary='Legacy decision mutation evidence',
+        source_links=item.source_links,
+        source_snippets=item.source_snippets,
+        confidence_score=0.99,
+        permission_level=permission_level,
+        review_status='approved',
+        source_review_item_id=item.id,
+    )
+    db.add(decision)
+    db.flush()
+    link = (
+        db.query(TrustedKnowledgeApprovalLink)
+        .filter_by(
+            knowledge_type='history_event',
+            knowledge_id=history.id,
+        )
+        .one()
+    )
+    link.knowledge_type = knowledge_type
+    link.knowledge_id = decision.id
+    link.permission_level = permission_level
+    item.item_type = 'decision_record'
+    item.permission_level = permission_level
+    db.commit()
+    document_id = f'decision_record:{decision.id}'
+    document = next(
+        candidate
+        for candidate in build_rag_index_documents(db)
+        if candidate.document_id == document_id
+    )
+    return decision, link, document
+
+
+def _add_canonical_decision_fingerprint(
+    db,
+    *,
+    decision: DecisionRecord,
+    link: TrustedKnowledgeApprovalLink,
+    permission_level: str,
+) -> TrustedKnowledgeFingerprint:
+    fingerprint = TrustedKnowledgeFingerprint(
+        knowledge_type='decision_record',
+        knowledge_id=decision.id,
+        security_scope_id='workspace-a',
+        scope_resolution='exact',
+        project_scope_hmac='a' * 64,
+        normalized_title_bucket_hmac='b' * 64,
+        normalized_claim_fingerprint='c' * 64,
+        fingerprint_key_version=link.fingerprint_key_version,
+        fingerprint_key_material_verifier=link.fingerprint_key_material_verifier,
+        permission_level=permission_level,
+        review_status='approved',
+    )
+    db.add(fingerprint)
+    db.commit()
+    return fingerprint
+
+
+@contextmanager
+def _pgvector_test_db(database_url: str):
+    engine = create_engine(database_url)
+    session_local = sessionmaker(bind=engine)
+    table_name = f'rag_vector_documents_test_{uuid4().hex[:8]}'
+    settings = Settings(database_url=database_url, openai_embedding_dimensions=8)
+    Base.metadata.create_all(engine)
+    try:
+        with session_local() as db:
+            yield db, table_name, settings
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text(f'DROP TABLE IF EXISTS {table_name}'))
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def _seed_pg_decision_schedule(
+    db,
+    *,
+    table_name: str,
+    settings: Settings,
+    knowledge_type: str,
+    permission_level: str,
+):
+    history, item, source, store, _ = _seed_pg_schedule(
+        db,
+        table_name=table_name,
+        settings=settings,
+    )
+    source.permission_level = permission_level
+    db.commit()
+    decision, link, document = _convert_pg_schedule_to_decision(
+        db,
+        history=history,
+        item=item,
+        knowledge_type=knowledge_type,
+        permission_level=permission_level,
+    )
+    fingerprint = _add_canonical_decision_fingerprint(
+        db,
+        decision=decision,
+        link=link,
+        permission_level=permission_level,
+    )
+    return decision, item, source, link, fingerprint, store, document
+
+
+def _index_pg_test_document(
+    db,
+    *,
+    document: VectorDocument,
+    store: PgVectorStore,
+    model_name: str,
+    settings: Settings,
+) -> None:
+    indexed = index_changed_vector_documents(
+        db=db,
+        documents=[document],
+        writer=store,
+        embedding_model=DeterministicHashEmbeddingModel(dimensions=8),
+        embedding_model_name=model_name,
+        settings=settings,
+    )
+    assert indexed.indexed_count == 1
 
 
 def test_startup_recovery_removes_stale_physical_pgvector_before_ready() -> None:
@@ -533,6 +672,190 @@ def test_pgvector_live_filter_accepts_legacy_decision_link_under_canonical_id(
     finally:
         Base.metadata.drop_all(engine)
         engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'),
+    reason='set PARAWORKS_PGVECTOR_TEST_DATABASE_URL to run pgvector integration test',
+)
+def test_pgvector_legacy_decision_permission_recovery_narrows_canonical_fingerprint(
+) -> None:
+    database_url = os.environ['PARAWORKS_PGVECTOR_TEST_DATABASE_URL']
+    with _pgvector_test_db(database_url) as (db, table_name, settings):
+        decision, item, source, link, fingerprint, store, document = (
+            _seed_pg_decision_schedule(
+                db,
+                table_name=table_name,
+                settings=settings,
+                knowledge_type='decision',
+                permission_level='public',
+            )
+        )
+        _index_pg_test_document(
+            db,
+            document=document,
+            store=store,
+            model_name='deterministic-hash:legacy-permission',
+            settings=settings,
+        )
+        source.permission_level = 'internal'
+        db.commit()
+
+        first = AutoReviewSourceReconciliationService(
+            db,
+            settings=settings,
+            vector_writer=store,
+        ).recover_stale_sources(limit=1)
+        replay = AutoReviewSourceReconciliationService(
+            db,
+            settings=settings,
+            vector_writer=store,
+        ).recover_stale_sources(limit=1)
+
+        assert first.narrowed_count == 1
+        assert first.remaining_count == 0
+        assert decision.permission_level == 'internal'
+        assert link.permission_level == 'internal'
+        assert item.permission_level == 'internal'
+        assert fingerprint.permission_level == 'internal'
+        assert db.scalar(
+            text(
+                f'SELECT permission_level FROM {table_name} '
+                'WHERE document_id = :document_id'
+            ),
+            {'document_id': document.document_id},
+        ) == 'internal'
+        assert replay.reconciled_count == 0
+        assert replay.remaining_count == 0
+
+
+@pytest.mark.parametrize('knowledge_type', ['decision', 'decision_record'])
+@pytest.mark.skipif(
+    not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'),
+    reason='set PARAWORKS_PGVECTOR_TEST_DATABASE_URL to run pgvector integration test',
+)
+def test_pgvector_decision_source_invalidation_revokes_canonical_artifacts(
+    knowledge_type: str,
+) -> None:
+    database_url = os.environ['PARAWORKS_PGVECTOR_TEST_DATABASE_URL']
+    with _pgvector_test_db(database_url) as (db, table_name, settings):
+        decision, item, source, link, fingerprint, store, document = (
+            _seed_pg_decision_schedule(
+                db,
+                table_name=table_name,
+                settings=settings,
+                knowledge_type=knowledge_type,
+                permission_level='internal',
+            )
+        )
+        fingerprint_id = fingerprint.id
+        _index_pg_test_document(
+            db,
+            document=document,
+            store=store,
+            model_name=f'deterministic-hash:revoke-{knowledge_type}',
+            settings=settings,
+        )
+        source.permission_level = 'restricted'
+        db.commit()
+
+        first = AutoReviewSourceReconciliationService(
+            db,
+            settings=settings,
+            vector_writer=store,
+        ).recover_stale_sources(limit=1)
+        replay = AutoReviewSourceReconciliationService(
+            db,
+            settings=settings,
+            vector_writer=store,
+        ).recover_stale_sources(limit=1)
+
+        assert first.revoked_count == 1
+        assert first.remaining_count == 0
+        assert replay.reconciled_count == 0
+        assert replay.remaining_count == 0
+        assert item.status == 'revoked'
+        assert link.active is False
+        assert decision.review_status == 'revoked'
+        assert db.scalar(text(f'SELECT count(*) FROM {table_name}')) == 0
+        assert db.scalar(
+            select(VectorServingTombstone.id).where(
+                VectorServingTombstone.document_id == document.document_id
+            )
+        ) is not None
+        assert db.get(TrustedKnowledgeFingerprint, fingerprint_id) is None
+        assert db.scalar(
+            select(VectorIndexState.id).where(
+                VectorIndexState.document_id == document.document_id
+            )
+        ) is None
+        if knowledge_type == 'decision':
+            assert db.scalar(
+                select(VectorServingTombstone.id).where(
+                    VectorServingTombstone.document_id == f'decision:{decision.id}'
+                )
+            ) is None
+
+
+@pytest.mark.skipif(
+    not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'),
+    reason='set PARAWORKS_PGVECTOR_TEST_DATABASE_URL to run pgvector integration test',
+)
+def test_pgvector_legacy_decision_invalidation_preserves_canonical_provenance(
+) -> None:
+    database_url = os.environ['PARAWORKS_PGVECTOR_TEST_DATABASE_URL']
+    with _pgvector_test_db(database_url) as (db, table_name, settings):
+        decision, item, source, selected_link, fingerprint, store, document = (
+            _seed_pg_decision_schedule(
+                db,
+                table_name=table_name,
+                settings=settings,
+                knowledge_type='decision',
+                permission_level='internal',
+            )
+        )
+        _, survivor_item, _, survivor_link = _seed_explicit_history(
+            db,
+            resolution_source='human',
+            current_signature='b' * 64,
+            evidence_signature='b' * 64,
+        )
+        survivor_item.item_type = 'decision_record'
+        survivor_link.knowledge_type = 'decision_record'
+        survivor_link.knowledge_id = decision.id
+        db.commit()
+        _index_pg_test_document(
+            db,
+            document=document,
+            store=store,
+            model_name='deterministic-hash:legacy-provenance',
+            settings=settings,
+        )
+        source.permission_level = 'restricted'
+        db.commit()
+
+        first = AutoReviewSourceReconciliationService(
+            db,
+            settings=settings,
+            vector_writer=store,
+        ).recover_stale_sources(limit=1)
+        replay = AutoReviewSourceReconciliationService(
+            db,
+            settings=settings,
+            vector_writer=store,
+        ).recover_stale_sources(limit=1)
+
+        assert first.revoked_count == 1
+        assert first.remaining_count == 0
+        assert replay.reconciled_count == 0
+        assert replay.remaining_count == 0
+        assert item.status == 'revoked'
+        assert selected_link.active is False
+        assert survivor_link.active is True
+        assert decision.review_status == 'approved'
+        assert db.scalar(text(f'SELECT count(*) FROM {table_name}')) == 1
+        assert db.query(VectorServingTombstone).count() == 0
+        assert db.get(TrustedKnowledgeFingerprint, fingerprint.id) is not None
 
 
 @pytest.mark.skipif(

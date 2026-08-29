@@ -38,6 +38,7 @@ from backend.app.knowledge.trusted_fingerprint_projection import (
 from backend.app.knowledge.trusted_serving_eligibility import (
     canonical_evidence_version_is_current,
     canonical_knowledge_document_id,
+    canonical_knowledge_type,
     knowledge_model_for_type,
 )
 from backend.app.models import (
@@ -649,7 +650,8 @@ class AutoReviewSourceReconciliationService:
     ) -> bool:
         row = self._db.scalar(
             select(TrustedKnowledgeFingerprint).where(
-                TrustedKnowledgeFingerprint.knowledge_type == knowledge_type,
+                TrustedKnowledgeFingerprint.knowledge_type
+                == canonical_knowledge_type(knowledge_type),
                 TrustedKnowledgeFingerprint.knowledge_id == knowledge_id,
             )
         )
@@ -664,10 +666,14 @@ class AutoReviewSourceReconciliationService:
                 == 'trusted_knowledge_fingerprints'
             )
         )
-        old_snapshot = snapshot_from_projection(row)
+        old_snapshot = (
+            snapshot_from_projection(row)
+            if row.knowledge_type in {'history_event', 'timeline_event'}
+            else None
+        )
         row.permission_level = narrowed
         row.updated_at = datetime.now(UTC)
-        if state is None:
+        if state is None or old_snapshot is None:
             return True
         try:
             old_digest = projection_row_digest(old_snapshot, settings=self._settings)
@@ -799,7 +805,8 @@ def _permission_reconciliation_exists(
             .outerjoin(
                 fingerprint,
                 and_(
-                    fingerprint.knowledge_type == link.knowledge_type,
+                    fingerprint.knowledge_type
+                    == canonical_knowledge_type(knowledge_type),
                     fingerprint.knowledge_id == link.knowledge_id,
                 ),
             )
