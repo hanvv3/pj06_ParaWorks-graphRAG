@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 
@@ -26,6 +26,7 @@ from backend.app.ingestion.source_content_signature import (
     connector_content_signature,
     normalize_source_permission,
     server_parser_policy_for_event,
+    source_state_primary_code,
 )
 from backend.app.ingestion.source_versions import SourceVersionRef, source_version_refs
 from backend.app.models import (
@@ -112,6 +113,9 @@ def ingest_events_with_result(
     *,
     vector_writer: VectorIndexWriter | None = None,
     settings: Settings | None = None,
+    authenticated_source_metadata_by_id: Mapping[
+        str, Mapping[str, object]
+    ] | None = None,
 ) -> IngestionResult:
     resolved_settings = settings or get_settings()
     production_vector_mutation = bool(
@@ -137,6 +141,9 @@ def ingest_events_with_result(
                 vector_writer=vector_writer,
                 settings=resolved_settings,
                 key_context=key_context,
+                authenticated_source_metadata_by_id=(
+                    authenticated_source_metadata_by_id or {}
+                ),
             )
     except Exception:
         db.rollback()
@@ -150,6 +157,9 @@ def _ingest_events_transaction(
     vector_writer: VectorIndexWriter | None,
     settings: Settings,
     key_context: KeyGenerationLockedContext | None,
+    authenticated_source_metadata_by_id: Mapping[
+        str, Mapping[str, object]
+    ],
 ) -> IngestionResult:
     existing_sources = _locked_sources_by_external_id(
         db, [event.source_id for event in events]
@@ -162,6 +172,7 @@ def _ingest_events_transaction(
 
     for event in events:
         existing_source = existing_sources.get(event.source_id)
+        _validate_source_event_identity(event, existing_source=existing_source)
         if event.source_type == 'slack':
             if _legacy_slack_event_is_unchanged(existing_source, event):
                 skipped_events += 1
@@ -187,7 +198,11 @@ def _ingest_events_transaction(
             computed_signature=computed_signature,
             parser_policy=parser_policy,
         )
-        if classification.primary_code == 'unchanged':
+        if not (
+            classification.content_changed
+            or classification.permission_changed
+            or classification.parser_policy_changed
+        ):
             _advance_unchanged_operational_state(
                 source=existing_source,
                 event=event,
@@ -200,6 +215,9 @@ def _ingest_events_transaction(
             event=event,
             existing_source=existing_source,
             signature=computed_signature,
+            authenticated_metadata=authenticated_source_metadata_by_id.get(
+                event.source_id
+            ),
         )
         existing_sources[event.source_id] = source
         changed_source_ids.append(event.source_id)
@@ -221,6 +239,7 @@ def _ingest_events_transaction(
                 event,
                 server_signature=computed_signature,
                 parser_policy=parser_policy,
+                canonical_permission_level=source.permission_level,
             )
             persist_parsed_document(
                 db,
@@ -231,6 +250,9 @@ def _ingest_events_transaction(
                     **_canonical_source_metadata(
                         event,
                         existing_metadata=source.raw_metadata,
+                        authenticated_metadata=authenticated_source_metadata_by_id.get(
+                            event.source_id
+                        ),
                     ),
                     'source_id': event.source_id,
                     'source_url': event.source_url,
@@ -268,7 +290,11 @@ def _ingest_events_transaction(
             content_changed=classification.content_changed,
             permission_changed=classification.permission_changed,
             parser_policy_changed=classification.parser_policy_changed,
-            primary_code=classification.primary_code,
+            primary_code=source_state_primary_code(
+                content_changed=classification.content_changed,
+                permission_changed=classification.permission_changed,
+                parser_policy_changed=classification.parser_policy_changed,
+            ),
         )
         for source, classification in changed_state_rows
     ]
@@ -279,6 +305,32 @@ def _ingest_events_transaction(
         changed_source_states=changed_states,
         skipped_events=skipped_events,
     )
+
+
+def _validate_source_event_identity(
+    event: SourceEvent,
+    *,
+    existing_source: Source | None,
+) -> None:
+    if (
+        existing_source is not None
+        and existing_source.source_type != event.source_type
+    ):
+        raise ValueError('source type conflicts with existing source')
+    if event.source_type in _C5_SOURCE_TYPES:
+        prefix = f'{event.source_type}:'
+        if (
+            event.source_id != event.source_id.strip()
+            or not event.source_id.startswith(prefix)
+            or event.source_id == prefix
+        ):
+            raise ValueError('source id does not match source type')
+        return
+    if event.source_type == 'slack' and any(
+        event.source_id.startswith(f'{source_type}:')
+        for source_type in _C5_SOURCE_TYPES
+    ):
+        raise ValueError('source id does not match source type')
 
 
 def _locked_sources_by_external_id(
@@ -354,11 +406,15 @@ def _upsert_c5_source(
     event: SourceEvent,
     existing_source: Source | None,
     signature: CanonicalSourceContentSignature,
+    authenticated_metadata: Mapping[str, object] | None,
 ) -> Source:
-    previous_metadata = existing_source.raw_metadata if existing_source else {}
+    previous_metadata = (
+        existing_source.raw_metadata if existing_source is not None else None
+    )
     metadata = _canonical_source_metadata(
         event,
         existing_metadata=previous_metadata,
+        authenticated_metadata=authenticated_metadata,
     )
     permission = normalize_source_permission(event.permission_level)
     if existing_source is None:
@@ -392,19 +448,25 @@ def _upsert_c5_source(
 def _canonical_source_metadata(
     event: SourceEvent,
     *,
-    existing_metadata: dict,
+    existing_metadata: Mapping[str, object] | None,
+    authenticated_metadata: Mapping[str, object] | None,
 ) -> dict:
     incoming = {
         key: value
         for key, value in event.raw_metadata.items()
         if key not in _CONNECTOR_AUTHORITY_KEYS
+        and key not in _SERVER_RESOLVED_METADATA_KEYS
     }
-    if existing_metadata:
+    if existing_metadata is not None:
         for key in _SERVER_RESOLVED_METADATA_KEYS:
             if key in existing_metadata:
                 incoming[key] = existing_metadata[key]
-            else:
-                incoming.pop(key, None)
+    if authenticated_metadata is not None:
+        unexpected = set(authenticated_metadata) - _SERVER_RESOLVED_METADATA_KEYS
+        if unexpected:
+            raise ValueError('authenticated source metadata contains unsupported keys')
+        for key, value in authenticated_metadata.items():
+            incoming.setdefault(key, value)
     incoming['participants'] = list(event.participants)
     incoming['semantic_timestamp_raw'] = event.semantic_timestamp_raw
     return incoming
@@ -447,7 +509,30 @@ def _current_parser_run(
             .order_by(DocumentParserRun.id)
         ).all()
     )
-    return runs[0] if len(runs) == 1 else None
+    if len(runs) != 1:
+        return None
+    parser_run = runs[0]
+    chunks = tuple(
+        db.scalars(
+            select(DocumentChunk)
+            .where(
+                DocumentChunk.version_id
+                == document.current_document_version_id
+            )
+            .order_by(DocumentChunk.chunk_index, DocumentChunk.id)
+        ).all()
+    )
+    if parser_run.chunk_count != len(chunks) or not chunks:
+        return None
+    if [chunk.chunk_index for chunk in chunks] != list(range(len(chunks))):
+        return None
+    if any(
+        chunk.source_id != source.id
+        or chunk.parser_run_id != parser_run.id
+        for chunk in chunks
+    ):
+        return None
+    return parser_run
 
 
 def _source_chunk_document_ids(db: Session, source_id: int) -> set[str]:

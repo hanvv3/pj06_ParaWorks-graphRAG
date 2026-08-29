@@ -24,12 +24,15 @@ def parsed_document_from_source_event(
     *,
     server_signature: CanonicalSourceContentSignature | None = None,
     parser_policy: ServerParserPolicy | None = None,
+    canonical_permission_level: str | None = None,
 ) -> ParsedDocument:
     metadata = event.raw_metadata
     document_version = str(metadata.get('document_version') or 'v1')
     revision_id = str(metadata.get('revision_id') or '')
     if (server_signature is None) != (parser_policy is None):
         raise ValueError('server signature and parser policy must be supplied together')
+    if server_signature is not None and canonical_permission_level is None:
+        raise ValueError('server parsing requires canonical permission')
     if server_signature is None:
         content_signature = str(
             metadata.get('content_signature') or f'{event.source_id}:{document_version}'
@@ -60,7 +63,11 @@ def parsed_document_from_source_event(
         source_id=event.source_id,
         source_url=event.source_url,
         source_snippet=source_snippet,
-        permission_level=event.permission_level,
+        permission_level=(
+            canonical_permission_level
+            if canonical_permission_level is not None
+            else event.permission_level
+        ),
         mime_type=mime_type,
         document_version=document_version,
         revision_id=revision_id,

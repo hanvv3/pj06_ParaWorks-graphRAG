@@ -209,20 +209,32 @@ def classify_source_state_change(
             or current_parser_run.mime_type != policy.mime_type
         )
     )
-    if content_changed:
-        primary_code = 'content_changed'
-    elif permission_changed:
-        primary_code = 'permission_changed'
-    elif parser_policy_changed:
-        primary_code = 'parser_policy_changed'
-    else:
-        primary_code = 'unchanged'
+    primary_code = source_state_primary_code(
+        content_changed=content_changed,
+        permission_changed=permission_changed,
+        parser_policy_changed=parser_policy_changed,
+    )
     return SourceStateChangeClassification(
         content_changed=content_changed,
         permission_changed=permission_changed,
         parser_policy_changed=parser_policy_changed,
         primary_code=primary_code,
     )
+
+
+def source_state_primary_code(
+    *,
+    content_changed: bool,
+    permission_changed: bool,
+    parser_policy_changed: bool,
+) -> str:
+    if content_changed:
+        return 'content_changed'
+    if permission_changed:
+        return 'permission_changed'
+    if parser_policy_changed:
+        return 'parser_policy_changed'
+    return 'unchanged'
 
 
 def normalize_source_permission(value: object) -> str:

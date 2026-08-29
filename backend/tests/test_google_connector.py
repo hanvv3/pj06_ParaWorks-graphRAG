@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from sqlalchemy.orm import Session
 
 from backend.app.connectors.google import (
     GOOGLE_CONNECTOR_SCOPES,
@@ -10,6 +11,9 @@ from backend.app.connectors.google import (
     GoogleConnectorConfig,
     GoogleWebApiClient,
 )
+from backend.app.core.config import Settings
+from backend.app.ingestion.sync import sync_connector_events
+from backend.app.models import Source
 
 
 class FakeGoogleClient:
@@ -174,6 +178,33 @@ def test_google_connector_maps_gmail_messages_to_source_events() -> None:
     assert event.raw_metadata['body_source'] == 'payload'
     assert event.raw_metadata['body_truncated'] is False
     assert event.semantic_timestamp_raw == '1777600800000'
+
+
+def test_google_sync_injects_authenticated_account_scope_and_security_context(
+    db_session: Session,
+) -> None:
+    connector = GoogleConnector(
+        config=GoogleConnectorConfig(
+            connector_type='gmail',
+            oauth_token='fake-google-oauth-token',
+            account_id='trusted-google-account',
+            account_name='para@example.com',
+        ),
+        client=FakeGoogleClient(),
+    )
+
+    sync_connector_events(
+        db=db_session,
+        connector=connector,
+        settings=Settings(agent_runtime_security_scope_id='trusted-scope'),
+    )
+
+    source = db_session.query(Source).one()
+    assert source.raw_metadata['account_id'] == 'trusted-google-account'
+    assert source.raw_metadata['required_scopes'] == list(
+        GOOGLE_CONNECTOR_SCOPES['gmail']
+    )
+    assert source.raw_metadata['security_scope_id'] == 'trusted-scope'
 
 
 def test_google_connector_decodes_encoded_gmail_sender_names() -> None:

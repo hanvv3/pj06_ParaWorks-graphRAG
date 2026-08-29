@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 import pytest
@@ -15,11 +15,21 @@ from backend.app.ingestion import sync as ingestion_sync
 from backend.app.ingestion.source_versions import SourceVersionRef
 from backend.app.ingestion.sync import sync_connector_events
 from backend.app.models import (
+    AgentRun,
+    AutoReviewExtractionCall,
+    AutoReviewValidation,
+    AutoReviewValidationCall,
     Document,
     DocumentChunk,
     DocumentParserRun,
+    ReviewItem,
     Source,
     SyncJob,
+)
+from backend.app.rag.embeddings import EmbeddingBatchResult
+from backend.app.rag.indexing import (
+    build_rag_index_documents,
+    index_changed_vector_documents,
 )
 
 
@@ -44,28 +54,30 @@ def source_event(source_id: str = 'contract-event-1') -> SourceEvent:
 
 def drive_source_event(
     *,
+    source_id: str = 'drive:file-1',
     version: str = '42',
     revision_id: str = 'rev-42',
     body: str = '휴가 신청은 HR 시스템에서 진행합니다.',
+    permission_level: str = 'restricted',
     parser_status: str = 'parsed',
     parser_status_reason: str | None = None,
 ) -> SourceEvent:
     return SourceEvent(
         source_type='drive',
-        source_id='drive:file-1',
-        source_url='https://drive.google.com/file/d/file-1/view',
+        source_id=source_id,
+        source_url=f'https://drive.google.com/file/d/{source_id.removeprefix("drive:")}/view',
         title='휴가 정책',
         body=body,
         author='owner@example.com',
         participants=['owner@example.com'],
         timestamp=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
-        permission_level='restricted',
+        permission_level=permission_level,
         raw_metadata={
             'sync_partition': 'drive',
             'sync_cursor': '2026-05-01T09:00:00Z',
             'document_version': version,
             'revision_id': revision_id,
-            'content_signature': f'drive:file-1:{version}:{revision_id}',
+            'content_signature': f'{source_id}:{version}:{revision_id}',
             'parser_name': 'google_drive_text_export',
             'parser_status': parser_status,
             'parser_status_reason': parser_status_reason,
@@ -551,6 +563,183 @@ def test_permission_change_is_visible_to_preflight_before_any_provider_call(
     )
 
     assert observed_permissions == ['restricted']
+
+
+def test_policy_rechunk_reindex_embeds_only_changed_content_after_incremental_skip(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = drive_source_event(
+        source_id='drive:file-1',
+        body='First source original body.',
+        permission_level='internal',
+    )
+    second = drive_source_event(
+        source_id='drive:file-2',
+        body='Second source remains unchanged.',
+        permission_level='internal',
+    )
+    ingestion_service.ingest_events_with_result(db_session, [first, second])
+    for event in (first, second):
+        db_session.add(
+            ReviewItem(
+                item_type='history_event',
+                payload={
+                    'title': 'Approved source chunk',
+                    'summary': 'Human-approved source for incremental indexing.',
+                    'source_ids': [event.source_id],
+                },
+                source_links=[event.source_url],
+                source_snippets=[event.body],
+                confidence_score=0.9,
+                permission_level='internal',
+                status='approved',
+            )
+        )
+    db_session.commit()
+
+    class RecordingBatchEmbeddingModel:
+        dimensions = 2
+
+        def __init__(self) -> None:
+            self.batches: list[list[str]] = []
+
+        def embed(self, text: str) -> list[float]:
+            raise AssertionError('incremental indexing must batch provider calls')
+
+        def embed_many(self, texts: list[str]) -> EmbeddingBatchResult:
+            self.batches.append(list(texts))
+            return EmbeddingBatchResult(
+                embeddings=[[1.0, 2.0] for _ in texts],
+                request_count=1 if texts else 0,
+            )
+
+    class RecordingIndexWriter:
+        def __init__(self) -> None:
+            self.document_ids: list[str] = []
+
+        def upsert_with_embedding(self, document, embedding) -> None:
+            self.document_ids.append(document.document_id)
+
+    embedding = RecordingBatchEmbeddingModel()
+    writer = RecordingIndexWriter()
+    index_changed_vector_documents(
+        db=db_session,
+        documents=build_rag_index_documents(db_session),
+        writer=writer,
+        embedding_model=embedding,
+        embedding_model_name='fake-embedding',
+    )
+    assert embedding.batches == [
+        ['First source original body.', 'Second source remains unchanged.']
+    ]
+    embedding.batches.clear()
+    writer.document_ids.clear()
+    queued_jobs: list[str] = []
+    reindex_results = []
+    handoff_order: list[str] = []
+    real_reconciliation_service = (
+        ingestion_sync.AutoReviewSourceReconciliationService
+    )
+
+    class RecordingReconciliationService:
+        def __init__(self, db, *, settings, vector_writer=None) -> None:
+            self.delegate = real_reconciliation_service(
+                db,
+                settings=settings,
+                vector_writer=vector_writer,
+            )
+
+        def reconcile(self, changed_states):
+            handoff_order.append('reconciled')
+            return self.delegate.reconcile(changed_states)
+
+    monkeypatch.setattr(
+        ingestion_sync,
+        'AutoReviewSourceReconciliationService',
+        RecordingReconciliationService,
+    )
+
+    def execute_fake_incremental_reindex(job_id: str) -> None:
+        assert handoff_order[-1] == 'reconciled'
+        handoff_order.append('enqueued')
+        queued_jobs.append(job_id)
+        queued_job = (
+            db_session.query(SyncJob)
+            .filter(SyncJob.job_id == job_id)
+            .one()
+        )
+        assert queued_job.status == 'queued'
+        reindex_results.append(
+            index_changed_vector_documents(
+                db=db_session,
+                documents=build_rag_index_documents(db_session),
+                writer=writer,
+                embedding_model=embedding,
+                embedding_model_name='fake-embedding',
+            )
+        )
+
+    changed = replace(first, body='First source changed body.')
+    sync_connector_events(
+        db=db_session,
+        connector=DriveContentSignatureConnector([changed]),
+        incremental_reindex_enqueuer=execute_fake_incremental_reindex,
+    )
+
+    assert len(queued_jobs) == 1
+    assert embedding.batches == [['First source changed body.']]
+    assert reindex_results[-1].indexed_count == 1
+    assert reindex_results[-1].skipped_count == 1
+
+    real_policy = ingestion_service.server_parser_policy_for_event
+    monkeypatch.setattr(
+        ingestion_service,
+        'server_parser_policy_for_event',
+        lambda event: replace(
+            real_policy(event),
+            chunk_policy_version='paragraph-chunks:1200:v2',
+        ),
+    )
+    sync_connector_events(
+        db=db_session,
+        connector=DriveContentSignatureConnector([changed]),
+        incremental_reindex_enqueuer=execute_fake_incremental_reindex,
+    )
+
+    assert len(queued_jobs) == 2
+    assert embedding.batches == [
+        ['First source changed body.'],
+        ['First source changed body.'],
+    ]
+    assert db_session.query(ReviewItem).count() == 2
+    assert db_session.query(AgentRun).count() == 0
+    assert db_session.query(AutoReviewExtractionCall).count() == 0
+    assert db_session.query(AutoReviewValidationCall).count() == 0
+    assert db_session.query(AutoReviewValidation).count() == 0
+    assert embedding.batches[-1] == ['First source changed body.']
+
+    restricted = replace(changed, permission_level='restricted')
+    sync_connector_events(
+        db=db_session,
+        connector=DriveContentSignatureConnector([restricted]),
+        incremental_reindex_enqueuer=execute_fake_incremental_reindex,
+    )
+    sync_connector_events(
+        db=db_session,
+        connector=DriveContentSignatureConnector([restricted]),
+        incremental_reindex_enqueuer=execute_fake_incremental_reindex,
+    )
+
+    assert len(queued_jobs) == 2
+    assert len(embedding.batches) == 2
+    assert handoff_order == [
+        'reconciled',
+        'enqueued',
+        'reconciled',
+        'enqueued',
+        'reconciled',
+    ]
 
 
 def test_unchanged_event_performs_zero_reconciliation(

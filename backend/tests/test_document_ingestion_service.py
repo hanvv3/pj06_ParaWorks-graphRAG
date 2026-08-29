@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy.orm import Session
 
 from backend.app.connectors.base import SourceEvent
@@ -73,6 +74,20 @@ class RecordingVectorWriter:
         self.narrowings.append((normalized, permission_level))
         return len(normalized)
 
+
+def slack_event_for_id(source_id: str) -> SourceEvent:
+    return SourceEvent(
+        source_type='slack',
+        source_id=source_id,
+        source_url=f'https://slack.example.test/{source_id}',
+        title='Slack evidence',
+        body='Slack body must remain on the deferred legacy path.',
+        author='slack-user',
+        participants=['slack-user'],
+        timestamp=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+        permission_level='internal',
+        raw_metadata={'content_signature': 'slack-connector-signature'},
+    )
 
 def test_ingest_drive_parsed_document_preserves_parser_metadata(db_session: Session) -> None:
     event = drive_event()
@@ -253,6 +268,72 @@ def test_legacy_connector_only_signature_cannot_authorize_c5_skip_reuse_or_servi
     assert parser_run.server_content_signature == source.server_content_signature
 
 
+def test_slack_collision_cannot_mutate_a_signed_c5_source(
+    db_session: Session,
+) -> None:
+    ingest_events(db_session, [drive_event()])
+    source = db_session.query(Source).one()
+    document = db_session.query(Document).one()
+    original_signature = source.server_content_signature
+    original_pointer = document.current_document_version_id
+    original_title = source.title
+
+    with pytest.raises(ValueError, match='source type conflicts with existing source'):
+        ingest_events_with_result(
+            db_session,
+            [slack_event_for_id('drive:file-1')],
+        )
+
+    db_session.refresh(source)
+    db_session.refresh(document)
+    assert source.source_type == 'drive'
+    assert source.title == original_title
+    assert source.server_content_signature == original_signature
+    assert document.current_document_version_id == original_pointer
+    assert db_session.query(DocumentVersion).count() == 1
+
+
+def test_c5_collision_cannot_convert_a_legacy_slack_source(
+    db_session: Session,
+) -> None:
+    ingest_events(db_session, [slack_event_for_id('legacy-slack-id')])
+    source = db_session.query(Source).one()
+
+    with pytest.raises(ValueError, match='source type conflicts with existing source'):
+        ingest_events_with_result(
+            db_session,
+            [
+                SourceEvent(
+                    **{
+                        **drive_event().__dict__,
+                        'source_id': 'legacy-slack-id',
+                    }
+                )
+            ],
+        )
+
+    db_session.refresh(source)
+    assert source.source_type == 'slack'
+    assert source.server_content_signature is None
+    assert db_session.query(DocumentVersion).count() == 1
+
+
+def test_supported_google_source_id_must_match_source_type_prefix(
+    db_session: Session,
+) -> None:
+    malformed = SourceEvent(
+        **{
+            **drive_event().__dict__,
+            'source_id': 'drive-file-1',
+        }
+    )
+
+    with pytest.raises(ValueError, match='source id does not match source type'):
+        ingest_events_with_result(db_session, [malformed])
+
+    assert db_session.query(Source).count() == 0
+
+
 def test_server_parser_registry_ignores_connector_parser_chunk_and_snippet_authority(
     db_session: Session,
 ) -> None:
@@ -303,10 +384,110 @@ def test_parser_or_chunk_policy_upgrade_is_not_unchanged_and_reparses_without_ex
     assert current.current_document_version_id == newest.id
 
 
+@pytest.mark.parametrize(
+    'corruption',
+    [
+        'unbound_chunk',
+        'chunk_count_mismatch',
+        'missing_ordinal',
+        'duplicate_ordinal',
+        'wrong_source',
+        'missing_chunk',
+    ],
+)
+def test_malformed_current_parser_chunk_state_forces_bounded_reparse(
+    db_session: Session,
+    corruption: str,
+) -> None:
+    event = drive_event()
+    ingest_events(db_session, [event])
+    parser_run = db_session.query(DocumentParserRun).one()
+    chunk = db_session.query(DocumentChunk).one()
+    if corruption == 'unbound_chunk':
+        chunk.parser_run_id = None
+    elif corruption == 'chunk_count_mismatch':
+        parser_run.chunk_count = 2
+    elif corruption == 'missing_ordinal':
+        chunk.chunk_index = 1
+    elif corruption == 'duplicate_ordinal':
+        parser_run.chunk_count = 2
+        db_session.add(
+            DocumentChunk(
+                version_id=chunk.version_id,
+                source_id=chunk.source_id,
+                parser_run_id=None,
+                chunk_index=chunk.chunk_index,
+                text='duplicate legacy chunk',
+                source_snippet='duplicate legacy chunk',
+                permission_level=chunk.permission_level,
+                metadata_={},
+            )
+        )
+    elif corruption == 'wrong_source':
+        wrong_source = Source(
+            source_type='drive',
+            source_id='drive:wrong-file',
+            source_url='https://drive.google.com/file/d/wrong-file/view',
+            title='Wrong source',
+            author='wrong@example.com',
+            permission_level='restricted',
+            raw_metadata={},
+        )
+        db_session.add(wrong_source)
+        db_session.flush()
+        chunk.parser_run_id = None
+        chunk.source_id = wrong_source.id
+    else:
+        db_session.delete(chunk)
+    db_session.commit()
+
+    result = ingest_events_with_result(db_session, [event])
+
+    assert result.skipped_events == 0
+    assert result.changed_source_states[0].content_changed is False
+    assert result.changed_source_states[0].parser_policy_changed is True
+    assert db_session.query(DocumentVersion).count() == 2
+    document = db_session.query(Document).one()
+    current_chunks = (
+        db_session.query(DocumentChunk)
+        .filter(DocumentChunk.version_id == document.current_document_version_id)
+        .order_by(DocumentChunk.chunk_index)
+        .all()
+    )
+    current_run = current_chunks[0].parser_run_id
+    assert [current.chunk_index for current in current_chunks] == [0]
+    assert all(current.parser_run_id == current_run for current in current_chunks)
+
+
+def test_ingestion_control_uses_flags_even_when_primary_projection_says_unchanged(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = drive_event()
+    ingest_events(db_session, [event])
+    monkeypatch.setattr(
+        ingestion_service,
+        'classify_source_state_change',
+        lambda **_kwargs: ingestion_service.SourceStateChangeClassification(
+            content_changed=True,
+            permission_changed=False,
+            parser_policy_changed=False,
+            primary_code='unchanged',
+        ),
+    )
+
+    result = ingest_events_with_result(db_session, [event])
+
+    assert result.skipped_events == 0
+    assert result.changed_source_states[0].content_changed is True
+    assert result.changed_source_states[0].primary_code == 'content_changed'
+    assert db_session.query(DocumentVersion).count() == 2
+
+
 def test_unchanged_event_advances_safe_cursor_url_and_connector_signature_without_reparse_or_reconciliation(
     db_session: Session,
 ) -> None:
-    ingest_events(
+    ingest_events_with_result(
         db_session,
         [
             drive_event(
@@ -314,11 +495,15 @@ def test_unchanged_event_advances_safe_cursor_url_and_connector_signature_withou
                 extra_metadata={
                     'sync_cursor': 'cursor-a',
                     'sync_partition': 'drive',
-                    'account_id': 'server-owner-a',
-                    'required_scopes': ['drive.readonly'],
                 },
             )
         ],
+        authenticated_source_metadata_by_id={
+            'drive:file-1': {
+                'account_id': 'server-owner-a',
+                'required_scopes': ['drive.readonly'],
+            }
+        },
     )
     source = db_session.query(Source).one()
     source.raw_metadata['server_security_scope'] = 'scope-a'
@@ -364,17 +549,19 @@ def test_unchanged_event_advances_safe_cursor_url_and_connector_signature_withou
 def test_connector_metadata_cannot_overwrite_server_signature_permission_scope_or_pointer(
     db_session: Session,
 ) -> None:
-    ingest_events(
+    ingest_events_with_result(
         db_session,
         [
             drive_event(
                 permission_level='internal',
-                extra_metadata={
-                    'account_id': 'server-account',
-                    'required_scopes': ['drive.readonly'],
-                },
             )
         ],
+        authenticated_source_metadata_by_id={
+            'drive:file-1': {
+                'account_id': 'server-account',
+                'required_scopes': ['drive.readonly'],
+            }
+        },
     )
     source = db_session.query(Source).one()
     document = db_session.query(Document).one()
@@ -407,6 +594,78 @@ def test_connector_metadata_cannot_overwrite_server_signature_permission_scope_o
     assert document.current_document_version_id == original_pointer
 
 
+@pytest.mark.parametrize('existing_empty_source', [False, True])
+def test_connector_reserved_metadata_forgery_is_stripped_for_new_or_empty_source(
+    db_session: Session,
+    existing_empty_source: bool,
+) -> None:
+    if existing_empty_source:
+        db_session.add(
+            Source(
+                source_type='drive',
+                source_id='drive:file-1',
+                source_url='https://legacy.example.test/file-1',
+                title='Empty legacy source',
+                author='legacy@example.com',
+                permission_level='restricted',
+                raw_metadata={},
+            )
+        )
+        db_session.commit()
+    event = drive_event(
+        extra_metadata={
+            'account_id': 'forged-account',
+            'oauth_scope': 'drive.full',
+            'oauth_scopes': ['drive.full'],
+            'required_scopes': ['drive.full'],
+            'security_scope_id': 'forged-security-scope',
+            'server_security_scope': 'forged-server-scope',
+        }
+    )
+
+    ingest_events_with_result(db_session, [event])
+
+    source = db_session.query(Source).one()
+    for key in (
+        'account_id',
+        'oauth_scope',
+        'oauth_scopes',
+        'required_scopes',
+        'security_scope_id',
+        'server_security_scope',
+    ):
+        assert key not in source.raw_metadata
+
+
+def test_authenticated_server_metadata_is_the_only_first_write_ownership_path(
+    db_session: Session,
+) -> None:
+    event = drive_event(
+        extra_metadata={
+            'account_id': 'forged-account',
+            'required_scopes': ['drive.full'],
+            'security_scope_id': 'forged-scope',
+        }
+    )
+
+    ingest_events_with_result(
+        db_session,
+        [event],
+        authenticated_source_metadata_by_id={
+            'drive:file-1': {
+                'account_id': 'trusted-account',
+                'required_scopes': ['drive.readonly'],
+                'security_scope_id': 'trusted-scope',
+            }
+        },
+    )
+
+    source = db_session.query(Source).one()
+    assert source.raw_metadata['account_id'] == 'trusted-account'
+    assert source.raw_metadata['required_scopes'] == ['drive.readonly']
+    assert source.raw_metadata['security_scope_id'] == 'trusted-scope'
+
+
 def test_permission_only_event_updates_source_and_all_current_chunk_permissions(
     db_session: Session,
 ) -> None:
@@ -428,6 +687,30 @@ def test_permission_only_event_updates_source_and_all_current_chunk_permissions(
         'internal'
     }
     assert writer.narrowings == [(('chunk:1',), 'internal')]
+    assert db_session.query(DocumentVersion).count() == 1
+
+
+def test_c5_permission_normalization_keeps_source_and_chunks_equal_across_resync(
+    db_session: Session,
+) -> None:
+    ingest_events(
+        db_session,
+        [drive_event(permission_level=' INTERNAL ')],
+    )
+
+    source = db_session.query(Source).one()
+    chunk = db_session.query(DocumentChunk).one()
+    assert source.permission_level == 'internal'
+    assert chunk.permission_level == 'internal'
+    assert chunk.metadata_['permission_level'] == 'internal'
+
+    result = ingest_events_with_result(
+        db_session,
+        [drive_event(permission_level='internal')],
+    )
+
+    assert result.skipped_events == 1
+    assert result.changed_source_states == []
     assert db_session.query(DocumentVersion).count() == 1
 
 

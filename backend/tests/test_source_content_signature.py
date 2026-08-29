@@ -407,3 +407,38 @@ def test_current_content_signature_rejects_noncanonical_64_character_legacy_valu
     )
 
     assert current_content_signature(source) is None
+
+
+def test_multi_flag_classification_keeps_primary_code_as_projection_only() -> None:
+    event = _event('drive', raw_metadata={'mime_type': 'text/plain'})
+    signature = canonical_source_content_signature(event)
+    policy = server_parser_policy_for_event(event)
+    source = SimpleNamespace(
+        server_content_signature_schema=signature.schema,
+        server_content_signature=signature.signature,
+        permission_level='public',
+    )
+    stale_parser_run = SimpleNamespace(
+        server_content_signature_schema=signature.schema,
+        server_content_signature=signature.signature,
+        parser_policy_version=policy.parser_policy_version,
+        parser_name=policy.parser_name,
+        parser_version=policy.parser_version,
+        chunk_policy_version='paragraph-chunks:old',
+        mime_type=policy.mime_type,
+    )
+
+    classification = classify_source_state_change(
+        source=source,
+        event=replace(
+            event,
+            body='Changed body',
+            permission_level='restricted',
+        ),
+        current_parser_run=stale_parser_run,
+    )
+
+    assert classification.content_changed is True
+    assert classification.permission_changed is True
+    assert classification.parser_policy_changed is True
+    assert classification.primary_code == 'content_changed'
