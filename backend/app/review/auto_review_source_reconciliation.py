@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import String, and_, case, cast, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -15,8 +15,7 @@ from backend.app.agent_runtime.keyed_mutation_guard import (
 )
 from backend.app.core.config import Settings
 from backend.app.ingestion.source_content_signature import (
-    SourceContentUnverifiableError,
-    server_parser_policy_for_source,
+    server_parser_run_matches_authority,
 )
 from backend.app.knowledge.trusted_fingerprint_projection import (
     ProjectionSummary,
@@ -29,16 +28,12 @@ from backend.app.knowledge.trusted_serving_eligibility import (
     knowledge_model_for_type,
 )
 from backend.app.models import (
-    DecisionRecord,
     Document,
     DocumentChunk,
     DocumentParserRun,
     DocumentVersion,
-    HistoryEvent,
     ReviewItem,
     Source,
-    TimelineEvent,
-    Todo,
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
     TrustedKnowledgeFingerprint,
@@ -170,9 +165,7 @@ class AutoReviewSourceReconciliationService:
                 readiness=False,
             )
 
-    def recover_stale_sources(
-        self, *, limit: int = 100
-    ) -> SourceReconciliationResult:
+    def recover_stale_sources(self, *, limit: int = 100) -> SourceReconciliationResult:
         bounded = _validate_limit(limit)
         try:
             stale = self._stale_source_ids(limit=bounded)
@@ -252,9 +245,7 @@ class AutoReviewSourceReconciliationService:
                 or changed.parser_policy_changed
             ):
                 normalized.append(changed)
-        return self.reconcile_source_ids(
-            [changed.source_id for changed in normalized]
-        )
+        return self.reconcile_source_ids([changed.source_id for changed in normalized])
 
     def repair_current_document_versions(
         self, *, limit: int = 100
@@ -345,9 +336,7 @@ class AutoReviewSourceReconciliationService:
                 return 'unresolved'
             acquire_projection(self._db, key_context)
             source_statement = select(Source).where(Source.id == source_id)
-            document_statement = select(Document).where(
-                Document.id == document_id
-            )
+            document_statement = select(Document).where(Document.id == document_id)
             if self._db.get_bind().dialect.name == 'postgresql':
                 source_statement = source_statement.with_for_update()
                 document_statement = document_statement.with_for_update()
@@ -358,8 +347,7 @@ class AutoReviewSourceReconciliationService:
                 or document is None
                 or document.source_id != source.id
                 or document.current_document_version_id is not None
-                or source.server_content_signature_schema
-                != 'server-source-content:v1'
+                or source.server_content_signature_schema != 'server-source-content:v1'
                 or source.server_content_signature is None
             ):
                 self._db.rollback()
@@ -367,9 +355,7 @@ class AutoReviewSourceReconciliationService:
             outcome, selected_version_id = self._pointer_candidate(
                 document_id=document.id,
                 source_id=source.id,
-                for_update=(
-                    self._db.get_bind().dialect.name == 'postgresql'
-                ),
+                for_update=(self._db.get_bind().dialect.name == 'postgresql'),
             )
             if outcome != 'repairable' or selected_version_id is None:
                 self._db.rollback()
@@ -392,18 +378,10 @@ class AutoReviewSourceReconciliationService:
             or document is None
             or document.source_id != source.id
             or document.current_document_version_id is not None
-            or source.server_content_signature_schema
-            != 'server-source-content:v1'
+            or source.server_content_signature_schema != 'server-source-content:v1'
             or source.server_content_signature is None
         ):
             return 'unresolved', None
-        try:
-            policy = server_parser_policy_for_source(
-                source_type=source.source_type,
-                mime_type=(source.raw_metadata or {}).get('mime_type'),
-            )
-        except SourceContentUnverifiableError:
-            return 'ambiguous', None
         versions_statement = (
             select(DocumentVersion)
             .where(DocumentVersion.document_id == document.id)
@@ -425,22 +403,21 @@ class AutoReviewSourceReconciliationService:
         exact_runs = tuple(
             run
             for run in runs
-            if run.server_content_signature_schema
-            == 'server-source-content:v1'
-            and run.server_content_signature
-            == source.server_content_signature
-            and run.parser_status == 'parsed'
-            and run.parser_name == policy.parser_name
-            and run.mime_type == policy.mime_type
-            and run.parser_policy_version == policy.parser_policy_version
-            and run.parser_version == policy.parser_version
-            and run.chunk_policy_version == policy.chunk_policy_version
+            if server_parser_run_matches_authority(
+                source=source,
+                parser_run=run,
+            )
         )
         if len(exact_runs) != 1:
             return ('ambiguous' if runs else 'unresolved'), None
         run = exact_runs[0]
         version_ids = {version.id for version in versions}
         if run.document_version_id not in version_ids:
+            return 'ambiguous', None
+        version = next(
+            version for version in versions if version.id == run.document_version_id
+        )
+        if run.document_version_label != version.version:
             return 'ambiguous', None
         chunks_statement = (
             select(DocumentChunk)
@@ -453,11 +430,9 @@ class AutoReviewSourceReconciliationService:
         if (
             run.chunk_count <= 0
             or len(chunks) != run.chunk_count
-            or [chunk.chunk_index for chunk in chunks]
-            != list(range(run.chunk_count))
+            or [chunk.chunk_index for chunk in chunks] != list(range(run.chunk_count))
             or any(
-                chunk.source_id != source.id
-                or chunk.parser_run_id != run.id
+                chunk.source_id != source.id or chunk.parser_run_id != run.id
                 for chunk in chunks
             )
         ):
@@ -467,125 +442,61 @@ class AutoReviewSourceReconciliationService:
     def _stale_source_ids(self, *, limit: int) -> list[int]:
         evidence = TrustedKnowledgeEvidenceLink
         link = TrustedKnowledgeApprovalLink
-        source_join = cast(Source.id, String(128)) == evidence.canonical_source_id
-        parser_match_count = (
-            select(func.count(DocumentParserRun.id))
-            .select_from(DocumentParserRun)
-            .join(Document, Document.id == DocumentParserRun.document_id)
+        canonical_source_ids = self._db.scalars(
+            select(evidence.canonical_source_id)
+            .select_from(evidence)
+            .join(link, link.id == evidence.approval_link_id)
             .where(
-                Document.source_id == Source.id,
-                Document.current_document_version_id
-                == DocumentParserRun.document_version_id,
-                DocumentParserRun.source_id == Source.id,
-                DocumentParserRun.server_content_signature_schema
-                == 'server-source-content:v1',
-                DocumentParserRun.server_content_signature
-                == Source.server_content_signature,
-                DocumentParserRun.parser_policy_version.is_not(None),
-                DocumentParserRun.parser_version.is_not(None),
-                DocumentParserRun.chunk_policy_version.is_not(None),
-                DocumentParserRun.revision_id
-                == evidence.canonical_version_or_signature,
+                link.active.is_(True),
+                link.resolution_source == 'auto_policy',
             )
-            .correlate(Source, evidence)
-            .scalar_subquery()
+            .distinct()
+            .order_by(evidence.canonical_source_id)
         )
-        evidence_is_current = and_(
-            Source.id.is_not(None),
-            Source.source_type == evidence.canonical_source_kind,
-            Source.server_content_signature_schema
-            == 'server-source-content:v1',
-            Source.server_content_signature.is_not(None),
-            Source.permission_level.in_(_KNOWN_SERVING_PERMISSIONS),
-            or_(
-                evidence.canonical_version_or_signature
-                == Source.server_content_signature,
-                parser_match_count == 1,
-            ),
-        )
-        stale_source_ids = set(
-            self._db.scalars(
-                select(evidence.canonical_source_id)
-                .select_from(evidence)
-                .join(link, link.id == evidence.approval_link_id)
-                .outerjoin(Source, source_join)
-                .where(
-                    link.active.is_(True),
-                    link.resolution_source == 'auto_policy',
-                    ~evidence_is_current,
-                )
-                .distinct()
-                .order_by(evidence.canonical_source_id)
-                .limit(limit)
-            ).all()
-        )
-        target_branches = (
-            (DecisionRecord, ('decision_record', 'decision')),
-            (HistoryEvent, ('history_event',)),
-            (TimelineEvent, ('timeline_event',)),
-            (Todo, ('todo',)),
-        )
-        for target, knowledge_types in target_branches:
-            fingerprint = TrustedKnowledgeFingerprint
-            permission_rank = _permission_rank_expression
-            core_permissions = (
-                target.permission_level,
-                ReviewItem.permission_level,
-                link.permission_level,
-            )
-            authoritative_permissions = (*core_permissions, Source.permission_level)
-            permission_is_stale = or_(
-                *(level.not_in(_PERMISSION_RANK) for level in core_permissions),
-                and_(
-                    fingerprint.id.is_not(None),
-                    fingerprint.permission_level.not_in(_PERMISSION_RANK),
-                ),
-                *(
-                    permission_rank(current) < permission_rank(authority)
-                    for current in core_permissions
-                    for authority in authoritative_permissions
-                ),
-                *(
-                    and_(
-                        fingerprint.id.is_not(None),
-                        permission_rank(fingerprint.permission_level)
-                        < permission_rank(authority),
-                    )
-                    for authority in authoritative_permissions
-                ),
-            )
-            stale_source_ids.update(
+        stale_source_ids: set[int] = set()
+        for canonical_source_id in canonical_source_ids:
+            source_id = _source_id(canonical_source_id)
+            if source_id is None:
+                continue
+            source = self._db.get(Source, source_id)
+            evidence_rows = tuple(
                 self._db.scalars(
-                    select(evidence.canonical_source_id)
-                    .select_from(evidence)
+                    select(evidence)
                     .join(link, link.id == evidence.approval_link_id)
-                    .join(Source, source_join)
-                    .join(ReviewItem, ReviewItem.id == link.review_item_id)
-                    .join(target, target.id == link.knowledge_id)
-                    .outerjoin(
-                        fingerprint,
-                        and_(
-                            fingerprint.knowledge_type == link.knowledge_type,
-                            fingerprint.knowledge_id == link.knowledge_id,
-                        ),
-                    )
                     .where(
+                        evidence.canonical_source_id == canonical_source_id,
                         link.active.is_(True),
                         link.resolution_source == 'auto_policy',
-                        link.knowledge_type.in_(knowledge_types),
-                        evidence_is_current,
-                        permission_is_stale,
                     )
-                    .distinct()
-                    .order_by(evidence.canonical_source_id)
-                    .limit(limit)
+                    .order_by(evidence.id)
                 ).all()
             )
-        return sorted(
-            source_id
-            for value in stale_source_ids
-            if (source_id := _source_id(value)) is not None
-        )[:limit]
+            if any(
+                not _evidence_is_current(self._db, source, evidence_row)
+                for evidence_row in evidence_rows
+            ):
+                stale_source_ids.add(source_id)
+                if len(stale_source_ids) >= limit:
+                    break
+                continue
+            if any(
+                (
+                    approval_link := self._db.get(
+                        TrustedKnowledgeApprovalLink,
+                        evidence_row.approval_link_id,
+                    )
+                )
+                is not None
+                and self._permission_reconciliation_needed(
+                    approval_link,
+                    source,
+                )
+                for evidence_row in evidence_rows
+            ):
+                stale_source_ids.add(source_id)
+            if len(stale_source_ids) >= limit:
+                break
+        return sorted(stale_source_ids)[:limit]
 
     def _permission_reconciliation_needed(
         self,
@@ -614,10 +525,8 @@ class AutoReviewSourceReconciliationService:
         ]
         fingerprint = self._db.scalar(
             select(TrustedKnowledgeFingerprint).where(
-                TrustedKnowledgeFingerprint.knowledge_type
-                == link.knowledge_type,
-                TrustedKnowledgeFingerprint.knowledge_id
-                == link.knowledge_id,
+                TrustedKnowledgeFingerprint.knowledge_type == link.knowledge_type,
+                TrustedKnowledgeFingerprint.knowledge_id == link.knowledge_id,
             )
         )
         if fingerprint is not None:
@@ -629,8 +538,7 @@ class AutoReviewSourceReconciliationService:
             self._db.scalars(
                 select(TrustedKnowledgeEvidenceLink.id)
                 .where(
-                    TrustedKnowledgeEvidenceLink.canonical_source_id
-                    == str(source_id)
+                    TrustedKnowledgeEvidenceLink.canonical_source_id == str(source_id)
                 )
                 .order_by(TrustedKnowledgeEvidenceLink.id)
                 .limit(100)
@@ -643,9 +551,7 @@ class AutoReviewSourceReconciliationService:
         for evidence_id in evidence_ids:
             evidence = self._db.get(TrustedKnowledgeEvidenceLink, evidence_id)
             link = (
-                self._db.get(
-                    TrustedKnowledgeApprovalLink, evidence.approval_link_id
-                )
+                self._db.get(TrustedKnowledgeApprovalLink, evidence.approval_link_id)
                 if evidence is not None
                 else None
             )
@@ -702,12 +608,8 @@ class AutoReviewSourceReconciliationService:
                 db=self._db, settings=self._settings
             ).acquire(key_context=key_context, plan=plan)
             source = self._db.get(Source, source_id)
-            evidence = self._db.get(
-                TrustedKnowledgeEvidenceLink, evidence_id
-            )
-            link = self._db.get(
-                TrustedKnowledgeApprovalLink, approval_link_id
-            )
+            evidence = self._db.get(TrustedKnowledgeEvidenceLink, evidence_id)
+            link = self._db.get(TrustedKnowledgeApprovalLink, approval_link_id)
             if (
                 evidence is None
                 or link is None
@@ -754,17 +656,13 @@ class AutoReviewSourceReconciliationService:
                         locked_context=locked_context,  # type: ignore[call-arg]
                     )
                 else:
-                    self._vector_writer.narrow_permissions(
-                        [document_id], strictest
-                    )
+                    self._vector_writer.narrow_permissions([document_id], strictest)
             if changed:
                 self._refresh_index_state_hash(document_id)
             self._db.commit()
             return 'narrowed' if changed else 'current'
 
-    def _narrow_fingerprint(
-        self, *, document_id: str, permission_level: str
-    ) -> bool:
+    def _narrow_fingerprint(self, *, document_id: str, permission_level: str) -> bool:
         knowledge_type, raw_id = document_id.rsplit(':', maxsplit=1)
         row = self._db.scalar(
             select(TrustedKnowledgeFingerprint).where(
@@ -789,9 +687,7 @@ class AutoReviewSourceReconciliationService:
         if state is None:
             return True
         try:
-            old_digest = projection_row_digest(
-                old_snapshot, settings=self._settings
-            )
+            old_digest = projection_row_digest(old_snapshot, settings=self._settings)
             new_digest = projection_row_digest(
                 snapshot_from_projection(row), settings=self._settings
             )
@@ -848,12 +744,10 @@ class AutoReviewSourceReconciliationService:
         context = object.__new__(SourceInvalidationRevokeContext)
         object.__setattr__(context, 'session_identity', id(self._db))
         object.__setattr__(context, 'review_item_id', review_item_id)
-        object.__setattr__(
-            context, 'canonical_source_id', canonical_source_id
-        )
-        self._db.info.setdefault(
-            _SOURCE_INVALIDATION_CONTEXTS_INFO_KEY, {}
-        )[id(context)] = context
+        object.__setattr__(context, 'canonical_source_id', canonical_source_id)
+        self._db.info.setdefault(_SOURCE_INVALIDATION_CONTEXTS_INFO_KEY, {})[
+            id(context)
+        ] = context
         return context
 
     def _evidence(
@@ -862,8 +756,7 @@ class AutoReviewSourceReconciliationService:
         return tuple(
             self._db.scalars(
                 select(TrustedKnowledgeEvidenceLink).where(
-                    TrustedKnowledgeEvidenceLink.approval_link_id
-                    == approval_link_id
+                    TrustedKnowledgeEvidenceLink.approval_link_id == approval_link_id
                 )
             ).all()
         )
@@ -909,12 +802,3 @@ def _strictest_many(*levels: str) -> str:
     if any(level not in _PERMISSION_RANK for level in levels):
         return 'restricted'
     return max(levels, key=_PERMISSION_RANK.__getitem__)
-
-
-def _permission_rank_expression(column: object) -> object:
-    return case(
-        (column == 'public', _PERMISSION_RANK['public']),
-        (column == 'internal', _PERMISSION_RANK['internal']),
-        (column == 'restricted', _PERMISSION_RANK['restricted']),
-        else_=len(_PERMISSION_RANK),
-    )

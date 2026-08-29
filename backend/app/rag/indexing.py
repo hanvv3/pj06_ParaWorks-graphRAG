@@ -14,10 +14,10 @@ from backend.app.agent_runtime.keyed_mutation_guard import (
     lock_runtime_state,
 )
 from backend.app.core.config import Settings
-from backend.app.ingestion.source_content_signature import (
-    server_parser_run_matches_authority,
+from backend.app.ingestion.source_authority import (
+    exact_authority_contains_chunk,
+    resolve_exact_source_authority,
 )
-from backend.app.ingestion.source_versions import current_content_signature
 from backend.app.knowledge.trusted_serving_eligibility import (
     TrustedServingEligibilityService,
 )
@@ -593,49 +593,13 @@ def _is_exact_current_server_chunk(
     parser_run: DocumentParserRun,
     chunk: DocumentChunk,
 ) -> bool:
-    signature = current_content_signature(source)
-    if (
-        signature is None
-        or document.current_document_version_id != version.id
-        or parser_run.document_version_label != version.version
-        or not server_parser_run_matches_authority(
-            source_type=source.source_type,
-            server_content_signature=signature,
-            parser_run=parser_run,
-        )
-    ):
-        return False
-    current_runs = tuple(
-        db.scalars(
-            select(DocumentParserRun)
-            .where(
-                DocumentParserRun.source_id == source.id,
-                DocumentParserRun.document_id == document.id,
-                DocumentParserRun.document_version_id == version.id,
-            )
-            .order_by(DocumentParserRun.id)
-        ).all()
-    )
-    if len(current_runs) != 1 or current_runs[0].id != parser_run.id:
-        return False
-    current_chunks = tuple(
-        db.scalars(
-            select(DocumentChunk)
-            .where(DocumentChunk.version_id == version.id)
-            .order_by(DocumentChunk.chunk_index, DocumentChunk.id)
-        ).all()
-    )
+    authority = resolve_exact_source_authority(db, source=source)
     return bool(
-        current_chunks
-        and parser_run.chunk_count == len(current_chunks)
-        and [current.chunk_index for current in current_chunks]
-        == list(range(len(current_chunks)))
-        and all(
-            current.source_id == source.id
-            and current.parser_run_id == parser_run.id
-            for current in current_chunks
-        )
-        and chunk in current_chunks
+        authority is not None
+        and authority.document.id == document.id
+        and authority.version.id == version.id
+        and authority.parser_run.id == parser_run.id
+        and exact_authority_contains_chunk(authority, chunk)
     )
 
 

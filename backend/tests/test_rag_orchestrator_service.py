@@ -52,7 +52,14 @@ def seed_chunk(db: Session, source_type: str, source_id: str, text: str, permiss
         title=f'{source_type} evidence',
         author='owner@example.com',
         permission_level=permission_level,
-        raw_metadata={'ts': '2026-04-30T10:00:00+00:00'},
+        raw_metadata={
+            'ts': '2026-04-30T10:00:00+00:00',
+            **(
+                {'mime_type': 'text/plain'}
+                if source_type in {'drive', 'gmail_attachment'}
+                else {}
+            ),
+        },
         server_content_signature_schema='server-source-content:v1',
         server_content_signature=signature,
     )
@@ -83,13 +90,23 @@ def seed_chunk(db: Session, source_type: str, source_id: str, text: str, permiss
         document_id=document.id,
         document_version_id=version.id,
         source_id=source.id,
-        parser_name='plain_text',
+        parser_name=f'server_{source_type}_source_event',
         parser_status='parsed',
+        parser_status_reason=None,
+        mime_type=(
+            'message/rfc822'
+            if source_type == 'gmail'
+            else 'text/calendar'
+            if source_type == 'calendar'
+            else 'text/plain'
+        ),
+        document_version_label=version.version,
+        content_signature=signature,
         server_content_signature_schema='server-source-content:v1',
         server_content_signature=signature,
-        parser_policy_version='parser-policy:v1',
-        parser_version='plain-text:v1',
-        chunk_policy_version='chunk-policy:v1',
+        parser_policy_version='server-source-parser-policy:v1',
+        parser_version='source-event-paragraph-parser:v1',
+        chunk_policy_version='paragraph-chunks:1200:v1',
     )
     db.add(parser_run)
     db.flush()

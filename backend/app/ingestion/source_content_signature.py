@@ -31,7 +31,7 @@ _SEMANTIC_METADATA_KEYS: dict[str, tuple[str, ...]] = {
 }
 _CALENDAR_DATE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _GOOGLE_MILLIS = re.compile(r'^\d+$')
-_ALLOWED_MIME_TYPES = frozenset(
+SERVER_ALLOWED_MIME_TYPES = frozenset(
     {
         'application/haansofthwp',
         'application/pdf',
@@ -53,9 +53,11 @@ class SourceContentUnverifiableError(ValueError):
 
 
 class CanonicalSourceState(Protocol):
+    source_type: str
     server_content_signature_schema: str | None
     server_content_signature: str | None
     permission_level: str
+    raw_metadata: dict
 
 
 class CurrentParserRunState(Protocol):
@@ -164,7 +166,7 @@ def server_parser_policy_for_source(
             normalized = mime_type.strip().lower()
             normalized_mime_type = (
                 normalized
-                if normalized in _ALLOWED_MIME_TYPES
+                if normalized in SERVER_ALLOWED_MIME_TYPES
                 else 'application/octet-stream'
             )
     return ServerParserPolicy(
@@ -186,14 +188,20 @@ def server_parser_policy_for_event(event: SourceEvent) -> ServerParserPolicy:
 
 def server_parser_run_matches_authority(
     *,
-    source_type: str,
-    server_content_signature: str,
+    source: CanonicalSourceState,
     parser_run: CurrentParserRunState,
 ) -> bool:
+    server_content_signature = source.server_content_signature
+    if (
+        source.server_content_signature_schema
+        != SERVER_SOURCE_CONTENT_SIGNATURE_SCHEMA
+        or server_content_signature is None
+    ):
+        return False
     try:
         expected = server_parser_policy_for_source(
-            source_type=source_type,
-            mime_type=parser_run.mime_type,
+            source_type=source.source_type,
+            mime_type=(source.raw_metadata or {}).get('mime_type'),
         )
     except SourceContentUnverifiableError:
         return False

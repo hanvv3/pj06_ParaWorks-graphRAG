@@ -9,6 +9,9 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
+from backend.app.ingestion.source_authority import (
+    postgres_exact_source_authority_sql,
+)
 from backend.app.rag.serving_locks import (
     VectorServingLockedContext,
     VectorServingLockManager,
@@ -320,6 +323,11 @@ class PgVectorStore:
         vector_rank = permission_rank.format(value=f'{table}.permission_level')
         source_rank = permission_rank.format(value='sources.permission_level')
         chunk_rank = permission_rank.format(value='document_chunks.permission_level')
+        raw_source_authority = postgres_exact_source_authority_sql(
+            source_alias='sources',
+            prefix='raw_authority',
+            required_chunk_id_sql='document_chunks.id',
+        )
         knowledge_branches = ' OR '.join(
             self._knowledge_target_branch(
                 table=table,
@@ -341,22 +349,9 @@ class PgVectorStore:
             AND EXISTS (
                 SELECT 1
                 FROM document_chunks
-                JOIN document_versions
-                  ON document_versions.id = document_chunks.version_id
-                JOIN documents
-                  ON documents.id = document_versions.document_id
-                 AND documents.current_document_version_id = document_versions.id
-                JOIN document_parser_runs
-                  ON document_parser_runs.id = document_chunks.parser_run_id
-                 AND document_parser_runs.document_version_id = document_versions.id
-                 AND document_parser_runs.source_id = document_chunks.source_id
                 JOIN sources ON sources.id = document_chunks.source_id
                 WHERE {table}.document_id = 'chunk:' || document_chunks.id::text
-                  AND sources.server_content_signature_schema = 'server-source-content:v1'
-                  AND sources.server_content_signature = document_parser_runs.server_content_signature
-                  AND document_parser_runs.parser_policy_version IS NOT NULL
-                  AND document_parser_runs.parser_version IS NOT NULL
-                  AND document_parser_runs.chunk_policy_version IS NOT NULL
+                  AND ({raw_source_authority})
                   AND sources.source_type <> 'slack'
                   AND sources.permission_level IN ('public', 'internal', 'restricted')
                   AND document_chunks.permission_level IN ('public', 'internal', 'restricted')
@@ -544,27 +539,13 @@ class PgVectorStore:
         evidence_alias: str,
         parser_prefix: str,
     ) -> str:
-        return f"""
-        {source_alias}.server_content_signature_schema = 'server-source-content:v1'
-        AND (
-            {source_alias}.server_content_signature = {evidence_alias}.canonical_version_or_signature
-            OR EXISTS (
-                SELECT 1
-                FROM document_parser_runs {parser_prefix}_parser_runs
-                JOIN documents {parser_prefix}_documents
-                  ON {parser_prefix}_documents.id = {parser_prefix}_parser_runs.document_id
-                 AND {parser_prefix}_documents.source_id = {source_alias}.id
-                 AND {parser_prefix}_documents.current_document_version_id = {parser_prefix}_parser_runs.document_version_id
-                WHERE {parser_prefix}_parser_runs.source_id = {source_alias}.id
-                  AND {parser_prefix}_parser_runs.server_content_signature_schema = 'server-source-content:v1'
-                  AND {parser_prefix}_parser_runs.server_content_signature = {source_alias}.server_content_signature
-                  AND {parser_prefix}_parser_runs.parser_policy_version IS NOT NULL
-                  AND {parser_prefix}_parser_runs.parser_version IS NOT NULL
-                  AND {parser_prefix}_parser_runs.chunk_policy_version IS NOT NULL
-                  AND {parser_prefix}_parser_runs.revision_id = {evidence_alias}.canonical_version_or_signature
-            )
+        return postgres_exact_source_authority_sql(
+            source_alias=source_alias,
+            prefix=f'{parser_prefix}_authority',
+            evidence_ref_sql=(
+                f'{evidence_alias}.canonical_version_or_signature'
+            ),
         )
-        """
 
 
 def _embedding_literal(embedding: list[float]) -> str:

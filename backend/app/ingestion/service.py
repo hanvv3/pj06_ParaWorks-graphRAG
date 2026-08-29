@@ -647,8 +647,7 @@ def _refresh_chunk_index_state_hash(
         or parser_run.document_version_label != version.version
         or source.server_content_signature is None
         or not server_parser_run_matches_authority(
-            source_type=source.source_type,
-            server_content_signature=source.server_content_signature,
+            source=source,
             parser_run=parser_run,
         )
     ):

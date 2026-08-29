@@ -32,10 +32,15 @@ class PgVectorSearchAdapter:
     def __init__(self, *, store: PgVectorStore, embedding_model: OpenAIEmbeddingModel) -> None:
         self.store = store
         self.embedding_model = embedding_model
+        self._query_embeddings: dict[str, list[float]] = {}
 
     def search(self, *, query: str, user: DemoUser, limit: int = 5):
+        query_embedding = self._query_embeddings.get(query)
+        if query_embedding is None:
+            query_embedding = self.embedding_model.embed(query)
+            self._query_embeddings[query] = query_embedding
         return self.store.search_with_embedding(
-            query_embedding=self.embedding_model.embed(query),
+            query_embedding=query_embedding,
             user=user,
             limit=limit,
         )

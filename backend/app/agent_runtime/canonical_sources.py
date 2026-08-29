@@ -9,20 +9,12 @@ from backend.app.agent_runtime.fingerprints import (
 )
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
-from backend.app.ingestion.source_content_signature import (
-    server_parser_run_matches_authority,
-)
+from backend.app.ingestion.source_authority import resolve_exact_source_authority
 from backend.app.ingestion.source_versions import (
     SourceVersionRef,
     current_content_signature,
 )
-from backend.app.models.source import (
-    Document,
-    DocumentChunk,
-    DocumentParserRun,
-    DocumentVersion,
-    Source,
-)
+from backend.app.models.source import Source
 
 CANONICAL_SOURCE_FINGERPRINT_SCHEMA = 'canonical-source-version:v1'
 CANONICAL_SOURCE_FINGERPRINT_POLICY = 'review-evidence-resolution:v1'
@@ -102,67 +94,12 @@ def _resolve_source_version(
     if content_signature != ref.version_or_signature:
         _raise_evidence_changed()
 
-    documents = tuple(
-        db.scalars(
-            select(Document)
-            .where(Document.source_id == source.id)
-            .order_by(Document.id)
-        ).all()
-    )
-    if len(documents) != 1:
+    authority = resolve_exact_source_authority(db, source=source)
+    if authority is None:
         _raise_evidence_changed()
-    document = documents[0]
-    if document.current_document_version_id is None:
-        _raise_evidence_changed()
-    document_version = db.scalar(
-        select(DocumentVersion).where(
-            DocumentVersion.id == document.current_document_version_id,
-            DocumentVersion.document_id == document.id,
-        )
-    )
-    if document_version is None:
-        _raise_evidence_changed()
-    parser_runs = tuple(
-        db.scalars(
-            select(DocumentParserRun)
-            .where(
-                DocumentParserRun.source_id == source.id,
-                DocumentParserRun.document_id == document.id,
-                DocumentParserRun.document_version_id == document_version.id,
-            )
-            .order_by(DocumentParserRun.id)
-        ).all()
-    )
-    if len(parser_runs) != 1:
-        _raise_evidence_changed()
-    parser_run = parser_runs[0]
-    if (
-        parser_run.document_version_label != document_version.version
-        or not server_parser_run_matches_authority(
-            source_type=source.source_type,
-            server_content_signature=content_signature,
-            parser_run=parser_run,
-        )
-    ):
-        _raise_evidence_changed()
-    chunks = tuple(
-        db.scalars(
-            select(DocumentChunk)
-            .where(DocumentChunk.version_id == document_version.id)
-            .order_by(DocumentChunk.chunk_index, DocumentChunk.id)
-        ).all()
-    )
-    if (
-        not chunks
-        or parser_run.chunk_count != len(chunks)
-        or [chunk.chunk_index for chunk in chunks] != list(range(len(chunks)))
-        or any(
-            chunk.source_id != source.id
-            or chunk.parser_run_id != parser_run.id
-            for chunk in chunks
-        )
-    ):
-        _raise_evidence_changed()
+    document_version = authority.version
+    parser_run = authority.parser_run
+    chunks = authority.chunks
 
     external_revision = _optional_string(parser_run.revision_id)
     fingerprint_value = {

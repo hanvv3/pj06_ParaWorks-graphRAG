@@ -19,6 +19,10 @@ from backend.app.agents.rag_orchestrator_agent.llm import (
 from backend.app.assistant.tool_logging import AssistantToolLogger
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
+from backend.app.ingestion.source_authority import (
+    exact_authority_contains_chunk,
+    resolve_exact_source_authority,
+)
 from backend.app.knowledge.trusted_serving_eligibility import (
     TrustedServingEligibilityService,
     knowledge_model_for_type,
@@ -26,10 +30,7 @@ from backend.app.knowledge.trusted_serving_eligibility import (
 from backend.app.models import (
     AgentRun,
     DecisionRecord,
-    Document,
     DocumentChunk,
-    DocumentParserRun,
-    DocumentVersion,
     HistoryEvent,
     ReviewItem,
     Source,
@@ -160,9 +161,26 @@ def answer_question_with_rag(
         candidates=tuple(visible_candidates),
         snapshots=tuple(dependency_snapshots),
     )
-    if not dependencies_live:
+    current_hidden_match_count = _recompute_live_hidden_match_count(
+        db=db,
+        user=user,
+        question=question,
+        vector_store=vector_store,
+    )
+    if not dependencies_live or current_hidden_match_count is None:
         answer = _evidence_unavailable_answer(answer)
         dependency_snapshots = []
+        dependencies_live = False
+    else:
+        answer = replace(
+            answer,
+            hidden_match_count=current_hidden_match_count,
+            permission_notice=(
+                'Some sources may be hidden by permissions.'
+                if current_hidden_match_count
+                else None
+            ),
+        )
     agent_run = AgentRun(
         agent_name=answer.agent_name,
         prompt_version=answer.prompt_version,
@@ -229,6 +247,35 @@ def _serving_dependencies_are_live(
     except (LookupError, SQLAlchemyError, TypeError, ValueError):
         return False
     return True
+
+
+def _recompute_live_hidden_match_count(
+    *,
+    db: Session,
+    user: DemoUser,
+    question: str,
+    vector_store: VectorStore | None,
+) -> int | None:
+    try:
+        if vector_store is None:
+            matching_candidates = retrieve_matching_evidence_candidates(
+                db=db,
+                question=question,
+            )
+            live_candidates = filter_live_serving_candidates(
+                db=db,
+                candidates=matching_candidates,
+            )
+            visible_count = sum(
+                can_access_permission(user, candidate.permission_level)
+                for candidate in live_candidates
+            )
+            return len(live_candidates) - visible_count
+        vector_result = vector_store.search(query=question, user=user)
+        return vector_result.hidden_match_count
+    except (LookupError, SQLAlchemyError, TypeError, ValueError, RuntimeError):
+        db.rollback()
+        return None
 
 
 def _evidence_unavailable_answer(answer: RagAnswer) -> RagAnswer:
@@ -494,32 +541,21 @@ def build_serving_dependency_snapshot(
         chunk = db.get(DocumentChunk, chunk_id)
         if chunk is None or chunk.parser_run_id is None:
             return None
-        version = db.get(DocumentVersion, chunk.version_id)
-        parser_run = db.get(DocumentParserRun, chunk.parser_run_id)
         source = db.get(Source, chunk.source_id)
-        document = db.get(Document, version.document_id) if version else None
+        authority = (
+            resolve_exact_source_authority(db, source=source)
+            if source is not None
+            else None
+        )
         if (
-            version is None
-            or parser_run is None
-            or source is None
-            or document is None
-            or document.source_id != source.id
-            or document.current_document_version_id != version.id
-            or parser_run.document_id != document.id
-            or parser_run.document_version_id != version.id
-            or parser_run.source_id != source.id
-            or source.server_content_signature_schema
-            != 'server-source-content:v1'
-            or source.server_content_signature is None
-            or parser_run.server_content_signature_schema
-            != 'server-source-content:v1'
-            or parser_run.server_content_signature
-            != source.server_content_signature
-            or not parser_run.parser_policy_version
-            or not parser_run.parser_version
-            or not parser_run.chunk_policy_version
+            source is None
+            or authority is None
+            or not exact_authority_contains_chunk(authority, chunk)
         ):
             return None
+        document = authority.document
+        version = authority.version
+        parser_run = authority.parser_run
         expected_hash = _serving_content_hash(
             source_id=source.source_id,
             text=chunk.text,

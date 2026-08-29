@@ -233,7 +233,7 @@ def test_pgvector_reindex_path_with_fake_embedding() -> None:
                 source_url='https://pgvector.mock/company-memory',
                 title='Current pgvector evidence',
                 permission_level='internal',
-                raw_metadata={},
+                raw_metadata={'mime_type': 'message/rfc822'},
                 server_content_signature_schema='server-source-content:v1',
                 server_content_signature=signature,
             )
@@ -272,13 +272,17 @@ def test_pgvector_reindex_path_with_fake_embedding() -> None:
                 document_id=document.id,
                 document_version_id=version.id,
                 source_id=source.id,
-                parser_name='plain_text',
+                parser_name='server_gmail_source_event',
                 parser_status='parsed',
+                parser_status_reason=None,
+                mime_type='message/rfc822',
                 server_content_signature_schema='server-source-content:v1',
                 server_content_signature=signature,
-                parser_policy_version='parser-policy:v1',
-                parser_version='plain-text:v1',
-                chunk_policy_version='chunk-policy:v1',
+                content_signature=signature,
+                document_version_label='v1',
+                parser_policy_version='server-source-parser-policy:v1',
+                parser_version='source-event-paragraph-parser:v1',
+                chunk_policy_version='paragraph-chunks:1200:v1',
             )
             db.add(parser_run)
             db.flush([parser_run])
@@ -526,7 +530,7 @@ def test_pgvector_knowledge_permission_is_strict_before_ranking_and_hidden_count
                 source_url='https://pgvector.mock/strict-permission',
                 title='Strict permission source',
                 permission_level='public',
-                raw_metadata={},
+                raw_metadata={'mime_type': 'message/rfc822'},
                 server_content_signature_schema='server-source-content:v1',
                 server_content_signature='c' * 64,
             )
@@ -543,6 +547,52 @@ def test_pgvector_knowledge_permission_is_strict_before_ranking_and_hidden_count
             )
             db.add_all([source, item])
             db.flush()
+            document = Document(
+                source_id=source.id,
+                title=source.title,
+                current_version='v1',
+            )
+            db.add(document)
+            db.flush([document])
+            version = DocumentVersion(
+                document_id=document.id,
+                version='v1',
+                body='Restricted exact history',
+            )
+            db.add(version)
+            db.flush([version])
+            parser_run = DocumentParserRun(
+                document_id=document.id,
+                document_version_id=version.id,
+                source_id=source.id,
+                parser_name='server_gmail_source_event',
+                parser_status='parsed',
+                parser_status_reason=None,
+                mime_type='message/rfc822',
+                server_content_signature_schema='server-source-content:v1',
+                server_content_signature=source.server_content_signature,
+                content_signature=source.server_content_signature,
+                document_version_label='v1',
+                parser_policy_version='server-source-parser-policy:v1',
+                parser_version='source-event-paragraph-parser:v1',
+                chunk_policy_version='paragraph-chunks:1200:v1',
+            )
+            db.add(parser_run)
+            db.flush([parser_run])
+            chunk = DocumentChunk(
+                version_id=version.id,
+                source_id=source.id,
+                parser_run_id=parser_run.id,
+                chunk_index=0,
+                text=version.body,
+                source_snippet=version.body,
+                permission_level='public',
+                metadata_={},
+            )
+            db.add(chunk)
+            db.flush([chunk])
+            document.current_document_version_id = version.id
+            parser_run.chunk_count = 1
             history = HistoryEvent(
                 project_key='strict-permission',
                 title='Restricted exact history',

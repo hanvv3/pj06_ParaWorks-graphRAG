@@ -6,16 +6,17 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from backend.app.ingestion.source_authority import (
+    exact_authority_contains_chunk,
+    resolve_exact_source_authority,
+)
 from backend.app.knowledge.trusted_provenance import has_legacy_human_base
 from backend.app.models import (
     AutoReviewAuditCorrection,
     AutoReviewPostAudit,
     AutoReviewValidation,
     DecisionRecord,
-    Document,
     DocumentChunk,
-    DocumentParserRun,
-    DocumentVersion,
     HistoryEvent,
     ReviewItem,
     Source,
@@ -98,33 +99,12 @@ class TrustedServingEligibilityService:
         effective = _strictest_permission(
             [source.permission_level, chunk.permission_level]
         )
-        if (
-            source.server_content_signature_schema != 'server-source-content:v1'
-            or source.server_content_signature is None
-            or chunk.parser_run_id is None
-        ):
+        if chunk.parser_run_id is None:
             return _ineligible()
-        version = self._db.get(DocumentVersion, chunk.version_id)
-        parser_run = self._db.get(DocumentParserRun, chunk.parser_run_id)
-        document = (
-            self._db.get(Document, version.document_id)
-            if version is not None
-            else None
-        )
+        authority = resolve_exact_source_authority(self._db, source=source)
         if (
-            version is None
-            or parser_run is None
-            or document is None
-            or document.current_document_version_id != version.id
-            or parser_run.document_version_id != version.id
-            or parser_run.source_id != source.id
-            or parser_run.server_content_signature_schema
-            != 'server-source-content:v1'
-            or parser_run.server_content_signature
-            != source.server_content_signature
-            or not parser_run.parser_policy_version
-            or not parser_run.parser_version
-            or not parser_run.chunk_policy_version
+            authority is None
+            or not exact_authority_contains_chunk(authority, chunk)
         ):
             return _ineligible()
         return TrustedServingEligibility(True, effective)
@@ -403,36 +383,13 @@ def canonical_evidence_version_is_current(
     source: Source,
     version_or_signature: str,
 ) -> bool:
-    if (
-        source.server_content_signature_schema
-        != 'server-source-content:v1'
-        or source.server_content_signature is None
-    ):
+    authority = resolve_exact_source_authority(db, source=source)
+    if authority is None:
         return False
     if version_or_signature == source.server_content_signature:
         return True
-    matches = tuple(
-        db.scalars(
-            select(DocumentParserRun.id)
-            .join(Document, Document.id == DocumentParserRun.document_id)
-            .where(
-                Document.source_id == source.id,
-                Document.current_document_version_id
-                == DocumentParserRun.document_version_id,
-                DocumentParserRun.source_id == source.id,
-                DocumentParserRun.server_content_signature_schema
-                == 'server-source-content:v1',
-                DocumentParserRun.server_content_signature
-                == source.server_content_signature,
-                DocumentParserRun.parser_policy_version.is_not(None),
-                DocumentParserRun.parser_version.is_not(None),
-                DocumentParserRun.chunk_policy_version.is_not(None),
-                DocumentParserRun.revision_id == version_or_signature,
-            )
-            .limit(2)
-        ).all()
-    )
-    return len(matches) == 1
+    revision_id = authority.parser_run.revision_id
+    return bool(revision_id and version_or_signature == revision_id)
 
 
 def _strictest_permission(permission_levels: list[str]) -> str:

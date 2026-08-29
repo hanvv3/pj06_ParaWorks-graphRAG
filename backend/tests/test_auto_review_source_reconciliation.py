@@ -212,6 +212,53 @@ def _seed_explicit_history(
             fingerprint_key_material_verifier=key_verifier,
         )
     )
+    document = Document(
+        source_id=source.id,
+        title=source.title,
+        current_version='v1',
+    )
+    db.add(document)
+    db.flush()
+    version = DocumentVersion(
+        document_id=document.id,
+        version='v1',
+        body='Exact current evidence',
+    )
+    db.add(version)
+    db.flush()
+    parser_run = DocumentParserRun(
+        document_id=document.id,
+        document_version_id=version.id,
+        source_id=source.id,
+        parser_name='server_gmail_source_event',
+        parser_status='parsed',
+        parser_status_reason=None,
+        mime_type='message/rfc822',
+        document_version_label=version.version,
+        revision_id='gmail-revision-1',
+        content_signature=current_signature,
+        server_content_signature_schema='server-source-content:v1',
+        server_content_signature=current_signature,
+        parser_policy_version=SERVER_PARSER_POLICY_VERSION,
+        parser_version=SERVER_PARSER_VERSION,
+        chunk_policy_version=SERVER_CHUNK_POLICY_VERSION,
+        chunk_count=1,
+    )
+    db.add(parser_run)
+    db.flush()
+    db.add(
+        DocumentChunk(
+            version_id=version.id,
+            source_id=source.id,
+            parser_run_id=parser_run.id,
+            chunk_index=0,
+            text='Exact current evidence',
+            source_snippet='Exact current evidence',
+            permission_level='internal',
+            metadata_={},
+        )
+    )
+    document.current_document_version_id = version.id
     db.commit()
     return history, item, source, link
 
@@ -275,36 +322,12 @@ def test_current_verified_parser_revision_is_valid_explicit_evidence_identity(
         )
     )
     evidence.canonical_version_or_signature = 'gmail-revision-41'
-    document = Document(
-        source_id=source.id,
-        title=source.title,
-        current_version='v41',
+    parser_run = (
+        db_session.query(DocumentParserRun)
+        .filter_by(source_id=source.id)
+        .one()
     )
-    db_session.add(document)
-    db_session.flush([document])
-    version = DocumentVersion(
-        document_id=document.id,
-        version='v41',
-        body='Exact current evidence',
-    )
-    db_session.add(version)
-    db_session.flush([version])
-    parser_run = DocumentParserRun(
-        document_id=document.id,
-        document_version_id=version.id,
-        source_id=source.id,
-        parser_name='plain_text',
-        parser_status='parsed',
-        revision_id='gmail-revision-41',
-        server_content_signature_schema='server-source-content:v1',
-        server_content_signature=source.server_content_signature,
-        parser_policy_version='parser-policy:v1',
-        parser_version='plain-text:v1',
-        chunk_policy_version='chunk-policy:v1',
-    )
-    db_session.add(parser_run)
-    db_session.flush([parser_run])
-    document.current_document_version_id = version.id
+    parser_run.revision_id = 'gmail-revision-41'
     db_session.commit()
 
     result = TrustedServingEligibilityService(db_session).for_knowledge(
@@ -335,6 +358,60 @@ def test_auto_trusted_vector_is_excluded_before_ranking_while_reconciliation_is_
 
     assert result.eligible is False
     assert result.effective_permission is None
+
+
+def test_direct_signature_does_not_bypass_current_pointer_in_serving_or_readiness(
+    client,
+    db_session: Session,
+) -> None:
+    from backend.app.knowledge.trusted_serving_eligibility import (
+        TrustedServingEligibilityService,
+    )
+    from backend.app.review.auto_review_source_reconciliation import (
+        AutoReviewSourceReconciliationService,
+    )
+
+    history, _, source, _ = _seed_explicit_history(
+        db_session,
+        resolution_source='auto_policy',
+    )
+    document = db_session.query(Document).filter_by(source_id=source.id).one()
+    document.current_document_version_id = None
+    db_session.commit()
+
+    serving = TrustedServingEligibilityService(db_session).for_knowledge(
+        'history_event', history.id
+    )
+    status = AutoReviewSourceReconciliationService(
+        db_session,
+        settings=Settings(database_url='sqlite://'),
+        vector_writer=PreviewVectorIndexWriter(),
+    ).status(limit=100)
+    knowledge = client.get(
+        '/api/v1/knowledge',
+        headers={'X-Demo-User': 'viewer'},
+    )
+    search = client.post(
+        '/api/v1/search',
+        headers={'X-Demo-User': 'viewer'},
+        json={'query': 'Trusted history'},
+    )
+    ask = client.post(
+        '/api/v1/ask',
+        headers={'X-Demo-User': 'viewer'},
+        json={'question': 'Trusted history'},
+    )
+
+    assert serving.eligible is False
+    assert serving.effective_permission is None
+    assert status.stale_count == 1
+    assert status.readiness is False
+    assert knowledge.status_code == 200
+    assert knowledge.json()['history_events'] == []
+    assert search.status_code == 200
+    assert search.json()['results'] == []
+    assert ask.status_code == 200
+    assert ask.json()['source_ids'] == []
 
 
 def test_any_critical_or_remediation_audit_quarantines_only_its_auto_effect_before_revoke_cleanup(
@@ -933,6 +1010,7 @@ def _seed_pointer_repair_candidate(
         mime_type=parser_values['mime_type'],
         server_content_signature_schema='server-source-content:v1',
         server_content_signature=signature,
+        content_signature=signature,
         parser_policy_version=parser_values['parser_policy_version'],
         parser_version=parser_values['parser_version'],
         chunk_policy_version=parser_values['chunk_policy_version'],
@@ -1091,6 +1169,8 @@ def test_current_pointer_repair_never_guesses_between_exact_relational_versions(
         parser_name='server_drive_source_event',
         parser_status='parsed',
         mime_type='text/plain',
+        document_version_label=second_version.version,
+        content_signature=source.server_content_signature,
         server_content_signature_schema='server-source-content:v1',
         server_content_signature=source.server_content_signature,
         parser_policy_version=SERVER_PARSER_POLICY_VERSION,

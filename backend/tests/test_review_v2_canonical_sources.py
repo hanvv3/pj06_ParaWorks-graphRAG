@@ -347,6 +347,26 @@ def test_non_server_current_parser_run_fails_closed(db_session) -> None:
     assert exc_info.value.code == 'evidence_changed'
 
 
+def test_current_parser_run_cannot_self_authorize_wrong_allowed_mime(
+    db_session,
+) -> None:
+    signature = 'f' * 64
+    source = _server_source(db_session, signature=signature)
+    _, _, parser_run = _add_server_document_state(
+        db_session,
+        source=source,
+        signature=signature,
+    )
+    assert source.raw_metadata['mime_type'] == 'text/plain'
+    parser_run.mime_type = 'application/pdf'
+    db_session.flush()
+
+    with pytest.raises(ReviewWorkflowPreflightError) as exc_info:
+        _resolve_one(db_session, source, signature)
+
+    assert exc_info.value.code == 'evidence_changed'
+
+
 def test_canonical_refs_sort_dedupe_and_require_prefixed_source_id(
     db_session,
 ) -> None:

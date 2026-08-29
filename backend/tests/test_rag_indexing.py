@@ -219,6 +219,29 @@ def test_human_approved_deferred_slack_chunk_never_gains_trusted_serving_authori
     }
 
 
+def test_raw_index_rejects_parser_mime_that_differs_from_server_source_mime(
+    db_session: Session,
+) -> None:
+    chunk_id = seed_chunk(
+        db_session,
+        'Wrong MIME parser evidence must not be indexed.',
+        source_id='drive:wrong-mime-index',
+    )
+    source = db_session.query(Source).one()
+    parser_run = db_session.query(DocumentParserRun).one()
+    source.source_type = 'drive'
+    source.raw_metadata = {**source.raw_metadata, 'mime_type': 'text/plain'}
+    parser_run.parser_name = 'server_drive_source_event'
+    parser_run.mime_type = 'application/pdf'
+    db_session.commit()
+
+    documents = build_rag_index_documents(db_session)
+
+    assert f'chunk:{chunk_id}' not in {
+        document.document_id for document in documents
+    }
+
+
 def test_tombstoned_documents_are_skipped_before_embedding(db_session: Session) -> None:
     document = VectorDocument(
         document_id='history_event:41',
@@ -583,7 +606,10 @@ def test_build_rag_index_documents_includes_document_parser_metadata(db_session:
         title='휴가 정책',
         author='owner@example.com',
         permission_level='restricted',
-        raw_metadata={'sync_cursor': '2026-05-01T09:00:00Z'},
+        raw_metadata={
+            'sync_cursor': '2026-05-01T09:00:00Z',
+            'mime_type': 'application/vnd.google-apps.document',
+        },
         server_content_signature_schema='server-source-content:v1',
         server_content_signature='b' * 64,
     )
