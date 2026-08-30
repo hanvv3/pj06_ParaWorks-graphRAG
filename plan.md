@@ -206,9 +206,12 @@ Next priorities:
 1. Keep C.5 rollout disabled unless a separate operational rollout action is
    explicitly authorized. Both C.5 paid release gates are complete.
 2. The consolidated written **Deliverable D Core** Retriever Port and RAG
-   Answer Graph V2 spec is approved. Prepare its separate TDD implementation
-   plan next; that remains planning work and requires separate approval before
-   production code changes.
+   Answer Graph V2 spec is approved. Its separate 27-task implementation and
+   release plan (26 TDD implementation tasks plus one final evidence task) is
+   now drafted at
+   `docs/superpowers/plans/2026-08-31-deliverable-d-core-rag-answer-graph-v2.md`
+   and awaits separate approval. This is still planning work; the next action
+   after that approval is actual implementation Task 1, not more planning.
 3. Reach a separate D Core green checkpoint, then design, plan, approve, and
    reach a separate green checkpoint for D.1 PostgreSQL answer cache.
 4. Follow D.1 with Deliverable E Neo4j GraphRAG, then handle Slack data

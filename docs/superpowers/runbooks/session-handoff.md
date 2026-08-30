@@ -2,6 +2,32 @@
 
 Updated: 2026-08-31
 
+## 2026-08-31 Deliverable D Core implementation plan
+
+- The approved D Core design now has a separate 27-task implementation and
+  release plan (26 TDD implementation tasks plus one final provider-free
+  evidence task) at
+  `docs/superpowers/plans/2026-08-31-deliverable-d-core-rag-answer-graph-v2.md`.
+  It is a planning artifact awaiting separate approval; no D production code
+  has changed. After approval, begin actual implementation at Task 1 using the
+  subagent-driven execution mode unless the user chooses inline execution.
+- The plan maps all approved design sections 1–23 to executable proof and uses
+  five phases: contracts/identity/storage, canonical evidence/retrieval,
+  structured generation/cost/LangGraph, V1 API/Assistant UX, and rollout/safety/
+  release. It requires real LangChain `Runnable` ports and a real request-local
+  compiled LangGraph `StateGraph`, never a custom callable presented as either.
+- Persistence is deliberately split into serving revision
+  `d1a2b3c4e5f6` (down `9d7f3a1c6e20`) and runtime-safety revision
+  `e2b3c4d5f6a7` (down `d1a2b3c4e5f6`). Release exact-six tables stay in
+  validation-only metadata outside application metadata and Alembic.
+- Implementation and automated validation use fake/deterministic providers;
+  paid call count remains zero. Do not initialize or run the live gate from
+  this plan. Only after Tasks 1–27, provider-free gates, a clean commit, and an
+  exact zero-call preview may the user separately authorize at most 30 cases,
+  30 generations, 10 embeddings, 40 dispatches, and USD `0.360000`. The USD
+  100 account balance is availability only and does not authorize expansion,
+  retry, production traffic, reindexing, D.1, or E spend.
+
 ## 2026-08-30 Deliverable D Core written design
 
 - Branch `codex/rag-orchestrator-agent` now has the section-level approved D

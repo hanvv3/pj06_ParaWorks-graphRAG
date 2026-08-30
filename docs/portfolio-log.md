@@ -6,6 +6,27 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-31 Deliverable D Core implementation plan
+
+- Converted the approved RAG V2 design into 26 bounded TDD implementation
+  tasks plus one final provider-free evidence task across five phases:
+  contracts/storage, canonical retrieval, structured generation and cost
+  authority, V1 API/Assistant UX, and rollout/release proof. The plan
+  requires actual LangChain `Runnable` retrievers and an actual compiled
+  LangGraph `StateGraph`; API routes may only use the application facade.
+- Split persistence into two ordered additive Alembic revisions so serving
+  projection schema lands before runtime safety/cost/Assistant integrity.
+  Live-release exact-six tables use separate validation-only SQLAlchemy
+  metadata and are intentionally absent from application metadata and Alembic.
+- Kept D Core free of answer reuse, Redis, Neo4j, CDC, and Slack recovery.
+  Provider-free fake/deterministic gates cover implementation. Paid calls
+  remain zero; the first live gate is still a separately approved clean-commit
+  preview capped at 30 cases, 30 generations, 10 embeddings, 40 dispatches,
+  and USD `0.360000`. The available USD 100 balance does not enlarge it.
+- This entry records a planning artifact only. After separate plan approval,
+  the next step is actual implementation Task 1 with RED/GREEN verification
+  and one independently green commit per task.
+
 ## 2026-08-30 Deliverable D Core RAG V2 design
 
 - Recorded the section-level approved direction for the Retriever Port and RAG
