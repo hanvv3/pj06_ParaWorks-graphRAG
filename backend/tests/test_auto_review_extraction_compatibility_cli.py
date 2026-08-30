@@ -58,7 +58,7 @@ def test_dual_authorized_live_extraction_cli_uses_all_exact_routes(
             assert messages[0][0] == 'human'
             assert config == {'callbacks': []}
             if captured['calls'] % 2 == 1:
-                schema_name = self.schema.__name__
+                schema_name = self.schema['name']
                 item_type = {
                     'MailDocumentExtractionResult': 'timeline_event',
                     'TimelineExtractionResult': 'timeline_event',
@@ -111,7 +111,7 @@ def test_dual_authorized_live_extraction_cli_uses_all_exact_routes(
                     'no_candidate_reason': 'no_relevant_evidence',
                 }
             return {
-                'parsed': self.schema.model_validate(parsed),
+                'parsed': parsed,
                 'parsing_error': None,
                 'raw': AIMessage(
                     content='',
@@ -128,7 +128,7 @@ def test_dual_authorized_live_extraction_cli_uses_all_exact_routes(
         verbose = False
 
         def with_structured_output(self, schema, **kwargs):
-            captured['schemas'].append((schema.__name__, kwargs))
+            captured['schemas'].append((schema, kwargs))
             return Structured(schema)
 
     def builder(**kwargs):
@@ -141,9 +141,9 @@ def test_dual_authorized_live_extraction_cli_uses_all_exact_routes(
         '--fixture', str(FIXTURE), '--mode', 'live-openai', '--aggregate-only',
         '--allow-paid-provider-call',
     ], model_builder=builder)
+    assert code == 0
     report = json.loads(capsys.readouterr().out)
 
-    assert code == 0
     assert report['gate_passed'] is True
     assert captured['calls'] == 10
     assert len(captured['model_kwargs']) == 5
@@ -160,6 +160,23 @@ def test_dual_authorized_live_extraction_cli_uses_all_exact_routes(
     assert all(kwargs == {
         'method': 'json_schema', 'strict': True, 'include_raw': True,
     } for _, kwargs in captured['schemas'])
+    for schema, _ in captured['schemas']:
+        assert set(schema) == {'name', 'schema', 'strict'}
+        assert schema['strict'] is True
+        serialized = json.dumps(schema, sort_keys=True)
+        assert '"oneOf"' not in serialized
+        assert '"discriminator"' not in serialized
+        assert '"default"' not in serialized
+        for definition in schema['schema'].get('$defs', {}).values():
+            score_schema = definition.get('properties', {}).get(
+                'confidence_score'
+            )
+            if score_schema is not None:
+                assert score_schema == {
+                    'maximum': 1,
+                    'minimum': 0,
+                    'type': 'number',
+                }
     assert report['usage'] == {
         'input_tokens': 1000,
         'output_tokens': 200,

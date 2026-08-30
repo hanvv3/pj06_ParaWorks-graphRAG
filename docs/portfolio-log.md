@@ -6,6 +6,24 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-30 C.5 live provider compatibility hardening
+
+- Separately authorized aggregate-only Terra and Mini gates uncovered real
+  Responses strict-schema incompatibilities that deterministic fake models
+  could not expose. OpenAI rejected Pydantic Decimal unions in both paths and a
+  discriminated `oneOf` in the five extraction schemas.
+- Added provider-compatible schema freezing while preserving the real
+  LangChain `with_structured_output(..., method='json_schema', strict=True)`
+  path. Terra keeps its Pydantic/Decimal domain contract but sends a bounded
+  JSON number. Mini reuses OpenAI SDK `pydantic_function_tool()` for strict
+  conversion, then normalizes only the unsupported Decimal and discriminated
+  union artifacts before LangChain invocation.
+- TDD/verification evidence is `96 passed` across validator, dependency
+  compatibility, evaluation CLIs, and V2.1 extraction, plus green touched-file
+  Ruff. Post-fix calls passed schema validation but the API account returned
+  `credit_balance_exhausted` / `insufficient_quota` (HTTP 429), so neither paid
+  quality gate is recorded as passed and rollout remains `disabled`.
+
 ## 2026-08-30 C.5 Task 16 release proof
 
 - Added Korean-first frozen validation cases covering supported facts,
@@ -20,8 +38,9 @@ demo story changes.
   reuses the production Terra renderer/schema/model-router and extraction reuses
   the exact five Mini route renderers and singular schemas. Automated tests
   inject LangChain fake models, prove exact model/options and privacy, and make
-  no network call. The real Terra and Mini gates remain pending separate user
-  authorization, so rollout remains `disabled`.
+  no network call. The later separately authorized attempts are recorded above;
+  they remain unpassed because of exhausted API credit, so rollout remains
+  `disabled`.
 - Added a hermetic release controller with guarded child environments, exact
   node/event sidecars, module schema leases, disposable PostgreSQL+pgvector
   role/database ownership, cleanup precedence, and high-confidence tracked plus

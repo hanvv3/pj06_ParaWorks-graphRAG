@@ -29,6 +29,7 @@ from backend.app.agent_runtime.review_v21_extraction import (
     EXTRACTION_REGISTRY_VERSION,
     ExtractionCallStateError,
     _render_invocation,
+    build_extraction_provider_schema,
     parse_extraction_result,
 )
 from backend.app.core.config import Settings
@@ -299,7 +300,7 @@ def _live_evaluate(
                     and invocation.max_output_tokens == policy.max_output_tokens
                 )
                 structured = model.with_structured_output(
-                    invocation.output_schema,
+                    build_extraction_provider_schema(invocation.output_schema),
                     method='json_schema',
                     strict=True,
                     include_raw=True,

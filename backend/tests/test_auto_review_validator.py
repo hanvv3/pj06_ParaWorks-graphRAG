@@ -223,6 +223,22 @@ def test_validator_uses_with_structured_output_and_exact_schema() -> None:
     ]
 
 
+def test_validator_freezes_provider_compatible_number_schema_for_decimal_score() -> None:
+    validator, _, _ = _validator()
+
+    invocation = validator.prepare_many((_request(),))
+
+    frozen_format = json.loads(invocation.response_schema_framing)
+    score_schema = frozen_format['schema']['$defs']['FieldValidationResult'][
+        'properties'
+    ]['entailment_score']
+    assert score_schema == {
+        'maximum': 1,
+        'minimum': 0,
+        'type': 'number',
+    }
+
+
 def test_invoke_reuses_frozen_schema_without_a_second_render(monkeypatch) -> None:
     validator, models, _ = _validator()
     invocation = validator.prepare_many((_request(),))

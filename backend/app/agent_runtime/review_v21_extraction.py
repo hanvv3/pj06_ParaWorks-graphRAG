@@ -5,6 +5,7 @@ import hmac
 import json
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
@@ -16,6 +17,7 @@ from typing import Any, TypeVar
 from uuid import uuid4
 
 import tiktoken
+from openai import pydantic_function_tool
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -227,6 +229,83 @@ _OUTPUT_SCHEMAS: dict[str, type[BaseModel]] = {
     'decision_record_agent': DecisionRecordExtractionResult,
     'todo_agent': TodoExtractionResult,
 }
+
+
+def _normalize_extraction_provider_schema(value: Any) -> None:
+    if isinstance(value, list):
+        for child in value:
+            _normalize_extraction_provider_schema(child)
+        return
+    if not isinstance(value, dict):
+        return
+    alternatives = value.get('anyOf')
+    if isinstance(alternatives, list) and len(alternatives) == 2:
+        number_schema = next(
+            (
+                branch for branch in alternatives
+                if isinstance(branch, dict)
+                and branch.get('type') == 'number'
+                and branch.get('minimum') == 0
+                and branch.get('maximum') == 1
+            ),
+            None,
+        )
+        string_schema = next(
+            (
+                branch for branch in alternatives
+                if isinstance(branch, dict)
+                and branch.get('type') == 'string'
+                and isinstance(branch.get('pattern'), str)
+            ),
+            None,
+        )
+        if number_schema is not None and string_schema is not None:
+            value.clear()
+            value.update(deepcopy(number_schema))
+            return
+    if 'oneOf' in value:
+        if 'anyOf' in value:
+            raise ExtractionCallStateError(
+                'extraction response schema is unavailable'
+            )
+        value['anyOf'] = value.pop('oneOf')
+    value.pop('discriminator', None)
+    for child in value.values():
+        _normalize_extraction_provider_schema(child)
+
+
+def build_extraction_provider_schema(
+    output_schema: type[BaseModel],
+) -> dict[str, Any]:
+    try:
+        tool = pydantic_function_tool(output_schema)
+        function = tool['function']
+        name = function['name']
+        parameters = deepcopy(function['parameters'])
+        strict = function['strict']
+    except (KeyError, TypeError, ValueError):
+        raise ExtractionCallStateError(
+            'extraction response schema is unavailable'
+        ) from None
+    if (
+        tool.get('type') != 'function'
+        or name != output_schema.__name__
+        or strict is not True
+        or not isinstance(parameters, dict)
+    ):
+        raise ExtractionCallStateError(
+            'extraction response schema is unavailable'
+        )
+    _normalize_extraction_provider_schema(parameters)
+    serialized = json.dumps(parameters, sort_keys=True, separators=(',', ':'))
+    if any(
+        token in serialized
+        for token in ('"default":', '"discriminator":', '"oneOf":')
+    ):
+        raise ExtractionCallStateError(
+            'extraction response schema is unavailable'
+        )
+    return {'name': name, 'schema': parameters, 'strict': True}
 
 
 def _canonical_json(value: Any) -> str:

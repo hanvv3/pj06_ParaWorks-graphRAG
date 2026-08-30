@@ -3388,6 +3388,14 @@ Expected: all deterministic cases pass and no network/provider client is constru
 
 - [ ] **Step 3: Run the separately authorized paid Terra offline gate before shadow rollout**
 
+2026-08-30 execution note: separately authorized and attempted. The first live
+request exposed an OpenAI `invalid_json_schema` rejection for the Pydantic
+Decimal score representation. That boundary was TDD-fixed and the official
+aggregate-only command was rerun. Provider schema validation then succeeded,
+but execution was blocked by `credit_balance_exhausted` /
+`insufficient_quota` (HTTP 429). This step remains unchecked; no live metric is
+recorded and rollout remains disabled.
+
 This is never part of pytest, CI, normal implementation verification, or an automatic continuation. After the code is otherwise green, stop and obtain explicit user authorization for paid provider calls. Use only the reviewed sanitized golden fixture—never production source data—and run the exact production prompt/schema against `gpt-5.6-terra` with reasoning effort `medium`, `max_retries=0`, and the same bounds/cost policy. Write only aggregate confusion-matrix counts, precision, prohibited-case counts, exact `(purpose='validation', provider='openai', model='gpt-5.6-terra', reasoning_effort='medium')` safety key, prompt/output-contract/policy/cost-policy identities, token totals, and cost; discard raw prompts and model outputs.
 
 ```powershell
@@ -3405,6 +3413,15 @@ if ($evalExit -ne 0) { throw "paid Terra aggregate gate failed with exit code $e
 The paid Terra gate must meet the same >=99% precision and zero prohibited-count criteria before an operator may authorize shadow. A Sol comparison is optional and requires a second explicit paid-call authorization; it is evaluation-only and can never become the C.5 validator or approval authority. If authorization is withheld or the gate fails, the implementation may be code-complete but rollout remains `disabled` and the docs must say the live model gate is pending/failed rather than copying deterministic metrics.
 
 - [ ] **Step 3B: Run the separately authorized paid Mini extraction compatibility gate before shadow rollout**
+
+2026-08-30 execution note: separately authorized and attempted. The first live
+request exposed OpenAI `invalid_json_schema` rejections for Decimal score and
+discriminated `oneOf` schema artifacts. The gate now reuses the OpenAI SDK
+strict Pydantic conversion and TDD-tested provider normalization before the
+real LangChain JSON-schema call. The post-fix official command reached provider
+execution but was blocked by `credit_balance_exhausted` /
+`insufficient_quota` (HTTP 429). This step remains unchecked; no live metric is
+recorded and rollout remains disabled.
 
 This is a distinct paid-call authorization and is never implied by Terra approval. Use only the sanitized five-route fixture and the exact production Responses API renderer. The aggregate gate must prove the exact `(purpose='extraction', provider='openai', model='gpt-5.4-mini-2026-03-17', reasoning_effort='none')` safety key and extraction cost-policy, all five agent/route/prompt/output-contract identities, each prepared request stayed within 10,000 framed input tokens, each response satisfied the singular `candidate|no_candidate` contract, its exact item/payload/field-evidence schema, and the complete canonical-envelope 2,048-token guard, output usage stayed within 2,048 total tokens, one attempt and zero fallback/retry occurred, each full-cap route reserve equaled USD 0.016716, the five-route full-cap maximum equaled USD 0.083580, and authoritative usage/cost accounting matched USD 0.75/M input plus USD 4.50/M output. No extracted text is written or printed.
 

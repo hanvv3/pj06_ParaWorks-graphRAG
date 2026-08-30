@@ -175,9 +175,13 @@ Current state:
   Terra/Mini evaluation CLIs, hermetic PostgreSQL schema isolation, exact
   collection/sidecar/cleanup authority, secret scanning, rollback smoke, and a
   managed Playwright server. Commit `4b9132a` records the verified behavior.
-  No paid provider call or rollout enablement occurred; both separately
-  authorized live model gates remain pending and the effective mode remains
-  `disabled`.
+  Both separately authorized live model gates were attempted on 2026-08-30.
+  The attempts exposed and TDD-fixed OpenAI strict-schema incompatibilities in
+  the Terra Decimal score and Mini Decimal/discriminated-union schemas. After
+  those fixes, both requests reached the provider execution boundary but were
+  blocked by `credit_balance_exhausted` / `insufficient_quota` (HTTP 429).
+  Neither paid gate passed, no rollout was enabled, and the effective mode
+  remains `disabled`.
 - The whole-suite PostgreSQL isolation boundary is now implemented. It uses one
   controller-owned `_test` role/database, module-specific serial schema leases,
   a separate SQLite app database, allowlisted child environments, exact
@@ -187,9 +191,10 @@ Current state:
 
 Next priorities:
 
-1. Keep C.5 rollout disabled until the user separately authorizes and both
-   sanitized paid gates pass: Terra validation and Mini five-route extraction.
-   These are release authorization gates, not remaining implementation work.
+1. Keep C.5 rollout disabled. After API credits/billing are restored, obtain a
+   fresh explicit paid-call confirmation and rerun both sanitized gates: Terra
+   validation and Mini five-route extraction. These are release authorization
+   gates, not remaining implementation work.
 2. After that authorization decision, enter the **planning stage** for
    Deliverable D Retriever Port and RAG Answer Graph V2.
 3. Follow D with Deliverable E Neo4j GraphRAG, then handle Slack data
@@ -495,7 +500,9 @@ Tasks:
     plan, and exact execution profile are finalized.
 - Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–16 implemented
   and deterministic/non-paid release proof verified. Paid Terra and Mini gates
-  are still required before shadow rollout.
+  were authorized and attempted, but remain unpassed because the API account
+  returned `credit_balance_exhausted`; both are still required before shadow
+  rollout.
   - Approved spec:
     `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
   - Implementation plan:
@@ -529,8 +536,10 @@ Tasks:
     15. Same-screen automatic trust review and trust-source badges: complete.
     16. Golden/release proof, whole-suite isolation, frontend regression,
         secret/privacy, and rollback gates: complete without live providers.
-        Paid Terra/Mini aggregate gates remain separately authorized release
-        prerequisites; rollout remains disabled.
+        Paid Terra/Mini aggregate attempts revealed strict-schema defects that
+        are now TDD-fixed. Both live gates remain release prerequisites because
+        the post-fix calls were blocked by exhausted API credit; rollout remains
+        disabled.
   - Separates canonical source evidence, pending AI knowledge, and trusted
     knowledge. Raw evidence is not official knowledge and C.5 does not broaden
     current RAG indexing.
@@ -621,8 +630,8 @@ Tasks:
     Frontend gates passed desktop `58`, mobile `48`, and legacy desktop `9`;
     lint/build, lock, Ruff, diff, and secret scans passed.
 - User-directed execution order for the remaining program:
-  1. Separately authorize or defer the paid C.5 Terra and Mini release gates;
-     rollout remains disabled until both pass.
+  1. Restore API billing/credits, freshly reconfirm both paid C.5 calls, and
+     rerun the Terra and Mini gates; rollout remains disabled until both pass.
   2. Plan Deliverable D Retriever Port and RAG Answer Graph V2 using Gmail, Drive,
      Calendar, trusted knowledge, and deterministic fixtures.
   3. Deliverable E Neo4j GraphRAG after D establishes the safe retriever and

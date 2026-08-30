@@ -129,9 +129,20 @@ def test_dependency_compat_freezes_json_schema_strict_bound_kwargs_and_framing()
         'method': 'json_schema',
         'strict': True,
     }
-    assert json.loads(invocation.response_schema_framing) == (
-        type_to_text_format_param(CandidateValidationBatchResult)
-    )
+    expected_format = type_to_text_format_param(CandidateValidationBatchResult)
+    expected_score_schema = expected_format['schema']['$defs'][
+        'FieldValidationResult'
+    ]['properties'].pop('entailment_score')
+    frozen_score_schema = frozen_format['schema']['$defs'][
+        'FieldValidationResult'
+    ]['properties'].pop('entailment_score')
+    assert 'anyOf' in expected_score_schema
+    assert frozen_score_schema == {
+        'maximum': 1,
+        'minimum': 0,
+        'type': 'number',
+    }
+    assert frozen_format == expected_format
     assert frozen_binding.kwargs['response_format'] == {
         'type': 'json_schema',
         'json_schema': frozen_schema,

@@ -2,6 +2,37 @@
 
 Updated: 2026-08-30
 
+## 2026-08-30 C.5 paid gate attempt and provider-schema repair
+
+- The user separately authorized the Terra validation and Mini five-route
+  extraction gates and chose to reuse the existing `.env.local` key. The key
+  was loaded only into each child process and was never printed, persisted, or
+  committed.
+- Safe model retrieval confirmed access to exact models `gpt-5.6-terra` and
+  `gpt-5.4-mini-2026-03-17`. The first live attempts then failed before model
+  execution with OpenAI `invalid_json_schema` on `text.format.schema`.
+- Root-cause diagnostics proved that Pydantic `Decimal` emitted a
+  number-or-regex-string union rejected by Responses strict JSON schema. The
+  extraction schemas additionally emitted a discriminated `oneOf`. TDD fixes
+  now freeze Terra scores as bounded JSON numbers and build Mini schemas from
+  OpenAI SDK `pydantic_function_tool()`, normalizing only Decimal unions and
+  discriminated `oneOf` to provider-supported JSON-schema shapes. Domain
+  parsing still uses the original Pydantic models and Decimal validation.
+- RED/GREEN evidence: the Terra provider-schema regression failed before the
+  change and passed afterward; the Mini live CLI fake gate failed `3 != 0`
+  before the provider-schema adapter and passed afterward. The combined focused
+  regression is `96 passed`; touched-file Ruff is green.
+- Post-fix official aggregate-only Terra and Mini CLIs were rerun. Safe bounded
+  diagnostics confirmed both schemas now pass provider validation and reach
+  execution, where the account returns
+  `credit_balance_exhausted` / `insufficient_quota` (HTTP 429). Therefore
+  neither live gate is passed and their plan checkboxes remain unchecked.
+- Operational mode remains `disabled`. Do not enable rollout or record the
+  deterministic fixture metrics as live-model results. After billing/credits
+  are restored, obtain fresh explicit paid-call confirmation and rerun both
+  exact aggregate-only commands. Deliverable D remains planning-only after the
+  C.5 paid release boundary; Slack remains last.
+
 ## 2026-08-30 C.5 Task 16 deterministic release proof complete
 
 - Branch `codex/rag-orchestrator-agent` now contains Task 16 behavior commit
@@ -15,7 +46,8 @@ Updated: 2026-08-30
   construct no network client without dual authorization.
 - Deterministic golden metrics are precision `1.0`, recall `1.0`, queue
   reduction `0.166667`, and every prohibited count `0`. Do not represent these
-  as live Terra/Mini results. No paid call has run in this session.
+  as live Terra/Mini results. The later paid attempts are recorded separately
+  above and did not produce a passing live-model report.
 - Official controller proof is green:
   - settings: `6 collected / 6 passed`, leases `2/2`;
   - PostgreSQL: `394 / 394`, leases `10/10`;
@@ -33,8 +65,8 @@ Updated: 2026-08-30
 - Operational mode remains `disabled`. No rollout authorization, breaker
   transition, production database mutation, deploy, push, merge, or PR occurred.
   The distinct paid Terra and Mini aggregate gates are the only remaining C.5
-  release-authorization boundary before shadow; they require a new explicit
-  user authorization.
+  release-authorization boundary before shadow; after billing recovery they
+  require fresh explicit paid-call confirmation.
 - If the paid gates are authorized and both pass, the next product activity is
   **Deliverable D planning**, not implementation. Deliverable E follows D;
   Slack reconstruction and the visible ten-node baseline remain last.

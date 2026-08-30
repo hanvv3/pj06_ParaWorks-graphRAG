@@ -323,12 +323,31 @@ def _render_validation_frame(
         ('system', _SYSTEM_INSTRUCTION),
         ('human', canonical_text),
     )
+    provider_schema = CandidateValidationBatchResult.model_json_schema()
+    try:
+        entailment_schema = provider_schema['$defs']['FieldValidationResult'][
+            'properties'
+        ]['entailment_score']
+    except (KeyError, TypeError):
+        raise AutoReviewValidationError(
+            'validation response schema is unavailable'
+        ) from None
+    if not isinstance(entailment_schema, dict):
+        raise AutoReviewValidationError(
+            'validation response schema is unavailable'
+        )
+    entailment_schema.clear()
+    entailment_schema.update({
+        'maximum': 1,
+        'minimum': 0,
+        'type': 'number',
+    })
     schema_framing = _canonical_json(
         {
             'type': 'json_schema',
             'strict': True,
             'name': CandidateValidationBatchResult.__name__,
-            'schema': CandidateValidationBatchResult.model_json_schema(),
+            'schema': provider_schema,
         }
     )
     estimator_text = _canonical_json(
