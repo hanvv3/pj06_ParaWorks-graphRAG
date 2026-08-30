@@ -1,5 +1,6 @@
 import { CheckCircle2, ExternalLink, ShieldCheck } from "lucide-react";
 import type { KnowledgeItem } from "@/lib/api/types";
+import { AutoReviewBadge } from "@/components/review/AutoReviewBadge";
 
 type MemoryCollectionProps = {
   eyebrow: string;
@@ -54,6 +55,7 @@ export function MemoryCard({ item }: { item: KnowledgeItem }) {
           {statusLabel(item.review_status)}
         </span>
         <span className="badge blue">{permissionLabel(item.permission_level)}</span>
+        <AutoReviewBadge resolutionSource={item.resolution_source} />
         {item.priority ? <span className="priority-badge warning">{item.priority}</span> : null}
       </div>
 

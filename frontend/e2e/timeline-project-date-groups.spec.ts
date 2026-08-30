@@ -54,6 +54,7 @@ test("Timeline groups approved project items by date", async ({ page }) => {
                 occurred_at: "2026-05-14T01:00:00+09:00",
                 evidence_reason: "승인된 항목",
                 project_key: "project-alpha",
+                resolution_source: "auto_policy",
               },
               {
                 id: "timeline_event:2",

@@ -11,8 +11,15 @@ from backend.app.core.demo_auth import DemoUser, get_demo_user
 from backend.app.db.session import get_db
 from backend.app.knowledge.trusted_serving_eligibility import (
     TrustedServingEligibilityService,
+    knowledge_type_storage_aliases,
 )
-from backend.app.models import DecisionRecord, HistoryEvent, TimelineEvent, Todo
+from backend.app.models import (
+    DecisionRecord,
+    HistoryEvent,
+    TimelineEvent,
+    Todo,
+    TrustedKnowledgeApprovalLink,
+)
 
 router = APIRouter(prefix='/knowledge', tags=['knowledge'])
 DbSession = Annotated[Session, Depends(get_db)]
@@ -24,6 +31,7 @@ PERMISSION_RANK = {'public': 0, 'internal': 1, 'restricted': 2}
 class _EligibleRecord:
     record: object
     permission_level: str
+    resolution_source: str
 
     def __getattr__(self, name: str) -> object:
         return getattr(self.record, name)
@@ -96,10 +104,10 @@ def _approved_memory_queries(
     ).all()
     service = TrustedServingEligibilityService(db)
     return (
-        _eligible_for_actor(service, 'decision_record', decisions, user),
-        _eligible_for_actor(service, 'history_event', history_events, user),
-        _eligible_for_actor(service, 'timeline_event', timeline_events, user),
-        _eligible_for_actor(service, 'todo', todos, user),
+        _eligible_for_actor(service, 'decision_record', decisions, user, db=db),
+        _eligible_for_actor(service, 'history_event', history_events, user, db=db),
+        _eligible_for_actor(service, 'timeline_event', timeline_events, user, db=db),
+        _eligible_for_actor(service, 'todo', todos, user, db=db),
     )
 
 
@@ -274,6 +282,7 @@ def list_knowledge(db: DbSession, user: CurrentUser) -> dict:
                 'permission_level': item.permission_level,
                 'review_status': item.review_status,
                 'created_at': item.created_at.isoformat(),
+                'resolution_source': item.resolution_source,
             }
             for item in decisions
         ],
@@ -288,6 +297,7 @@ def list_knowledge(db: DbSession, user: CurrentUser) -> dict:
                 'permission_level': item.permission_level,
                 'review_status': item.review_status,
                 'created_at': item.created_at.isoformat(),
+                'resolution_source': item.resolution_source,
             }
             for item in history_events
         ],
@@ -302,6 +312,7 @@ def list_knowledge(db: DbSession, user: CurrentUser) -> dict:
                 'permission_level': item.permission_level,
                 'review_status': item.review_status,
                 'created_at': item.created_at.isoformat(),
+                'resolution_source': item.resolution_source,
             }
             for item in timeline_events
         ],
@@ -317,6 +328,7 @@ def list_knowledge(db: DbSession, user: CurrentUser) -> dict:
                 'permission_level': item.permission_level,
                 'review_status': item.review_status,
                 'created_at': item.created_at.isoformat(),
+                'resolution_source': item.resolution_source,
             }
             for item in todos
         ],
@@ -328,6 +340,8 @@ def _eligible_for_actor(
     knowledge_type: str,
     records: list,
     user: DemoUser,
+    *,
+    db: Session | None = None,
 ) -> list:
     visible = []
     for record in records:
@@ -336,5 +350,32 @@ def _eligible_for_actor(
             result.eligible
             and result.effective_permission in user.permission_levels
         ):
-            visible.append(_EligibleRecord(record, result.effective_permission))
+            visible.append(_EligibleRecord(
+                record,
+                result.effective_permission,
+                (
+                    _trusted_resolution_source(db, knowledge_type, record.id)
+                    if db is not None
+                    else 'human'
+                ),
+            ))
     return visible
+
+
+def _trusted_resolution_source(
+    db: Session,
+    knowledge_type: str,
+    knowledge_id: int,
+) -> str:
+    sources = tuple(db.scalars(
+        select(TrustedKnowledgeApprovalLink.resolution_source).where(
+            TrustedKnowledgeApprovalLink.knowledge_type.in_(
+                knowledge_type_storage_aliases(knowledge_type)
+            ),
+            TrustedKnowledgeApprovalLink.knowledge_id == knowledge_id,
+            TrustedKnowledgeApprovalLink.active.is_(True),
+        )
+    ).all())
+    if 'human' in sources or not sources:
+        return 'human'
+    return 'auto_policy' if 'auto_policy' in sources else 'human'

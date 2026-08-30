@@ -3229,7 +3229,7 @@ git commit -m "feat: preview auto review cost in integrations"
 - Adds `사람 승인` or `자동 검증` as a separate trust-source badge in Knowledge/History/Decision collections and Timeline while preserving operational status and source evidence behavior. If shared canonical knowledge has any active human or legacy-human provenance, `사람 승인` takes precedence; `자동 검증` is shown only when all active trusted provenance is auto-policy.
 - Exposes only permission-filtered `resolution_source` from Knowledge/project Timeline backend projections; it does not expose validation/provenance internals.
 
-- [ ] **Step 1: Write backend trust-source projection tests**
+- [x] **Step 1: Write backend trust-source projection tests**
 
 Assert that approved Knowledge/History/Timeline records resolve `human` versus `auto_policy` from visible provenance, retain the strictest permission, conceal inaccessible rows, and never expose validation/provenance ids or counts.
 
@@ -3239,7 +3239,7 @@ Run and observe RED:
 uv run --locked pytest backend/tests/test_knowledge_api.py backend/tests/test_project_memory_api.py -q
 ```
 
-- [ ] **Step 2: Write Review and trust-badge Playwright tests**
+- [x] **Step 2: Write Review and trust-badge Playwright tests**
 
 Cover:
 
@@ -3264,7 +3264,7 @@ desktop and mobile add no page/modal/navigation depth
 
 Run the new specs once and observe their expected failures against the missing UI.
 
-- [ ] **Step 3: Add safe action wrappers and shared badges**
+- [x] **Step 3: Add safe action wrappers and shared badges**
 
 `autoReview.ts` exposes only:
 
@@ -3286,17 +3286,17 @@ submitAutoReviewAudit(
 
 Reuse the generic client error sanitizer. `AutoReviewBadge` maps allowlisted state to Korean labels without printing raw codes. `AutoReviewActions` renders one inline Korean-labeled select for the five frozen revoke reasons (business withdrawal versus four quality reasons), sends only the enum code, keeps actions inline, disables duplicate submission, and waits for canonical server response. On bounded 409 `remediation_required`, it immediately refetches the item and renders `조치 필요`; it never optimistically restores or hides the quarantined effect. Audit submission retains its separate 1–500 character human reason. No modal, second confirmation step, or client-side quality classifier is added.
 
-- [ ] **Step 4: Add the two-view Review surface and V2.1 counts**
+- [x] **Step 4: Add the two-view Review surface and V2.1 counts**
 
 The current page hard-codes `status=pending_review`; replace that with view-derived query parameters while keeping pending as initial state. In auto view use `status=approved&resolution_source=auto_policy`, retain the exact server-issued `workflow_thread_id`, and render `AutoReviewTrustPanel` in the existing expanded item area. Keep `SourceEvidenceDrawer` unchanged.
 
 For automatic detail, use `상세 내용` rather than the current raw `#{item.id}` label. Do not place ids in visible error/copy. Render `감사 필요` when audit status is pending and `조치 필요` whenever remediation is required; a failed critical remediation cannot be hidden by normal confirmed UI state.
 
-- [ ] **Step 5: Add permission-aware trust-source projections and badges**
+- [x] **Step 5: Add permission-aware trust-source projections and badges**
 
 Join approved knowledge/project Timeline records to their originating ReviewItem/provenance after applying permission filters, return nullable `resolution_source`, and add it to typed item models. Resolve shared provenance deterministically as human when any active explicit/legacy-human source exists, otherwise auto-policy when at least one active auto source exists; never disclose how many links produced the label. `MemoryCollection.tsx` covers Knowledge, History, and Decisions; `timeline/page.tsx` adds the trust badge separately from `승인/완료` operational status and retains its current inline evidence panel.
 
-- [ ] **Step 6: Run backend and frontend focused gates GREEN**
+- [x] **Step 6: Run backend and frontend focused gates GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_knowledge_api.py backend/tests/test_project_memory_api.py -q
@@ -3317,7 +3317,7 @@ Set-Location ..
 
 Expected: every focused backend/frontend test passes. Stop the server and verify port 3000 is closed.
 
-- [ ] **Step 7: Commit the same-screen trust UX**
+- [x] **Step 7: Commit the same-screen trust UX**
 
 ```powershell
 git add frontend/src/lib/api/autoReview.ts frontend/src/components/review/AutoReviewBadge.tsx frontend/src/components/review/AutoReviewActions.tsx frontend/src/app/review/AutoReviewTrustPanel.tsx frontend/src/app/review/ReviewWorkflowContextPanel.tsx frontend/src/app/review/page.tsx frontend/src/lib/api/types.ts backend/app/api/v1/knowledge.py backend/app/projects/service.py frontend/src/components/knowledge/MemoryCollection.tsx frontend/src/app/timeline/page.tsx frontend/e2e/auto-review-trust-promotion.spec.ts frontend/e2e/auto-review-knowledge-badges.spec.ts frontend/e2e/review-hitl-v2-review.spec.ts frontend/e2e/timeline-project-date-groups.spec.ts backend/tests/test_knowledge_api.py backend/tests/test_project_memory_api.py

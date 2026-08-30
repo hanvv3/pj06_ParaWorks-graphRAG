@@ -149,7 +149,7 @@ Current state:
 - PostgreSQL restart, reconciliation, exact-batch launch, concurrent Review
   transition, concurrent resume, terminal-race, checkpoint privacy, and exact
   cleanup coverage is release-verified with zero PostgreSQL skips.
-- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–14 are implemented
+- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–15 are implemented
   and independently verified. Deterministic eligibility/policy authority and
   the isolated real LangChain `gpt-5.6-terra` validator boundary now join the
   exact source/current-version, revocation, serving, and vector-state
@@ -168,7 +168,9 @@ Current state:
   audit/revoke actions through the existing breaker-first services. Product
   Task 14 adds exact V2.0/V2.1 client unions, a same-click signed V2.1 launch,
   combined extraction/validation/total cost preview, and explicit re-confirmation
-  after a changed preview. Product Tasks 15–16 remain unstarted;
+  after a changed preview. Task 15 adds the same-screen pending/automatic Review
+  switch, inline bounded audit/revoke controls, V2.1 counts, and permission-aware
+  human/automatic trust-source badges. Product Task 16 remains unstarted;
   no paid provider call or
   rollout enablement occurred.
 - A later Task 16 release-gate dry run exposed a test-infrastructure boundary,
@@ -493,8 +495,8 @@ Tasks:
     checkpoint runtimes/pools/savers; A is closed and disposed before B exists.
   - This historical boundary is superseded: the C.5 design/spec, implementation
     plan, and exact execution profile are finalized.
-- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–14 implemented
-  and verified; product Task 15 is the next implementation slice.
+- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–15 implemented
+  and verified; product Task 16 release proof is the next implementation slice.
   - Approved spec:
     `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
   - Implementation plan:
@@ -525,8 +527,9 @@ Tasks:
     13. Bounded Review auto metadata, permission-concealed filter, audit, and
         revoke API actions: complete.
     14. Typed V2.1 client and same-click combined cost preview: complete.
-    15. Tasks 15–16, Deliverable D/E, and Slack recovery: not started; Task 15
-        is the next implementation slice.
+    15. Same-screen automatic trust review and trust-source badges: complete.
+    16. Task 16 release proof, Deliverable D/E, and Slack recovery: not started;
+        Task 16 is the next implementation slice.
   - Separates canonical source evidence, pending AI knowledge, and trusted
     knowledge. Raw evidence is not official knowledge and C.5 does not broaden
     current RAG indexing.

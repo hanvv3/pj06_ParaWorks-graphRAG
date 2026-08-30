@@ -284,6 +284,7 @@ export type KnowledgeItem = {
   permission_level: string;
   review_status: string;
   created_at: string;
+  resolution_source?: "human" | "auto_policy" | null;
 };
 
 export type KnowledgeResponse = {
@@ -424,6 +425,35 @@ export type ReviewItem = {
   permission_level: string;
   status: ReviewStatus;
   reviewer_id?: string | null;
+  resolution_source?: "human" | "auto_policy" | null;
+  resolution_policy_version?: string | null;
+  auto_review_summary?: AutoReviewSummary | null;
+  auto_review_audit?: AutoReviewAuditSummary | null;
+};
+
+export type AutoReviewSummary = {
+  validator_model: "gpt-5.6-terra";
+  reasoning_effort: "medium";
+  validator_prompt_version: "auto-review-validation:v1";
+  validator_output_contract_version: "candidate-validation-batch:v1";
+  policy_version: "auto-review-policy:v1";
+  supported_substantive_field_count: number;
+  minimum_entailment_score: number;
+  policy_reason_codes: Array<"direct_fact_supported" | "trusted_exact_reaffirmation">;
+  validated_at: string;
+};
+
+export type AutoReviewAuditOutcome =
+  | "confirmed"
+  | "incorrect"
+  | "permission_violation"
+  | "source_version_violation"
+  | "policy_violation";
+
+export type AutoReviewAuditSummary = {
+  status: "pending" | "completed" | "remediation_required";
+  outcome: AutoReviewAuditOutcome | null;
+  action_required: boolean;
 };
 
 export type ReviewPromotionResult = {
@@ -803,6 +833,7 @@ export type ProjectTimelineItem = {
   project_key?: string | null;
   completed_at?: string | null;
   completed_by?: string | null;
+  resolution_source?: "human" | "auto_policy" | null;
 };
 
 export type ProjectMemory = {

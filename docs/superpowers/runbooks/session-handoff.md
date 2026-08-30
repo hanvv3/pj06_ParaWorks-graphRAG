@@ -2,6 +2,24 @@
 
 Updated: 2026-08-30
 
+## 2026-08-30 C.5 Task 15 same-screen trust UX complete
+
+- Review retains the pending default and exact workflow filter while adding an
+  inline automatic-approved view. Automatic details omit raw ids and human
+  bulk/project/edit/approve actions, retain the evidence drawer, and expose only
+  bounded validation/audit state plus strict inline audit/revoke controls.
+- V2.1 workflow context shows automatic/human-required/more-evidence counts;
+  V2.0 keeps the old completed/total display. No modal, wizard, route, or normal
+  navigation depth was added.
+- Permission-filtered Knowledge and project Timeline projections now include
+  nullable trust source only. Human provenance takes precedence over automatic
+  provenance, and UI badges remain separate from operational status.
+- Fresh evidence: backend focused `30 passed`; frontend lint/build; desktop
+  Playwright `31 passed`; mobile `26 passed`. No paid provider or rollout.
+- Next is C.5 Task 16, an actual implementation/release-verification task. Its
+  deterministic harness and isolation profiles may run automatically, but the
+  paid Terra and Mini gates still require separate explicit authorization.
+
 ## 2026-08-30 C.5 Task 14 typed one-click preview complete
 
 - Frontend transport now uses exact V2.0/V2.1 discriminated unions and exact

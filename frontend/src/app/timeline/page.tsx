@@ -14,6 +14,7 @@ import Image, { type ImageProps } from "next/image";
 import { useEffect, useMemo, useState } from "react";
 import { apiGet } from "@/lib/api/client";
 import type { ProjectTimelineItem, ProjectsResponse } from "@/lib/api/types";
+import { AutoReviewBadge } from "@/components/review/AutoReviewBadge";
 import todoIcon from "@/app/timeline/icons/todo.png";
 import slackIcon from "@/app/timeline/icons/slack.svg";
 import gmailIcon from "@/app/timeline/icons/gmail.png";
@@ -37,6 +38,7 @@ type TimelineHistory = {
   summary: string;
   history: string;
   status: TimelineStatus;
+  resolutionSource?: "human" | "auto_policy" | null;
   sourceUrl: string;
   preview: string;
   snippets: { author: string; body: string; time: string }[];
@@ -814,6 +816,7 @@ function TimelineEventRow({
         <span className={`rounded-full border px-2.5 py-1 text-[11px] font-extrabold ${statusChipClass(item.status)}`}>
           {statusLabel(item.status)}
         </span>
+        <AutoReviewBadge resolutionSource={item.resolutionSource} />
         <button
           type="button"
           aria-pressed={isSelected}
@@ -865,6 +868,7 @@ function timelineHistoryFromProjectItem(item: ProjectTimelineItem): TimelineHist
     summary: item.summary,
     history: item.summary || "승인된 타임라인 요약이 없습니다.",
     status,
+    resolutionSource: item.resolution_source,
     sourceUrl: item.source_links[0] ?? "",
     preview: previewForProjectItem(item, source),
     snippets: item.source_snippets.map((snippet) => ({

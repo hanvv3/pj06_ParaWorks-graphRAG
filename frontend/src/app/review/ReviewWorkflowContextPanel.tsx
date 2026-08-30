@@ -104,14 +104,20 @@ export function ReviewWorkflowContextPanel({
         <div>
           <p className="text-xs font-bold uppercase tracking-wide text-[var(--ink-muted)]">검토 워크플로</p>
           <p className="mt-1 text-sm font-semibold text-[var(--ink)]">상태: {lifecycleLabel(status)}</p>
-          <p className="mt-1 text-base font-bold text-[var(--ink)]">완료 수 / 전체 수: {completed} / {status.review_item_count}</p>
+          {status.graph_version === "company-memory-review-v2.1-auto-review" ? (
+            <p className="mt-1 text-base font-bold text-[var(--ink)]">
+              자동 승인 {status.auto_approved_count}건 | 확인 필요 {status.human_review_required_count}건 | 추가 근거 필요 {status.review_status_counts.needs_more_evidence}건
+            </p>
+          ) : (
+            <p className="mt-1 text-base font-bold text-[var(--ink)]">완료 수 / 전체 수: {completed} / {status.review_item_count}</p>
+          )}
           <p className="mt-1 text-sm leading-6 text-[var(--ink-muted)]">{guidance(status)}</p>
           <p className="mt-1 text-xs text-[var(--ink-muted)]">연결된 검토 항목만 표시합니다 · 워크플로 버전 {status.graph_version}</p>
           <p className="mt-1 text-xs text-[var(--ink-muted)]">
             {status.durable ? "체크포인트가 저장되어 재시작 후에도 이어집니다." : "현재 프로세스에서만 유지됩니다. 서버를 다시 시작하면 이어서 처리할 수 없습니다."}
           </p>
         </div>
-        {status.status === "awaiting_human_review" ? (
+        {status.status === "awaiting_human_review" && status.resume_allowed ? (
           <button
             type="button"
             onClick={onResume}

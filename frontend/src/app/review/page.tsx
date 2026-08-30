@@ -18,6 +18,7 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, type MouseEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ReviewWorkflowContextPanel } from "@/app/review/ReviewWorkflowContextPanel";
+import { AutoReviewTrustPanel } from "@/app/review/AutoReviewTrustPanel";
 import { deriveReviewBulkProjectState, parseReviewWorkflowQuery } from "@/app/review/reviewWorkflowContext";
 import { SourceEvidenceDrawer } from "@/components/shared/SourceEvidenceDrawer";
 import { apiGet, apiPatch, apiPost } from "@/lib/api/client";
@@ -374,6 +375,7 @@ function ReviewPageContent() {
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [workflowUnavailable, setWorkflowUnavailable] = useState(false);
   const [workflowActionPending, setWorkflowActionPending] = useState(false);
+  const [reviewView, setReviewView] = useState<"pending" | "auto">("pending");
   const searchParams = useSearchParams();
   const workflowQuery = parseReviewWorkflowQuery(searchParams.get("workflow_thread_id"));
   const workflowThreadId = workflowQuery.kind === "workflow" ? workflowQuery.workflowThreadId : undefined;
@@ -381,7 +383,7 @@ function ReviewPageContent() {
   const itemId = Number(searchParams.get("itemId") ?? searchParams.get("item_id"));
   const deepLinkItemId = Number.isInteger(itemId) && itemId > 0 ? itemId : undefined;
   const workflowQueryKey = workflowQuery.kind === "workflow" ? `workflow:${workflowThreadId}` : workflowQuery.kind;
-  const queryKey = `${workflowQueryKey}:${deepLinkItemId ?? ""}`;
+  const queryKey = `${workflowQueryKey}:${deepLinkItemId ?? ""}:${reviewView}`;
   const [renderedContextKey, setRenderedContextKey] = useState(queryKey);
   const contextGeneration = useRef(0);
   const listRequestGeneration = useRef(0);
@@ -417,13 +419,14 @@ function ReviewPageContent() {
 
     try {
       const params = new URLSearchParams({
-        status: "pending_review",
+        status: reviewView === "auto" ? "approved" : "pending_review",
         limit: String(REVIEW_PAGE_SIZE),
         offset: String(nextOffset),
         include_previews: "false",
       });
+      if (reviewView === "auto") params.set("resolution_source", "auto_policy");
       if (workflowThreadId) params.set("workflow_thread_id", workflowThreadId);
-      void apiGet<{projects: Array<{project_key: string, name: string}>}>("/api/v1/projects/defined")
+      if (reviewView === "pending") void apiGet<{projects: Array<{project_key: string, name: string}>}>("/api/v1/projects/defined")
         .then((projectsRes) => {
           if (
             requestContext === contextGeneration.current
@@ -468,7 +471,7 @@ function ReviewPageContent() {
         setLoading(false);
       }
     }
-  }, [invalidWorkflowContext, queryKey, workflowThreadId]);
+  }, [invalidWorkflowContext, queryKey, reviewView, workflowThreadId]);
 
   const loadWorkflowStatus = useCallback(async (
     requestContext = contextGeneration.current,
@@ -595,7 +598,7 @@ function ReviewPageContent() {
   const toggleGroup = (group: ReviewGroup) => {
     const willOpen = !expandedGroups[group.group_id];
     setExpandedGroups(prev => ({ ...prev, [group.group_id]: willOpen }));
-    if (willOpen) void loadPreviewsForItems(group.items || []);
+    if (willOpen && reviewView === "pending") void loadPreviewsForItems(group.items || []);
   };
 
   function startEdit(item: ReviewItem) {
@@ -918,12 +921,16 @@ function ReviewPageContent() {
           actionPending={workflowActionPending}
           onResume={() => void resumeWorkflow()}
         />
+        <div className="inline-flex rounded-lg border border-[var(--line-soft)] bg-white p-1" aria-label="검토 보기">
+          <button type="button" aria-pressed={reviewView === "pending"} onClick={() => setReviewView("pending")} className={`h-8 rounded-md px-3 text-sm font-semibold ${reviewView === "pending" ? "bg-[#21132b] text-white" : "text-[var(--ink-muted)]"}`}>검토 대기</button>
+          <button type="button" aria-pressed={reviewView === "auto"} onClick={() => setReviewView("auto")} className={`h-8 rounded-md px-3 text-sm font-semibold ${reviewView === "auto" ? "bg-[#21132b] text-white" : "text-[var(--ink-muted)]"}`}>자동 승인</button>
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="inline-flex h-9 items-center gap-2 rounded-lg border border-[var(--line-soft)] bg-[var(--glass-elevated)] px-3 text-sm font-semibold text-[var(--ink-muted)] shadow-sm">
             <Bot className="h-4 w-4 text-[var(--workspace-accent)]" aria-hidden="true" />
             Agent 후보 {totalAgentItems}개 · {loadedItemCount}/{visibleTotalCount}개 로드
           </span>
-          <button
+          {reviewView === "pending" ? <button
             type="button"
             data-testid="review-approve-loaded"
             onClick={() => openBulkConfirm("approve", loadedItemIds, "loaded")}
@@ -932,8 +939,8 @@ function ReviewPageContent() {
           >
             <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
             모두 승인
-          </button>
-          <button
+          </button> : null}
+          {reviewView === "pending" ? <button
             type="button"
             data-testid="review-reject-loaded"
             onClick={() => openBulkConfirm("reject", loadedItemIds, "loaded")}
@@ -942,7 +949,7 @@ function ReviewPageContent() {
           >
             <XCircle className="h-4 w-4" aria-hidden="true" />
             모두 반려
-          </button>
+          </button> : null}
           <button
             type="button"
             onClick={() => void refreshReviewData(captureQueryContext())}
@@ -1000,7 +1007,7 @@ function ReviewPageContent() {
         </div>
       ) : null}
 
-      <section className="sticky top-24 z-10 rounded-xl border border-[var(--line-soft)] bg-[var(--glass-elevated)]/95 p-3 shadow-sm backdrop-blur">
+      {reviewView === "pending" ? <section className="sticky top-24 z-10 rounded-xl border border-[var(--line-soft)] bg-[var(--glass-elevated)]/95 p-3 shadow-sm backdrop-blur">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <button
@@ -1074,7 +1081,7 @@ function ReviewPageContent() {
             </button>
           </div>
         </div>
-      </section>
+      </section> : null}
 
       <section className="space-y-4">
         {visibleGroups.map((group) => {
@@ -1091,7 +1098,7 @@ function ReviewPageContent() {
                 className="flex cursor-pointer items-center justify-between border-b border-[var(--line-soft)] bg-[var(--glass-strong)] px-4 py-3 hover:bg-[var(--glass-stronger)]"
               >
                 <div className="flex items-center gap-3">
-                  <button
+                  {reviewView === "pending" ? <button
                     type="button"
                     data-testid={`review-group-select-${group.group_id}`}
                     aria-label={`${group.title} 선택`}
@@ -1100,7 +1107,7 @@ function ReviewPageContent() {
                     className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--line-soft)] bg-white text-[var(--ink)] shadow-sm hover:bg-[var(--glass-strong)]"
                   >
                     {groupSelected || groupPartiallySelected ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
-                  </button>
+                  </button> : null}
                   <span className="rounded-full border border-[var(--line-soft)] bg-white/50 px-2.5 py-0.5 text-xs font-bold text-[var(--ink-muted)]">
                     {itemTypeLabel(group.item_type)}
                   </span>
@@ -1113,7 +1120,7 @@ function ReviewPageContent() {
                   )}
                 </div>
                 <div className="flex items-center gap-4">
-                  {hasMultiple ? (
+                  {reviewView === "pending" && hasMultiple ? (
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
@@ -1176,10 +1183,10 @@ function ReviewPageContent() {
                         id={`review-item-${item.id}`}
                         data-testid={`review-item-${item.id}`}
                         className={`scroll-mt-24 p-5 ${isDeepLinked ? "bg-white ring-2 ring-[var(--workspace-rail-active)] ring-inset" : ""}`}
-                        onContextMenu={(event) => openContextMenu(event, item)}
+                        onContextMenu={reviewView === "pending" ? (event) => openContextMenu(event, item) : undefined}
                       >
                         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-                          <button
+                          {reviewView === "pending" ? <button
                             type="button"
                             data-testid={`review-select-${item.id}`}
                             aria-label={`${itemTitle(item)} 선택`}
@@ -1188,7 +1195,7 @@ function ReviewPageContent() {
                             className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--line-soft)] bg-white text-[var(--ink)] shadow-sm hover:bg-[var(--glass-strong)]"
                           >
                             {selectedItemIds.has(item.id) ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
-                          </button>
+                          </button> : null}
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="rounded-full border border-[var(--line-soft)] bg-[var(--glass-strong)] px-2.5 py-1 text-xs font-semibold capitalize text-[var(--ink-muted)]">
@@ -1279,7 +1286,7 @@ function ReviewPageContent() {
                                     </div>
                                   </div>
                                 ) : null}
-                                <label className="mt-4 block max-w-sm text-sm font-semibold text-[var(--ink)]">
+                                {reviewView === "pending" ? <label className="mt-4 block max-w-sm text-sm font-semibold text-[var(--ink)]">
                                   프로젝트 지정
                                   <select
                                     aria-label="프로젝트 지정"
@@ -1295,7 +1302,7 @@ function ReviewPageContent() {
                                       </option>
                                     ))}
                                   </select>
-                                </label>
+                                </label> : null}
                                 {projectSelectionRequired ? (
                                   <div
                                     data-testid="project-selection-required"
@@ -1357,7 +1364,7 @@ function ReviewPageContent() {
                                     ) : null}
                                   </div>
                                 ) : null}
-                                <h4 className="mt-3 text-sm font-bold text-[var(--ink-muted)]">#{item.id} 상세 내용</h4>
+                                <h4 className="mt-3 text-sm font-bold text-[var(--ink-muted)]">{reviewView === "auto" ? "상세 내용" : `#${item.id} 상세 내용`}</h4>
                                 <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--ink)]">
                                   {itemSummary(item)}
                                 </p>
@@ -1371,7 +1378,7 @@ function ReviewPageContent() {
                               </div>
                             ) : null}
 
-                            {preview ? (
+                            {reviewView === "pending" && preview ? (
                               <div className="mt-4 rounded-lg border border-[var(--line-soft)] bg-[var(--glass-strong)] p-3">
                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                   <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--ink-muted)]">
@@ -1414,7 +1421,7 @@ function ReviewPageContent() {
                           </div>
                         </div>
 
-                        <div className="mt-4 flex flex-wrap gap-2 border-t border-dashed border-[var(--line-soft)] pt-4">
+                        {reviewView === "pending" ? <div className="mt-4 flex flex-wrap gap-2 border-t border-dashed border-[var(--line-soft)] pt-4">
                           {isEditing ? (
                             <>
                               <button
@@ -1482,7 +1489,7 @@ function ReviewPageContent() {
                               </button>
                             </>
                           )}
-                        </div>
+                        </div> : <AutoReviewTrustPanel item={item} onChanged={() => refreshReviewData(captureQueryContext())} />}
                         {isEvidenceRequestOpen ? (
                           <div className="mt-3 rounded-lg border border-[var(--line-soft)] bg-[var(--glass-elevated)] p-3">
                             <label className="block text-sm font-semibold text-[var(--ink)]">
@@ -1534,7 +1541,7 @@ function ReviewPageContent() {
 
         {!visibleLoading && !visibleError && visibleGroups.length === 0 ? (
           <div className="rounded-lg border border-[var(--line-soft)] bg-[var(--glass-elevated)] p-8 text-sm text-[var(--ink-muted)] shadow-sm text-center">
-            대기 중인 검토 항목이 없습니다.
+            {reviewView === "auto" ? "자동 승인된 항목이 없습니다." : "대기 중인 검토 항목이 없습니다."}
           </div>
         ) : null}
         {!visibleLoading && visibleHasMore ? (

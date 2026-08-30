@@ -6,6 +6,20 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-30 C.5 Task 15 same-screen trust review
+
+- Review now opens in `검토 대기` and offers an inline `자동 승인` view that
+  preserves workflow scope while requesting only visible approved auto-policy
+  items. Human bulk/edit/approve actions are absent from the automatic view.
+- Added bounded automatic validation/audit badges and inline audit/strict-reason
+  revoke controls. Server state is reloaded after every action, including a
+  remediation conflict; no optimistic trusted-state update is made.
+- Knowledge, History, and project Timeline responses now expose only the
+  permission-filtered `resolution_source`; shared UI renders `사람 승인` or
+  `자동 검증` separately from operational approval/completion status.
+- Verification: backend Knowledge/Project tests `30 passed`; frontend lint and
+  build pass; desktop focused Playwright `31 passed`, mobile `26 passed`.
+
 ## 2026-08-30 C.5 Task 14 one-click V2.1 cost preview
 
 - Added exact TypeScript V2.0/V2.1 dry-run, status-count, status, and launch

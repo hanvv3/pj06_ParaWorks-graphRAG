@@ -19,6 +19,21 @@ const item = {
   reviewer_id: null,
 };
 
+const autoItem = {
+  ...item,
+  id: 3003,
+  status: "approved",
+  resolution_source: "auto_policy",
+  resolution_policy_version: "auto-review-policy:v1",
+  auto_review_summary: {
+    validator_model: "gpt-5.6-terra", reasoning_effort: "medium",
+    validator_prompt_version: "auto-review-validation:v1", validator_output_contract_version: "candidate-validation-batch:v1",
+    policy_version: "auto-review-policy:v1", supported_substantive_field_count: 2,
+    minimum_entailment_score: 0.99, policy_reason_codes: ["direct_fact_supported"], validated_at: "2026-08-30T00:00:00Z",
+  },
+  auto_review_audit: { status: "pending", outcome: null, action_required: true },
+};
+
 test("bulk project derived state hides stale workflow selection before effects", () => {
   expect(deriveReviewBulkProjectState({
     isRenderedContextCurrent: false,
@@ -97,6 +112,15 @@ async function installReviewRoutes(
       },
     });
   });
+  await page.route("**/api/v1/review?status=approved**", async (route) => {
+    options.onReviewRequest?.(route.request().url());
+    await route.fulfill({ contentType: "application/json", json: {
+      groups: [{ group_id: "history_event:auto", title: "Automatic", item_type: "history_event", status: "approved", permission_level: "internal", items: [autoItem], total_count: 1, avg_confidence: 0.9 }],
+      items: [autoItem], total_count: 1, limit: 50, offset: 0, has_more: false, include_previews: false,
+    } });
+  });
+  await page.route(`**/api/v1/review/${autoItem.id}/auto-review-audit`, (route) => route.fulfill({ contentType: "application/json", json: { audit_status: "completed", breaker_open: false, revoke_status: "not_required" } }));
+  await page.route(`**/api/v1/review/${autoItem.id}/revoke-auto-approval`, (route) => route.fulfill({ contentType: "application/json", json: { review_item_id: autoItem.id, status: "revoked", replayed: false, knowledge_remains_trusted: false, revoked_document_count: 1 } }));
   await page.route(`**/api/v1/orchestration/v2/company-memory/runs/${threadId}/resume`, async (route) => {
     options.onResume?.();
     await route.fulfill({ contentType: "application/json", json: workflowStatus({ status: "completed" }) });
@@ -112,6 +136,24 @@ async function installReviewRoutes(
     await page.route(`**/api/v1/review/${item.id}/${action}`, (route) => route.fulfill({ contentType: "application/json", json: { ...item, status: action === "approve" ? "approved" : action === "reject" ? "rejected" : "needs_more_evidence" } }));
   }
 }
+
+test("automatic approvals stay inline and hide human queue actions", async ({ page }) => {
+  const listUrls: string[] = [];
+  await installReviewRoutes(page, { onReviewRequest: (url) => listUrls.push(url) });
+  await page.goto(`/review?workflow_thread_id=${threadId}`);
+  await page.getByRole("button", { name: "자동 승인" }).click();
+  await expect.poll(() => listUrls.some((url) => new URL(url).searchParams.get("resolution_source") === "auto_policy")).toBe(true);
+  await page.locator(".group-container > div:first-child").click();
+  const panel = page.getByTestId("auto-review-trust-panel");
+  await expect(panel).toContainText("자동 검증");
+  await expect(panel).toContainText("감사 필요");
+  await expect(panel).toContainText("Terra · medium");
+  await expect(page.getByTestId("review-item-3003")).toContainText("상세 내용");
+  await expect(page.getByTestId("review-item-3003")).not.toContainText("#3003");
+  await expect(page.getByTestId("review-approve-loaded")).toHaveCount(0);
+  await expect(page.getByTestId("review-bulk-approve")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "승인", exact: true })).toHaveCount(0);
+});
 
 test("filters review items and enables explicit completion only when ready", async ({ page }) => {
   let resumes = 0;

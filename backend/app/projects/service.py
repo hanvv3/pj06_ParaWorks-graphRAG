@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from backend.app.core.demo_auth import DemoUser
 from backend.app.knowledge.trusted_serving_eligibility import (
     TrustedServingEligibilityService,
+    knowledge_type_storage_aliases,
 )
 from backend.app.models import (
     DecisionRecord,
@@ -16,6 +17,7 @@ from backend.app.models import (
     Source,
     TimelineEvent,
     Todo,
+    TrustedKnowledgeApprovalLink,
 )
 from backend.app.review.evidence_visibility import (
     ReviewEvidenceNotFound,
@@ -57,6 +59,7 @@ class ProjectTimelineItem:
     project_key: str | None = None
     completed_at: str | None = None
     completed_by: str | None = None
+    resolution_source: str = 'human'
 
 
 @dataclass(frozen=True)
@@ -232,6 +235,9 @@ def _approved_memory_records(
             project_key=item.project_key,
             completed_at=None,
             completed_by=None,
+            resolution_source=_trusted_resolution_source(
+                db, 'decision_record', item.id
+            ),
         )
         for item in db.scalars(select(DecisionRecord).where(DecisionRecord.review_status == 'approved')).all()
         if (
@@ -257,6 +263,9 @@ def _approved_memory_records(
             project_key=item.project_key,
             completed_at=None,
             completed_by=None,
+            resolution_source=_trusted_resolution_source(
+                db, 'history_event', item.id
+            ),
         )
         for item in db.scalars(select(HistoryEvent).where(HistoryEvent.review_status == 'approved')).all()
         if (
@@ -282,6 +291,9 @@ def _approved_memory_records(
             project_key=item.project_key,
             completed_at=None,
             completed_by=None,
+            resolution_source=_trusted_resolution_source(
+                db, 'timeline_event', item.id
+            ),
         )
         for item in db.scalars(select(TimelineEvent).where(TimelineEvent.review_status == 'approved')).all()
         if (
@@ -307,6 +319,7 @@ def _approved_memory_records(
             project_key=item.project_key,
             completed_at=item.completed_at.isoformat() if item.completed_at else None,
             completed_by=item.completed_by,
+            resolution_source=_trusted_resolution_source(db, 'todo', item.id),
         )
         for item in db.scalars(select(Todo).where(Todo.review_status == 'approved')).all()
         if (
@@ -316,6 +329,25 @@ def _approved_memory_records(
         ) is not None
     )
     return records
+
+
+def _trusted_resolution_source(
+    db: Session,
+    knowledge_type: str,
+    knowledge_id: int,
+) -> str:
+    sources = tuple(db.scalars(
+        select(TrustedKnowledgeApprovalLink.resolution_source).where(
+            TrustedKnowledgeApprovalLink.knowledge_type.in_(
+                knowledge_type_storage_aliases(knowledge_type)
+            ),
+            TrustedKnowledgeApprovalLink.knowledge_id == knowledge_id,
+            TrustedKnowledgeApprovalLink.active.is_(True),
+        )
+    ).all())
+    if 'human' in sources or not sources:
+        return 'human'
+    return 'auto_policy' if 'auto_policy' in sources else 'human'
 
 
 def _visible_review_items(
