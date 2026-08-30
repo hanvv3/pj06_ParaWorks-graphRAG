@@ -24,6 +24,7 @@ const REVIEW_WORKFLOW_ERROR_CODES = new Set<ReviewWorkflowErrorCode>([
   "runtime_version_unavailable",
   "model_unavailable",
   "budget_exceeded",
+  "cost_preview_changed",
   "concurrent_resume",
   "invalid_state_transition",
 ]);
@@ -78,6 +79,9 @@ function runRequestBody(request: ReviewWorkflowRunRequest): ReviewWorkflowRunReq
   const body: ReviewWorkflowRunRequest = {
     source_refs,
     agent_names: [...request.agent_names],
+    ...("launch_confirmation_token" in request
+      ? { launch_confirmation_token: request.launch_confirmation_token }
+      : {}),
   };
   if (request.client_request_id !== undefined) {
     body.client_request_id = request.client_request_id;

@@ -67,10 +67,29 @@ export function ReviewCandidateLaunchPanel({
       {dryRun ? (
         <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
           <Metric label="변경 원본" value={`${dryRun.source_count.toLocaleString()}개`} />
-          <Metric label="예상 비용" value={formatUsd(dryRun.estimated_cost_usd)} />
-          <Metric label="예상 입력 토큰" value={dryRun.estimated_input_tokens.toLocaleString()} />
-          <Metric label="예상 출력 토큰" value={dryRun.estimated_output_tokens.toLocaleString()} />
+          {dryRun.graph_version === "company-memory-review-v2.1-auto-review" ? (
+            <>
+              <Metric label="추출 예상 비용" value={formatUsd(dryRun.estimated_cost_usd)} />
+              <Metric label="자동 검증 최대 비용" value={formatUsd(dryRun.auto_review_estimated_cost_usd)} />
+              <Metric label="총 최대 비용" value={formatUsd(dryRun.total_estimated_cost_usd)} />
+              <Metric label="총 최대 입력 토큰" value={dryRun.total_estimated_input_tokens.toLocaleString()} />
+              <Metric label="총 최대 출력 토큰" value={dryRun.total_estimated_output_tokens.toLocaleString()} />
+              <Metric label="실행 모드" value={dryRun.auto_review_mode === "enforce" ? "자동 승인" : "비교 관찰"} />
+              <Metric label="검증 모델" value="Terra · medium" />
+              <Metric label="워크플로 버전" value="V2.1" />
+            </>
+          ) : (
+            <>
+              <Metric label="예상 비용" value={formatUsd(dryRun.estimated_cost_usd)} />
+              <Metric label="예상 입력 토큰" value={dryRun.estimated_input_tokens.toLocaleString()} />
+              <Metric label="예상 출력 토큰" value={dryRun.estimated_output_tokens.toLocaleString()} />
+            </>
+          )}
         </div>
+      ) : null}
+
+      {errorMessage && launchState === "ready" ? (
+        <p className="mt-3 text-sm font-medium text-amber-700">{errorMessage}</p>
       ) : null}
 
       {dryRun?.budget_status === "within_budget" ? (

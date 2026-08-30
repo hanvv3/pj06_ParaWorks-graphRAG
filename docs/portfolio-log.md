@@ -6,6 +6,20 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-30 C.5 Task 14 one-click V2.1 cost preview
+
+- Added exact TypeScript V2.0/V2.1 dry-run, status-count, status, and launch
+  unions. V2.0 request bytes remain unchanged; only V2.1 sends the signed
+  launch confirmation token.
+- The existing Integrations panel now shows extraction, automatic-validation,
+  and total maximum costs/tokens plus bounded mode/model/version information.
+  It adds no route, modal, wizard, selector, or second normal-path click.
+- A changed-cost conflict discards the stale preview/token, fetches a new
+  zero-call preview, and requires a new press of the same button. It never
+  automatically starts a paid run.
+- Verification: frontend lint and production build pass; focused desktop
+  Playwright `27 passed`, mobile `22 passed`; port 3000 was closed afterward.
+
 ## 2026-08-30 C.5 Task 13 bounded operator API
 
 - Added permission-concealed `approved + auto_policy` Review filtering while

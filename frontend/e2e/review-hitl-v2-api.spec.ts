@@ -63,6 +63,12 @@ test("review workflow wrappers use the approved methods, paths, and bounded run 
     source_refs: request.source_refs,
     agent_names: request.agent_names,
   };
+  const v21Request: ReviewWorkflowRunRequest = {
+    source_refs: request.source_refs,
+    agent_names: request.agent_names,
+    client_request_id: "client-request-v21",
+    launch_confirmation_token: "signed-preview-token-at-least-32-bytes",
+  };
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push({
@@ -81,6 +87,7 @@ test("review workflow wrappers use the approved methods, paths, and bounded run 
     await dryRunReviewWorkflow(runtimeExtraRequest);
     await launchReviewWorkflow(runtimeExtraRequest);
     await launchReviewWorkflow(requestWithoutClientId);
+    await launchReviewWorkflow(v21Request);
     await getReviewWorkflowStatus(status.thread_id);
     await resumeReviewWorkflow(status.thread_id);
     await cancelReviewWorkflow(status.thread_id);
@@ -109,6 +116,11 @@ test("review workflow wrappers use the approved methods, paths, and bounded run 
       },
     },
     {
+      path: "/api/v1/orchestration/v2/company-memory/runs",
+      method: "POST",
+      body: v21Request,
+    },
+    {
       path: `/api/v1/orchestration/v2/company-memory/runs/${serverIssuedWorkflowThreadId}`,
       method: "GET",
     },
@@ -133,6 +145,23 @@ test("review workflow wrappers expose only a bounded backend error code", async 
   try {
     await expect(launchReviewWorkflow(request)).rejects.toMatchObject({
       code: "evidence_changed",
+      message: "요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("review workflow wrappers allowlist a changed-cost preview error", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(
+    JSON.stringify({ detail: { code: "cost_preview_changed" } }),
+    { status: 409, headers: { "Content-Type": "application/json" } },
+  )) as typeof fetch;
+
+  try {
+    await expect(launchReviewWorkflow(request)).rejects.toMatchObject({
+      code: "cost_preview_changed",
       message: "요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.",
     });
   } finally {

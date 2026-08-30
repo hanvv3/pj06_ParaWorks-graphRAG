@@ -3100,7 +3100,7 @@ git commit -m "feat: expose auto review audit and revoke actions"
 - Uses the same `검토 후보 만들기` button as explicit paid-run confirmation. No route, modal, wizard, selector, or second normal-path click is added.
 - On `cost_preview_changed`, discards the stale token, obtains a fresh zero-call preview, and requires the user to press the same launch button again; it never automatically launches a changed paid run.
 
-- [ ] **Step 1: Write transport and Integrations behavior tests**
+- [x] **Step 1: Write transport and Integrations behavior tests**
 
 Extend the client test to assert exact bodies:
 
@@ -3116,7 +3116,7 @@ expect(v21Body).toEqual({
 
 Cover V2.0 exact compatibility, V2.1 combined fields, token forwarding, token omission for V2.0, malformed/untrusted errors hidden, and `cost_preview_changed` allowlisting. In the page tests cover desktop/mobile combined costs, stale sync protection, cached/no-input/over-budget states, refreshed changed preview, and no automatic relaunch.
 
-- [ ] **Step 2: Run client/page tests and observe RED**
+- [x] **Step 2: Run client/page tests and observe RED**
 
 Start the existing frontend dev server on `127.0.0.1:3000`, then run:
 
@@ -3130,7 +3130,7 @@ Set-Location ..
 
 Expected: new V2.1 transport/render assertions fail while current V2.0 cases stay green. Stop the server after the run.
 
-- [ ] **Step 3: Add exact TypeScript discriminated unions**
+- [x] **Step 3: Add exact TypeScript discriminated unions**
 
 Define shared bases only for genuinely common fields; do not make every V2.1 field optional on one interface:
 
@@ -3164,13 +3164,13 @@ export type ReviewWorkflowRunRequestV21 = ReviewWorkflowRunBase & {
 
 Narrow on `graph_version === 'company-memory-review-v2.1-auto-review'` before reading V2.1 counts/costs or constructing its run body.
 
-- [ ] **Step 4: Render combined preview and preserve one explicit launch**
+- [x] **Step 4: Render combined preview and preserve one explicit launch**
 
 Replace the single cost metric only for V2.1 with labeled extraction, automatic-validation maximum, and total maximum token/cost values. Show selected `shadow|enforce` and bounded policy/model identity without operational internals. Retain V2.0's existing panel exactly.
 
 When the backend returns `cost_preview_changed`, set launch state back to preview loading, erase the token immediately, fetch a new preview, and display Korean copy explaining that the estimate changed. Do not reuse the old `client_request_id` to launch until the new explicit click.
 
-- [ ] **Step 5: Run frontend focused tests, lint, and build GREEN**
+- [x] **Step 5: Run frontend focused tests, lint, and build GREEN**
 
 With no dev server active for lint/build:
 
@@ -3191,7 +3191,7 @@ Set-Location ..
 
 Expected: lint/build and all selected tests pass; stop the server and verify port 3000 is closed.
 
-- [ ] **Step 6: Commit the typed one-click preview**
+- [x] **Step 6: Commit the typed one-click preview**
 
 ```powershell
 git add frontend/src/lib/api/types.ts frontend/src/lib/api/reviewWorkflow.ts frontend/src/app/integrations/ReviewCandidateLaunchPanel.tsx frontend/src/app/integrations/page.tsx frontend/e2e/review-hitl-v2-api.spec.ts frontend/e2e/review-hitl-v2-integrations.spec.ts

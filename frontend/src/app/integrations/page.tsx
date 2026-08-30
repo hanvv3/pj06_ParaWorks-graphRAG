@@ -687,12 +687,14 @@ export default function IntegrationsPage() {
     batchKey,
     diagnostic,
     sourceRefs,
+    notice,
   }: {
     type: string;
     jobId: string;
     batchKey: string;
     diagnostic: ReviewWorkflowDiagnostic;
     sourceRefs: ReviewWorkflowSourceRef[];
+    notice?: string;
   }) {
     if (activeSyncJobRef.current !== jobId || activeReviewBatchRef.current !== batchKey) {
       return;
@@ -708,7 +710,7 @@ export default function IntegrationsPage() {
               ...current.reviewWorkflow,
               dryRun: undefined,
               launchState: "loading_preview",
-              errorMessage: undefined,
+              errorMessage: notice,
             },
           }
         : current,
@@ -729,7 +731,12 @@ export default function IntegrationsPage() {
         current.reviewWorkflow?.batchKey === batchKey
           ? {
               ...current,
-              reviewWorkflow: { ...current.reviewWorkflow, dryRun, launchState: "ready" },
+              reviewWorkflow: {
+                ...current.reviewWorkflow,
+                dryRun,
+                launchState: "ready",
+                errorMessage: notice,
+              },
             }
           : current,
       );
@@ -880,11 +887,20 @@ export default function IntegrationsPage() {
     );
 
     try {
-      const status = await launchReviewWorkflow({
-        source_refs: reviewWorkflow.sourceRefs,
-        agent_names: reviewWorkflow.diagnostic.default_agent_names,
-        client_request_id: clientRequestId,
-      });
+      const status = await launchReviewWorkflow(
+        dryRun.graph_version === "company-memory-review-v2.1-auto-review"
+          ? {
+              source_refs: reviewWorkflow.sourceRefs,
+              agent_names: reviewWorkflow.diagnostic.default_agent_names,
+              client_request_id: clientRequestId,
+              launch_confirmation_token: dryRun.launch_confirmation_token,
+            }
+          : {
+              source_refs: reviewWorkflow.sourceRefs,
+              agent_names: reviewWorkflow.diagnostic.default_agent_names,
+              client_request_id: clientRequestId,
+            },
+      );
       if (activeSyncJobRef.current !== jobId || activeReviewBatchRef.current !== batchKey) {
         return;
       }
@@ -912,6 +928,20 @@ export default function IntegrationsPage() {
         error instanceof ReviewWorkflowClientError
           ? error
           : readReviewWorkflowError(error);
+      if (safeError.code === "cost_preview_changed") {
+        if (activeSyncJobRef.current !== jobId || activeReviewBatchRef.current !== batchKey) {
+          return;
+        }
+        await loadReviewCandidatePreview({
+          type: syncProgress.connectorType,
+          jobId,
+          batchKey,
+          diagnostic: reviewWorkflow.diagnostic,
+          sourceRefs: reviewWorkflow.sourceRefs,
+          notice: "비용 예상치가 변경되었습니다. 새 미리보기를 확인한 뒤 같은 버튼을 다시 눌러 주세요.",
+        });
+        return;
+      }
       const nonRetryable =
         safeError.code !== null && NON_RETRYABLE_LAUNCH_ERROR_CODES.has(safeError.code);
       if (activeSyncJobRef.current !== jobId || activeReviewBatchRef.current !== batchKey) {

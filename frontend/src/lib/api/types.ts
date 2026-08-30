@@ -363,7 +363,8 @@ export type ReviewStatus =
   | "pending_review"
   | "approved"
   | "rejected"
-  | "needs_more_evidence";
+  | "needs_more_evidence"
+  | "revoked";
 
 export type ReviewItemUpdate = {
   payload?: Record<string, unknown>;
@@ -497,11 +498,23 @@ export type ReviewWorkflowSourceRef = {
   version_or_signature: string;
 };
 
-export type ReviewWorkflowRunRequest = {
+export type ReviewWorkflowRunBase = {
   source_refs: ReviewWorkflowSourceRef[];
   agent_names: string[];
   client_request_id?: string;
 };
+
+export type ReviewWorkflowRunRequestV20 = ReviewWorkflowRunBase & {
+  launch_confirmation_token?: never;
+};
+
+export type ReviewWorkflowRunRequestV21 = ReviewWorkflowRunBase & {
+  launch_confirmation_token: string;
+};
+
+export type ReviewWorkflowRunRequest =
+  | ReviewWorkflowRunRequestV20
+  | ReviewWorkflowRunRequestV21;
 
 export type ReviewWorkflowErrorCode =
   | "invalid_input"
@@ -515,6 +528,7 @@ export type ReviewWorkflowErrorCode =
   | "runtime_version_unavailable"
   | "model_unavailable"
   | "budget_exceeded"
+  | "cost_preview_changed"
   | "concurrent_resume"
   | "invalid_state_transition";
 
@@ -532,9 +546,8 @@ export type ReviewWorkflowDiagnostic = {
 
 export type ReviewWorkflowBudgetStatus = "within_budget" | "cached" | "no_input" | "over_budget";
 
-export type ReviewWorkflowDryRun = {
+type ReviewWorkflowDryRunBase = {
   workflow_name: "company-memory-review";
-  graph_version: "company-memory-review-v2.0";
   source_count: number;
   agent_names: string[];
   selection_policy_version: "company-memory-review-selection:v1";
@@ -546,6 +559,32 @@ export type ReviewWorkflowDryRun = {
   cache_hit: boolean;
   requires_explicit_run: true;
 };
+
+export type ReviewWorkflowDryRunV20 = ReviewWorkflowDryRunBase & {
+  graph_version: "company-memory-review-v2.0";
+};
+
+export type ReviewWorkflowDryRunV21 = ReviewWorkflowDryRunBase & {
+  graph_version: "company-memory-review-v2.1-auto-review";
+  auto_review_mode: "shadow" | "enforce";
+  auto_review_policy_version: "auto-review-policy:v1";
+  auto_review_validator_provider: "openai";
+  auto_review_validator_model: "gpt-5.6-terra";
+  auto_review_reasoning_effort: "medium";
+  auto_review_validator_prompt_version: "auto-review-validation:v1";
+  auto_review_validator_output_contract_version: "candidate-validation-batch:v1";
+  auto_review_cost_policy_version: "auto-review-cost:v1";
+  auto_review_enforce_percentage: 0 | 10 | 100;
+  auto_review_estimated_input_tokens: number;
+  auto_review_estimated_output_tokens: number;
+  auto_review_estimated_cost_usd: number;
+  total_estimated_input_tokens: number;
+  total_estimated_output_tokens: number;
+  total_estimated_cost_usd: number;
+  launch_confirmation_token: string;
+};
+
+export type ReviewWorkflowDryRun = ReviewWorkflowDryRunV20 | ReviewWorkflowDryRunV21;
 
 export type ReviewWorkflowLifecycleStatus =
   | "created"
@@ -559,15 +598,21 @@ export type ReviewWorkflowLifecycleStatus =
   | "failed"
   | "cancelled";
 
-export type ReviewWorkflowStatusCounts = Partial<Record<ReviewStatus, number>>;
+export type ReviewStatusCountsV20 = Record<
+  "pending_review" | "approved" | "rejected" | "needs_more_evidence",
+  number
+>;
 
-export type ReviewWorkflowStatus = {
+export type ReviewStatusCountsV21 = Record<
+  "pending_review" | "approved" | "rejected" | "needs_more_evidence" | "revoked",
+  number
+>;
+
+type ReviewWorkflowStatusBase = {
   thread_id: string;
   status: ReviewWorkflowLifecycleStatus;
   review_item_count: number;
-  review_status_counts: ReviewWorkflowStatusCounts;
   durable: boolean;
-  graph_version: string;
   review_resolution_ready: boolean;
   checkpoint_resumable: boolean;
   resume_allowed: boolean;
@@ -577,6 +622,24 @@ export type ReviewWorkflowStatus = {
   error_code: ReviewWorkflowErrorCode | null;
   resume_error_code: ReviewWorkflowErrorCode | null;
 };
+
+export type ReviewWorkflowStatusV20 = ReviewWorkflowStatusBase & {
+  graph_version: "company-memory-review-v2.0";
+  review_status_counts: ReviewStatusCountsV20;
+};
+
+export type ReviewWorkflowStatusV21 = ReviewWorkflowStatusBase & {
+  graph_version: "company-memory-review-v2.1-auto-review";
+  review_status_counts: ReviewStatusCountsV21;
+  auto_review_mode: "shadow" | "enforce";
+  auto_review_policy_version: "auto-review-policy:v1";
+  auto_review_enforce_percentage: 0 | 10 | 100;
+  auto_approved_count: number;
+  human_review_required_count: number;
+  auto_review_fallback_count: number;
+};
+
+export type ReviewWorkflowStatus = ReviewWorkflowStatusV20 | ReviewWorkflowStatusV21;
 
 export type SearchResult = {
   id: number;

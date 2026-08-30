@@ -2,6 +2,20 @@
 
 Updated: 2026-08-30
 
+## 2026-08-30 C.5 Task 14 typed one-click preview complete
+
+- Frontend transport now uses exact V2.0/V2.1 discriminated unions and exact
+  four-key versus five-key review status counts. V2.0 never accepts or emits a
+  launch token; V2.1 requires the server-issued signed preview token.
+- Integrations preserves the existing `검토 후보 만들기` button as the only
+  normal-path confirmation and displays combined extraction, validation, and
+  total maximum costs/tokens inline. Cost drift clears the token, refreshes the
+  preview, and waits for another explicit click without automatic relaunch.
+- Fresh evidence: lint/build pass, desktop focused Playwright `27 passed`,
+  mobile `22 passed`, and the development server/port 3000 was stopped.
+- Next is C.5 Task 15, an actual implementation task: same-screen automatic
+  trust review plus human/automatic trust-source badges. Slack remains last.
+
 ## 2026-08-30 C.5 Task 13 bounded Review API complete
 
 - Added strict `revoke-auto-approval` and `auto-review-audit` routes through

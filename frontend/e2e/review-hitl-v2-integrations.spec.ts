@@ -41,6 +41,34 @@ const dryRun = {
   requires_explicit_run: true,
 };
 
+const diagnosticV21 = {
+  ...diagnostic,
+  graph_version: "company-memory-review-v2.1-auto-review",
+};
+
+function dryRunV21(token = "signed-preview-token-at-least-32-bytes") {
+  return {
+    ...dryRun,
+    graph_version: "company-memory-review-v2.1-auto-review",
+    auto_review_mode: "enforce",
+    auto_review_policy_version: "auto-review-policy:v1",
+    auto_review_validator_provider: "openai",
+    auto_review_validator_model: "gpt-5.6-terra",
+    auto_review_reasoning_effort: "medium",
+    auto_review_validator_prompt_version: "auto-review-validation:v1",
+    auto_review_validator_output_contract_version: "candidate-validation-batch:v1",
+    auto_review_cost_policy_version: "auto-review-cost:v1",
+    auto_review_enforce_percentage: 10,
+    auto_review_estimated_input_tokens: 80,
+    auto_review_estimated_output_tokens: 20,
+    auto_review_estimated_cost_usd: 0.0024,
+    total_estimated_input_tokens: 200,
+    total_estimated_output_tokens: 60,
+    total_estimated_cost_usd: 0.0036,
+    launch_confirmation_token: token,
+  };
+}
+
 const completedSync = {
   job_id: "gmail-sync-review-v2",
   connector_type: "gmail",
@@ -289,6 +317,69 @@ test("shows cost and launches the exact completed source batch", async ({ page }
     agent_names: diagnostic.default_agent_names,
     client_request_id: "review:gmail-sync-review-v2:company-memory-review-selection:v1",
   });
+});
+
+test("shows V2.1 combined cost and sends the signed preview on the same launch click", async ({ page }) => {
+  let launchBody: unknown;
+  await installIntegrationsRoutes(page, {
+    diagnosticResponse: diagnosticV21,
+    dryRunResponses: [dryRunV21()],
+    onLaunch: (body) => {
+      launchBody = body;
+    },
+  });
+
+  await completeGmailSync(page);
+  const panel = page.getByTestId("review-candidate-launch-panel");
+  await expect(panel).toContainText("추출 예상 비용");
+  await expect(panel).toContainText("자동 검증 최대 비용");
+  await expect(panel).toContainText("총 최대 비용");
+  await expect(panel).toContainText("$0.0036");
+  await expect(panel).toContainText("자동 승인");
+  await expect(panel).toContainText("Terra · medium");
+  await expect(panel).toContainText("V2.1");
+
+  await panel.getByRole("button", { name: "검토 후보 만들기" }).click();
+  expect(launchBody).toEqual({
+    source_refs: sourceRefs,
+    agent_names: diagnostic.default_agent_names,
+    client_request_id: "review:gmail-sync-review-v2:company-memory-review-selection:v1",
+    launch_confirmation_token: "signed-preview-token-at-least-32-bytes",
+  });
+});
+
+test("changed V2.1 cost replaces the token and never relaunches automatically", async ({ page }) => {
+  const launchBodies: unknown[] = [];
+  await installIntegrationsRoutes(page, {
+    diagnosticResponse: diagnosticV21,
+    dryRunResponses: [
+      dryRunV21("old-signed-preview-token-at-least-32-bytes"),
+      dryRunV21("new-signed-preview-token-at-least-32-bytes"),
+    ],
+    launchStatuses: [
+      { status: 409, code: "cost_preview_changed" },
+      awaitingReviewStatus(),
+    ],
+    onLaunch: (body) => launchBodies.push(body),
+  });
+
+  await completeGmailSync(page);
+  const panel = page.getByTestId("review-candidate-launch-panel");
+  await panel.getByRole("button", { name: "검토 후보 만들기" }).click();
+  await expect(panel).toContainText("비용 예상치가 변경되었습니다");
+  await expect(panel.getByRole("button", { name: "검토 후보 만들기" })).toBeEnabled();
+  expect(launchBodies).toHaveLength(1);
+
+  await panel.getByRole("button", { name: "검토 후보 만들기" }).click();
+  expect(launchBodies).toHaveLength(2);
+  expect(launchBodies).toEqual([
+    expect.objectContaining({
+      launch_confirmation_token: "old-signed-preview-token-at-least-32-bytes",
+    }),
+    expect.objectContaining({
+      launch_confirmation_token: "new-signed-preview-token-at-least-32-bytes",
+    }),
+  ]);
 });
 
 test("uses canonical refs returned by queued runtime completion", async ({ page }) => {
