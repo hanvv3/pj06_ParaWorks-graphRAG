@@ -149,7 +149,7 @@ Current state:
 - PostgreSQL restart, reconciliation, exact-batch launch, concurrent Review
   transition, concurrent resume, terminal-race, checkpoint privacy, and exact
   cleanup coverage is release-verified with zero PostgreSQL skips.
-- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–12 are implemented
+- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–13 are implemented
   and independently verified. Deterministic eligibility/policy authority and
   the isolated real LangChain `gpt-5.6-terra` validator boundary now join the
   exact source/current-version, revocation, serving, and vector-state
@@ -163,7 +163,10 @@ Current state:
   stored V2.0/V2.1 threads by immutable graph version. Task 12 adds an
   independent five-status V2.1 StateGraph, pending-first HITL routing,
   version-specific lifecycle/API mapping, fail-closed live reconciliation,
-  and bounded provider-call recovery. Product Tasks 13–16 remain unstarted;
+  and bounded provider-call recovery. Task 13 adds permission-concealed
+  approved-auto filtering, allowlisted validation/audit projections, and strict
+  audit/revoke actions through the existing breaker-first services. Product
+  Tasks 14–16 remain unstarted;
   no paid provider call or
   rollout enablement occurred.
 - A later Task 16 release-gate dry run exposed a test-infrastructure boundary,
@@ -488,8 +491,8 @@ Tasks:
     checkpoint runtimes/pools/savers; A is closed and disposed before B exists.
   - This historical boundary is superseded: the C.5 design/spec, implementation
     plan, and exact execution profile are finalized.
-- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–12 implemented
-  and verified; product Task 13 is the next implementation slice.
+- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–13 implemented
+  and verified; product Task 14 is the next implementation slice.
   - Approved spec:
     `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
   - Implementation plan:
@@ -517,7 +520,9 @@ Tasks:
     11. Signed zero-call V2.1 cost preview and immutable-version facade:
         complete.
     12. Task 12 immutable V2.1 LangGraph/lifecycle: complete.
-    13. Tasks 13–16, Deliverable D/E, and Slack recovery: not started; Task 13
+    13. Bounded Review auto metadata, permission-concealed filter, audit, and
+        revoke API actions: complete.
+    14. Tasks 14–16, Deliverable D/E, and Slack recovery: not started; Task 14
         is the next implementation slice.
   - Separates canonical source evidence, pending AI knowledge, and trusted
     knowledge. Raw evidence is not official knowledge and C.5 does not broaden

@@ -67,6 +67,15 @@ _REVIEW_AUDIT_OUTCOMES = frozenset({
 })
 _REVIEW_AUDIT_TARGET_TYPES = frozenset({'review_item', 'review_workflow'})
 _REVIEW_AUDIT_STATUSES = frozenset({'failure', 'success'})
+_AUTO_REVIEW_CONTROL_ACTIONS = frozenset({
+    'review.auto_audit',
+    'review.auto_revoke',
+})
+_AUTO_REVIEW_CONTROL_OUTCOMES = frozenset({
+    'completed',
+    'remediation_required',
+    'revoked',
+})
 _REVIEW_AUDIT_ENUM_VALUES = {
     'item_type': frozenset(PROMOTABLE_REVIEW_TYPES),
     'permission_level': VALID_PERMISSION_LEVELS,
@@ -183,6 +192,35 @@ def record_review_resolution_audit(
     )
     db.add(audit)
     return audit
+
+
+def record_auto_review_control_audit(
+    *,
+    db: Session,
+    actor: DemoUser,
+    action: str,
+    review_item_id: int,
+    outcome: str,
+    replayed: bool = False,
+) -> AuditLog:
+    """Persist only bounded operator-control metadata, never reasons or internals."""
+    _require_review_audit_enum(
+        'action', action, _AUTO_REVIEW_CONTROL_ACTIONS
+    )
+    _require_review_audit_enum(
+        'outcome', outcome, _AUTO_REVIEW_CONTROL_OUTCOMES
+    )
+    return record_audit_log(
+        db=db,
+        actor=actor,
+        action=action,
+        target_type='review_item',
+        target_id=review_item_id,
+        metadata={
+            'outcome': outcome,
+            'replayed': replayed,
+        },
+    )
 
 
 def serialize_audit_log(log: AuditLog) -> dict[str, object]:

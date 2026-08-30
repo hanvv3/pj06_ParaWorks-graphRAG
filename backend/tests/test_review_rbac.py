@@ -28,8 +28,8 @@ def test_reviewer_cannot_approve_restricted_review_item(client, db_session: Sess
 
     response = client.post(f'/api/v1/review/{item.id}/approve', headers={'X-Demo-User': 'mina@paraworks.com'})
 
-    assert response.status_code == 403
-    assert response.json()['detail'] == 'Review approval permission required.'
+    assert response.status_code == 404
+    assert response.json()['detail'] == 'Review item not found'
 
 
 def test_admin_can_approve_restricted_review_item(client, db_session: Session) -> None:
@@ -57,7 +57,7 @@ def test_approve_route_rechecks_exact_actor_permission_membership(client, db_ses
 
     response = client.post(f'/api/v1/review/{item.id}/approve')
 
-    assert response.status_code == 403
+    assert response.status_code == 404
     assert db_session.get(ReviewItem, item.id).status == 'pending_review'
 
 
@@ -135,8 +135,8 @@ def test_reviewer_cannot_edit_restricted_review_item(client, db_session: Session
         headers={'X-Demo-User': 'mina@paraworks.com'},
     )
 
-    assert response.status_code == 403
-    assert response.json()['detail'] == 'Review approval permission required.'
+    assert response.status_code == 404
+    assert response.json()['detail'] == 'Review item not found'
 
 
 def _add_review_item(db_session: Session, *, permission_level: str) -> ReviewItem:

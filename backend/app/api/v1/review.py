@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -17,11 +17,28 @@ from backend.app.models import (
     AgentRun,
     AgentWorkflowEvidenceRef,
     AgentWorkflowThread,
+    AutoReviewAuditCorrection,
+    AutoReviewPostAudit,
+    AutoReviewPromotionDecision,
+    AutoReviewRolloutState,
+    AutoReviewValidation,
     Project,
     ReviewItem,
     Source,
 )
 from backend.app.review.actors import ReviewResolutionActor, human_review_actor
+from backend.app.review.auto_review_audit import (
+    AutoReviewPostAuditTransitionService,
+)
+from backend.app.review.auto_review_quality_revoke import (
+    AutoReviewQualityRevokeService,
+    QualityRevokeRefused,
+)
+from backend.app.review.auto_review_revoke import (
+    AutoReviewRevokeRefused,
+    AutoReviewRevokeService,
+)
+from backend.app.review.auto_review_rollout import RolloutGateError
 from backend.app.review.evidence_visibility import (
     ReviewEvidenceNotFound,
     ReviewEvidenceProjection,
@@ -33,10 +50,22 @@ from backend.app.review.transitions import (
     ReviewTransitionResult,
     ReviewTransitionService,
 )
+from backend.app.schemas.auto_review import (
+    AUTO_REVIEW_POLICY_VERSION,
+    AUTO_REVIEW_REASONING_EFFORT,
+    AUTO_REVIEW_VALIDATOR_MODEL,
+    AUTO_REVIEW_VALIDATOR_OUTPUT_CONTRACT_VERSION,
+    AUTO_REVIEW_VALIDATOR_PROMPT_VERSION,
+    COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21,
+)
 from backend.app.schemas.review import (
+    AutoReviewAuditRequest,
+    AutoReviewAuditResponse,
     ReviewBulkActionRequest,
     ReviewEvidenceRequest,
     ReviewItemUpdate,
+    RevokeAutoApprovalRequest,
+    RevokeAutoApprovalResponse,
 )
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
@@ -44,6 +73,7 @@ from backend.app.schemas.review_workflow import (
 )
 from backend.app.services.audit import (
     record_audit_log,
+    record_auto_review_control_audit,
     record_review_resolution_audit,
 )
 from backend.app.services.review_display import review_item_display_title
@@ -58,6 +88,9 @@ def _review_item_response(
     item: ReviewItem,
     agent_run: AgentRun | None = None,
     evidence: ReviewEvidenceProjection | None = None,
+    *,
+    auto_review_summary: dict[str, object] | None = None,
+    auto_review_audit: dict[str, object] | None = None,
 ) -> dict:
     agent_run_id = _agent_run_id(item)
 
@@ -111,6 +144,10 @@ def _review_item_response(
         ),
         'status': item.status,
         'reviewer_id': item.reviewer_id,
+        'resolution_source': item.resolution_source,
+        'resolution_policy_version': item.resolution_policy_version,
+        'auto_review_summary': auto_review_summary,
+        'auto_review_audit': auto_review_audit,
     }
 
 
@@ -163,14 +200,24 @@ def list_review_items(
     user: CurrentUser,
     settings: AppSettings,
     status: str = 'pending_review',
+    resolution_source: Literal['human', 'auto_policy'] | None = None,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     include_previews: bool = False,
     workflow_thread_id: str | None = Query(default=None, min_length=1, max_length=64),
 ) -> dict:
-    items = db.scalars(
-        select(ReviewItem).order_by(ReviewItem.created_at.desc(), ReviewItem.id.desc())
-    ).all()
+    statement = select(ReviewItem).where(ReviewItem.status == status)
+    if resolution_source is not None:
+        statement = statement.where(
+            ReviewItem.resolution_source == resolution_source
+        )
+    if workflow_thread_id is not None:
+        statement = statement.where(
+            ReviewItem.workflow_thread_id == workflow_thread_id
+        )
+    items = db.scalars(statement.order_by(
+        ReviewItem.created_at.desc(), ReviewItem.id.desc()
+    )).all()
     all_visible_items = _visible_review_items(db, items, user, settings)
     if workflow_thread_id is not None:
         all_visible_items = _visible_workflow_items(
@@ -180,9 +227,7 @@ def list_review_items(
             settings=settings,
             workflow_thread_id=workflow_thread_id,
         )
-    all_visible_items = _sort_review_items_for_queue([
-        item for item in all_visible_items if item.status == status
-    ])
+    all_visible_items = _sort_review_items_for_queue(all_visible_items)
     total_count = len(all_visible_items)
     visible_items = all_visible_items[offset : offset + limit]
     agent_runs = _agent_runs_by_id(db, visible_items)
@@ -195,7 +240,11 @@ def list_review_items(
     for item in visible_items:
         agent_run = agent_runs.get(_agent_run_id(item) or -1)
         response_item = _review_item_response(
-            item, agent_run, evidence_by_id[item.id]
+            item,
+            agent_run,
+            evidence_by_id[item.id],
+            auto_review_summary=_auto_review_summary(db, item),
+            auto_review_audit=_auto_review_audit(db, item),
         )
         title = review_item_display_title(item)
         group_key = f'{item.item_type}:{title}'
@@ -229,6 +278,8 @@ def list_review_items(
                 item,
                 agent_runs.get(_agent_run_id(item) or -1),
                 evidence_by_id[item.id],
+                auto_review_summary=_auto_review_summary(db, item),
+                auto_review_audit=_auto_review_audit(db, item),
             )
             for item in visible_items
         ],
@@ -498,6 +549,170 @@ def reject_review_item(
     return response
 
 
+@router.post(
+    '/{item_id}/revoke-auto-approval',
+    response_model=RevokeAutoApprovalResponse,
+)
+def revoke_auto_approval(
+    item_id: int,
+    request: RevokeAutoApprovalRequest,
+    db: DbSession,
+    user: CurrentUser,
+    settings: AppSettings,
+) -> RevokeAutoApprovalResponse:
+    item = _get_review_item_for_user(db, item_id, user, settings)
+    actor = _human_actor_for_item(user, item)
+    try:
+        if request.reason_code == 'business_withdrawal':
+            result = AutoReviewRevokeService(
+                db, settings=settings
+            ).revoke(
+                review_item_id=item.id,
+                actor=actor,
+                reason_code=request.reason_code,
+            )
+        else:
+            quality = AutoReviewQualityRevokeService(
+                db, settings=settings
+            ).revoke_quality(
+                review_item_id=item.id,
+                actor=actor,
+                reason_code=request.reason_code,
+                reason=f'operator_reason:{request.reason_code}',
+            )
+            if quality.remediation_required:
+                raise HTTPException(
+                    status_code=409,
+                    detail={'code': 'remediation_required'},
+                )
+            item = _get_review_item_for_user(db, item_id, user, settings)
+            result = RevokeAutoApprovalResponse(
+                review_item_id=item.id,
+                status='revoked',
+                replayed=quality.replayed,
+                knowledge_remains_trusted=bool(
+                    item.revoke_knowledge_remained_trusted
+                ),
+                revoked_document_count=item.revoke_document_count or 0,
+            )
+    except AutoReviewRevokeRefused as exc:
+        _raise_auto_review_conflict(exc.code)
+    except QualityRevokeRefused as exc:
+        _raise_auto_review_conflict(exc.code)
+    record_auto_review_control_audit(
+        db=db,
+        actor=user,
+        action='review.auto_revoke',
+        review_item_id=item.id,
+        outcome='revoked',
+        replayed=result.replayed,
+    )
+    db.commit()
+    return RevokeAutoApprovalResponse(
+        review_item_id=result.review_item_id,
+        status='revoked',
+        replayed=result.replayed,
+        knowledge_remains_trusted=result.knowledge_remains_trusted,
+        revoked_document_count=result.revoked_document_count,
+    )
+
+
+@router.post(
+    '/{item_id}/auto-review-audit',
+    response_model=AutoReviewAuditResponse,
+)
+def submit_auto_review_audit(
+    item_id: int,
+    request: AutoReviewAuditRequest,
+    db: DbSession,
+    user: CurrentUser,
+    settings: AppSettings,
+) -> AutoReviewAuditResponse:
+    item = _get_review_item_for_user(db, item_id, user, settings)
+    actor = _human_actor_for_item(user, item)
+    try:
+        if request.outcome == 'confirmed':
+            audit_service = AutoReviewPostAuditTransitionService(
+                db, settings=settings
+            )
+            audit = audit_service.ensure_manual_audit(
+                review_item_id=item.id,
+                actor=actor,
+            )
+            transition = audit_service.complete(
+                audit_id=audit.id,
+                actor=actor,
+                outcome='confirmed',
+                reason=request.reason,
+            )
+            db.commit()
+            response = AutoReviewAuditResponse(
+                audit_status='completed',
+                breaker_open=_auto_review_breaker_open(db, item.id),
+                revoke_status='not_required',
+            )
+            replayed = transition.replayed
+        else:
+            reason_code = {
+                'incorrect': 'incorrect_content',
+                'permission_violation': 'permission_violation',
+                'source_version_violation': 'wrong_source_version',
+                'policy_violation': 'policy_violation',
+            }[request.outcome]
+            quality = AutoReviewQualityRevokeService(
+                db, settings=settings
+            ).revoke_quality(
+                review_item_id=item.id,
+                actor=actor,
+                reason_code=reason_code,
+                reason=request.reason,
+            )
+            if quality.remediation_required:
+                raise HTTPException(
+                    status_code=409,
+                    detail={'code': 'remediation_required'},
+                )
+            response = AutoReviewAuditResponse(
+                audit_status='completed',
+                breaker_open=_auto_review_breaker_open(db, item.id),
+                revoke_status='revoked',
+            )
+            replayed = quality.replayed
+    except (QualityRevokeRefused, AutoReviewRevokeRefused) as exc:
+        _raise_auto_review_conflict(exc.code)
+    except RolloutGateError as exc:
+        code = (
+            'audit_conflict'
+            if 'immutable' in str(exc)
+            else 'audit_unavailable'
+        )
+        raise HTTPException(status_code=409, detail={'code': code}) from exc
+    record_auto_review_control_audit(
+        db=db,
+        actor=user,
+        action='review.auto_audit',
+        review_item_id=item.id,
+        outcome=response.audit_status,
+        replayed=replayed,
+    )
+    db.commit()
+    return response
+
+
+def _raise_auto_review_conflict(code: str) -> None:
+    if code == 'not_found':
+        raise HTTPException(status_code=404, detail='Review item not found')
+    allowed = {
+        'audit_required',
+        'quality_audit_required',
+        'remediation_required',
+        'revoke_reason_conflict',
+        'unsupported_transition',
+    }
+    public_code = code if code in allowed else 'invalid_auto_review_action'
+    raise HTTPException(status_code=409, detail={'code': public_code})
+
+
 def _transition_or_http(
     *,
     db: Session,
@@ -674,7 +889,10 @@ def _visible_workflow_items(
         thread is None
         or thread.security_scope_id != settings.agent_runtime_security_scope_id
         or thread.workflow_name != COMPANY_MEMORY_REVIEW_WORKFLOW
-        or thread.graph_version != COMPANY_MEMORY_REVIEW_GRAPH_VERSION
+        or thread.graph_version not in {
+            COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+            COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21,
+        }
     ):
         return []
     refs = tuple(
@@ -700,18 +918,6 @@ def _visible_workflow_items(
         not in user.permission_levels
         for ref in refs
     ):
-        return []
-    bound_items = tuple(
-        db.scalars(
-            select(ReviewItem)
-            .where(ReviewItem.workflow_thread_id == workflow_thread_id)
-            .order_by(ReviewItem.id)
-        ).all()
-    )
-    if not bound_items:
-        return []
-    visible_ids = {item.id for item in items}
-    if any(item.id not in visible_ids for item in bound_items):
         return []
     return [item for item in items if item.workflow_thread_id == workflow_thread_id]
 
@@ -797,7 +1003,149 @@ def _projected_review_item_response(
         item,
         _agent_run_for_item(db, item),
         evidence,
+        auto_review_summary=_auto_review_summary(db, item),
+        auto_review_audit=_auto_review_audit(db, item),
     )
+
+
+_PUBLIC_AUTO_REVIEW_REASON_CODES = frozenset({
+    'direct_fact_supported',
+    'trusted_exact_reaffirmation',
+})
+_PUBLIC_AUTO_REVIEW_OUTCOMES = frozenset({
+    'confirmed',
+    'incorrect',
+    'permission_violation',
+    'source_version_violation',
+    'policy_violation',
+})
+
+
+def _auto_review_summary(
+    db: Session,
+    item: ReviewItem,
+) -> dict[str, object] | None:
+    if (
+        item.resolution_source != 'auto_policy'
+        or item.auto_validation_id is None
+    ):
+        return None
+    validation = db.get(AutoReviewValidation, item.auto_validation_id)
+    if (
+        validation is None
+        or validation.review_item_id != item.id
+        or validation.workflow_thread_id != item.workflow_thread_id
+        or validation.status != 'completed'
+        or validation.validator_model != AUTO_REVIEW_VALIDATOR_MODEL
+        or validation.reasoning_effort != AUTO_REVIEW_REASONING_EFFORT
+        or validation.validator_prompt_version
+        != AUTO_REVIEW_VALIDATOR_PROMPT_VERSION
+        or validation.validator_output_contract_version
+        != AUTO_REVIEW_VALIDATOR_OUTPUT_CONTRACT_VERSION
+        or validation.policy_version != AUTO_REVIEW_POLICY_VERSION
+        or validation.minimum_entailment_score is None
+        or validation.completed_at is None
+    ):
+        return None
+    reason_codes = validation.policy_reason_codes
+    if (
+        not isinstance(reason_codes, list)
+        or not 1 <= len(reason_codes) <= 2
+        or len(set(reason_codes)) != len(reason_codes)
+        or any(
+            not isinstance(code, str)
+            or code not in _PUBLIC_AUTO_REVIEW_REASON_CODES
+            for code in reason_codes
+        )
+    ):
+        return None
+    claim_results = validation.claim_results
+    if not isinstance(claim_results, list):
+        return None
+    supported_count = sum(
+        1
+        for claim in claim_results
+        if isinstance(claim, dict) and claim.get('verdict') == 'supported'
+    )
+    if supported_count > 2:
+        return None
+    score = float(validation.minimum_entailment_score)
+    if not 0.0 <= score <= 1.0:
+        return None
+    return {
+        'validator_model': validation.validator_model,
+        'reasoning_effort': validation.reasoning_effort,
+        'validator_prompt_version': validation.validator_prompt_version,
+        'validator_output_contract_version': (
+            validation.validator_output_contract_version
+        ),
+        'policy_version': validation.policy_version,
+        'supported_substantive_field_count': supported_count,
+        'minimum_entailment_score': score,
+        'policy_reason_codes': list(reason_codes),
+        'validated_at': validation.completed_at,
+    }
+
+
+def _auto_review_audit(
+    db: Session,
+    item: ReviewItem,
+) -> dict[str, object] | None:
+    if item.resolution_source != 'auto_policy':
+        return None
+    audit = db.scalar(
+        select(AutoReviewPostAudit).where(
+            AutoReviewPostAudit.review_item_id == item.id
+        )
+    )
+    if audit is None:
+        return None
+    correction = db.scalar(
+        select(AutoReviewAuditCorrection).where(
+            AutoReviewAuditCorrection.review_item_id == item.id
+        )
+    )
+    if correction is not None:
+        if (
+            correction.status not in {'completed', 'remediation_required'}
+            or correction.effective_outcome not in _PUBLIC_AUTO_REVIEW_OUTCOMES
+            or correction.effective_outcome == 'confirmed'
+        ):
+            return None
+        return {
+            'status': correction.status,
+            'outcome': correction.effective_outcome,
+            'action_required': correction.status == 'remediation_required',
+        }
+    if (
+        audit.status not in {'pending', 'completed', 'remediation_required'}
+        or audit.outcome not in _PUBLIC_AUTO_REVIEW_OUTCOMES | {None}
+        or (audit.status == 'pending' and audit.outcome is not None)
+    ):
+        return None
+    return {
+        'status': audit.status,
+        'outcome': audit.outcome,
+        'action_required': audit.status in {'pending', 'remediation_required'},
+    }
+
+
+def _auto_review_breaker_open(db: Session, review_item_id: int) -> bool:
+    decision = db.scalar(
+        select(AutoReviewPromotionDecision).where(
+            AutoReviewPromotionDecision.review_item_id == review_item_id
+        )
+    )
+    if decision is None:
+        return False
+    rollout = db.scalar(
+        select(AutoReviewRolloutState).where(
+            AutoReviewRolloutState.security_scope_id
+            == decision.security_scope_id,
+            AutoReviewRolloutState.policy_version == decision.policy_version,
+        )
+    )
+    return bool(rollout and rollout.breaker_open)
 
 
 def _agent_run_id(item: ReviewItem) -> int | None:

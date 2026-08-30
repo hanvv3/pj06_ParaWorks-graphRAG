@@ -3021,7 +3021,7 @@ git commit -m "feat: add immutable auto review langgraph v21"
 - Critical audit invokes breaker-first service semantics before exact revoke; frontend/API cannot close a breaker.
 - Returns the revoke success model only after exact revoke. A committed quality quarantine with pending/failed physical revoke maps to exact HTTP 409 `remediation_required`; callers refetch the permission-filtered Review item and no internal failure text is exposed. A same-item replay with a different immutable terminal reason maps to bounded HTTP 409 `revoke_reason_conflict`; it never replaces the first assessment or reveals its reason.
 
-- [ ] **Step 1: Write response/privacy/filter/action tests**
+- [x] **Step 1: Write response/privacy/filter/action tests**
 
 Cover:
 
@@ -3048,32 +3048,32 @@ Cover:
 - `test_foreign_revoke_and_audit_are_concealed_not_found`
 
 
-- [ ] **Step 2: Run Review API tests and observe RED**
+- [x] **Step 2: Run Review API tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_api.py backend/tests/test_review.py backend/tests/test_review_rbac.py backend/tests/test_review_v2_api.py -q
 ```
 
-- [ ] **Step 3: Add strict request/response models and safe projections**
+- [x] **Step 3: Add strict request/response models and safe projections**
 
 Define the revoke request as only `reason_code: business_withdrawal|incorrect_content|permission_violation|wrong_source_version|policy_violation`; extra/free-text fields are forbidden. Keep the separate audit request's 1–500 character normalized human reason. `auto_review_summary` is built only from the completed canonical validation linked to the same item and includes model, reasoning, versions, supported-field count, minimum score, the separate public allowlist `direct_fact_supported|trusted_exact_reaffirmation`, and completion timestamp. Never pass internal `AutoReviewPolicyReasonCode` through directly: hidden-collision, lookup, permission, registry, budget, drift, and failure codes make the optional summary null/fail closed on corrupt legacy data. `auto_review_audit` includes only effective status/outcome and `action_required`; a confirmed row with an immutable correction projects critical/action-required without exposing correction ids/counters or rewriting the original audit.
 
 Do not return validation id/key, lease, claim fingerprint, cohort/ordinal, raw audit reason, raw output, evidence aliases, hidden collision result, provenance identity/count, vector id, or another ReviewItem id.
 
-- [ ] **Step 4: Add filters and actions through existing services**
+- [x] **Step 4: Add filters and actions through existing services**
 
 Apply status/resolution filters in the SQL query together with workflow ownership, then call `ReviewEvidenceVisibilityService` before totals/groups are returned. Revoke and audit routes resolve the item through the same concealment helper, convert the human actor after RBAC, and call services; they do not perform direct updates. Dispatch `business_withdrawal` to normal revoke and every quality enum to the breaker-first quality coordinator. Preserve `audit_required|quality_audit_required|remediation_required` as allowlisted conflicts without exposing cohort/ordinal, correction identity, or why the item was sampled. `remediation_required` is emitted only after durable quarantine exists and exact revoke did not finish; the handler does not attempt to compensate/undo it.
 
 Keep existing approve/reject/evidence/bulk response behavior and paths unchanged.
 
-- [ ] **Step 5: Run Review API tests and lint GREEN**
+- [x] **Step 5: Run Review API tests and lint GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_api.py backend/tests/test_review.py backend/tests/test_review_rbac.py backend/tests/test_review_v2_api.py -q
 uv run --locked ruff check backend/app/schemas/review.py backend/app/api/v1/review.py backend/app/services/audit.py backend/app/review/auto_review_revoke.py backend/app/review/auto_review_audit.py backend/app/review/auto_review_quality_revoke.py backend/tests/test_auto_review_api.py backend/tests/test_review.py backend/tests/test_review_rbac.py backend/tests/test_review_v2_api.py
 ```
 
-- [ ] **Step 6: Commit the bounded API slice**
+- [x] **Step 6: Commit the bounded API slice**
 
 ```powershell
 git add backend/app/schemas/review.py backend/app/api/v1/review.py backend/app/services/audit.py backend/app/review/auto_review_revoke.py backend/app/review/auto_review_audit.py backend/app/review/auto_review_quality_revoke.py backend/tests/test_auto_review_api.py backend/tests/test_review.py backend/tests/test_review_rbac.py backend/tests/test_review_v2_api.py

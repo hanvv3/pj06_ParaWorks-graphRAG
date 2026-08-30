@@ -6,6 +6,22 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-30 C.5 Task 13 bounded operator API
+
+- Added permission-concealed `approved + auto_policy` Review filtering while
+  keeping the pending queue default and exact V2.0/V2.1 workflow filtering.
+- Review responses now expose only allowlisted validator identity, two-field
+  support summary, policy reasons, timestamp, and effective audit state. Raw
+  validation, correction, evidence, provenance, vector, and reason data remain
+  private and malformed legacy rows fail closed to a null summary.
+- Added strict audit and revoke routes. Business withdrawal follows the normal
+  audit gate; every quality reason uses the breaker-first coordinator, and a
+  committed quarantine with incomplete physical revoke returns only
+  `remediation_required`.
+- Verification: focused Review API suite `69 passed`; adjacent audit, quality
+  revoke, provenance, and Review regression `184 passed, 58 skipped`; Ruff and
+  diff checks pass. No paid provider call or rollout enablement occurred.
+
 ## 2026-08-30 C.5 Task 12 immutable dual-version LangGraph lifecycle
 
 - Compiled a separate LangGraph 1.x V2.1 review graph with an exact safe

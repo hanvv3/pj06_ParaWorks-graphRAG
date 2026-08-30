@@ -2,6 +2,25 @@
 
 Updated: 2026-08-30
 
+## 2026-08-30 C.5 Task 13 bounded Review API complete
+
+- Added strict `revoke-auto-approval` and `auto-review-audit` routes through
+  existing human actor, audit-gate, breaker-first quality, quarantine, and
+  exact-revoke services. Request bodies cannot forge actor/policy/target or add
+  revoke free text; conflicts expose only allowlisted codes.
+- Review list defaults to pending, supports permission-concealed
+  `status=approved&resolution_source=auto_policy`, and accepts only exact
+  registered V2.0/V2.1 workflow versions. Totals/groups are computed after
+  evidence visibility.
+- Auto summary/audit projection is allowlist-only and omits ids, raw output,
+  reasons, evidence aliases, provenance/document identities, and internal
+  failure/collision codes. Corrupt legacy metadata fails closed.
+- Fresh evidence: focused API/RBAC/V2 suite `69 passed`; adjacent audit,
+  quality-revoke, provenance, and Review suite `184 passed, 58 skipped`; Ruff
+  and diff checks pass. No paid/live provider, rollout, push, merge, or PR.
+- Next is C.5 Task 14, an actual implementation task: typed V2.1 client and the
+  existing one-click combined cost preview. Slack remains last.
+
 ## 2026-08-30 C.5 Task 12 immutable V2.1 lifecycle complete
 
 - Added an independent eight-key/five-status V2.1 checkpoint contract and an

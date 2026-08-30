@@ -128,6 +128,29 @@ def test_visible_workflow_filter_returns_only_bound_items(client, db_session) ->
     )
 
 
+def test_workflow_filter_keeps_requested_status_when_other_statuses_exist(
+    client,
+    db_session,
+) -> None:
+    workflow = _seed_filtered_review_workflow(
+        db_session,
+        'workflow-mixed-status-filter',
+        statuses=('pending_review', 'approved'),
+    )
+
+    response = client.get(
+        '/api/v1/review',
+        params={
+            'status': 'pending_review',
+            'workflow_thread_id': workflow.thread_id,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()['total_count'] == 1
+    assert response.json()['items'][0]['status'] == 'pending_review'
+
+
 def test_hidden_missing_and_zero_visible_workflow_filters_are_identical_empty_results(
     client,
     db_session,

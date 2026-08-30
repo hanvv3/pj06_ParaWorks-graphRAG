@@ -55,7 +55,9 @@ _OUTCOME_BY_REASON: dict[str, str] = {
 
 
 class QualityRevokeRefused(ValueError):  # noqa: N818 - bounded domain refusal
-    pass
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 class QualityRevokeCallback(Protocol):

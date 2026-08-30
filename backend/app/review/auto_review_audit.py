@@ -296,6 +296,51 @@ class AutoReviewPostAuditTransitionService:
         self._db = db
         self._settings = settings
 
+    def ensure_manual_audit(
+        self,
+        *,
+        review_item_id: int,
+        actor: ReviewResolutionActor,
+    ) -> AutoReviewPostAudit:
+        """Create the bounded manual audit for an unsampled auto approval."""
+        _assert_review_resolution_actor(actor)
+        if actor.actor_type != 'human' or 'human_review' not in actor.capabilities:
+            raise RolloutGateError('human audit authority is required')
+        item = self._db.get(ReviewItem, review_item_id)
+        if (
+            item is None
+            or item.permission_level not in actor.allowed_permission_levels
+            or item.status not in {'approved', 'revoked'}
+            or item.resolution_source != 'auto_policy'
+        ):
+            raise RolloutGateError('post audit is unavailable')
+        decision = self._db.scalar(
+            select(AutoReviewPromotionDecision).where(
+                AutoReviewPromotionDecision.review_item_id == review_item_id
+            )
+        )
+        if decision is None:
+            raise RolloutGateError('post audit promotion is unavailable')
+        existing = self._db.scalar(
+            select(AutoReviewPostAudit).where(
+                AutoReviewPostAudit.review_item_id == review_item_id
+            )
+        )
+        if existing is not None:
+            return existing
+        if decision.selection_result != 'not_selected':
+            raise RolloutGateError('selected post audit is unavailable')
+        audit = AutoReviewPostAudit(
+            review_item_id=review_item_id,
+            promotion_decision_id=decision.id,
+            sample_cohort='manual',
+            status='pending',
+            outcome=None,
+        )
+        self._db.add(audit)
+        self._db.flush([audit])
+        return audit
+
     def complete(
         self,
         *,
