@@ -149,7 +149,7 @@ Current state:
 - PostgreSQL restart, reconciliation, exact-batch launch, concurrent Review
   transition, concurrent resume, terminal-race, checkpoint privacy, and exact
   cleanup coverage is release-verified with zero PostgreSQL skips.
-- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–10 are implemented
+- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–11 are implemented
   and independently verified. Deterministic eligibility/policy authority and
   the isolated real LangChain `gpt-5.6-terra` validator boundary now join the
   exact source/current-version, revocation, serving, and vector-state
@@ -158,7 +158,10 @@ Current state:
   source/permission revalidation, and bounded observation persistence. Task 10
   adds fail-closed rollout latches, stable canary/audit cohorts, immutable
   promotion decisions, breaker-first quality quarantine/revoke, recovery, and
-  human shadow comparison accounting. Product Tasks 11–16 remain unstarted;
+  human shadow comparison accounting. Task 11 binds a zero-call, read-only
+  combined cost preview to one short-lived HMAC launch token and dispatches
+  stored V2.0/V2.1 threads by immutable graph version. Product Tasks 12–16
+  remain unstarted;
   no paid provider call or
   rollout enablement occurred.
 - A later Task 16 release-gate dry run exposed a test-infrastructure boundary,
@@ -175,7 +178,7 @@ Current state:
 
 Next priorities:
 
-1. Continue C.5 product Tasks 11–16 in the approved order; keep rollout disabled
+1. Continue C.5 product Tasks 12–16 in the approved order; keep rollout disabled
    and live paid-provider benchmarks separately authorized. At Task 16 entry,
    first implement the whole-suite PostgreSQL isolation boundary after its
    detailed plan is separately approved; planning it now does not reorder
@@ -483,8 +486,8 @@ Tasks:
     checkpoint runtimes/pools/savers; A is closed and disposed before B exists.
   - This historical boundary is superseded: the C.5 design/spec, implementation
     plan, and exact execution profile are finalized.
-- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–10 implemented
-  and verified; product Task 11 is the next implementation slice.
+- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–11 implemented
+  and verified; product Task 12 is the next implementation slice.
   - Approved spec:
     `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
   - Implementation plan:
@@ -509,7 +512,9 @@ Tasks:
     10. Locked rollout/canary authority, immutable promotion/audit decisions,
         breaker-first quality revoke/recovery, and shadow comparison: complete
         and PostgreSQL-verified.
-    11. Tasks 11–16, Deliverable D/E, and Slack recovery: not started; Task 11
+    11. Signed zero-call V2.1 cost preview and immutable-version facade:
+        complete.
+    12. Tasks 12–16, Deliverable D/E, and Slack recovery: not started; Task 12
         is the next implementation slice.
   - Separates canonical source evidence, pending AI knowledge, and trusted
     knowledge. Raw evidence is not official knowledge and C.5 does not broaden

@@ -28,6 +28,7 @@ from backend.app.agent_runtime.review_v2_agents import build_review_agent_catalo
 from backend.app.agent_runtime.review_v2_drafting import (
     ReviewDraftError,
     ReviewDraftResult,
+    ReviewDraftService,
 )
 from backend.app.agent_runtime.review_v2_preflight import (
     PreparedReviewRequestV21,
@@ -60,6 +61,7 @@ from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_SELECTION_POLICY_VERSION,
     ReviewWorkflowDryRunResponse,
     ReviewWorkflowRunRequest,
+    ReviewWorkflowRunRequestV21,
 )
 
 
@@ -707,18 +709,32 @@ def test_shadow_service_start_persists_v21_snapshot_without_running_future_graph
     application_session_factory,
     service_parts,
 ) -> None:
-    draft = _FakeDraftService(application_session_factory)
+    settings = _settings(auto_review_mode='shadow')
+    actual_draft = ReviewDraftService(
+        session_factory=application_session_factory,
+        catalog=build_review_agent_catalog(settings),
+        settings=settings,
+    )
     service = _service(
         application_session_factory,
         service_parts,
-        draft=draft,
-        settings=_settings(auto_review_mode='shadow'),
+        draft=actual_draft,
+        settings=settings,
         v21_launch_authority=_V21Authority(_v21_config()),
     )
     source = _seed_source(db_session)
     db_session.commit()
 
-    status = service.start(actor=_actor(), request=_request(source))
+    request = _request(source)
+    preview = service.dry_run(actor=_actor(), request=request)
+    assert hasattr(preview, 'launch_confirmation_token')
+    status = service.start(
+        actor=_actor(),
+        request=ReviewWorkflowRunRequestV21(
+            **request.model_dump(),
+            launch_confirmation_token=preview.launch_confirmation_token,
+        ),
+    )
 
     db_session.expire_all()
     thread = db_session.get(AgentWorkflowThread, status.thread_id)
@@ -729,7 +745,7 @@ def test_shadow_service_start_persists_v21_snapshot_without_running_future_graph
     assert request_row.auto_review_mode == 'shadow'
     assert request_row.auto_review_extraction_provider == 'openai'
     assert request_row.selected_extraction_agent_count == 1
-    assert draft.draft_calls == 0
+    assert db_session.scalar(select(func.count()).select_from(AgentRun)) == 0
 
 
 def test_model_readiness_blocks_only_new_work_and_preserves_checkpoint_mode(

@@ -38,6 +38,9 @@ from backend.app.agent_runtime.review_v2_service import (
     ReviewModelReadiness,
     ReviewWorkflowService,
 )
+from backend.app.agent_runtime.review_workflow_facade import (
+    DatabaseV21LaunchAuthority,
+)
 from backend.app.api.v1.router import api_router
 from backend.app.core.config import Settings, get_settings
 from backend.app.db.session import SessionLocal
@@ -153,6 +156,11 @@ def create_app(
                 agent_registry=agent_registry,
                 draft_service=draft_service,
                 model_readiness=model_readiness,
+                v21_launch_authority=(
+                    DatabaseV21LaunchAuthority(settings=settings)
+                    if settings.auto_review_mode != 'disabled'
+                    else None
+                ),
             )
             app.state.agent_checkpoint_runtime = checkpoint_runtime
             app.state.agent_graph_registry = graph_registry

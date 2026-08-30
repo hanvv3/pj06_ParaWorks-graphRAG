@@ -2782,7 +2782,7 @@ git commit -m "feat: gate auto review rollout with human audit"
 - Uses existing exact-batch ownership and `client_request_id`; the token is not a new idempotency namespace and cannot create a second thread/call.
 - Defines a narrow injected V2.1 lifecycle protocol in the facade so Task 11 tests use a fake service; it does not import the concrete `review_v21_service.py` that is created in Task 12.
 
-- [ ] **Step 1: Write token, preview, and replay tests**
+- [x] **Step 1: Write token, preview, and replay tests**
 
 Cover:
 
@@ -2821,13 +2821,13 @@ Cover:
 
 Use an injected clock and fixed secret; never sleep.
 
-- [ ] **Step 2: Run launch/facade tests and observe RED**
+- [x] **Step 2: Run launch/facade tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_launch_confirmation.py backend/tests/test_review_workflow_facade.py backend/tests/test_review_v2_drafting.py -q
 ```
 
-- [ ] **Step 3: Implement canonical token issue/verify**
+- [x] **Step 3: Implement canonical token issue/verify**
 
 Use the existing non-default agent-runtime fingerprint key with explicit `auto-review-launch:v1`, a base64url canonical compact JSON payload plus HMAC-SHA256, and constant-time comparison. One frozen codec owns this exact key set and rejects any missing or unknown key:
 
@@ -2854,7 +2854,7 @@ Validation checks key version/material verifier, both estimator identities, `o20
 
 Return `cost_preview_changed` for every token mismatch class so public callers cannot probe which hidden field changed.
 
-- [ ] **Step 4: Add the version-selection facade and dry-run aggregation**
+- [x] **Step 4: Add the version-selection facade and dry-run aggregation**
 
 The facade depends on explicit V2.0/V2.1 lifecycle protocols and selects:
 
@@ -2868,14 +2868,14 @@ unknown stored version -> runtime_version_unavailable
 
 For V2.1 dry-run, aggregate extraction and the conservative validation upper bound separately and total them. Let `N` be the signed selected-agent count, where `1 <= N <= 5`. Extraction reserves exactly `N * USD 0.016716`; validation reserves exactly `ceil(N / 4) * USD 0.048864`, because the strict output contract allows each selected agent to produce at most one candidate. At `N=5`, those ceilings are USD 0.083580 and USD 0.097728, totaling USD 0.181308. This does not discount from a predicted candidate count: zero candidates are still charged against the signed maximum, and only the schema-enforced numeric cap permits the batch bound. The V2.1 legacy-named `estimated_*` fields remain the extraction reserve, `auto_review_estimated_*` is the validation reserve, `total_*` is their exact Decimal-priced sum, and `budget_status/budget_limit_usd` evaluate that total against the exact USD 0.20 limit. A route set whose recomputed reserve exceeds its signed ceiling or the overall limit is unavailable until a separately reviewed profile is approved. An over-budget preview returns no launch token and start creates no workflow/thread or provider call. Preview reads every required extraction/validation safety row and `rollout.peek_or_default()` without locks that mutate state; no preview inserts a rollout row. Issue the token only after canonical source/version/permission, strict result-schema, tokenizer/framing, every purpose safety row, and total-cost readiness succeed. Verification occurs before `create_or_reuse_review_thread()`; start recomputes `ep` and `es`, then locks every required purpose-safety row in sorted order before ensuring/locking rollout and rechecks the signed provider/rollout/budget/timing snapshots. Any concurrent selected-agent set, route, prompt, output contract, price, cap, timing, safety, rollout, permission, or source change returns `cost_preview_changed` before a thread or provider call.
 
-- [ ] **Step 5: Run launch/facade tests and lint GREEN**
+- [x] **Step 5: Run launch/facade tests and lint GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_launch_confirmation.py backend/tests/test_review_workflow_facade.py backend/tests/test_review_v2_drafting.py -q
 uv run --locked ruff check backend/app/agent_runtime/launch_confirmation.py backend/app/agent_runtime/review_workflow_facade.py backend/app/agent_runtime/review_v2_drafting.py backend/app/agent_runtime/review_v2_preflight.py backend/tests/test_auto_review_launch_confirmation.py backend/tests/test_review_workflow_facade.py backend/tests/test_review_v2_drafting.py
 ```
 
-- [ ] **Step 6: Commit signed one-click launch preflight**
+- [x] **Step 6: Commit signed one-click launch preflight**
 
 ```powershell
 git add backend/app/agent_runtime/launch_confirmation.py backend/app/agent_runtime/review_workflow_facade.py backend/app/agent_runtime/review_v2_drafting.py backend/app/agent_runtime/review_v2_preflight.py backend/tests/test_auto_review_launch_confirmation.py backend/tests/test_review_workflow_facade.py backend/tests/test_review_v2_drafting.py

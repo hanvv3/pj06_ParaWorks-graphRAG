@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from math import ceil
 from typing import Any, cast
 from uuid import uuid4
@@ -28,12 +29,17 @@ from backend.app.agent_runtime.contracts import (
     ReviewCandidate,
 )
 from backend.app.agent_runtime.fingerprints import fingerprint_secret_bytes
+from backend.app.agent_runtime.launch_confirmation import (
+    LaunchConfirmationCodec,
+    build_v21_launch_snapshot,
+)
 from backend.app.agent_runtime.review_v2_agents import (
     ReviewAgentAdapter,
     ReviewAgentCatalog,
 )
 from backend.app.agent_runtime.review_v2_preflight import (
     PreparedReviewRequest,
+    PreparedReviewRequestV21,
     build_prepared_review_identity,
     find_matching_review_thread,
     review_thread_matches_prepared,
@@ -61,6 +67,7 @@ from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_SELECTION_POLICY_VERSION,
     ReviewItemResolutionStatus,
     ReviewWorkflowDryRunResponse,
+    ReviewWorkflowDryRunResponseV21,
     normalize_agent_names,
 )
 
@@ -499,11 +506,18 @@ class ReviewDraftService:
     def preview_prepared(
         self,
         *,
-        prepared: PreparedReviewRequest,
+        prepared: PreparedReviewRequest | PreparedReviewRequestV21,
         actor_subject_id: str,
         allowed_permission_levels: Sequence[str],
-    ) -> ReviewWorkflowDryRunResponse:
+    ) -> ReviewWorkflowDryRunResponse | ReviewWorkflowDryRunResponseV21:
         permission_levels = _normalize_permission_levels(allowed_permission_levels)
+        if isinstance(prepared, PreparedReviewRequestV21):
+            return _preview_v21(
+                prepared=prepared,
+                actor_subject_id=actor_subject_id,
+                permission_levels=permission_levels,
+                settings=self._settings,
+            )
         with self._session_factory() as db:
             packet = _build_exact_packet(
                 db,
@@ -1159,6 +1173,94 @@ def _aggregate_preview(
         budget_status=cast(Any, budget_status),
         cache_hit=cache_hit,
         requires_explicit_run=True,
+    )
+
+
+def _preview_v21(
+    *,
+    prepared: PreparedReviewRequestV21,
+    actor_subject_id: str,
+    permission_levels: tuple[str, ...],
+    settings: Settings,
+) -> ReviewWorkflowDryRunResponseV21:
+    config = prepared.config
+    selected_count = len(prepared.agent_names)
+    if selected_count != len(config.extraction_plan_identities):
+        raise ReviewDraftError('cost_preview_changed', 'V2.1 route set changed')
+    validation_batches = (selected_count + 3) // 4
+    extraction_input = selected_count * 10_000
+    extraction_output = selected_count * 2_048
+    validation_input = validation_batches * 6_000
+    validation_output = validation_batches * 3_072
+    extraction_cost = Decimal(selected_count) * Decimal('0.016716')
+    validation_cost = Decimal(validation_batches) * Decimal('0.048864')
+    total_cost = extraction_cost + validation_cost
+    if (
+        extraction_cost != config.confirmed_extraction_cost_ceiling_usd
+        or validation_cost != config.confirmed_validation_cost_ceiling_usd
+        or total_cost != config.confirmed_total_cost_ceiling_usd
+        or total_cost > config.total_budget_limit_usd
+    ):
+        raise ReviewDraftError('cost_preview_changed', 'V2.1 cost snapshot changed')
+    scope_hmac = build_keyed_fingerprint(
+        {'security_scope_id': settings.agent_runtime_security_scope_id},
+        settings=settings,
+        schema_version='auto-review-launch-scope:v1',
+        policy_version='auto-review-launch:v1',
+    )
+    actor_hmac = build_keyed_fingerprint(
+        {'subject_id': actor_subject_id},
+        settings=settings,
+        schema_version='auto-review-launch-actor:v1',
+        policy_version='auto-review-launch:v1',
+    )
+    permission_hmac = build_permission_fingerprint(
+        settings=settings,
+        allowed_permission_levels=permission_levels,
+    )
+    token = LaunchConfirmationCodec(settings=settings).issue(
+        build_v21_launch_snapshot(
+            prepared=prepared,
+            security_scope_hmac=scope_hmac,
+            actor_subject_hmac=actor_hmac,
+            owner_permission_hmac=permission_hmac,
+        )
+    )
+    return ReviewWorkflowDryRunResponseV21(
+        workflow_name=COMPANY_MEMORY_REVIEW_WORKFLOW,
+        graph_version=prepared.graph_version,
+        source_count=len(prepared.source_refs),
+        agent_names=list(prepared.agent_names),
+        selection_policy_version=prepared.selection_policy_version,
+        estimated_input_tokens=extraction_input,
+        estimated_output_tokens=extraction_output,
+        estimated_cost_usd=float(extraction_cost),
+        budget_limit_usd=float(config.total_budget_limit_usd),
+        budget_status='within_budget',
+        cache_hit=False,
+        requires_explicit_run=True,
+        auto_review_mode=cast(Any, config.configured_auto_review_mode),
+        auto_review_policy_version=cast(Any, config.policy_version),
+        auto_review_validator_provider=cast(Any, config.validator_provider),
+        auto_review_validator_model=cast(Any, config.validator_model),
+        auto_review_reasoning_effort=cast(
+            Any, config.validator_reasoning_effort
+        ),
+        auto_review_validator_prompt_version=cast(
+            Any, config.validator_prompt_version
+        ),
+        auto_review_validator_output_contract_version=cast(
+            Any, config.validator_output_contract_version
+        ),
+        auto_review_cost_policy_version=cast(Any, config.cost_policy_version),
+        auto_review_enforce_percentage=cast(Any, config.enforce_percentage),
+        auto_review_estimated_input_tokens=validation_input,
+        auto_review_estimated_output_tokens=validation_output,
+        auto_review_estimated_cost_usd=float(validation_cost),
+        total_estimated_input_tokens=extraction_input + validation_input,
+        total_estimated_output_tokens=extraction_output + validation_output,
+        total_estimated_cost_usd=float(total_cost),
+        launch_confirmation_token=token,
     )
 
 

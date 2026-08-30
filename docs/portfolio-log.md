@@ -5093,3 +5093,17 @@ Cost/security note:
 - Fresh deterministic verification passed `103` focused tests and `54`
   PostgreSQL-backed tests. No live provider, connector, or embedding call was
   made, and rollout remained disabled.
+
+## 2026-08-30 C.5 Task 11 signed zero-call launch
+
+- Added a compact, exact-field HMAC launch confirmation that binds one V2.1
+  preview to actor/scope/permission, canonical input/evidence, route and safety
+  digests, rollout authority, provider timings/caps/prices, and total budget.
+- The V2.1 preview performs no database write or provider call and reserves the
+  schema-enforced extraction plus validation maximum. Start re-resolves the
+  same identity and verifies the token before creating a workflow thread.
+- Existing threads now have a facade boundary that dispatches lifecycle work
+  by stored graph version, preventing current configuration from rewriting a
+  paused V2.0 or V2.1 execution.
+- Fresh deterministic Task 11/lifecycle verification passed `124` tests with
+  Ruff and diff checks green. Rollout and paid-provider gates remain disabled.

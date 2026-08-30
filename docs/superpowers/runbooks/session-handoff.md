@@ -3311,6 +3311,26 @@ tests passed with 53 tests; ruff passed.
   compile, and diff checks pass. No paid provider call, rollout enablement,
   push, merge, or PR action occurred. Task 11 is the next actual implementation
   slice: signed zero-call launch confirmation and version-selection facade.
+
+## 2026-08-30 C.5 Task 11 complete
+
+- Added the exact-key-set compact HMAC launch token. It binds current source,
+  owner permission, provider safety, extraction plan/safety digests, rollout
+  control epoch/generation, caps, timings, six-place prices, and combined
+  extraction/validation budget; malformed, changed, cross-actor, or expired
+  tokens collapse to `cost_preview_changed` before thread creation.
+- V2.1 dry-run is read-only and provider-free. It reserves extraction at
+  `N * 0.016716` and validation at `ceil(N/4) * 0.048864`; the five-agent bound
+  remains `0.181308 <= 0.20` without a predicted-output discount.
+- Added a narrow facade that chooses V2.0/V2.1 for new runs from current mode,
+  but always routes existing status/resume/cancel by the stored immutable graph
+  version. The database launch authority requires current runtime key,
+  purpose-specific safety rows, registry prices/caps, source permissions, and
+  read-only rollout control.
+- Fresh Task 11 + adjacent lifecycle evidence is `124 passed`; Ruff and diff
+  checks pass. No provider call, rollout enablement, push, or PR occurred. Task
+  12 is the next actual implementation slice: immutable V2.1 LangGraph and
+  dedicated lifecycle service.
 - Preserve the persisted schema spelling `first_50`. The Task 10 plan prose
   uses `mandatory_50` in a few paragraphs, but the approved design and existing
   database check constraint use `first_50`; changing that output schema requires

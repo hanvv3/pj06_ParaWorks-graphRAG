@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.agent_runtime.canonical_sources import (
     ReviewWorkflowPreflightError,
+    build_keyed_fingerprint,
     resolve_source_versions,
 )
 from backend.app.agent_runtime.checkpoint_execution import (
@@ -30,10 +31,16 @@ from backend.app.agent_runtime.graph_versions import (
     GraphVersionRegistry,
     RuntimeVersionUnavailable,
 )
+from backend.app.agent_runtime.launch_confirmation import (
+    LaunchConfirmationCodec,
+    LaunchConfirmationError,
+    build_v21_launch_snapshot,
+)
 from backend.app.agent_runtime.registry import AgentRegistry
 from backend.app.agent_runtime.review_v2_drafting import (
     ReviewDraftError,
     ReviewDraftResult,
+    build_permission_fingerprint,
 )
 from backend.app.agent_runtime.review_v2_preflight import (
     PreparedReviewRequest,
@@ -64,6 +71,7 @@ from backend.app.schemas.review_workflow import (
     ReviewWorkflowDryRunResponse,
     ReviewWorkflowErrorCode,
     ReviewWorkflowRunRequest,
+    ReviewWorkflowRunRequestV21,
 )
 
 _REVIEW_STATUSES = (
@@ -385,7 +393,7 @@ class ReviewWorkflowService:
                     'cost_preview_changed',
                     'V2.1 launch mode changed',
                 )
-        return prepare_review_request(
+        prepared = prepare_review_request(
             db,
             request=request,
             actor=actor,
@@ -393,6 +401,47 @@ class ReviewWorkflowService:
             settings=self._settings,
             v21_config=v21_config,
         )
+        if isinstance(prepared, PreparedReviewRequestV21) and operation == 'start':
+            if not isinstance(request, ReviewWorkflowRunRequestV21):
+                raise ReviewWorkflowPreflightError(
+                    'cost_preview_changed',
+                    'V2.1 launch confirmation is required',
+                )
+            scope_hmac = build_keyed_fingerprint(
+                {'security_scope_id': self._settings.agent_runtime_security_scope_id},
+                settings=self._settings,
+                schema_version='auto-review-launch-scope:v1',
+                policy_version='auto-review-launch:v1',
+            )
+            actor_hmac = build_keyed_fingerprint(
+                {'subject_id': actor.id},
+                settings=self._settings,
+                schema_version='auto-review-launch-actor:v1',
+                policy_version='auto-review-launch:v1',
+            )
+            permission_hmac = build_permission_fingerprint(
+                settings=self._settings,
+                allowed_permission_levels=tuple(actor.permission_levels),
+            )
+            try:
+                LaunchConfirmationCodec(
+                    settings=self._settings,
+                    now=self._now,
+                ).verify(
+                    request.launch_confirmation_token,
+                    expected=build_v21_launch_snapshot(
+                        prepared=prepared,
+                        security_scope_hmac=scope_hmac,
+                        actor_subject_hmac=actor_hmac,
+                        owner_permission_hmac=permission_hmac,
+                    ),
+                )
+            except LaunchConfirmationError:
+                raise ReviewWorkflowPreflightError(
+                    'cost_preview_changed',
+                    'V2.1 launch confirmation changed',
+                ) from None
+        return prepared
 
     def diagnostic(self) -> ReviewWorkflowDiagnosticResponse:
         if not self._settings.langgraph_review_v2_enabled:
