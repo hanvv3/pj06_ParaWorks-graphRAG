@@ -2,6 +2,43 @@
 
 Updated: 2026-08-30
 
+## 2026-08-30 C.5 Task 16 deterministic release proof complete
+
+- Branch `codex/rag-orchestrator-agent` now contains Task 16 behavior commit
+  `4b9132a` after Tasks 1–15. Alembic head remains
+  `9d7f3a1c6e20`; Task 16 adds no production schema or trust mutation.
+- Aggregate-only evaluation CLIs are code-complete. Terra live mode requires
+  both `--allow-paid-provider-call` and
+  `PARAWORKS_ALLOW_PAID_TERRA_EVAL=1`; Mini requires its own CLI flag plus
+  `PARAWORKS_ALLOW_PAID_EXTRACTION_EVAL=1`. Both also require
+  `OPENAI_API_KEY`. Automated tests use injected LangChain fake models and
+  construct no network client without dual authorization.
+- Deterministic golden metrics are precision `1.0`, recall `1.0`, queue
+  reduction `0.166667`, and every prohibited count `0`. Do not represent these
+  as live Terra/Mini results. No paid call has run in this session.
+- Official controller proof is green:
+  - settings: `6 collected / 6 passed`, leases `2/2`;
+  - PostgreSQL: `394 / 394`, leases `10/10`;
+  - compatibility: `1,595 collected / 1,591 passed / 4 exact Slack
+    deselected`, leases `91/91`;
+  - non-Slack: `2,036 / 2,026 passed / 10 exact Slack deselected`, leases
+    `150/150`;
+  - full: `2,036 / 2,026 passed / exactly 10 Slack failures`, leases `150/150`.
+  Every profile has errors/skips/xfails `0`, unexpected nodes `0`,
+  `release_proof=true`, `no_live_provider=true`, and database/role residue
+  `0/0`.
+- Frontend lint/build are green. Managed Playwright is desktop `58 passed`,
+  mobile `48 passed`, and legacy desktop `9 passed`; port 3000 is closed.
+  Lock, whole-tree Ruff, diff, bounded symbol scan, and secret hygiene are green.
+- Operational mode remains `disabled`. No rollout authorization, breaker
+  transition, production database mutation, deploy, push, merge, or PR occurred.
+  The distinct paid Terra and Mini aggregate gates are the only remaining C.5
+  release-authorization boundary before shadow; they require a new explicit
+  user authorization.
+- If the paid gates are authorized and both pass, the next product activity is
+  **Deliverable D planning**, not implementation. Deliverable E follows D;
+  Slack reconstruction and the visible ten-node baseline remain last.
+
 ## 2026-08-30 C.5 Task 15 same-screen trust UX complete
 
 - Review retains the pending default and exact workflow filter while adding an

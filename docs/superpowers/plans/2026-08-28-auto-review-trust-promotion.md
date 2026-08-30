@@ -3348,9 +3348,15 @@ git commit -m "feat: review and audit automatic trust inline"
 
 **Release gate:** This task adds no new trust behavior. It proves code safety with deterministic/fake provider output, a disposable PostgreSQL+pgvector target, the complete non-Slack/frontend regression set, and a rollback smoke. Separately authorized sanitized paid Terra validation and Mini extraction compatibility gates are additionally required before shadow rollout, never during automated tests. They record aggregate evidence only and leave auto review disabled by default.
 
+**Execution status (2026-08-30):** Steps 1–2 and 4–12 are complete at behavior
+commit `4b9132a` plus the following documentation evidence commit. Steps 3 and
+3B remain intentionally unchecked because no paid-call authorization was given.
+This is a rollout gate, not unfinished product implementation; mode remains
+`disabled` until both live aggregate gates pass.
+
 **Task 16 entry prerequisite:** Product Tasks 6–15 must already be implemented and reviewed. Before Step 4, `docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md` must first be separately user-approved and its infrastructure Tasks 1–11 implemented through their RED/GREEN/reviewed-commit checkpoints. That plan's Task 12 is this task's Steps 4–7 official profile proof. Its controller is the only authoritative backend release path; a focused `--child-id` result is development evidence only and never a release proof.
 
-- [ ] **Step 1: Create the Korean-first frozen golden dataset and metric harness**
+- [x] **Step 1: Create the Korean-first frozen golden dataset and metric harness**
 
 The fixture must label direct supported Timeline/History, proposal versus decision, planned versus completed, affirmation versus negation, conditional/uncertain wording, date/subject/actor mismatch, conflicting sources, source supersession, permission loss/unknown, partial support, high-confidence hard negative, prompt injection, exact reaffirmation, trusted collision, Decision/Todo, and restricted cases.
 
@@ -3372,7 +3378,7 @@ Release assertions are precision at least 0.99 and every prohibited-count metric
 
 `auto_review_extraction_compatibility.py` separately owns a five-route compatibility harness. Its frozen fixture contains sanitized allowlisted evidence for `candidate` and `no_candidate` outcomes for every exact registry entry. Fake mode proves exact agent/prompt/output-schema tuples, singular 0/1 cardinality, item-type/payload/field-evidence integrity, the canonical-envelope aggregate 2,048-token validator including accepted-boundary and rejected-over-budget fixtures, exact rendered framed input <=10,000, Responses `max_output_tokens=2048`, one attempt, no fallback, usage parsing, per-route full-cap reserve **equals** USD 0.016716, and five-route full-cap reserve **equals** USD 0.083580 with six-place arithmetic. Live mode requires both `--allow-paid-provider-call` and `PARAWORKS_ALLOW_PAID_EXTRACTION_EVAL=1`, accepts only `(purpose='extraction', provider='openai', model='gpt-5.4-mini-2026-03-17', reasoning_effort='none')`, and emits that exact safety key, all five agent/route/prompt/output-contract identities, extraction cost-policy identity, aggregate pass/fail counts, tokens, and cost—never prompts, evidence, model output, secret, or HMAC key material.
 
-- [ ] **Step 2: Run the golden gate**
+- [x] **Step 2: Run the golden gate**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_golden.py backend/tests/test_auto_review_evaluation_cli.py backend/tests/test_auto_review_extraction_compatibility_cli.py -q
@@ -3416,7 +3422,7 @@ if ($extractExit -ne 0) { throw "paid Mini extraction compatibility gate failed 
 
 If authorization is withheld or any route/schema fails, rollout remains `disabled`; do not substitute an alias, Azure OpenAI, Gemini, another model, or a fallback route.
 
-- [ ] **Step 4: Run the controller-owned PostgreSQL restart, concurrency, audit, revoke, and reindex gate**
+- [x] **Step 4: Run the controller-owned PostgreSQL restart, concurrency, audit, revoke, and reindex gate**
 
 Use the approved controller to validate the existing shared service, create only its owned `_test` role/database, allocate serial schema leases, prove exact node coverage and zero skips, and clean exact owned resources:
 
@@ -3426,7 +3432,7 @@ uv run --locked python scripts/backend_release_matrix.py --profile postgres
 
 Required zero-skip coverage includes concurrent human/auto transition exactly once; extraction E1/E2/E3 claim/cancel/crash/restart/one-call/atomic-candidate completion and global-disabled zero-call at both pre-attempt boundaries; the durable attempt marker committing before the body-blind transport consumes its one-use dispatch permit; validation lease/restart/cancel terminal-completed and terminal-failed replay, deferred parent/child terminal guards, pre-attempt-only reclaim, global-disabled zero-call, and crash-after-provider-send no-retry conservative charge; rotation refusal during attempt-zero/attempt-one calls followed by old-generation accounting recovery; provider-safety and rollout control transitions appending exactly one immutable old/new-key event plus aggregate backpointer while lost CAS/replay and metric-only updates append none; V2.0/V2.1 immutable evidence refs; exact duplicate/reaffirmation; Gmail/Drive missing/malformed semantic timestamp rejection and Calendar deterministic start; source update or parser-policy-only change versus extraction completion, promotion, reconciliation, and reindex; Source/Document two-phase crash recovery; permission-only vector narrowing and current-version pointer repair; promotion/revoke race; shared-provenance survival; last-provenance knowledge/companion/vector revoke; same-key advisory serialization of stale-snapshot reindex versus tombstone; stale/quarantined vector search exclusion before hidden count; persisted Assistant answer dependency commit versus concurrent source drift followed by zero-leak list/context/summary/email projection; mandatory-50 replacement audit non-skippability; 10%-to-100% authorization latch and full-enforce-only 2% sampling; purpose-specific breaker/global demotion while extraction or validation is in flight; business revoke rejected before assessment insertion; quality revoke versus pending audit, confirmed-audit correction, same-reason replay, and different-reason conflict; critical/manual-audit serving quarantine before revoke and through revoke failure/crash; remediation-required persistence; owner permission loss before/during/resume; reversed provider route-set/admin lock schedules; V2.0 paused resume; stored V2.1 resume without provider readiness; and exact generated-row cleanup. Every barrier-based schedule must have a bounded test timeout and zero deadlocks. Missing `PARAWORKS_TEST_POSTGRES_URL` is a release blocker, not a pass.
 
-- [ ] **Step 5: Run the complete C.5 and C/B compatibility suites**
+- [x] **Step 5: Run the complete C.5 and C/B compatibility suites**
 
 The controller manifest freezes the same six selector groups formerly listed as independent raw pytest commands. It must prove exact canonical collection union, pairwise-disjoint verification children, native-exit/sidecar agreement, zero release-critical skips, and no live provider:
 
@@ -3436,7 +3442,7 @@ uv run --locked python scripts/backend_release_matrix.py --profile compatibility
 
 Expected: all selected tests pass with zero skips/xfails/errors, V2.0 exact snapshots remain green, and no live provider is called. An unavailable optional environment is a Task 16 release blocker to configure or investigate, not accepted release evidence.
 
-- [ ] **Step 6: Run the approved non-Slack comparison gate**
+- [x] **Step 6: Run the approved non-Slack comparison gate**
 
 Use the controller manifest's exact ten user-deferred Slack deselections and add none. The controller must prove selected nodes equal canonical collection minus exactly those ten:
 
@@ -3446,7 +3452,7 @@ uv run --locked python scripts/backend_release_matrix.py --profile non-slack
 
 Expected: every selected test passes with zero skips/xfails/errors. An unavailable optional environment is a release blocker, not an accepted skip. Do not add a deselection for C.5.
 
-- [ ] **Step 7: Run the full backend suite and compare the deferred Slack baseline**
+- [x] **Step 7: Run the full backend suite and compare the deferred Slack baseline**
 
 ```powershell
 uv run --locked python scripts/backend_release_matrix.py --profile full
@@ -3454,7 +3460,7 @@ uv run --locked python scripts/backend_release_matrix.py --profile full
 
 Expected: the authoritative sidecars prove the same ten user-deferred Slack-related test ids are the only failures, with no errors/skips/xfails, and every C.5/non-Slack test passes. Native pytest exit `1` alone is never success. If the exact failure set or collection differs, stop and investigate rather than editing the manifest.
 
-- [ ] **Step 8: Run lock, Ruff, diff, and secret/privacy scans**
+- [x] **Step 8: Run lock, Ruff, diff, and secret/privacy scans**
 
 `test_secret_hygiene.py` NUL-safely enumerates `git ls-files --cached --others --exclude-standard`, so tracked plus untracked non-ignored release files are scanned even before Task 16's commit, and applies high-confidence OpenAI/Slack/GitHub/private-key/password-assignment patterns plus context-aware entropy rules. It explicitly allowlists documented placeholders such as `xoxb-test`, `<OPENAI_API_KEY>`, `example`, and null/empty configuration. Failure output contains only repository-relative path, line number, and detector kind—never the matched value or surrounding line. The test constructs a real-looking failing sample from split runtime fragments in an untracked temporary repository file, proves the scanner sees it and fails without echoing bytes, then removes it through fixture cleanup; documented examples must pass. This executable test replaces a noisy raw `rg` secret dump.
 
@@ -3468,7 +3474,7 @@ rg -n "source_snippet|source_url|provider_exception|validation_key|lease_token" 
 
 Expected: lock/Ruff/diff and the executable high-confidence secret scan pass, and the bounded checkpoint/audit symbol scan shows no prohibited raw-content write. Inspect legitimate symbol references rather than treating every source-code name as a leak; never print a suspected secret to diagnose it.
 
-- [ ] **Step 9: Run all affected frontend gates on both viewports**
+- [x] **Step 9: Run all affected frontend gates on both viewports**
 
 Modify `frontend/playwright.config.ts` so `PLAYWRIGHT_MANAGED_SERVER=1` adds exactly one Playwright `webServer` entry with command `npm run dev -- --hostname 127.0.0.1 --port 3000`, URL `http://127.0.0.1:3000`, `reuseExistingServer: false`, and timeout `120_000`; without the flag the existing external-server behavior remains unchanged. With no dev server active:
 
@@ -3509,7 +3515,7 @@ if ($testExit -ne 0) { throw "Playwright gate failed with exit code $testExit" }
 
 Expected: lint/build and every selected desktop/mobile test pass; port 3000 is closed afterward.
 
-- [ ] **Step 10: Run deterministic disabled, shadow, enforce, and rollback smokes**
+- [x] **Step 10: Run deterministic disabled, shadow, enforce, and rollback smokes**
 
 `backend/tests/test_auto_review_smoke.py` contains two named tests and no live provider path. `test_disabled_sqlite_smoke` uses only explicit in-memory SQLite plus the process-local non-ready test identity (no durable keyed row survives the process), proves a new disabled run selects V2.0, and keeps both extraction and validation call counters zero. A separate contract test proves file-backed SQLite with a placeholder key refuses every C.5-bound durable write. `test_postgres_control_plane_shadow_enforce_rollback_smoke` uses only a disposable `_test` PostgreSQL+pgvector database, a 32+ byte test-only key/version, fake extraction/validator adapters, and the real migration/services/CLI entrypoints. Its setup/order is executable and exact:
 
@@ -3537,9 +3543,10 @@ uv run --locked pytest backend/tests/test_auto_review_smoke.py -q -k postgres_co
 
 The PostgreSQL test itself parses both database and user names and fails unless each ends in `_test`; it runs migrations against a fresh schema and fails on any skip. Record bounded counts, graph/mode/policy/key generations, aggregate call counts/costs, gate states, and statuses only—never ids or raw fixture content.
 
-- [ ] **Step 11: Update product truth with observed evidence**
+- [x] **Step 11: Update product truth with observed evidence**
 
-Only after every required gate passes:
+Only after every required non-paid gate passes. If the separately authorized
+live gates remain pending, record that fact and keep rollout disabled:
 
 - mark C.5 implemented/verified in `plan.md` and keep D, E, and Slack in their approved order;
 - record actual pass/fail/skip counts, dependency path, UX, golden metrics, PostgreSQL target rules, rollback, and known Slack baseline in `docs/portfolio-log.md`;
@@ -3547,7 +3554,7 @@ Only after every required gate passes:
 
 Do not copy this plan's expected results as if they were observed.
 
-- [ ] **Step 12: Commit verified release evidence after reviewed behavior-slice commits**
+- [x] **Step 12: Commit verified release evidence after reviewed behavior-slice commits**
 
 All test/helper/controller and product behavior must already be present in the reviewed intermediate commits required by their owning implementation plans. This final commit contains only observed product truth and release evidence; do not squash or recommit the behavior files here.
 

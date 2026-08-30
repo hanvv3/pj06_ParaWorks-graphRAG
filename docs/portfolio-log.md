@@ -6,6 +6,37 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-30 C.5 Task 16 release proof
+
+- Added Korean-first frozen validation cases covering supported facts,
+  proposal/completion confusion, negation, uncertainty, identity/date mismatch,
+  conflicts, supersession, permission loss, partial support, prompt injection,
+  duplicate/collision, Decision/Todo, and restricted evidence. The deterministic
+  gate reports precision `1.0`, recall `1.0`, queue reduction `0.166667`, and
+  zero hard-negative, permission/version, duplicate, cross-item revoke,
+  malformed-output, or replay violations. These are fixture metrics, not Terra
+  quality claims.
+- Added aggregate-only paid-gate CLIs. After dual authorization, validation
+  reuses the production Terra renderer/schema/model-router and extraction reuses
+  the exact five Mini route renderers and singular schemas. Automated tests
+  inject LangChain fake models, prove exact model/options and privacy, and make
+  no network call. The real Terra and Mini gates remain pending separate user
+  authorization, so rollout remains `disabled`.
+- Added a hermetic release controller with guarded child environments, exact
+  node/event sidecars, module schema leases, disposable PostgreSQL+pgvector
+  role/database ownership, cleanup precedence, and high-confidence tracked plus
+  untracked secret scanning. Task 16 implementation commit is `4b9132a`.
+- Fresh official backend evidence: settings `6/6`; PostgreSQL `394/394`;
+  compatibility `1,595 = 1,591 passed + 4 approved Slack deselections`;
+  non-Slack `2,036 = 2,026 passed + 10 approved Slack deselections`; full
+  `2,026 passed + exactly 10 approved Slack failures`. Errors, skips, xfails,
+  and unexpected nodes are zero. Leases are balanced (`2/2`, `10/10`, `91/91`,
+  `150/150`, `150/150`) and every temporary database/role cleanup is `0/0`.
+- Frontend lint/build passed. Managed-server Playwright passed desktop `58`,
+  mobile `48`, and legacy desktop `9`; port 3000 was closed after every run.
+  Lock, Ruff, diff, symbol, and secret/privacy gates passed. Slack recovery is
+  still last after Deliverables D and E.
+
 ## 2026-08-30 C.5 Task 15 same-screen trust review
 
 - Review now opens in `검토 대기` and offers an inline `자동 승인` view that

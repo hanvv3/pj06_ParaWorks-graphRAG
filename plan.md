@@ -149,8 +149,9 @@ Current state:
 - PostgreSQL restart, reconciliation, exact-batch launch, concurrent Review
   transition, concurrent resume, terminal-race, checkpoint privacy, and exact
   cleanup coverage is release-verified with zero PostgreSQL skips.
-- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–15 are implemented
-  and independently verified. Deterministic eligibility/policy authority and
+- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–16 are
+  implemented and independently verified with fake/deterministic providers.
+  Deterministic eligibility/policy authority and
   the isolated real LangChain `gpt-5.6-terra` validator boundary now join the
   exact source/current-version, revocation, serving, and vector-state
   contracts. Task 9 adds PostgreSQL-authoritative one-call validation
@@ -170,32 +171,29 @@ Current state:
   combined extraction/validation/total cost preview, and explicit re-confirmation
   after a changed preview. Task 15 adds the same-screen pending/automatic Review
   switch, inline bounded audit/revoke controls, V2.1 counts, and permission-aware
-  human/automatic trust-source badges. Product Task 16 remains unstarted;
-  no paid provider call or
-  rollout enablement occurred.
-- A later Task 16 release-gate dry run exposed a test-infrastructure boundary,
-  not a Task 5 product regression: one shared PostgreSQL `public` schema caused
-  144 fresh-empty fixture errors, controller environment overrides caused six
-  Settings-contract failures, and six Review V2 PostgreSQL failures require a
-  clean targeted RED before their leading fixture-provenance hypothesis can be
-  accepted. The approved architecture is documented in
-  `docs/superpowers/specs/2026-08-29-whole-suite-postgresql-isolation-design.md`;
-  its written spec passed independent Spec/Quality review and is now
-  user-approved. The detailed TDD plan is
-  `docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md`; it
-  awaits user review, and no isolation implementation has started.
+  human/automatic trust-source badges. Task 16 adds Korean-first aggregate-only
+  Terra/Mini evaluation CLIs, hermetic PostgreSQL schema isolation, exact
+  collection/sidecar/cleanup authority, secret scanning, rollback smoke, and a
+  managed Playwright server. Commit `4b9132a` records the verified behavior.
+  No paid provider call or rollout enablement occurred; both separately
+  authorized live model gates remain pending and the effective mode remains
+  `disabled`.
+- The whole-suite PostgreSQL isolation boundary is now implemented. It uses one
+  controller-owned `_test` role/database, module-specific serial schema leases,
+  a separate SQLite app database, allowlisted child environments, exact
+  collection/event sidecars, and cleanup precedence. The earlier shared-public-
+  schema and Settings-contamination failures are superseded by the fresh Task 16
+  release evidence below.
 
 Next priorities:
 
-1. Continue C.5 product Tasks 13–16 in the approved order; keep rollout disabled
-   and live paid-provider benchmarks separately authorized. At Task 16 entry,
-   first implement the whole-suite PostgreSQL isolation boundary after its
-   detailed plan is separately approved; planning it now does not reorder
-   Tasks 11–15.
-2. After all C.5 product tasks are complete, plan Deliverable D Retriever Port
-   and RAG Answer Graph V2, followed by Deliverable E Neo4j GraphRAG.
-3. Continue frontend consistency only in its planned C.5 tasks, and keep Slack
-   data reconstruction plus its visible regression baseline last.
+1. Keep C.5 rollout disabled until the user separately authorizes and both
+   sanitized paid gates pass: Terra validation and Mini five-route extraction.
+   These are release authorization gates, not remaining implementation work.
+2. After that authorization decision, enter the **planning stage** for
+   Deliverable D Retriever Port and RAG Answer Graph V2.
+3. Follow D with Deliverable E Neo4j GraphRAG, then handle Slack data
+   reconstruction and its visible regression baseline last.
 
 ## 4. Shared Runtime Contracts
 
@@ -495,8 +493,9 @@ Tasks:
     checkpoint runtimes/pools/savers; A is closed and disposed before B exists.
   - This historical boundary is superseded: the C.5 design/spec, implementation
     plan, and exact execution profile are finalized.
-- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–15 implemented
-  and verified; product Task 16 release proof is the next implementation slice.
+- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–16 implemented
+  and deterministic/non-paid release proof verified. Paid Terra and Mini gates
+  are still required before shadow rollout.
   - Approved spec:
     `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
   - Implementation plan:
@@ -528,8 +527,10 @@ Tasks:
         revoke API actions: complete.
     14. Typed V2.1 client and same-click combined cost preview: complete.
     15. Same-screen automatic trust review and trust-source badges: complete.
-    16. Task 16 release proof, Deliverable D/E, and Slack recovery: not started;
-        Task 16 is the next implementation slice.
+    16. Golden/release proof, whole-suite isolation, frontend regression,
+        secret/privacy, and rollback gates: complete without live providers.
+        Paid Terra/Mini aggregate gates remain separately authorized release
+        prerequisites; rollout remains disabled.
   - Separates canonical source evidence, pending AI knowledge, and trusted
     knowledge. Raw evidence is not official knowledge and C.5 does not broaden
     current RAG indexing.
@@ -577,9 +578,10 @@ Tasks:
     exact revoke; a corrected confirmed audit is permanent and requires a new
     reviewed policy version for recovery.
   - Automated tests remain fake/deterministic. A separately authorized,
-    sanitized paid Terra benchmark is required before shadow rollout, otherwise
-    mode stays disabled. Populated C.5 data is not destroyed by downgrade/reset;
-    config disablement is the operational rollback.
+    sanitized paid Terra benchmark and a distinct paid Mini five-route gate are
+    required before shadow rollout, otherwise mode stays disabled. Populated
+    C.5 data is not destroyed by downgrade/reset; config disablement is the
+    operational rollback.
   - Tasks 1–6 changed product code and schema under their approved TDD plan.
     Task 5's final database-boundary commits are `cedd546`, `cc5faa5`,
     `4177f80`, `149ea23`, `4018ddd`, and `4d31aaf`; their final PostgreSQL
@@ -609,10 +611,19 @@ Tasks:
     `117 passed`; shared contracts are `41 passed`; Ruff, compile, lock, and
     diff checks pass. Independent rereview is Spec PASS / Quality APPROVED with
     zero open Critical or Important findings. No live provider was called.
-    Task 9 and later work remain separately gated.
+  - Task 16 commit `4b9132a` adds the aggregate-only evaluation and release
+    harness. Fresh controller proof: settings `6/6`; PostgreSQL `394/394`;
+    compatibility `1,595 collected = 1,591 passed + 4 approved Slack
+    deselections`; non-Slack `2,036 collected = 2,026 passed + 10 approved Slack
+    deselections`; full `2,036 collected = 2,026 passed + exactly the 10 Slack
+    baseline failures`. Every profile has zero errors/skips/xfails, balanced
+    leases, no unexpected node, no live provider, and DB/role cleanup `0/0`.
+    Frontend gates passed desktop `58`, mobile `48`, and legacy desktop `9`;
+    lint/build, lock, Ruff, diff, and secret scans passed.
 - User-directed execution order for the remaining program:
-  1. Deliverable C.5 Auto-Review Trust Promotion Tasks 9–16.
-  2. Deliverable D Retriever Port and RAG Answer Graph V2 using Gmail, Drive,
+  1. Separately authorize or defer the paid C.5 Terra and Mini release gates;
+     rollout remains disabled until both pass.
+  2. Plan Deliverable D Retriever Port and RAG Answer Graph V2 using Gmail, Drive,
      Calendar, trusted knowledge, and deterministic fixtures.
   3. Deliverable E Neo4j GraphRAG after D establishes the safe retriever and
      answer contracts.

@@ -1156,6 +1156,12 @@ git commit -m "test: harden backend release cleanup"
 
 ## Task 12: Run C.5 Task 16 Steps 4–7 Official Profiles and Record Only Observed Evidence
 
+Execution note (2026-08-30): the isolation implementation and official profiles
+are complete at behavior commit `4b9132a`. The earlier task-level micro-commit
+checkboxes above are retained as the approved plan history; the authoritative
+observed results and operational procedure are in
+`docs/superpowers/runbooks/backend-release-matrix.md`.
+
 **Files:**
 
 - Create: `docs/superpowers/runbooks/backend-release-matrix.md`
@@ -1163,7 +1169,7 @@ git commit -m "test: harden backend release cleanup"
 - Modify: `docs/portfolio-log.md`
 - Modify: `docs/superpowers/runbooks/session-handoff.md`
 
-- [ ] **Step 1: Verify the implementation tree and shared service before release**
+- [x] **Step 1: Verify the implementation tree and shared service before release**
 
 ```powershell
 git status --short
@@ -1173,7 +1179,7 @@ git diff --check
 
 Expected: clean tracked worktree and a healthy externally provided shared container matching the exact approved contract. If the container is absent/mismatched, stop with `preflight_refused`; do not start or replace it.
 
-- [ ] **Step 2: Run the official controller profiles**
+- [x] **Step 2: Run the official controller profiles**
 
 ```powershell
 uv run --locked python scripts/backend_release_matrix.py --profile settings-diagnostic
@@ -1194,7 +1200,7 @@ Required results:
 
 Any changed Slack node, missing module, collection mismatch, optional skip, new failure, residual resource, or cleanup uncertainty stops the release. Do not edit the manifest to make a run pass.
 
-- [ ] **Step 3: Run final code-quality gates**
+- [x] **Step 3: Run final code-quality gates**
 
 ```powershell
 uv run --no-cache --locked pytest backend/tests/test_release_contracts.py backend/tests/test_release_bootstrap.py backend/tests/test_release_evidence_plugin.py backend/tests/test_postgres_isolation.py backend/tests/test_backend_release_matrix.py -q
@@ -1206,7 +1212,7 @@ git diff --check
 
 Expected: all selected controller/helper tests pass and static gates are clean. Do not represent expected counts from this plan as observed output.
 
-- [ ] **Step 4: Write the operational runbook and product truth**
+- [x] **Step 4: Write the operational runbook and product truth**
 
 `docs/superpowers/runbooks/backend-release-matrix.md` must document:
 
@@ -1219,9 +1225,15 @@ Expected: all selected controller/helper tests pass and static gates are clean. 
 - exact Slack-baseline human gate;
 - no-live-provider and artifact-retention policy.
 
-Update `plan.md`, `docs/portfolio-log.md`, and `docs/superpowers/runbooks/session-handoff.md` with only the actual commit SHA, actual isolation-profile counts/hashes/outcomes, and cleanup result. State explicitly that C.5 Task 16 Steps 8–11 remain pending; do not mark C.5 or Task 16 complete and do not name Deliverable D as the next boundary yet. Keep Deliverable D, E, and Slack-last order unchanged.
+Update `plan.md`, `docs/portfolio-log.md`, and
+`docs/superpowers/runbooks/session-handoff.md` with only the actual commit SHA,
+actual isolation-profile counts/outcomes, and cleanup result. The completed
+follow-on Task 16 Steps 8–11 may now be recorded as observed. State explicitly
+that the paid Terra/Mini gates remain pending and rollout is disabled; after
+that authorization decision, Deliverable D planning precedes E and Slack stays
+last.
 
-- [ ] **Step 5: Commit verification evidence separately**
+- [x] **Step 5: Commit verification evidence separately**
 
 ```powershell
 git add docs/superpowers/runbooks/backend-release-matrix.md plan.md docs/portfolio-log.md docs/superpowers/runbooks/session-handoff.md
