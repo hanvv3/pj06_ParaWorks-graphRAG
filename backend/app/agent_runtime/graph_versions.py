@@ -58,3 +58,24 @@ def register_company_memory_review_v2(
         COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
         build_company_memory_review_v2_graph,
     )
+
+
+def register_company_memory_review_versions(
+    registry: GraphVersionRegistry,
+) -> None:
+    from backend.app.agent_runtime.review_v21_graph import (
+        build_company_memory_review_v21_graph,
+    )
+    from backend.app.schemas.auto_review import (
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21,
+    )
+    from backend.app.schemas.review_workflow import (
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+    )
+
+    register_company_memory_review_v2(registry)
+    registry.register(
+        COMPANY_MEMORY_REVIEW_WORKFLOW,
+        COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21,
+        build_company_memory_review_v21_graph,
+    )

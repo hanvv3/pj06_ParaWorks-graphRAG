@@ -51,6 +51,8 @@ from backend.app.schemas.review_workflow import COMPANY_MEMORY_REVIEW_GRAPH_VERS
 
 
 class ReviewLifecycle(Protocol):
+    def diagnostic(self) -> object: ...
+
     def dry_run(self, *, actor: DemoUser, request: object) -> object: ...
 
     def start(self, *, actor: DemoUser, request: object) -> object: ...
@@ -63,7 +65,9 @@ class ReviewLifecycle(Protocol):
 
 
 class ReviewWorkflowFacadeError(RuntimeError):  # noqa: N818 - bounded error
-    pass
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 class ReviewWorkflowFacade:
@@ -81,6 +85,9 @@ class ReviewWorkflowFacade:
         self._settings = settings
         self._v20 = v20
         self._v21 = v21
+
+    def diagnostic(self) -> object:
+        return self._new_lifecycle().diagnostic()
 
     def dry_run(self, *, actor: DemoUser, request: object) -> object:
         return self._new_lifecycle().dry_run(actor=actor, request=request)

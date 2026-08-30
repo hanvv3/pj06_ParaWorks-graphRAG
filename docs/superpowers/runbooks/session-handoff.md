@@ -2,6 +2,31 @@
 
 Updated: 2026-08-30
 
+## 2026-08-30 C.5 Task 12 immutable V2.1 lifecycle complete
+
+- Added an independent eight-key/five-status V2.1 checkpoint contract and an
+  actual LangGraph 1.x topology with authoritative extraction, auto-review,
+  database count refresh, pending-first interrupt routing, and distinct
+  no-candidate, needs-more-evidence, and all-resolved terminal nodes. V2.0 was
+  not mutated.
+- Registered V2.0 and `company-memory-review-v2.1-auto-review` under exact
+  immutable registry keys. New-run selection uses configured mode; status,
+  resume, and cancel use the stored graph version through the facade.
+- Added the dedicated V2.1 lifecycle/status mapper, five-count API union,
+  checkpoint/live-row reconciliation, verified human transition auditing, and
+  verified auto-policy revoke-only terminal drift. Checkpoints and responses
+  contain counts only, never item ids, source content, prompts, or model output.
+- Added aggregate-only extraction/validation call recovery and lifespan order:
+  source reconciliation -> provider-call recovery -> audit remediation. It
+  performs no provider retry and charges attempt-zero as zero and attempt-one
+  conservatively from its reservation.
+- Fresh deterministic Task 12/V2.0 regression evidence is `157 passed`; the
+  isolated PostgreSQL V2.0 checkpoint suite is `9 passed` with six Alembic
+  deprecation warnings. Ruff and `git diff --check` pass. No live provider
+  call, rollout enablement, push, merge, or PR occurred.
+- Next is C.5 Task 13, an actual implementation task: bounded review metadata,
+  revoke, and audit API actions. Slack remains deferred to the end.
+
 ## 2026-08-30 C.5 Task 6 complete and next boundary
 
 - Task 6 is complete on `codex/rag-orchestrator-agent`; its independently

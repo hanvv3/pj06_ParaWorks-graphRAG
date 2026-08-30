@@ -6,6 +6,24 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-30 C.5 Task 12 immutable dual-version LangGraph lifecycle
+
+- Compiled a separate LangGraph 1.x V2.1 review graph with an exact safe
+  checkpoint schema, five review counts including `revoked`, server-owned
+  owner permission re-resolution, and pending-first HITL routing. Zero
+  candidates and auto-resolved candidates terminate through distinct nodes.
+- Added immutable V2.0/V2.1 registry dispatch and a dedicated V2.1 lifecycle
+  behind the workflow facade. Existing V2.0 response keys remain unchanged;
+  V2.1 dry-run/status responses are graph-version discriminated and expose
+  only bounded counts and policy metadata.
+- Added fail-closed checkpoint/live database reconciliation and an
+  aggregate-only recovery command for abandoned extraction/validation calls.
+  Recovery never retries a provider and never prints raw provider output.
+- Verification: `157 passed` across new V2.1 graph/service/API/recovery and
+  adjacent V2.0 tests; isolated PostgreSQL V2.0 checkpoint verification
+  `9 passed`; Ruff and whitespace checks pass. No paid model or live connector
+  was called, and rollout remains disabled.
+
 ## 2026-08-30 C.5 Task 6 revocable trusted serving completed
 
 - Task 6 is code-complete and independently approved at implementation head

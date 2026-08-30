@@ -11,6 +11,7 @@ from backend.app.agent_runtime.model_router import ReviewModelUnavailableError
 from backend.app.core.config import Settings, get_settings
 from backend.app.main import create_app
 from backend.app.models.agent_workflows import AgentWorkflowThread
+from backend.app.schemas.auto_review import COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
     COMPANY_MEMORY_REVIEW_WORKFLOW,
@@ -89,8 +90,13 @@ def test_app_lifespan_registers_immutable_v2_graph_even_when_new_runs_disabled(
             COMPANY_MEMORY_REVIEW_WORKFLOW,
             COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
         )
+        builder_v21 = app.state.agent_graph_registry.resolve(
+            COMPANY_MEMORY_REVIEW_WORKFLOW,
+            COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21,
+        )
 
     assert callable(builder)
+    assert callable(builder_v21)
     assert events == ['start:False', 'close']
 
 
@@ -118,6 +124,46 @@ def test_disabled_start_preserves_nonterminal_existing_review_threads(
     app = create_app(
         checkpoint_runtime_factory=lambda _settings: runtime,  # type: ignore[arg-type]
         workflow_session_factory=factory,
+    )
+
+    with TestClient(app):
+        pass
+
+    assert events == ['start:True', 'close']
+
+
+def test_disabled_start_preserves_nonterminal_existing_v21_threads(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        'backend.app.main.AutoReviewKeyBootstrapService.ensure_initialized',
+        lambda _self: type(
+            'Result',
+            (),
+            {'schema_available': True, 'initialized': False, 'ready': False},
+        )(),
+    )
+    db_session.add(AgentWorkflowThread(
+        thread_id='existing-review-v21-thread',
+        workflow_name=COMPANY_MEMORY_REVIEW_WORKFLOW,
+        graph_version=COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21,
+        checkpoint_thread_id='review-v21:existing-checkpoint',
+        checkpoint_store='memory',
+        owner_subject_id='owner-1',
+        security_scope_id='default',
+        input_hash='a' * 64,
+        evidence_version_hash='b' * 64,
+        status='awaiting_human_review',
+    ))
+    db_session.commit()
+    events: list[str] = []
+    runtime = _FakeCheckpointRuntime(events)
+    app = create_app(
+        checkpoint_runtime_factory=lambda _settings: runtime,  # type: ignore[arg-type]
+        workflow_session_factory=sessionmaker(
+            bind=db_session.get_bind(), expire_on_commit=False
+        ),
     )
 
     with TestClient(app):

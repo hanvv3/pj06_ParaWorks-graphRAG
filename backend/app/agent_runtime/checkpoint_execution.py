@@ -182,7 +182,7 @@ def invoke_and_confirm_checkpoint(
     command_or_input: object,
     checkpoint_thread_id: str,
     runtime_context: object,
-    expect_interrupt: bool,
+    expect_interrupt: bool | None,
 ) -> CheckpointConfirmation:
     config = checkpoint_config(checkpoint_thread_id)
     before = _read_checkpoint_tuple(saver, config)
@@ -263,7 +263,7 @@ def invoke_and_confirm_checkpoint(
             'checkpoint interrupt state mismatch'
         )
     returned_interrupt = bool(returned_interrupts)
-    if returned_interrupt != expect_interrupt:
+    if expect_interrupt is not None and returned_interrupt != expect_interrupt:
         raise CheckpointConfirmationError(
             'checkpoint interrupt state mismatch'
         )

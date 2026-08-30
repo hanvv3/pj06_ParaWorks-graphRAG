@@ -6,6 +6,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from backend.app.admin.auto_review_call_recovery import (
+    AutoReviewCallRecoveryResult,
+    AutoReviewCallRecoveryService,
+)
 from backend.app.admin.auto_review_keys import AutoReviewKeyBootstrapService
 from backend.app.agent_runtime.auto_review_orchestrator import (
     AutoReviewValidationOrchestrator,
@@ -22,7 +26,7 @@ from backend.app.agent_runtime.checkpointing import (
 )
 from backend.app.agent_runtime.graph_versions import (
     GraphVersionRegistry,
-    register_company_memory_review_v2,
+    register_company_memory_review_versions,
 )
 from backend.app.agent_runtime.model_router import ReviewModelUnavailableError
 from backend.app.agent_runtime.registry import AgentRegistry
@@ -38,8 +42,10 @@ from backend.app.agent_runtime.review_v2_service import (
     ReviewModelReadiness,
     ReviewWorkflowService,
 )
+from backend.app.agent_runtime.review_v21_service import ReviewV21Service
 from backend.app.agent_runtime.review_workflow_facade import (
     DatabaseV21LaunchAuthority,
+    ReviewWorkflowFacade,
 )
 from backend.app.api.v1.router import api_router
 from backend.app.core.config import Settings, get_settings
@@ -52,6 +58,7 @@ from backend.app.review.auto_review_source_reconciliation import (
     SourceReconciliationResult,
     build_source_reconciliation_service,
 )
+from backend.app.schemas.auto_review import COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
     COMPANY_MEMORY_REVIEW_WORKFLOW,
@@ -98,7 +105,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         graph_registry = GraphVersionRegistry()
-        register_company_memory_review_v2(graph_registry)
+        register_company_memory_review_versions(graph_registry)
         preserve_existing_review_threads = (
             not settings.langgraph_review_v2_enabled
             and _has_nonterminal_review_v2_threads(workflow_session_factory)
@@ -125,6 +132,9 @@ def create_app(
             )
             source_reconciliation = _recover_source_reconciliation_batch(
                 workflow_session_factory, settings=settings, limit=100
+            )
+            call_recovery = _recover_auto_review_calls_batch(
+                workflow_session_factory, limit=100
             )
             quality_remediation_recovered = _recover_quality_remediation_batch(
                 workflow_session_factory, settings=settings, limit=100
@@ -162,16 +172,33 @@ def create_app(
                     else None
                 ),
             )
+            review_v21_service = ReviewV21Service(
+                launch_service=review_workflow_service,
+                session_factory=workflow_session_factory,
+                settings=settings,
+                checkpoint_runtime=checkpoint_runtime,
+                graph_registry=graph_registry,
+                agent_registry=agent_registry,
+            )
+            review_workflow_facade = ReviewWorkflowFacade(
+                session_factory=workflow_session_factory,
+                settings=settings,
+                v20=review_workflow_service,
+                v21=review_v21_service,
+            )
             app.state.agent_checkpoint_runtime = checkpoint_runtime
             app.state.agent_graph_registry = graph_registry
             app.state.review_agent_catalog = catalog
             app.state.review_agent_registry = agent_registry
             app.state.review_model_readiness = model_readiness
-            app.state.review_workflow_service = review_workflow_service
+            app.state.review_workflow_service = review_workflow_facade
+            app.state.review_workflow_v20_service = review_workflow_service
+            app.state.review_workflow_v21_service = review_v21_service
             app.state.auto_review_key_bootstrap = key_bootstrap_result
             app.state.auto_review_validation_store = validation_store
             app.state.auto_review_validation_orchestrator = validation_orchestrator
             app.state.auto_review_source_reconciliation = source_reconciliation
+            app.state.auto_review_call_recovery = call_recovery
             app.state.auto_review_quality_remediation_recovered = (
                 quality_remediation_recovered
             )
@@ -198,8 +225,10 @@ def _has_nonterminal_review_v2_threads(
                 select(AgentWorkflowThread.thread_id).where(
                     AgentWorkflowThread.workflow_name
                     == COMPANY_MEMORY_REVIEW_WORKFLOW,
-                    AgentWorkflowThread.graph_version
-                    == COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+                    AgentWorkflowThread.graph_version.in_((
+                        COMPANY_MEMORY_REVIEW_GRAPH_VERSION,
+                        COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21,
+                    )),
                     AgentWorkflowThread.status.in_(
                         _NONTERMINAL_REVIEW_THREAD_STATUSES
                     ),
@@ -243,6 +272,23 @@ def _recover_quality_remediation_batch(
             ).recover_pending_remediation(limit=limit)
     except (SQLAlchemyError, ValueError):
         return 0
+
+
+def _recover_auto_review_calls_batch(
+    session_factory: WorkflowSessionFactory,
+    *,
+    limit: int,
+) -> AutoReviewCallRecoveryResult:
+    try:
+        return AutoReviewCallRecoveryService(
+            session_factory=session_factory,
+        ).recover(limit=limit)
+    except (SQLAlchemyError, ValueError):
+        return AutoReviewCallRecoveryResult(
+            extraction_remaining=1,
+            validation_remaining=1,
+            failure_count=1,
+        )
 
 
 app = create_app()

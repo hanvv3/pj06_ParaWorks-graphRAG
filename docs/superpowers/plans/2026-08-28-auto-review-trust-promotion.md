@@ -2913,7 +2913,7 @@ git commit -m "feat: bind auto review costs to signed launch"
 - Uses a dedicated V2.1 service behind the facade. Status/resume/cancel dispatch from the stored graph version, never current config.
 - Returns a `graph_version` discriminated dry-run/status union. V2.0 mapper never emits V2.1 fields.
 
-- [ ] **Step 1: Write graph topology, routing, checkpoint privacy, and dual-version tests**
+- [x] **Step 1: Write graph topology, routing, checkpoint privacy, and dual-version tests**
 
 Cover:
 
@@ -2942,13 +2942,13 @@ Cover:
 - `test_call_recovery_cli_finalizes_old_generation_attempts_without_provider_retry_or_raw_output`
 
 
-- [ ] **Step 2: Run graph/service/API tests and observe RED**
+- [x] **Step 2: Run graph/service/API tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_review_v21_state.py backend/tests/test_review_v21_graph.py backend/tests/test_review_v21_service.py backend/tests/test_review_v21_api.py backend/tests/test_auto_review_call_recovery.py backend/tests/test_agent_runtime_graph_versions.py backend/tests/test_agent_runtime_lifespan.py backend/tests/test_review_v2_service.py backend/tests/test_review_v2_api.py backend/tests/test_review_v2_postgres.py -q
 ```
 
-- [ ] **Step 3: Implement the separate V2.1 state and actual graph**
+- [x] **Step 3: Implement the separate V2.1 state and actual graph**
 
 Copy no V2.0 state by import-and-mutate. Define the separate exact status set and validator, reusing only safe bounded reducers. Compile:
 
@@ -2970,7 +2970,7 @@ START
 
 The V2.1 `draft_review_candidates_transaction` invokes only the authoritative Task 3 `review_v21_extraction` coordinator and its one-call ledger; it never calls the legacy V2.0 agent adapters directly or permits their retry/fallback/cache policy. The V2.0 builder alone retains those legacy adapters. `run_auto_review` receives only `workflow_thread_id` from state and calls the injected validation coordinator; it never puts result ids/output in state. A LangGraph runtime-context dependency supplies a server-owned current-permission resolver, not a checkpoint field or client-provided permission set. On every node execution/resume the coordinator reloads the stored workflow owner and computes effective visibility as `current_owner_allowed_permission_levels ∩ ('public', 'internal')`; the auto actor is never a broader surrogate. `refresh` opens PostgreSQL and reconstructs exact five-status counts. Routing checks `total == 0` first and records only the bounded `finalize_no_candidates` completion marker; it cannot fall through the vacuously true all-resolved equality.
 
-- [ ] **Step 4: Add a dedicated V2.1 lifecycle service and facade dispatch**
+- [x] **Step 4: Add a dedicated V2.1 lifecycle service and facade dispatch**
 
 Reuse checkpoint execution primitives, not V2.0 private four-status validators. V2.1 service owns its own projection/snapshot validation and exposes counts only. For a **completed terminal checkpoint**, live reconciliation accepts only one post-checkpoint monotonic exception without mutating checkpoint bytes: `approved -= N` and `revoked += N` with total/resolved counts unchanged, after proving each changed workflow-owned item was auto-policy approved with a completed same-item validation and a later `revoked_at`. For an **interrupted human-review checkpoint**, preserve the existing resume contract: workflow-owned `pending_review -> approved|rejected|needs_more_evidence` is accepted only when the current row and transition/AuditLog prove an authorized human/internal-stale transition later than the checkpoint; verified auto `approved -> revoked` is an additional exception. Total changes, unverified terminal changes, terminal-to-pending/reverse transitions, or cross-workflow rows fail closed. Refresh reconstructs live counts and routes without rewriting old checkpoint bytes. On resume, global mode can demote work still ahead of the node, but stored graph/config never upgrades. A V2.1 thread never falls back to V2.0.
 
@@ -2978,18 +2978,18 @@ Register and compile both graph builders, the coordinator, and the V2.1 lifecycl
 
 `AutoReviewCallRecoveryService` performs an unlocked bounded id scan, then for each row reacquires the old generation's full ordered workflow/call context. Attempt-zero stale/cancelled calls become zero-charge terminal and release their reservation; attempt-one lost calls become actual-if-known or conservative-reserve charged failure, with no provider retry, candidate, validation child, promotion decision, audit, or approval. It handles extraction and validation independently and is replay-safe. The local aggregate-only CLI is `python -m backend.app.admin.auto_review_call_recovery status --limit 100` or `recover --limit 100`; it accepts no call id, subject, secret, or raw-output option, returns only extraction/validation pending/recovered/remaining/failure counts, and uses exit `0` for no remaining work, `2` for bounded configuration/key refusal, and `3` for retained non-terminal/failure state. Lifespan runs one bounded recovery batch after source reconciliation and before audit-remediation recovery. Rotation remains refused until status reports both remaining counts zero.
 
-- [ ] **Step 5: Add version-specific API validation and mapping**
+- [x] **Step 5: Add version-specific API validation and mapping**
 
 Parse a V2.0 request when no V2.1 token is allowed and a V2.1 request only when the facade selected V2.1 preview identity. Map `cost_preview_changed` to 409, new-preview/start readiness infrastructure failures to bounded 503, hidden permission to 404, and keep existing conflict mappings. A stored V2.1 resume does not return 503 merely because global mode/provider key changed; it follows the zero-call/human-fallback path above. Do not emit raw Pydantic/provider/checkpoint exceptions.
 
-- [ ] **Step 6: Run graph/service/API tests and lint GREEN**
+- [x] **Step 6: Run graph/service/API tests and lint GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_review_v21_state.py backend/tests/test_review_v21_graph.py backend/tests/test_review_v21_service.py backend/tests/test_review_v21_api.py backend/tests/test_auto_review_call_recovery.py backend/tests/test_agent_runtime_graph_versions.py backend/tests/test_agent_runtime_lifespan.py backend/tests/test_review_v2_service.py backend/tests/test_review_v2_api.py backend/tests/test_review_v2_postgres.py -q
 uv run --locked ruff check backend/app/agent_runtime/review_v21_state.py backend/app/agent_runtime/review_v21_graph.py backend/app/agent_runtime/review_v21_service.py backend/app/admin/auto_review_call_recovery.py backend/app/agent_runtime/graph_versions.py backend/app/agent_runtime/review_workflow_facade.py backend/app/main.py backend/app/api/v1/orchestration_v2.py backend/tests/test_review_v21_state.py backend/tests/test_review_v21_graph.py backend/tests/test_review_v21_service.py backend/tests/test_review_v21_api.py backend/tests/test_auto_review_call_recovery.py backend/tests/test_agent_runtime_graph_versions.py backend/tests/test_agent_runtime_lifespan.py backend/tests/test_review_v2_service.py backend/tests/test_review_v2_api.py backend/tests/test_review_v2_postgres.py
 ```
 
-- [ ] **Step 7: Commit dual-version LangGraph lifecycle**
+- [x] **Step 7: Commit dual-version LangGraph lifecycle**
 
 ```powershell
 git add backend/app/agent_runtime/review_v21_state.py backend/app/agent_runtime/review_v21_graph.py backend/app/agent_runtime/review_v21_service.py backend/app/admin/auto_review_call_recovery.py backend/app/agent_runtime/graph_versions.py backend/app/agent_runtime/review_workflow_facade.py backend/app/main.py backend/app/api/v1/orchestration_v2.py backend/tests/test_review_v21_state.py backend/tests/test_review_v21_graph.py backend/tests/test_review_v21_service.py backend/tests/test_review_v21_api.py backend/tests/test_auto_review_call_recovery.py backend/tests/test_agent_runtime_graph_versions.py backend/tests/test_agent_runtime_lifespan.py backend/tests/test_review_v2_service.py backend/tests/test_review_v2_api.py backend/tests/test_review_v2_postgres.py

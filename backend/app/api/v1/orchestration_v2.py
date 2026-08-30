@@ -8,16 +8,21 @@ from pydantic import ValidationError
 from starlette.responses import JSONResponse
 
 from backend.app.agent_runtime.review_v2_service import (
-    ReviewWorkflowService,
     ReviewWorkflowServiceError,
     ReviewWorkflowStatus,
+)
+from backend.app.agent_runtime.review_workflow_facade import (
+    ReviewWorkflowFacadeError,
 )
 from backend.app.core.demo_auth import DemoUser, get_demo_user
 from backend.app.schemas.review_workflow import (
     ReviewWorkflowDiagnosticResponse,
-    ReviewWorkflowDryRunResponse,
+    ReviewWorkflowDryRunUnion,
     ReviewWorkflowRunRequest,
-    ReviewWorkflowStatusResponse,
+    ReviewWorkflowRunRequestV21,
+    ReviewWorkflowStatusResponseV20,
+    ReviewWorkflowStatusResponseV21,
+    ReviewWorkflowStatusUnion,
 )
 
 
@@ -69,12 +74,12 @@ def diagnostic(
     return _call_service(_workflow_service(request).diagnostic)
 
 
-@router.post('/dry-run', response_model=ReviewWorkflowDryRunResponse)
+@router.post('/dry-run', response_model=ReviewWorkflowDryRunUnion)
 def dry_run(
     request: Request,
     body: RequestBody,
     user: CurrentUser,
-) -> ReviewWorkflowDryRunResponse:
+) -> ReviewWorkflowDryRunUnion:
     run_request = _validated_run_request(body)
     return _call_service(
         _workflow_service(request).dry_run,
@@ -83,14 +88,14 @@ def dry_run(
     )
 
 
-@router.post('/runs', response_model=ReviewWorkflowStatusResponse)
+@router.post('/runs', response_model=ReviewWorkflowStatusUnion)
 def start_run(
     request: Request,
     response: Response,
     body: RequestBody,
     user: CurrentUser,
-) -> ReviewWorkflowStatusResponse:
-    run_request = _validated_run_request(body)
+) -> ReviewWorkflowStatusUnion:
+    run_request = _validated_run_request(body, allow_v21_token=True)
     status = _call_service(
         _workflow_service(request).start,
         actor=user,
@@ -100,12 +105,12 @@ def start_run(
     return _status_response(status)
 
 
-@router.get('/runs/{thread_id}', response_model=ReviewWorkflowStatusResponse)
+@router.get('/runs/{thread_id}', response_model=ReviewWorkflowStatusUnion)
 def run_status(
     thread_id: str,
     request: Request,
     user: CurrentUser,
-) -> ReviewWorkflowStatusResponse:
+) -> ReviewWorkflowStatusUnion:
     status = _call_service(
         _workflow_service(request).status,
         actor=user,
@@ -116,13 +121,13 @@ def run_status(
 
 @router.post(
     '/runs/{thread_id}/resume',
-    response_model=ReviewWorkflowStatusResponse,
+    response_model=ReviewWorkflowStatusUnion,
 )
 def resume_run(
     thread_id: str,
     request: Request,
     user: CurrentUser,
-) -> ReviewWorkflowStatusResponse:
+) -> ReviewWorkflowStatusUnion:
     status = _call_service(
         _workflow_service(request).resume,
         actor=user,
@@ -133,13 +138,13 @@ def resume_run(
 
 @router.post(
     '/runs/{thread_id}/cancel',
-    response_model=ReviewWorkflowStatusResponse,
+    response_model=ReviewWorkflowStatusUnion,
 )
 def cancel_run(
     thread_id: str,
     request: Request,
     user: CurrentUser,
-) -> ReviewWorkflowStatusResponse:
+) -> ReviewWorkflowStatusUnion:
     status = _call_service(
         _workflow_service(request).cancel,
         actor=user,
@@ -148,12 +153,20 @@ def cancel_run(
     return _status_response(status)
 
 
-def _workflow_service(request: Request) -> ReviewWorkflowService:
+def _workflow_service(request: Request):
     return request.app.state.review_workflow_service
 
 
-def _validated_run_request(body: object) -> ReviewWorkflowRunRequest:
+def _validated_run_request(
+    body: object, *, allow_v21_token: bool = False
+) -> ReviewWorkflowRunRequest:
     try:
+        if (
+            allow_v21_token
+            and isinstance(body, dict)
+            and 'launch_confirmation_token' in body
+        ):
+            return ReviewWorkflowRunRequestV21.model_validate(body)
         return ReviewWorkflowRunRequest.model_validate(body)
     except ValidationError:
         raise HTTPException(
@@ -165,7 +178,7 @@ def _validated_run_request(body: object) -> ReviewWorkflowRunRequest:
 def _call_service(call, **kwargs):
     try:
         return call(**kwargs)
-    except ReviewWorkflowServiceError as exc:
+    except (ReviewWorkflowServiceError, ReviewWorkflowFacadeError) as exc:
         public_code = 'not_found' if exc.code == 'permission_denied' else exc.code
         if public_code == 'invalid_input':
             status_code = 400
@@ -183,5 +196,8 @@ def _call_service(call, **kwargs):
         ) from None
 
 
-def _status_response(status: ReviewWorkflowStatus) -> ReviewWorkflowStatusResponse:
-    return ReviewWorkflowStatusResponse.model_validate(asdict(status))
+def _status_response(status: ReviewWorkflowStatus) -> ReviewWorkflowStatusUnion:
+    payload = asdict(status)
+    if payload['graph_version'] == 'company-memory-review-v2.1-auto-review':
+        return ReviewWorkflowStatusResponseV21.model_validate(payload)
+    return ReviewWorkflowStatusResponseV20.model_validate(payload)
