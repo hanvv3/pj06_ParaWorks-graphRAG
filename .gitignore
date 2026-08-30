@@ -15,6 +15,7 @@ data/
 # env
 .env
 .env.local
+.env.*.tmp
 .env_backup
 .env.example
 

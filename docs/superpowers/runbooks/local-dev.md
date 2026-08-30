@@ -5,6 +5,33 @@ Run commands from the repository root.
 For quick UI demos without Docker, use
 `docs/superpowers/runbooks/sqlite-smoke.md`.
 
+## Configure the Local Environment
+
+ParaWorks uses one ignored root `.env` file for the backend, Docker Compose,
+local Python scripts, and the Next.js frontend. For a new checkout—or to fill
+missing local signing secrets without replacing existing provider keys—run:
+
+```powershell
+uv run python scripts/bootstrap_local_env.py
+```
+
+The bootstrap copies `.env.example` only when `.env` is missing, then generates
+independent cryptographic values for the C.5 fingerprint, session, Google OAuth,
+Google identity, and deferred Slack state signers. It preserves existing values,
+including `OPENAI_API_KEY`, and prints names only—never secret values. This step
+is required before the ParaWorks application starts against PostgreSQL because
+the durable C.5 key boundary is enforced even while automatic-review rollout is
+disabled.
+
+Do not commit `.env` or create a second `frontend/.env.local`. The frontend
+reads only `NEXT_PUBLIC_API_BASE_URL` and `NEXT_DIST_DIR` from the root file;
+provider keys and other backend-only values are never copied into the frontend
+environment. `.env.example` documents optional settings, while defaults not
+listed in `.env` continue to come from `backend/app/core/config.py`.
+
+Slack settings remain in the template as a deferred integration section. Leave
+them empty until a replacement Slack data source is designed.
+
 ## Start Runtime Services
 
 ```powershell

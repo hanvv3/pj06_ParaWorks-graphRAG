@@ -6,6 +6,28 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-30 Single-root local environment contract
+
+- Consolidated local runtime configuration into one ignored root `.env`; the
+  existing OpenAI key was migrated locally without printing or committing it,
+  and the redundant `.env.local` file was removed only after verification.
+- Reorganized `.env.example` by runtime, LangGraph/Review, providers, auth,
+  Google, and deferred Slack concerns. Removed unused API host/port and MinIO
+  variables, blanked tracked signing secrets, and added the active C.5
+  rollout/cost controls while preserving `AUTO_REVIEW_MODE=disabled`.
+- Added a safe, idempotent local bootstrap that creates `.env` when missing,
+  generates five independent signer/fingerprint secrets, preserves provider
+  keys, and satisfies the PostgreSQL durable-key preflight without enabling C.5.
+- Next.js now parses the root file with `dotenv` but copies only the explicit
+  `NEXT_PUBLIC_API_BASE_URL` and `NEXT_DIST_DIR` allowlist. Node tests cover
+  secret exclusion, process-environment precedence, and a missing root file.
+- Fresh verification: backend/config/bootstrap/secret gates `76 passed`,
+  frontend env `3 passed`, Ruff and ESLint clean, and Next.js production build
+  complete. Independent final review reported no unresolved findings and
+  readiness `Yes`; no live provider call was made.
+- This is an operational refactor before Deliverable D planning; it does not
+  enable paid providers, C.5 rollout, Deliverable D/E implementation, or Slack.
+
 ## 2026-08-30 C.5 live release gates complete
 
 - After billing was restored, the separately authorized aggregate-only Terra

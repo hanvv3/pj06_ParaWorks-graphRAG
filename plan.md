@@ -195,6 +195,11 @@ Current state:
   collection/event sidecars, and cleanup precedence. The earlier shared-public-
   schema and Settings-contamination failures are superseded by the fresh Task 16
   release evidence below.
+- Local development configuration now uses one ignored root `.env` across the
+  backend, Docker Compose, Python scripts, and a frontend-safe allowlist loader.
+  A safe bootstrap generates untracked durable/signing secrets while preserving
+  provider keys. The tracked `.env.example` documents current C.5 controls and
+  keeps Slack configuration deferred; C.5 rollout remains disabled.
 
 Next priorities:
 

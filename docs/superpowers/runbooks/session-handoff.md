@@ -2,6 +2,30 @@
 
 Updated: 2026-08-30
 
+## 2026-08-30 single-root local environment contract
+
+- Local runtime configuration now has one canonical ignored file: root `.env`.
+  Backend Settings, Docker Compose, local Python scripts, and Next.js consume
+  it; `frontend/.env.local.example` was removed.
+- Next.js uses a tested `dotenv` parser boundary that copies only
+  `NEXT_PUBLIC_API_BASE_URL` and `NEXT_DIST_DIR`. `OPENAI_API_KEY` and every
+  other backend-only value remain outside the frontend environment.
+- The existing ignored `.env.local` key was migrated to ignored `.env` without
+  outputting its value, verified in the target, and only then removed from the
+  worktree. Neither env file is tracked.
+- `.env.example` is the documented template. Obsolete API host/port and MinIO
+  entries are gone and tracked signer values are blank. The idempotent
+  `scripts/bootstrap_local_env.py` creates/fills ignored `.env` with independent
+  C.5/session/Google/Slack signing secrets while preserving provider keys. C.5
+  remains explicitly disabled; Slack settings are grouped last and deferred.
+- Fresh evidence is backend/config/bootstrap/secret `76 passed`, frontend env
+  `3 passed`, Ruff/ESLint clean, Next.js production build complete, and an
+  independent final review with no unresolved finding (`Ready: Yes`). No live
+  provider call occurred.
+- Next product activity remains **Deliverable D planning**. No paid provider
+  call, rollout, D/E implementation, Slack recovery, push, merge, or PR is
+  authorized by this configuration refactor.
+
 ## 2026-08-30 C.5 paid release gates complete
 
 - Branch `codex/rag-orchestrator-agent` completed both separately authorized

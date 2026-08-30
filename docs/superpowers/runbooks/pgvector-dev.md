@@ -64,7 +64,10 @@ postgresql+psycopg://paraworks:paraworks@127.0.0.1:5432/paraworks
 
 ## Environment
 
-Copy `.env.example` to `.env` for local development.
+Use the single root `.env` described in `docs/superpowers/runbooks/local-dev.md`.
+Run `uv run python scripts/bootstrap_local_env.py` before starting the ParaWorks
+application against PostgreSQL; do not overwrite an existing local file or
+create a separate frontend env file.
 
 Do not commit `.env`, provider API keys, OAuth tokens, Slack tokens, or any
 other secret values.

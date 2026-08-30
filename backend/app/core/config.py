@@ -2,10 +2,19 @@ import logging
 import os
 from decimal import Decimal
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import BeforeValidator, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _coerce_integer_literal(value: object) -> object:
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    return value
 
 
 class Settings(BaseSettings):
@@ -25,7 +34,9 @@ class Settings(BaseSettings):
     )
     agent_runtime_fingerprint_key_version: str = 'v1'
     auto_review_mode: Literal['disabled', 'shadow', 'enforce'] = 'disabled'
-    auto_review_enforce_percentage: Literal[0, 10, 100] = 0
+    auto_review_enforce_percentage: Annotated[
+        Literal[0, 10, 100], BeforeValidator(_coerce_integer_literal)
+    ] = 0
     auto_review_launch_confirmation_ttl_seconds: int = Field(
         default=600, ge=60, le=3600
     )
