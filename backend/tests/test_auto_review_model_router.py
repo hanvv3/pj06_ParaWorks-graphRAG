@@ -45,7 +45,7 @@ def test_live_route_constructs_chat_openai_terra_medium_without_fallback() -> No
 
     assert route.model is model
     assert route.model_name == 'gpt-5.6-terra'
-    assert route.route_version == 'auto-review-validation:v1'
+    assert route.route_version == 'auto-review-validation:v2'
     assert route.deterministic is False
     assert calls == [
         {

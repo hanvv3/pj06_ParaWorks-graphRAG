@@ -65,7 +65,7 @@ def _config() -> V21PreparedReviewConfig:
         validator_provider='openai',
         validator_model='gpt-5.6-terra',
         validator_reasoning_effort='medium',
-        validator_prompt_version='auto-review-validation:v1',
+        validator_prompt_version='auto-review-validation:v2',
         validator_output_contract_version='candidate-validation-batch:v1',
         policy_version='auto-review-policy:v1',
         cost_policy_version='auto-review-cost:v1',

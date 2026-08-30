@@ -284,7 +284,7 @@ def test_validator_version_identity_and_post_validation_state_are_exact() -> Non
         provider='openai',
         model='gpt-5.6-terra',
         reasoning_effort='medium',
-        prompt_version='auto-review-validation:v2',
+        prompt_version='auto-review-validation:v3',
         output_contract_version='candidate-validation-batch:v1',
         policy_version='auto-review-policy:v1',
     )

@@ -142,11 +142,11 @@ def _route(agent_name: str, prompt_version: str, output_contract_version: str) -
 
 
 EXTRACTION_ROUTE_POLICIES = (
-    _route('mail_document_agent', 'mail-document-extraction:c5-v1', 'mail-document-candidate:c5-v1'),
-    _route('timeline_agent', 'timeline-extraction:c5-v1', 'timeline-candidate:c5-v1'),
-    _route('history_agent', 'history-extraction:c5-v1', 'history-candidate:c5-v1'),
-    _route('decision_record_agent', 'decision-record-extraction:c5-v1', 'decision-record-candidate:c5-v1'),
-    _route('todo_agent', 'todo-extraction:c5-v1', 'todo-candidate:c5-v1'),
+    _route('mail_document_agent', 'mail-document-extraction:c5-v2', 'mail-document-candidate:c5-v2'),
+    _route('timeline_agent', 'timeline-extraction:c5-v2', 'timeline-candidate:c5-v2'),
+    _route('history_agent', 'history-extraction:c5-v2', 'history-candidate:c5-v2'),
+    _route('decision_record_agent', 'decision-record-extraction:c5-v2', 'decision-record-candidate:c5-v2'),
+    _route('todo_agent', 'todo-extraction:c5-v2', 'todo-candidate:c5-v2'),
 )
 
 

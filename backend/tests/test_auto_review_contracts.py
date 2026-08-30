@@ -84,7 +84,7 @@ def test_v21_dry_run_exposes_exact_validator_output_contract_and_cost_policy_ide
         auto_review_validator_provider='openai',
         auto_review_validator_model='gpt-5.6-terra',
         auto_review_reasoning_effort='medium',
-        auto_review_validator_prompt_version='auto-review-validation:v1',
+        auto_review_validator_prompt_version='auto-review-validation:v2',
         auto_review_validator_output_contract_version='candidate-validation-batch:v1',
         auto_review_cost_policy_version='auto-review-cost:v1',
         auto_review_enforce_percentage=0,
@@ -305,8 +305,8 @@ def test_v21_rejects_retry_fallback_or_missing_extraction_estimator_route() -> N
         extraction_cost_policy_version='auto-review-extraction-cost:v1',
         provider='openai', model='gpt-5.4-mini-2026-03-17', reasoning_effort='none',
         route_version='auto-review-extraction-route:v1',
-        prompt_version='timeline-extraction:c5-v1',
-        output_contract_version='timeline-candidate:c5-v1',
+        prompt_version='timeline-extraction:c5-v2',
+        output_contract_version='timeline-candidate:c5-v2',
     ).max_provider_attempts == 1
 
 
@@ -361,7 +361,7 @@ def _timeline_candidate(*, duplicate_slot: bool = False) -> dict[str, object]:
     }
 
 
-def test_extraction_no_candidate_reason_and_evidence_slots_are_exact_and_unique() -> None:
+def test_extraction_no_candidate_reason_and_field_bindings_are_exact() -> None:
     from backend.app.schemas.auto_review import TimelineExtractionResult
 
     assert TimelineExtractionResult.model_validate(
@@ -379,9 +379,17 @@ def test_extraction_no_candidate_reason_and_evidence_slots_are_exact_and_unique(
                 'no_candidate_reason': 'unbounded reason',
             }
         )
+    shared_slot = TimelineExtractionResult.model_validate(
+        {'result_kind': 'candidate', 'candidate': _timeline_candidate(duplicate_slot=True)}
+    )
+    assert shared_slot.candidate.field_evidence_bindings[0].evidence_slot_id == 'S01'
+    assert shared_slot.candidate.field_evidence_bindings[1].evidence_slot_id == 'S01'
+
+    duplicate_field = _timeline_candidate()
+    duplicate_field['field_evidence_bindings'][1]['field_key'] = 'title'
     with pytest.raises(ValidationError):
         TimelineExtractionResult.model_validate(
-            {'result_kind': 'candidate', 'candidate': _timeline_candidate(duplicate_slot=True)}
+            {'result_kind': 'candidate', 'candidate': duplicate_field}
         )
 
 

@@ -1,7 +1,7 @@
 {
   "schema_version": "auto-review-golden:v1",
   "identities": {
-    "prompt_version": "auto-review-validation:v1",
+    "prompt_version": "auto-review-validation:v2",
     "output_contract_version": "candidate-validation-batch:v1",
     "policy_version": "auto-review-policy:v1",
     "cost_policy_version": "auto-review-cost:v1"

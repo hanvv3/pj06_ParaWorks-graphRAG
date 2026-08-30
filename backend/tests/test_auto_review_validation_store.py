@@ -45,7 +45,7 @@ def _identity() -> AutoReviewValidationIdentity:
         validator_provider='openai',
         validator_model='gpt-5.6-terra',
         reasoning_effort='medium',
-        validator_prompt_version='auto-review-validation:v1',
+        validator_prompt_version='auto-review-validation:v2',
         validator_output_contract_version='candidate-validation-batch:v1',
         policy_version='auto-review-policy:v1',
         fingerprint_key_version='validation-store-v1',
@@ -563,7 +563,9 @@ def test_completed_validation_replays_without_second_provider_call() -> None:
             policy_decision='auto_approve',
             policy_reason_codes=('eligible',),
         )
-        for index, candidate in enumerate(request.candidates, start=1)
+        for index, candidate in enumerate(
+            sorted(request.candidates, key=lambda item: item.validation_key), start=1
+        )
     )
 
     completed = store.complete(

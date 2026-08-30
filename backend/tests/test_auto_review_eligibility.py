@@ -439,7 +439,7 @@ def _seed_database_candidate(
     )
     run = AgentRun(
         agent_name='timeline_agent',
-        prompt_version='timeline-extraction:c5-v1',
+        prompt_version='timeline-extraction:c5-v2',
         status='complete',
         source_window='bounded',
         cache_key='task7-cache',
@@ -447,7 +447,7 @@ def _seed_database_candidate(
         generation_provider='openai',
         generation_reasoning_effort='none',
         generation_route_version='auto-review-extraction-route:v1',
-        generation_output_contract_version='timeline-candidate:c5-v1',
+        generation_output_contract_version='timeline-candidate:c5-v2',
         permission_level='internal',
         workflow_thread_id=thread.thread_id,
         effect_key='task7-effect',
@@ -573,7 +573,7 @@ def _seed_database_candidate(
             owner='Developer C',
             input_contract='EvidencePacket',
             output_contract='AgentRunResult',
-            prompt_versions=('timeline-extraction:c5-v1',),
+            prompt_versions=('timeline-extraction:c5-v2',),
             supported_permissions=('public', 'internal'),
             capabilities=('timeline_extraction',),
         )

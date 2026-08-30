@@ -277,6 +277,21 @@ def test_prompt_treats_evidence_as_data_and_uses_only_local_slots() -> None:
     assert 'candidate_key' not in invocation.canonical_text
 
 
+def test_prompt_exposes_candidate_local_evidence_allowlists() -> None:
+    validator, _, _ = _validator()
+
+    invocation = validator.prepare_many((
+        _request(evidence=('첫 후보 근거',)),
+        _request(evidence=('둘째 후보 첫 근거', '둘째 후보 둘째 근거')),
+    ))
+
+    payload = json.loads(invocation.canonical_text)
+    assert [
+        candidate.get('allowed_evidence_slot_ids')
+        for candidate in payload['candidates']
+    ] == [['E01'], ['E02', 'E03']]
+
+
 def test_prepared_invocation_is_rendered_once_counted_and_sent_byte_for_byte() -> None:
     dispatcher = _Dispatcher()
     validator, models, _ = _validator(dispatcher=dispatcher)

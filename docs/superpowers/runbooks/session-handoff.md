@@ -2,6 +2,37 @@
 
 Updated: 2026-08-30
 
+## 2026-08-30 C.5 paid release gates complete
+
+- Branch `codex/rag-orchestrator-agent` completed both separately authorized
+  aggregate-only paid gates using the existing `.env.local` key only inside the
+  child process. No key or raw provider content was logged or committed.
+- Terra's final production identity is OpenAI `gpt-5.6-terra`, medium,
+  `auto-review-validation:v2`, and `candidate-validation-batch:v1`. Candidate
+  and claim order plus candidate-local evidence-slot allowlists are explicit.
+  The 18-case live gate passed precision `1.0`, all prohibited counts `0`,
+  queue reduction `0.055556`, recall `0.333333`, tokens `3726/2554`, cost USD
+  `0.038100`.
+- All five extraction entries now use their agent-specific `*:c5-v2` prompt and
+  `*:c5-v2` output identity with exact Mini snapshot
+  `gpt-5.4-mini-2026-03-17`, reasoning `none`. Canonical prompts list allowed
+  item types, candidate-local slots, required/optional field maps, and exact
+  binding rules. One known slot may support multiple different fields; field
+  keys remain unique and every populated field requires one known slot. The
+  live gate passed `5/5` routes, `9/9` checks, tokens `9439/954`, cost USD
+  `0.011372`.
+- Fresh post-change official compatibility proof is `1,599 collected / 1,595
+  passed / 4 exact Slack deselected`, errors/skips/xfails `0`, leases `91/91`,
+  `no_live_provider=true`, and DB/role residue `0/0`. Focused regression is
+  `119 passed`, `226 passed`, and eligibility `23 passed`; Ruff, lock, and
+  secret hygiene pass. A raw all-C.5 pytest attempt without the controller was
+  intentionally not accepted as proof because its PostgreSQL URL was absent or
+  pointed at a local database with mismatched credentials.
+- Deliverable C.5 is complete, but rollout remains `disabled`. No rollout
+  authorization, deploy, push, merge, or PR occurred. The next activity is
+  **Deliverable D planning**, not implementation; Deliverable E follows D and
+  Slack reconstruction remains last.
+
 ## 2026-08-30 C.5 paid gate attempt and provider-schema repair
 
 - The user separately authorized the Terra validation and Mini five-route
@@ -64,12 +95,11 @@ Updated: 2026-08-30
   Lock, whole-tree Ruff, diff, bounded symbol scan, and secret hygiene are green.
 - Operational mode remains `disabled`. No rollout authorization, breaker
   transition, production database mutation, deploy, push, merge, or PR occurred.
-  The distinct paid Terra and Mini aggregate gates are the only remaining C.5
-  release-authorization boundary before shadow; after billing recovery they
-  require fresh explicit paid-call confirmation.
-- If the paid gates are authorized and both pass, the next product activity is
-  **Deliverable D planning**, not implementation. Deliverable E follows D;
-  Slack reconstruction and the visible ten-node baseline remain last.
+  The distinct paid Terra and Mini gates subsequently passed as recorded in the
+  newer entry above.
+- The next product activity is **Deliverable D planning**, not implementation.
+  Deliverable E follows D; Slack reconstruction and the visible ten-node
+  baseline remain last.
 
 ## 2026-08-30 C.5 Task 15 same-screen trust UX complete
 

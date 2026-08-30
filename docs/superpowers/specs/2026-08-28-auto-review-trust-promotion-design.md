@@ -141,7 +141,7 @@ links를 반드시 쓰며, migration 이전 human `source_review_item_id`만 imp
 
 ```python
 AUTO_REVIEW_POLICY_VERSION = 'auto-review-policy:v1'
-AUTO_REVIEW_VALIDATOR_PROMPT_VERSION = 'auto-review-validation:v1'
+AUTO_REVIEW_VALIDATOR_PROMPT_VERSION = 'auto-review-validation:v2'
 AUTO_REVIEW_VALIDATOR_OUTPUT_CONTRACT_VERSION = 'candidate-validation-batch:v1'
 AUTO_REVIEW_NORMALIZATION_SCHEMA_VERSION = 'trusted-claim-normalization:v1'
 AUTO_REVIEW_TOKEN_ESTIMATOR_VERSION = 'openai-o200k-chat:v1'
@@ -602,7 +602,7 @@ provider: openai
 model: gpt-5.6-terra
 reasoning.effort: medium
 structured output: required
-validator prompt version: auto-review-validation:v1
+validator prompt version: auto-review-validation:v2
 validator output contract: candidate-validation-batch:v1
 Responses API max_output_tokens: 3072
 SDK retry: 0
@@ -640,11 +640,11 @@ registry는 아래 다섯 entry와 그 exact schema만 가진다.
 
 | agent | prompt | output/schema | allowed item type |
 |---|---|---|---|
-| `mail_document_agent` | `mail-document-extraction:c5-v1` | `mail-document-candidate:c5-v1` / `MailDocumentExtractionResult` | Timeline, History, Decision, Todo union |
-| `timeline_agent` | `timeline-extraction:c5-v1` | `timeline-candidate:c5-v1` / `TimelineExtractionResult` | `timeline_event` |
-| `history_agent` | `history-extraction:c5-v1` | `history-candidate:c5-v1` / `HistoryExtractionResult` | `history_event` |
-| `decision_record_agent` | `decision-record-extraction:c5-v1` | `decision-record-candidate:c5-v1` / `DecisionRecordExtractionResult` | `decision_record` |
-| `todo_agent` | `todo-extraction:c5-v1` | `todo-candidate:c5-v1` / `TodoExtractionResult` | `todo` |
+| `mail_document_agent` | `mail-document-extraction:c5-v2` | `mail-document-candidate:c5-v2` / `MailDocumentExtractionResult` | Timeline, History, Decision, Todo union |
+| `timeline_agent` | `timeline-extraction:c5-v2` | `timeline-candidate:c5-v2` / `TimelineExtractionResult` | `timeline_event` |
+| `history_agent` | `history-extraction:c5-v2` | `history-candidate:c5-v2` / `HistoryExtractionResult` | `history_event` |
+| `decision_record_agent` | `decision-record-extraction:c5-v2` | `decision-record-candidate:c5-v2` / `DecisionRecordExtractionResult` | `decision_record` |
+| `todo_agent` | `todo-extraction:c5-v2` | `todo-candidate:c5-v2` / `TodoExtractionResult` | `todo` |
 
 모든 schema는 `extra='forbid'`이고 singular envelope
 `result_kind: candidate|no_candidate`, `candidate: CandidatePayload|None`, bounded
@@ -655,7 +655,9 @@ prepared input에 실제 존재하는 `S01..S12` slot만 허용한다. Timeline 
 `result_summary`, History는 `reason`, Decision은 `decision_summary`, Todo는 required
 `priority|priority_reason`과 bounded optional `task_summary|assignee|due_date|evidence_reason|
 source_type|project_tag`만 허용한다. 각 required/present substantive field는 정확히 한 binding을
-가져야 한다. 개별 field maximum은 독립 안전 상한이며 모든 maximum의 Cartesian 조합을
+가져야 하고 field key는 중복될 수 없다. 하나의 실제 source slot이 여러 다른 field를 직접
+뒷받침할 수 있으므로 slot은 field 간 재사용할 수 있지만 prepared input에 없는 slot은 항상
+거부한다. 개별 field maximum은 독립 안전 상한이며 모든 maximum의 Cartesian 조합을
 유효하다고 보장하지 않는다. 각 output-contract의 final validator는 JSON-mode-safe structure를
 만들되 `confidence_score`가 exact Decimal zero이면 signed `-0`도 먼저 positive `Decimal('0')`로
 정규화하고, 그 다음 four places로 quantize해 fixed `0.0000` string으로 format한다. 따라서

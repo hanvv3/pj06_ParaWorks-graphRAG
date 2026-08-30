@@ -157,7 +157,7 @@ class ReviewWorkflowDryRunResponseV21(BaseModel):
     auto_review_validator_provider: Literal['openai']
     auto_review_validator_model: Literal['gpt-5.6-terra']
     auto_review_reasoning_effort: Literal['medium']
-    auto_review_validator_prompt_version: Literal['auto-review-validation:v1']
+    auto_review_validator_prompt_version: Literal['auto-review-validation:v2']
     auto_review_validator_output_contract_version: Literal[
         'candidate-validation-batch:v1'
     ]

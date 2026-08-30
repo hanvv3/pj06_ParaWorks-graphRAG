@@ -137,7 +137,7 @@ class AutoReviewValidationIdentity:
     validator_provider: Literal['openai']
     validator_model: Literal['gpt-5.6-terra']
     reasoning_effort: Literal['medium']
-    validator_prompt_version: Literal['auto-review-validation:v1']
+    validator_prompt_version: Literal['auto-review-validation:v2']
     validator_output_contract_version: Literal['candidate-validation-batch:v1']
     policy_version: Literal['auto-review-policy:v1']
     fingerprint_key_version: str

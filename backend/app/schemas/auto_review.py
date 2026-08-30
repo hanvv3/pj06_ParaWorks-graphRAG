@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_valid
 
 COMPANY_MEMORY_REVIEW_GRAPH_VERSION_V21 = 'company-memory-review-v2.1-auto-review'
 AUTO_REVIEW_POLICY_VERSION = 'auto-review-policy:v1'
-AUTO_REVIEW_VALIDATOR_PROMPT_VERSION = 'auto-review-validation:v1'
+AUTO_REVIEW_VALIDATOR_PROMPT_VERSION = 'auto-review-validation:v2'
 AUTO_REVIEW_VALIDATOR_OUTPUT_CONTRACT_VERSION = 'candidate-validation-batch:v1'
 AUTO_REVIEW_NORMALIZATION_SCHEMA_VERSION = 'trusted-claim-normalization:v1'
 AUTO_REVIEW_COST_POLICY_VERSION = 'auto-review-cost:v1'
@@ -133,9 +133,6 @@ class _ExtractionCandidateBase(BaseModel):
         fields = [binding.field_key for binding in self.field_evidence_bindings]
         if len(fields) != len(set(fields)):
             raise ValueError('each candidate field requires exactly one evidence binding')
-        evidence_slots = [binding.evidence_slot_id for binding in self.field_evidence_bindings]
-        if len(evidence_slots) != len(set(evidence_slots)):
-            raise ValueError('candidate evidence slots must be unique')
         present = set(self._required_evidence_fields)
         for field_name in self.model_fields_set:
             if field_name in {'task_summary', 'assignee', 'due_date', 'evidence_reason', 'source_type', 'project_tag'} and getattr(self, field_name) is not None:
@@ -257,7 +254,7 @@ class AutoReviewPublicSummary(BaseModel):
 
     validator_model: Literal['gpt-5.6-terra']
     reasoning_effort: Literal['medium']
-    validator_prompt_version: Literal['auto-review-validation:v1']
+    validator_prompt_version: Literal['auto-review-validation:v2']
     validator_output_contract_version: Literal['candidate-validation-batch:v1']
     policy_version: Literal['auto-review-policy:v1']
     supported_substantive_field_count: int = Field(ge=0, le=2)

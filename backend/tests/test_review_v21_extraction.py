@@ -1,3 +1,4 @@
+import json
 import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -175,6 +176,19 @@ def test_extraction_confidence_signed_zero_canonicalizes_to_positive_fixed_zero(
     assert '"confidence_score":"0.0000"' in result.canonical_json()
 
 
+def test_extraction_allows_one_evidence_slot_to_support_multiple_candidate_fields():
+    payload = _candidate()
+    for binding in payload['candidate']['field_evidence_bindings']:
+        binding['evidence_slot_id'] = 'S01'
+
+    result = parse_extraction_result(HistoryExtractionResult, payload)
+
+    assert {
+        binding.evidence_slot_id
+        for binding in result.candidate.field_evidence_bindings
+    } == {'S01'}
+
+
 def test_v21_extraction_individually_valid_over_2048_canonical_envelope_fails_without_review_item_or_no_candidate_marker():
     ledger = ExtractionCallLedger()
     context = ledger.claim_or_replay('workflow', _plans().plans[0])
@@ -288,6 +302,50 @@ def test_v21_extraction_provider_dto_contains_only_local_aliases_and_allowlisted
         and 'https://secret.test' not in text
         and '@example.test' not in text
     )
+
+
+def test_v21_extraction_provider_dto_declares_candidate_local_binding_contracts():
+    dto = json.loads(
+        _plans(('mail_document_agent',)).plans[0].invocation.canonical_text
+    )
+
+    requirements = dto['requirements']
+    assert requirements['allowed_evidence_slot_ids'] == ['S01', 'S02', 'S03']
+    assert requirements['allowed_item_types'] == [
+        'timeline_event', 'history_event', 'decision_record', 'todo'
+    ]
+    assert requirements['candidate_contracts']['timeline_event'] == {
+        'required_evidence_fields': ['title', 'summary', 'result_summary'],
+        'optional_evidence_fields': [],
+    }
+    assert requirements['candidate_contracts']['decision_record'] == {
+        'required_evidence_fields': ['title', 'summary', 'decision_summary'],
+        'optional_evidence_fields': [],
+    }
+    assert requirements['candidate_contracts']['todo'] == {
+        'required_evidence_fields': [
+            'title', 'summary', 'priority', 'priority_reason'
+        ],
+        'optional_evidence_fields': [
+            'task_summary', 'assignee', 'due_date', 'evidence_reason',
+            'source_type', 'project_tag',
+        ],
+    }
+    assert requirements['field_evidence_binding_rules'] == {
+        'required_fields_exactly_once': True,
+        'populated_optional_fields_exactly_once': True,
+        'field_keys_unique': True,
+        'evidence_slot_reuse_across_fields_allowed': True,
+        'evidence_slot_ids_must_be_allowed': True,
+    }
+    assert requirements['field_evidence_binding_instructions'] == [
+        'Emit exactly one binding object for each required field and each populated optional field.',
+        'Never emit two binding objects with the same field_key; when multiple evidence slots support one field, choose the single strongest slot.',
+        'The same allowed evidence_slot_id may support more than one different field_key.',
+        'Emit no binding for an unpopulated optional field and no field_key outside the selected item_type contract.',
+        'For todo, each non-null task_summary, assignee, due_date, evidence_reason, source_type, or project_tag requires its own binding; otherwise set that optional field to null.',
+        'Before responding, verify binding count equals required field count plus populated optional field count.',
+    ]
 
 
 def test_v21_extraction_credential_match_is_zero_call_zero_cache_zero_trace():

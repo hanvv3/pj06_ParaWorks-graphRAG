@@ -121,13 +121,13 @@ The immutable extraction registry contains exactly these five entries; a missing
 
 | Agent | Prompt version | Output contract / exact schema | Allowed candidate item type |
 |---|---|---|---|
-| `mail_document_agent` | `mail-document-extraction:c5-v1` | `mail-document-candidate:c5-v1` / `MailDocumentExtractionResult` | `timeline_event|history_event|decision_record|todo` |
-| `timeline_agent` | `timeline-extraction:c5-v1` | `timeline-candidate:c5-v1` / `TimelineExtractionResult` | `timeline_event` |
-| `history_agent` | `history-extraction:c5-v1` | `history-candidate:c5-v1` / `HistoryExtractionResult` | `history_event` |
-| `decision_record_agent` | `decision-record-extraction:c5-v1` | `decision-record-candidate:c5-v1` / `DecisionRecordExtractionResult` | `decision_record` |
-| `todo_agent` | `todo-extraction:c5-v1` | `todo-candidate:c5-v1` / `TodoExtractionResult` | `todo` |
+| `mail_document_agent` | `mail-document-extraction:c5-v2` | `mail-document-candidate:c5-v2` / `MailDocumentExtractionResult` | `timeline_event|history_event|decision_record|todo` |
+| `timeline_agent` | `timeline-extraction:c5-v2` | `timeline-candidate:c5-v2` / `TimelineExtractionResult` | `timeline_event` |
+| `history_agent` | `history-extraction:c5-v2` | `history-candidate:c5-v2` / `HistoryExtractionResult` | `history_event` |
+| `decision_record_agent` | `decision-record-extraction:c5-v2` | `decision-record-candidate:c5-v2` / `DecisionRecordExtractionResult` | `decision_record` |
+| `todo_agent` | `todo-extraction:c5-v2` | `todo-candidate:c5-v2` / `TodoExtractionResult` | `todo` |
 
-All five result classes use `ConfigDict(extra='forbid')` and the same singular envelope: `result_kind: Literal['candidate','no_candidate']`, `candidate: CandidatePayload | None`, and `no_candidate_reason: Literal['no_relevant_evidence','insufficient_direct_evidence','non_business_evidence','conflicting_evidence'] | None`. A model validator requires exactly one non-null `candidate` and a null reason for `candidate`, or a null candidate and one reason for `no_candidate`; no candidate list exists. Common candidate fields are `title` 1–160 characters, `summary` 1–800 characters, `confidence_score` Decimal 0.0000–1.0000 with at most four decimal places, optional `uncertainty_reason` 1–400 characters, and 1–10 `CandidateFieldEvidence` rows. Each evidence row has one item-type-allowlisted substantive `field_name` and 1–12 unique local slots matching `^S(0[1-9]|1[0-2])$`; each required substantive field appears exactly once, all slots must exist in the prepared input, and the union is non-empty. These per-field maxima are independent safety ceilings, not a promise that their Cartesian maximum is a valid response.
+All five result classes use `ConfigDict(extra='forbid')` and the same singular envelope: `result_kind: Literal['candidate','no_candidate']`, `candidate: CandidatePayload | None`, and `no_candidate_reason: Literal['no_relevant_evidence','insufficient_direct_evidence','non_business_evidence','conflicting_evidence'] | None`. A model validator requires exactly one non-null `candidate` and a null reason for `candidate`, or a null candidate and one reason for `no_candidate`; no candidate list exists. Common candidate fields are `title` 1–160 characters, `summary` 1–800 characters, `confidence_score` Decimal 0.0000–1.0000 with at most four decimal places, optional `uncertainty_reason` 1–400 characters, and 1–10 `CandidateFieldEvidence` rows. Each evidence row has one item-type-allowlisted substantive `field_name` and one local slot matching `^S(0[1-9]|1[0-2])$`; each required or populated optional substantive field appears exactly once, all slots must exist in the prepared input, and the union is non-empty. Field names are unique, while the same real source slot may support multiple different fields. These per-field maxima are independent safety ceilings, not a promise that their Cartesian maximum is a valid response.
 
 The item payloads are also `extra='forbid'`: Timeline requires only `result_summary` 1–800; History requires only `reason` 1–800; Decision requires only `decision_summary` 1–800; Todo requires `priority: low|medium|high` and `priority_reason` 1–400, with optional `task_summary` 1–400, `assignee` 1–100, `due_date` 1–64, `evidence_reason` 1–400, `source_type: gmail|gmail_attachment|drive|calendar|internal_document`, and `project_tag` 1–100. Required evidence field names are `title,summary,result_summary`, `title,summary,reason`, `title,summary,decision_summary`, or `title,summary,priority,priority_reason` plus every present optional Todo field, respectively. `mail_document_agent` uses a discriminated union of those exact four payloads; each other class exposes only its one branch. As part of each frozen output contract, a final model validator first produces a JSON-safe structure equivalent to `model_dump(mode='json')` but canonicalizes `confidence_score` by replacing every exact Decimal zero, including signed `-0`, with positive `Decimal('0')`, then quantizing to four places and formatting it as the fixed string `0.0000`; therefore `-0`, `0`, `0.0000`, `0.98`, and `0.9800` have the expected sign-insensitive/equal-value canonical forms. It then renders one NFC, sorted-key compact JSON string with `ensure_ascii=False` and `allow_nan=False`, counts `o200k_base.encode(canonical_text)`, and rejects any candidate whose complete canonical envelope exceeds 2,048 tokens. The same string encoded once as UTF-8 supplies HMAC/fixture bytes. Frozen Korean/ASCII fixtures cover exact 2,048-token acceptance, 2,049-token rejection, signed-zero normalization, and individually field-valid combinations that exceed the aggregate budget. Unknown/extra fields, a second candidate shape, an invalid item type, a missing/duplicate field binding, an unrecognized slot, or an aggregate over-cap output is sanitized human-only and never truncated into a trusted candidate. A provider response truncated by the native Responses `max_output_tokens=2048` cap is malformed/human-only; partial JSON is never repaired.
 
@@ -675,7 +675,7 @@ Tasks 2, 10, 12, and 15 contain several coupled sub-slices but are not single fr
 - Adds nullable exact Decimal V2.1 extraction input/output confirmation prices distinct from the legacy float estimate settings. New shadow/enforce readiness requires all selected agents to match one of the five exact registry tuples on OpenAI `gpt-5.4-mini-2026-03-17`, reasoning `none`, 10,000/2,048 token caps, one-candidate envelope, USD 0.75/USD 4.50 prices, and an explicitly authorized extraction provider-safety row. Alias `gpt-5.4-mini`, Azure OpenAI, Gemini, different reasoning, a legacy prompt/output contract, or an unregistered agent is unavailable; it is never repriced with an OpenAI tokenizer or validator price.
 - Uses a 600-second launch-token TTL. Validation price settings must exactly equal the immutable `auto-review-cost:v1` Terra USD 2/USD 12 registry entry and extraction price settings must exactly equal the immutable `auto-review-extraction-cost:v1` USD 0.75/USD 4.50 registry entries before `shadow`/`enforce` is ready. Do not accept an arbitrary positive override, alias price, or lower configured value. The fixed maxima are USD 0.083580 extraction, USD 0.097728 validation, USD 0.181308 profile reserve, and USD 0.20 budget.
 
-- [ ] **Step 1: Write strict schema, default-mode, and compatibility tests**
+- [x] **Step 1: Write strict schema, default-mode, and compatibility tests**
 
 Create `backend/tests/test_auto_review_contracts.py` with tests that assert:
 
@@ -733,7 +733,7 @@ assert set(v20_status.model_dump()) == {
 
 Keep the current V2.0 checkpoint eight-key and four-status assertions and add a graph edge snapshot proving the existing V2.0 builder has no auto-review node. Separately assert the exact V2.1 dry-run key set, including `auto_review_validator_output_contract_version` and `auto_review_cost_policy_version`; neither field may be inferred from another version string or omitted as an internal-only detail.
 
-- [ ] **Step 2: Run the focused tests and observe RED**
+- [x] **Step 2: Run the focused tests and observe RED**
 
 Run:
 
@@ -743,7 +743,7 @@ uv run --locked pytest backend/tests/test_auto_review_contracts.py backend/tests
 
 Expected: collection/import failures for the new contracts and assertion failures for missing V2.1 types. The pre-existing V2.0 assertions remain green in the same run.
 
-- [ ] **Step 3: Add the strict contract module and validated settings**
+- [x] **Step 3: Add the strict contract module and validated settings**
 
 Implement the frozen types in `schemas/auto_review.py` with `ConfigDict(extra='forbid')`, exact `Literal` unions, `Decimal`, bounded strings/lists, and explicit discriminators. Add one shared final model validator/canonicalizer used by all five extraction result classes: fixed-four-place Decimal normalization, JSON-mode safe values, NFC sorted compact JSON, `o200k_base` string token count, UTF-8 fixture/HMAC bytes, exact 2,048 acceptance and 2,049 rejection. Individual field bounds do not bypass this aggregate guard. Keep these existing names unchanged in `schemas/review_workflow.py`:
 
@@ -803,7 +803,7 @@ Add a cross-field settings validator: `disabled` and `shadow` require percentage
 
 After editing the two direct requirements, run `uv lock`, inspect that the lock diff contains only the intended direct-dependency metadata and resolver consequences, and only then run `uv lock --check`. Do not expect `--check` to create or refresh the lock.
 
-- [ ] **Step 4: Run contract tests and lint GREEN**
+- [x] **Step 4: Run contract tests and lint GREEN**
 
 Run:
 
@@ -815,7 +815,7 @@ uv run --locked ruff check backend/app/schemas/auto_review.py backend/app/schema
 
 Expected: all focused tests and Ruff pass; V2.0 exact-key and topology snapshots are unchanged.
 
-- [ ] **Step 5: Commit the frozen contract slice**
+- [x] **Step 5: Commit the frozen contract slice**
 
 ```powershell
 git add pyproject.toml uv.lock backend/app/schemas/auto_review.py backend/app/schemas/review_workflow.py backend/app/core/config.py backend/app/agent_runtime/auto_review_cost_policy.py backend/tests/test_auto_review_contracts.py backend/tests/test_auto_review_cost_policy.py backend/tests/test_review_v2_schemas.py backend/tests/test_agent_runtime_state.py backend/tests/test_review_v2_graph.py backend/tests/test_langchain_langgraph_dependency_compat.py
@@ -865,7 +865,7 @@ git commit -m "feat: freeze auto review v21 contracts"
 - Adds nullable C.5 identity columns to `DocumentParserRun` (`server_content_signature_schema`, `server_content_signature`, `parser_policy_version`, `parser_version`, `chunk_policy_version`) and nullable `DocumentChunk.parser_run_id` for legacy compatibility. A C.5 chunk derives its immutable source signature and parser/chunk policy only through a same-version/same-source parser-run FK; mutable chunk metadata never becomes authority.
 - Produces the sole fixed-lock guard API and an idempotent startup/admin key bootstrap before Task 3 writes its first keyed evidence row; later tasks consume this API and never issue their own global advisory-lock SQL.
 
-- [ ] **Step 1: Write model and migration tests before defining rows**
+- [x] **Step 1: Write model and migration tests before defining rows**
 
 Create tests for fresh upgrade, upgrade from `2f6a8b9c0d1e`, empty-schema downgrade back to that revision, populated-C.5 downgrade refusal, a repeated idempotent upgrade helper path, generated-id cleanup, legacy-row preservation, named constraints, exact indexes, and local data-reset refusal/preservation when C.5 retained rows exist. Assert these relational invariants:
 
@@ -1167,7 +1167,7 @@ Model/migration tests prove duplicate `current_version='v1'` rows with different
 
 In `test_keyed_mutation_guard.py` freeze the exact constants `1066041229503628369` and `-2972884933094306491`, shared/exclusive SQL, runtime row lock mode, and global acquisition order. In `test_auto_review_key_bootstrap.py` prove first initialization, idempotent replay, table-not-yet-present startup no-op, SQLite disabled-mode compatibility, and refusal when a missing/mismatched runtime row coexists with any retained C.5 keyed artifact.
 
-- [ ] **Step 2: Run migration/model tests and observe RED**
+- [x] **Step 2: Run migration/model tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_migration.py backend/tests/test_agent_runtime_migration.py backend/tests/test_db_schema_operations.py backend/tests/test_models.py backend/tests/test_assistant_models.py backend/tests/test_data_reset.py backend/tests/test_keyed_mutation_guard.py backend/tests/test_auto_review_key_bootstrap.py backend/tests/test_agent_runtime_lifespan.py backend/tests/test_connector_ingestion_contract.py -q
@@ -1175,7 +1175,7 @@ uv run --locked pytest backend/tests/test_auto_review_migration.py backend/tests
 
 Expected: missing model/revision/table/column failures. Existing runtime-foundation migration tests must continue to validate the old revision while treating the new revision as head.
 
-- [ ] **Step 3: Define exact columns and indexes**
+- [x] **Step 3: Define exact columns and indexes**
 
 Use bounded storage types rather than unbounded text for identifiers/codes:
 
@@ -1207,7 +1207,7 @@ Every durable keyed C.5 row stores the non-secret `fingerprint_key_version` and 
 
 Define the composite FK with a stable name such as `fk_review_items_auto_validation_same_item`, `use_alter=True`, and a deferrable PostgreSQL constraint. The migration must use a batch-safe path for SQLite schema tests and explicit constraint/index names for downgrade. No table should depend on autogenerate-only names.
 
-- [ ] **Step 4: Implement the additive migration**
+- [x] **Step 4: Implement the additive migration**
 
 Follow the repository's inspect-before-create/drop helpers so a fresh database, pre-C.5 database, and test recreation are deterministic. The upgrade order is:
 
@@ -1226,7 +1226,7 @@ The migration marker is also a writer cutover boundary, not only a legacy classi
 
 Operational rollback is configuration-based (`disabled`), not schema downgrade. The downgrade may reverse an otherwise empty/test schema and remove only the C.5 boundary marker. Its retained-state predicate must refuse when **any** new C.5 table has a row (including workflow/assistant evidence refs and runtime/projection state), any thread has graph version V2.1, any workflow request has a non-null C.5 snapshot/ceiling, any ReviewItem has a C.5 generator/resolution/validation/revoke field or `revoked` status, any AgentRun has a new generation-identity field, any AssistantMessage has a non-null evidence-contract/count field, any Source has a non-null server/connector signature column, any Document has a non-null `current_document_version_id`, any parser run has a C.5 signature/policy identity, or any chunk has `parser_run_id`. Add one refusal test per category; validation/provenance-only checks are insufficient. It never destroys retained assistant audit dependencies, signature authority, version pointers, parser lineage, or audit history. Update the local connector-derived reset service to report the same complete predicate and refuse confirmed row deletion when any C.5 retained state exists, directing developers to recreate only an explicitly disposable local database instead of deleting audit rows out of order.
 
-- [ ] **Step 5: Run migration/model tests and lint GREEN**
+- [x] **Step 5: Run migration/model tests and lint GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_migration.py backend/tests/test_agent_runtime_migration.py backend/tests/test_db_schema_operations.py backend/tests/test_models.py backend/tests/test_assistant_models.py backend/tests/test_data_reset.py backend/tests/test_keyed_mutation_guard.py backend/tests/test_auto_review_key_bootstrap.py backend/tests/test_agent_runtime_lifespan.py backend/tests/test_connector_ingestion_contract.py -q
@@ -1235,7 +1235,7 @@ uv run --locked ruff check backend/app/models backend/app/connectors/base.py bac
 
 Expected: fresh/upgrade/downgrade/model cases pass with legacy data preserved and no raw-content column.
 
-- [ ] **Step 6: Commit the persistence slice**
+- [x] **Step 6: Commit the persistence slice**
 
 ```powershell
 git add backend/app/models backend/app/connectors/base.py backend/app/agent_runtime/keyed_mutation_guard.py backend/app/admin/auto_review_keys.py backend/app/admin/data_reset.py backend/app/main.py backend/migrations/versions/7c5a2e9f4b10_add_auto_review_trust_promotion.py backend/tests/test_auto_review_migration.py backend/tests/test_agent_runtime_migration.py backend/tests/test_db_schema_operations.py backend/tests/test_models.py backend/tests/test_assistant_models.py backend/tests/test_data_reset.py backend/tests/test_keyed_mutation_guard.py backend/tests/test_auto_review_key_bootstrap.py backend/tests/test_agent_runtime_lifespan.py backend/tests/test_connector_ingestion_contract.py
@@ -1281,7 +1281,7 @@ git commit -m "feat: persist auto review trust state"
 - Extends `AgentRunResult` additively with nullable provider/reasoning/route/output-contract identities. V2.0 adapters may report the provider that actually answered after their legacy fallback; V2.1 never falls back and must report the exact registry tuple. Persist exact bounded columns rather than parsing a route or trusting mutable metadata. Missing/wrong identity or the same exact provider/model as the validator is later forced human.
 - Owns the shared `FencedProviderSendPermit`/`ProviderAttemptGrant` boundary used by both extraction and validation. A permit is an opaque process-local, one-use capability with only attempt/deadline metadata; it cannot be pickled, copied, converted by Pydantic, JSON-encoded, logged, or reconstructed after restart. `consume_at_dispatch()` uses a monotonic clock and succeeds exactly once before its deadline. `FencedOpenAITransport` consumes it immediately before the one underlying HTTP dispatch, applies only the grant's stored timeout, never reads/logs request or response bodies, and rejects a redirect/retry/second dispatch. The database store—not the caller—creates the grant only after the attempt-marker transaction commits.
 
-- [ ] **Step 1: Write immutable identity and evidence-binding tests**
+- [x] **Step 1: Write immutable identity and evidence-binding tests**
 
 Cover:
 
@@ -1360,7 +1360,7 @@ Cover:
 
 The candidate binding must reject the single candidate when its links/snippets cannot be mapped exactly to its permission-filtered packet. That attempted run is finalized `failed` with the allowlisted aggregate reason `evidence_binding_mismatch`; **no ReviewItem, partial binding row, completed cache entry, or fabricated `no_candidate` result is persisted**. It must never create a permanently unapprovable post-migration pending item or invent a broad packet-level binding.
 
-- [ ] **Step 2: Run focused preflight/draft tests and observe RED**
+- [x] **Step 2: Run focused preflight/draft tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_provider_send_fence.py backend/tests/test_review_v21_preflight.py backend/tests/test_review_v21_drafting.py backend/tests/test_review_v21_extraction.py backend/tests/test_review_v2_preflight.py backend/tests/test_review_v2_drafting.py backend/tests/test_review_v2_agents.py -q
@@ -1368,7 +1368,7 @@ uv run --locked pytest backend/tests/test_provider_send_fence.py backend/tests/t
 
 Expected: new V2.1 types/bindings are missing; every V2.0 regression remains green.
 
-- [ ] **Step 3: Add a version-specific prepared identity**
+- [x] **Step 3: Add a version-specific prepared identity**
 
 Do not add optional V2.1 values to the canonical V2.0 HMAC payload. Add a separate frozen type and builder whose canonical identity includes:
 
@@ -1406,7 +1406,7 @@ exact V2.1 total-budget limit
 
 `review_thread_matches_prepared()` must dispatch by the stored graph version. A V2.1 mismatch is `evidence_changed` or `cost_preview_changed` at the appropriate preflight boundary; it never mutates a previously stored request.
 
-- [ ] **Step 4: Implement the authoritative V2.1 extraction plan and call ledger**
+- [x] **Step 4: Implement the authoritative V2.1 extraction plan and call ledger**
 
 `review_v21_extraction.py` exposes immutable `PreparedExtractionPlan`/`PreparedExtractionPlanSet`/`PreparedExtractionInvocation` plus a store with `claim_or_replay`, `mark_attempt_started -> ProviderAttemptGrant`, `complete(ExtractionLockedContext, ...)`, and `fail(ExtractionLockedContext, ...)`. The store derives lease tokens and every persisted claim/attempt/completion/failure wall timestamp from PostgreSQL `clock_timestamp()` under the locked row; requests may carry an expected timestamp only for equality testing, never authority. SQLite/fake tests inject a DB-clock abstraction. Only `FencedProviderSendPermit` uses the local monotonic clock after marker commit. The plan builder resolves the selected agent only through the immutable extraction registry and accepts exactly `openai/gpt-5.4-mini-2026-03-17/none/auto-review-extraction-route:v1` plus that agent's registered prompt/output schema and `o200k_base` framing policy, then uses the V2.1 privacy-bounded renderer rather than the legacy provider payload. It freezes Responses API transport, `cache=False`, `max_retries=0`, empty callbacks, and disabled tracing, and refuses an alias, Azure OpenAI, Gemini, fallback, unknown tokenizer, missing/mismatched price, mutable route, credential-scan hit, or non-allowlisted provider DTO field. V2.0 alone continues to use the current catalog and fallback policy unchanged.
 
@@ -1448,7 +1448,7 @@ transaction E3:
 
 Unknown usage after the attempt marker charges the full reserve; pre-attempt expiry alone may be reclaimed, and post-attempt expiry never retries. Known input/output/cost or workflow-total overrun uses the same like-for-like rules as Task 9, stores actual cost, opens the extraction breaker across scopes, produces no trusted candidate from that run, and prevents validation. A schema-valid field combination whose canonical envelope is 2,049 or more tokens, or native output that is truncated/partial, is an extraction failure rather than `no_candidate`: E3 charges once, persists no ReviewItem, no result marker, and no cacheable `AgentRun.status='complete'`. Owner/source/version/permission drift discovered after the call is not a provider overrun: it discards all model output and creates no ReviewItem, but still charges actual usage or the conservative reserve exactly once. Global `disabled` or cancellation observed in E1/E2 under the workflow lock terminalizes an attempt-zero claim at zero charge and releases its reservation; neither restart nor resume may bypass that check. Once E2 commits attempt one, cancellation only latches the workflow and output-discard requirement; it does not terminalize the canonical call before the owner finishes or the stored database lease expires. A cancellation racing between marker commit and dispatch is therefore treated as possibly sent: the owner may consume its still-live permit once, but E3 must discard the result and charge actual-or-reserve; cancellation can never manufacture a second call. The one-use `FencedProviderSendPermit` is process-local/non-serializable, is consumed at the HTTP transport's actual dispatch boundary, and rejects after its monotonic send-start deadline; a restarted or late owner therefore cannot send. The stored provider timeout plus send window plus commit grace is strictly shorter than the stored database-clock lease, so expiry recovery cannot race a permitted live send. At/after lease expiry recovery charges the conservative reserve and terminalizes failure; the expired permit can never send afterward. E3 is the only successful completion boundary: after the aggregate output guard, it commits the call, `AgentRun.status='complete'`, exactly one valid ReviewItem and its exact evidence binding plus the domain-separated one-item result-set HMAC, or the explicit signed empty-set marker, together. A second candidate or second ReviewItem child is corruption and fails the run. It never commits a cacheable run first and candidates later; a crash before E3 leaves a non-retryable marked call that recovery finalizes with conservative charge and no phantom cache result. Replay of `complete` re-derives and verifies singular result kind, count in `{0,1}`, and the exact one-child/empty HMAC; absence alone is corruption. `AgentRun` float cost fields are mirrors only. Completion/failure persists no prompt/source/model output or raw exception. The workflow's authoritative paid total is the sum of extraction-call and validation-call Numeric charges exactly once; admission uses other non-final reserves plus final actual charges under the workflow lock.
 
-- [ ] **Step 5: Insert exact evidence refs in the candidate transaction**
+- [x] **Step 5: Insert exact evidence refs in the candidate transaction**
 
 Have `_insert_or_get_review_item()` return whether the ReviewItem was newly inserted. For every newly inserted V2.0 or V2.1 item, set server-owned `candidate_contract_version='c5-v1'`, write the exact `agent_run.id` into the relational column, map only the candidate's exact evidence to workflow refs, and insert the rows before the outer transaction commits. Despite its approved legacy name, `candidate_slot_ordinal` is the deterministic one-based **evidence-ref ordinal within one ReviewItem**: each child row receives a distinct value `1..N`; it is not one repeated candidate ordinal. On replay, load and compare the same-workflow AgentRun FK and immutable ref set; a null, cross-workflow, partial, extra, or mismatched binding is `invalid_state_transition`, not a payload lookup or repair write. Pre-migration null AgentRun bindings remain human-only. The V2.0 public schema, HMAC identity, checkpoint, graph, and transition behavior remain byte/shape compatible; only internal provenance rows are additive.
 
@@ -1458,21 +1458,21 @@ Add `model_provider: str | None = None`, `model_reasoning_effort: str | None = N
 
 Compute `candidate_generation_fingerprint` with domain/schema `candidate-generation:v1` over canonical JSON containing exactly `agent_name`, actual `generation_provider`, `model_name`, `generation_reasoning_effort`, `prompt_version`, `generation_route_version`, `generation_output_contract_version`, fingerprint key version, and key-material verifier. It is loaded only through the relational same-workflow `ReviewItem.agent_run_id`; mutable payload metadata is ignored. Any single-field change changes the HMAC/cache identity; a null/unknown field or the exact same provider+model as the validator is human-only. Do not infer provider/reasoning from configured order or parse a route containing multiple fallbacks.
 
-- [ ] **Step 6: Run Task 3A shared preflight/draft/send-fence tests and lint GREEN**
+- [x] **Step 6: Run Task 3A shared preflight/draft/send-fence tests and lint GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_provider_send_fence.py backend/tests/test_review_v21_preflight.py backend/tests/test_review_v21_drafting.py backend/tests/test_review_v21_extraction.py backend/tests/test_review_v2_preflight.py backend/tests/test_review_v2_drafting.py backend/tests/test_review_v2_agents.py -q
 uv run --locked ruff check backend/app/agent_runtime/review_v2_preflight.py backend/app/agent_runtime/review_v2_drafting.py backend/app/agent_runtime/contracts.py backend/app/agent_runtime/review_v2_agents.py backend/app/agent_runtime/model_router.py backend/app/agent_runtime/review_v21_extraction.py backend/app/agent_runtime/auto_review_input_safety.py backend/app/agent_runtime/provider_send_fence.py backend/app/models/agent_workflows.py backend/app/models/agent_runs.py backend/tests/test_provider_send_fence.py backend/tests/test_review_v21_preflight.py backend/tests/test_review_v21_drafting.py backend/tests/test_review_v21_extraction.py backend/tests/test_review_v2_preflight.py backend/tests/test_review_v2_drafting.py backend/tests/test_review_v2_agents.py
 ```
 
-- [ ] **Step 7: Commit Task 3A shared immutable binding/send-fence slice**
+- [x] **Step 7: Commit Task 3A shared immutable binding/send-fence slice**
 
 ```powershell
 git add backend/app/agent_runtime/review_v2_preflight.py backend/app/agent_runtime/review_v2_drafting.py backend/app/agent_runtime/contracts.py backend/app/agent_runtime/review_v2_agents.py backend/app/agent_runtime/model_router.py backend/app/agent_runtime/review_v21_extraction.py backend/app/agent_runtime/auto_review_input_safety.py backend/app/agent_runtime/provider_send_fence.py backend/app/models/agent_workflows.py backend/app/models/agent_runs.py backend/tests/test_provider_send_fence.py backend/tests/test_review_v21_preflight.py backend/tests/test_review_v21_drafting.py backend/tests/test_review_v21_extraction.py backend/tests/test_review_v2_preflight.py backend/tests/test_review_v2_drafting.py backend/tests/test_review_v2_agents.py
 git commit -m "feat: bind review candidates to canonical evidence"
 ```
 
-- [ ] **Step 8: Implement and verify Task 3B agent-owned adapters on `codex/mail-document-agent`**
+- [x] **Step 8: Implement and verify Task 3B agent-owned adapters on `codex/mail-document-agent`**
 
 Developer B bases this branch on the exact Task 3A commit, adapts the Mail/Document and memory-extraction LangChain adapters to the frozen result/provider/send-fence contracts, and leaves registration behind the existing `AgentManifest`/`AgentRegistry`. No direct feature-agent import or shared payload change is allowed.
 
@@ -1507,7 +1507,7 @@ The integration branch merges the exact 3A then 3B commits and reruns the union 
 - The internal stale transition is not a general needs-more action: it is exposed only on the injected coordinator-to-transition service (never the public action dispatcher), requires a locked canonical re-resolution proving that a previously bound evidence version changed or disappeared, accepts no note, and can only change `pending_review` to `needs_more_evidence`. It does not add a reusable actor capability.
 - Keeps the existing generic `record_audit_log(DemoUser, ...)` contract for all unrelated callers. A narrow review-resolution audit adapter projects a human actor to the existing email/role columns or uses fixed application-owned system values; it writes only allowlisted actor type/id, item id, action/outcome, versions, bounded counts, and cost—never raw reason or evidence and never a fabricated `DemoUser`.
 
-- [ ] **Step 1: Write capability, forgery, and compatibility tests**
+- [x] **Step 1: Write capability, forgery, and compatibility tests**
 
 Add tests that prove:
 
@@ -1525,7 +1525,7 @@ Add tests that prove:
 
 In PostgreSQL, retain the existing row-lock/concurrent approval assertions while changing the service actor type.
 
-- [ ] **Step 2: Run actor/transition tests and observe RED**
+- [x] **Step 2: Run actor/transition tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_review_resolution_actors.py backend/tests/test_review_transitions.py backend/tests/test_review_transition_postgres.py backend/tests/test_review_rbac.py backend/tests/test_audit_logs.py -q
@@ -1533,7 +1533,7 @@ uv run --locked pytest backend/tests/test_review_resolution_actors.py backend/te
 
 Expected: missing actor/directive failures; legacy behavior tests document the compatibility baseline.
 
-- [ ] **Step 3: Refactor to one actor-aware locked core**
+- [x] **Step 3: Refactor to one actor-aware locked core**
 
 Keep a narrow public wrapper if that minimizes callers:
 
@@ -1554,20 +1554,20 @@ Default `approval_directive` to `CreateNewPromotion()` only for an authorized hu
 
 Every new human approve/reject/needs-more transition writes `resolution_source='human'` and null policy/validation fields. Auto approval writes `reviewer_id='system:auto-review'`, `resolution_source='auto_policy'`, matching `resolution_policy_version`, and the same-item completed `auto_validation_id` in the locked transaction. `mark_evidence_stale` writes the bounded system actor and reason code but no model result or human note. Legacy terminal rows retain nullable fields and are not backfilled heuristically.
 
-- [ ] **Step 4: Adapt API and audit call sites**
+- [x] **Step 4: Adapt API and audit call sites**
 
 Convert the authenticated user only after existing API visibility/RBAC checks. Do not accept actor fields, the stale directive, or internal capabilities in Pydantic request bodies, query parameters, headers, or dependency overrides. Keep concealment behavior (foreign/inaccessible item becomes 404) and existing 409 transition mapping.
 
 Do not change `AuditLog` columns or the shared `record_audit_log()` signature. Add a review-only adapter that maps the internal actor to fixed `actor_id='system:auto-review'`, `actor_email='system:auto-review@paraworks.invalid'`, and `actor_role='system'`; human audit rows retain the authenticated user's existing values. Tests assert the system constants and the bounded metadata allowlist.
 
-- [ ] **Step 5: Run actor/transition tests and lint GREEN**
+- [x] **Step 5: Run actor/transition tests and lint GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_review_resolution_actors.py backend/tests/test_review_transitions.py backend/tests/test_review_transition_postgres.py backend/tests/test_review_rbac.py backend/tests/test_audit_logs.py -q
 uv run --locked ruff check backend/app/review/actors.py backend/app/review/transitions.py backend/app/api/v1/review.py backend/app/services/audit.py backend/tests/test_review_resolution_actors.py backend/tests/test_review_transitions.py backend/tests/test_review_transition_postgres.py backend/tests/test_review_rbac.py backend/tests/test_audit_logs.py
 ```
 
-- [ ] **Step 6: Commit the actor boundary**
+- [x] **Step 6: Commit the actor boundary**
 
 ```powershell
 git add backend/app/review/actors.py backend/app/review/transitions.py backend/app/api/v1/review.py backend/app/services/audit.py backend/tests/test_review_resolution_actors.py backend/tests/test_review_transitions.py backend/tests/test_review_transition_postgres.py backend/tests/test_review_rbac.py backend/tests/test_audit_logs.py
@@ -1600,7 +1600,7 @@ git commit -m "refactor: add review resolution actor boundary"
 - Extends the locked promotion core with `create_new` and `reuse_existing`; exact reaffirmation returns canonical ids with `promotion_effect='reaffirmed'` and creates no duplicate knowledge row.
 - Recognizes pre-migration human `source_review_item_id` as implicit active base provenance, but never treats an auto-policy-created row that way.
 
-- [ ] **Step 1: Write fingerprint, cardinality, replay, and collision tests**
+- [x] **Step 1: Write fingerprint, cardinality, replay, and collision tests**
 
 Cover:
 
@@ -1642,13 +1642,13 @@ Cover:
 
 Use SQL capture or a repository fake to prove the hidden guard executes a server-side `EXISTS` projection, not a query that loads id, content, permission, or count.
 
-- [ ] **Step 2: Run focused promotion tests and observe RED**
+- [x] **Step 2: Run focused promotion tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_provenance.py backend/tests/test_review_knowledge_promotion.py backend/tests/test_review_transitions.py backend/tests/test_review_transition_postgres.py -q
 ```
 
-- [ ] **Step 3: Implement canonical claim and collision HMACs**
+- [x] **Step 3: Implement canonical claim and collision HMACs**
 
 Expose narrow functions:
 
@@ -1699,7 +1699,7 @@ Define `ProjectionSummary(active_count, checksum_hex)` and a pure `ProjectionSum
 
 Rotation uses a CLI-only `SecretStr` key-ring source from the deployment secret manager containing exactly `(current_version,current_secret,next_version,next_secret)`. It first derives the current material verifier from the old secret and compares it with the locked DB state, then derives the next verifier/projection HMACs only from the next secret. Missing next material, a wrong old material verifier, version mismatch, or equal old/new material is a bounded refusal. The normal application process still receives only its one active version/secret. `rotate` refuses unless global mode is disabled, there is no in-flight migration, and a locked aggregate query finds zero non-terminal extraction/validation calls. `status` prints only the two bounded non-terminal counts; it never prints call ids. The exclusive barrier drains database mutations but is not falsely claimed to cover the provider network gap. Operators resume/cancel or run the bounded Task 12 call-ledger recovery until both counts reach zero, then retry rotation. After the transition and rebuild, admission stays disabled until deployment configuration is cut over to the new single active version/secret and `status` proves runtime/projection identities ready. Exit `0` means the requested invariant is ready, `2` is bounded configuration/authorization refusal, and `3` is retained-state/readiness failure. Lifespan ordering and bounded recovery are finalized in Tasks 10/12; rebuild and rotation remain explicit operator actions.
 
-- [ ] **Step 4: Add approval and evidence provenance services**
+- [x] **Step 4: Add approval and evidence provenance services**
 
 `TrustedKnowledgeApprovalLink` owns exactly one primary or companion effect. `TrustedKnowledgeEvidenceLink` is a child keyed by `approval_link_id` and can represent multiple evidence refs. The fingerprint projection and both link levels snapshot the current non-secret fingerprint key version/material verifier used for their keyed values. On replay, compare both key identities and the complete expected child set; do not append a partial repair silently. For History reaffirmation, lock and verify the directive's primary plus companion ids/fingerprints as one bundle and require exactly one canonical active companion whose normalized written fields, project, scope, permission, and status match. Missing, ambiguous, mismatched, or partially linked bundles force human review and no mutation. A new V2.0 or V2.1 candidate with missing bindings is an invalid state and cannot create a childless link.
 
@@ -1714,7 +1714,7 @@ OR legacy human base where source_review_item_id is present and
 
 The transition identifies that narrow legacy cohort from the persisted per-row contract marker plus the database-enforced post-marker writer guard, never from application timestamps, clock comparison, or a client flag. It preserves the existing evidence-bearing ReviewItem and `source_review_item_id`, creates no incomplete approval/evidence link, remains human-only and non-revocable, and is covered by V2.0 approval plus skewed-created-at regressions. An auto-policy originating item never gains implicit legacy-base status merely because the existing knowledge row has `source_review_item_id`.
 
-- [ ] **Step 5: Extend promotion under the existing item lock**
+- [x] **Step 5: Extend promotion under the existing item lock**
 
 For every human or automatic approve/reaffirmation, use the total order `shared key-generation/runtime -> sorted provider-safety rows on the auto path -> projection -> rollout -> sorted Source -> workflow -> ReviewItem -> promotion decision/audit -> approval/evidence links -> target knowledge -> document locks`. An unlocked locator may discover source/workflow ids, but all ownership and current source state are rechecked after the ordered locks. The **auto** path additionally requires every matching provider-safety row closed, matching runtime/projection key material, both ready states, equal summary pairs, a clean active-row anti-join, and fresh exact duplicate/hidden-collision checks; any failure leaves the item for human review. The **human** path does not lock provider safety and is never blocked by projection incompleteness/rebuild. If projection state started ready/matching and an exact row+summary delta can be applied, it commits canonical human resolution, complete provenance, projection row, and both source/projected deltas while preserving ready. Only when projection state was already unhealthy/key-mismatched or an exact projection delta cannot be produced does it commit the human result while setting **projection-only** `ready=false, rebuild_required=true`; runtime key state remains read-locked and unchanged. This closes check→concurrent promotion→write TOCTOU without stopping shadow comparison every time a human reviews; reject/needs-more transitions skip only irrelevant projection work, not the Source/workflow-before-item order.
 
@@ -1731,14 +1731,14 @@ PromotionResult(
 
 Do not change the legacy response keys; `effect` is additive only in the internal/result and new V2.1-aware response. `create_new` retains the current exactly-once unique source-review behavior and additionally writes explicit provenance.
 
-- [ ] **Step 6: Run promotion/provenance tests and lint GREEN**
+- [x] **Step 6: Run promotion/provenance tests and lint GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_provenance.py backend/tests/test_review_knowledge_promotion.py backend/tests/test_review_transitions.py backend/tests/test_review_transition_postgres.py -q
 uv run --locked ruff check backend/app/knowledge/claim_fingerprints.py backend/app/knowledge/trusted_fingerprint_projection.py backend/app/knowledge/trusted_provenance.py backend/app/agent_runtime/keyed_mutation_guard.py backend/app/admin/auto_review_keys.py backend/app/knowledge/promotion.py backend/app/review/transitions.py backend/app/review/auto_review_resolution.py backend/tests/test_auto_review_provenance.py backend/tests/test_review_knowledge_promotion.py backend/tests/test_review_transitions.py backend/tests/test_review_transition_postgres.py
 ```
 
-- [ ] **Step 7: Commit the provenance/reaffirmation slice**
+- [x] **Step 7: Commit the provenance/reaffirmation slice**
 
 ```powershell
 git add backend/app/knowledge/claim_fingerprints.py backend/app/knowledge/trusted_fingerprint_projection.py backend/app/knowledge/trusted_provenance.py backend/app/agent_runtime/keyed_mutation_guard.py backend/app/admin/auto_review_keys.py backend/app/knowledge/promotion.py backend/app/review/transitions.py backend/app/review/auto_review_resolution.py backend/tests/test_auto_review_provenance.py backend/tests/test_review_knowledge_promotion.py backend/tests/test_review_transitions.py backend/tests/test_review_transition_postgres.py
@@ -1837,7 +1837,7 @@ git commit -m "feat: add exact trusted knowledge provenance"
 - Applies the same live predicate at the last public retrieval boundary for Search, Ask, Assistant, and company-memory orchestration. No stale/quarantined auto-only source id, URL, snippet, citation, hidden count, or answer is serialized. The RAG orchestrator carries a server-only `ServingDependencySnapshot` beside each selected candidate; public `RagAnswer` evidence fields never act as authority. `append_assistant_message` stores the exact dependency rows and answer atomically. A raw-chunk snapshot binds the current chunk/document-version/parser-run/source signature and content hash. A trusted-knowledge snapshot binds the target/content hash plus one deterministically selected active approval effect and all of that effect's exact evidence links, or the narrowly proven pre-C.5 legacy-human base. Any candidate that cannot produce a complete exact snapshot is excluded before answer generation; an answer with zero surviving evidence returns the normal bounded no-evidence result instead of being persisted as evidenced RAG output.
 - Keeps persisted answer bytes only as immutable audit storage. `backend.app.assistant.service` performs one shared fail-closed projection used by `serialize_message`, conversation serialization, recent-message context, derived summary, and email-draft context. Every access rechecks all exact dependencies through `TrustedServingEligibilityService`, current version/parser/signature/content hash, actor permission, active non-quarantined effect, and complete evidence-child set. If one required dependency is absent, changed, revoked, quarantined, broader than the actor, or lookup-failed, the entire assistant answer becomes bounded `evidence_unavailable`, with empty citations/source ids/links/snippets, zero hidden-match detail, and a regeneration notice. Raw `AssistantConversation.summary` is audit/cache data only: public serialization and LLM/email context recompute a bounded summary from currently eligible projected messages and never copy the stored summary blindly. A retained pre-C.5 assistant row whose evidence-shaped fields are non-empty but whose exact dependency contract is null/incomplete receives the same fail-closed projection; non-evidence operational messages remain available only when their marker/empty dependency invariant proves they contain no RAG evidence.
 
-- [ ] **Step 1: Write revoke, shared-provenance, and indexing-race tests**
+- [x] **Step 1: Write revoke, shared-provenance, and indexing-race tests**
 
 Cover:
 
@@ -1942,13 +1942,13 @@ Cover:
 
 Add PostgreSQL interleaving tests for all relevant boundaries: reindex commits its guarded upsert first and revoke subsequently deletes it; revoke commits the tombstone first and the later guarded upsert affects zero rows; and reindex reaches its initial guard/read before revoke starts but cannot write from that stale snapshot because both operations serialize on the same transaction advisory lock and reindex rechecks after acquiring it. Every schedule finishes with a tombstone and no serving vector.
 
-- [ ] **Step 2: Run focused revoke/index tests and observe RED**
+- [x] **Step 2: Run focused revoke/index tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_revocation.py backend/tests/test_auto_review_source_reconciliation.py backend/tests/test_auto_review_source_reconciliation_admin.py backend/tests/test_source_content_signature.py backend/tests/test_review_evidence_visibility.py backend/tests/test_google_connector.py backend/tests/test_connector_ingestion_contract.py backend/tests/test_document_ingestion_service.py backend/tests/test_rag_indexing.py backend/tests/test_pgvector_store.py backend/tests/test_pgvector_integration.py backend/tests/test_knowledge_api.py backend/tests/test_dashboard_api.py backend/tests/test_review.py backend/tests/test_todos_api.py backend/tests/test_notifications_api.py backend/tests/test_mock_sync.py backend/tests/test_integration_runtime_status.py backend/tests/test_search_permissions.py backend/tests/test_search_retrieval_backend.py backend/tests/test_ask_api.py backend/tests/test_assistant_api.py backend/tests/test_assistant_service.py backend/tests/test_assistant_email_agent.py backend/tests/test_company_memory_orchestration_service.py backend/tests/test_orchestration_api.py backend/tests/test_project_memory_api.py backend/tests/test_rag_orchestrator_agent.py backend/tests/test_rag_orchestrator_service.py backend/tests/test_agent_runtime_lifespan.py -q
 ```
 
-- [ ] **Step 3: Add exact delete and eligibility contracts**
+- [x] **Step 3: Add exact delete and eligibility contracts**
 
 Extend the writer protocol:
 
@@ -1974,7 +1974,7 @@ Create `serving_locks.py` as the only producer of document serving lock keys. Lo
 
 Change pgvector `_upsert_sql()` from `VALUES` to an `INSERT SELECT` whose guard is `WHERE NOT EXISTS (SELECT 1 FROM vector_serving_tombstones WHERE document_id = :document_id)` in the same SQL statement. Every production `PgVectorStore` upsert/delete/narrow accepts the already-held `VectorServingLockedContext` and validates exact session object, current generation, and document-id membership as defense in depth; it never reacquires the earlier runtime or document lock after Source/workflow/knowledge locks. A standalone store mutation uses an outer coordinator that obtains `KeyGenerationLockedContext`, discovers and locks every applicable later class, then calls `acquire_documents()` at the document position and passes the result inward. Missing, forged, wrong-session, wrong-generation, or incomplete contexts are bounded failures. `reindex_components()` and revoke acquire each stage exactly once in their outer coordinator and inject the same context/settings. Tests force reversed revoke/reindex schedules and reject any nested runtime/document reacquire. A separate Python precheck or conditional statement without the common advisory lock is insufficient at PostgreSQL `READ COMMITTED`.
 
-- [ ] **Step 4: Make source-state changes immediately fail closed and synchronously reconcilable**
+- [x] **Step 4: Make source-state changes immediately fail closed and synchronously reconcilable**
 
 Replace both content-only skip checks (`ingestion.sync._changed_content_signature_events` and `ingestion.service._same_content_signature`) for the supported Google/document boundary with one frozen `SourceStateChangeClassification(content_changed, permission_changed, parser_policy_changed, primary_code)` contract. `primary_code` is a bounded deterministic projection of the three booleans; callers branch on the booleans and may report only the code, never infer a parser change from connector metadata. Only three false flags are `unchanged`. `source_content_signature.py` is the single registry/implementation for server-computed `server-source-content:v1`. It freezes semantic metadata keys as `gmail: ()`, `gmail_attachment: ('filename', 'mime_type')`, `drive: ('mime_type',)`, and `calendar: ('attendee_domains', 'end', 'event_status', 'location', 'organizer_email', 'start')`; no connector may extend the tuple dynamically. The payload always contains schema, source type, title, body, author, participants, one registry-selected semantic timestamp, and every registered semantic key. Title/body/author/string metadata are UTF-8 NFC with CRLF/CR normalized to LF, but preserve case plus every other leading/trailing/internal whitespace; body is never trimmed, collapsed, or case-folded. Missing optional values encode JSON null while empty strings remain empty. Required title/body malformed/null is unverifiable. Participants are normalized by the same string rule, exact-deduplicated, and sorted by normalized UTF-8 bytes; case variants stay distinct. A normal event semantic timestamp comes only from Task 2's exact `semantic_timestamp_raw`, parses as an aware datetime, and renders UTC RFC3339 with exactly six fractional digits plus `Z`; missing, naive, or malformed values are unverifiable. Calendar is explicit: its signature timestamp is the exact raw `start`, never connector `updated`/`SourceEvent.timestamp`; `start`/`end` accept either exact ISO `YYYY-MM-DD` encoded as `{'kind':'date','value':'YYYY-MM-DD'}` or an aware datetime encoded as `{'kind':'instant','value':'<UTC RFC3339 microseconds Z>'}`. Offset-equivalent instants canonicalize identically, while date and instant remain distinct. Calendar `event_context_key`, `updated`, attendee response counts, cursor, and external revision are operational and excluded; status/location/organizer/times/participant set remain semantic. `attendee_domains` uses the participant-list rule. Other semantic values accept only their frozen string/null type. Canonical JSON uses `ensure_ascii=False`, sorted keys, compact separators, and `allow_nan=False`; SHA-256 over those exact UTF-8 bytes is the 64-hex signature. Any normalization/key/type/allowlist change requires a new schema version, connector re-sync/full source reconciliation/current-pointer repair, and explicit approval—never an in-place v1 reinterpretation.
 
@@ -1998,7 +1998,7 @@ If an invalidated item has a selected required audit still `pending`, the shared
 
 The local module `python -m backend.app.admin.auto_review_source_reconciliation status --limit 100`, `recover --limit 100`, or `repair-current-document-versions --limit 100` accepts no subject, source id, secret, raw-content, or raw-output option, uses fixed `system:local-auto-review-source-reconciler` attribution, and prints only aggregate stale/reconciled/repaired/ambiguous/remaining/failure counts plus readiness. Exit `0` means no detected stale or ambiguous work remains, `2` is bounded configuration/key refusal, and `3` means retained stale/ambiguous work or a reconciliation failure remains so the operator must resync/remediate and rerun. Lifespan runs exactly one reconciliation recovery batch, not an unbounded repair; the CLI is the continuation/repair path.
 
-- [ ] **Step 5: Implement one stable-lock-order revoke transaction**
+- [x] **Step 5: Implement one stable-lock-order revoke transaction**
 
 Lock in the global total order shared with promotion/rebuild: shared key-generation/runtime, projection, rollout row when present, sorted canonical Source rows, workflow, ReviewItem, immutable promotion decision/its unique audit and correction if any, approval/evidence links, target knowledge/companion rows, active-provenance set, sorted exact document advisory locks, tombstones/index states. Re-read stable key generation, current source state, and the exact target/link/bundle set after the leading locks; never enter revoke with an earlier unlocked snapshot. Human revoke accepts exactly one server-validated `AutoReviewRevokeReasonCode`: non-quality `business_withdrawal`, or quality `incorrect_content|permission_violation|wrong_source_version|policy_violation`. There is no free-text or LLM reason classifier. Normal direct revoke is permitted only for `business_withdrawal` and only if no audit exists or its status is `completed` with outcome `confirmed`; `pending`, `remediation_required`, every critical/corrected outcome, and every quality reason return `audit_required`/`quality_audit_required` with no provenance change **and no revocation assessment row**. After the normal gate passes, the business path inserts/replays the immutable assessment in the same transaction as exact revoke. Quality reasons can proceed only with Task 10's unforgeable breaker-first `QualityRevokeContext`; its coordinator inserts/replays the assessment immediately before the breaker/quarantine commit, and confirmed audits are not a loophole. An existing assessment with a different reason is `revoke_reason_conflict`; it never gets overwritten. Only that critical-audit/recovery context or the independently unforgeable, currently proven `SourceInvalidationRevokeContext` may bypass the normal gate; each is accepted only by its owning coordinator and cannot be supplied through an API. Source invalidation writes no human assessment, replaces the normal actor-visibility check only with locked canonical drift proof, and has no authority to read content or approve. Projection incompleteness or `ready=false` does **not** block an exact revoke: under the lock, update/remove the affected projection row when safe and otherwise keep/set projection state `ready=false, rebuild_required=true`, while canonical provenance/tombstone/vector revocation still commits. Only auto approval requires projection-ready. Then:
 
@@ -2012,11 +2012,11 @@ Lock in the global total order shared with promotion/rebuild: shared key-generat
 
 Do not expose document ids or other provenance in the result. Human revoke/assessment attribution uses domain `auto-review-revoke-actor:v1` plus the current key version/material verifier; server recovery/source-invalidation contexts use their fixed typed system attribution and can never accept a caller subject. `revoked_document_count` is the stable number of distinct serving-document identities for which this item made the corresponding target last-provenance and created/owned a tombstone; it is not the physical pgvector affected-row count and is zero for wholly shared provenance. Physical delete counts remain internal metrics. Return only item id, revoked status, replayed flag, the first-commit `knowledge_remains_trusted`, and the persisted first-commit document count. Replay returns those snapshots even if another provenance changes later.
 
-- [ ] **Step 6: Add post-provider locked eligibility checks to reindex**
+- [x] **Step 6: Add post-provider locked eligibility checks to reindex**
 
 Filter approved/no-tombstone/live-source-eligible/current-document-version documents before batch estimation, finish the embedding provider call with no open database transaction or advisory lock, and start a fresh write transaction. From the detached batch, discover dependency ids, then acquire the shared generation/runtime guard, sorted current Source rows `FOR SHARE`, and only afterward all changed document locks in sorted order on `db`; while those locks are held, re-read each canonical knowledge status, current Source/DocumentVersion/effective permission, and tombstone, then conditionally upsert and persist `VectorIndexState` on that same `db` transaction. If eligibility changed after embedding, count it as skipped and saved serving write; never persist an indexed state. A permission-only narrowing uses `narrow_permissions` and updates the state hash without a provider call. Preserve the existing indexed/skipped/saved-embedding-call metrics and add bounded stale-source/revoked skip counts only to internal/admin observability if needed.
 
-- [ ] **Step 7: Run and commit the Task 6A revoke/serving/visibility slice GREEN**
+- [x] **Step 7: Run and commit the Task 6A revoke/serving/visibility slice GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_revocation.py backend/tests/test_auto_review_source_reconciliation.py backend/tests/test_auto_review_source_reconciliation_admin.py backend/tests/test_review_evidence_visibility.py backend/tests/test_rag_indexing.py backend/tests/test_pgvector_store.py backend/tests/test_pgvector_integration.py backend/tests/test_knowledge_api.py backend/tests/test_dashboard_api.py backend/tests/test_review.py backend/tests/test_todos_api.py backend/tests/test_notifications_api.py backend/tests/test_mock_sync.py backend/tests/test_integration_runtime_status.py backend/tests/test_search_permissions.py backend/tests/test_search_retrieval_backend.py backend/tests/test_ask_api.py backend/tests/test_assistant_api.py backend/tests/test_assistant_service.py backend/tests/test_assistant_email_agent.py backend/tests/test_company_memory_orchestration_service.py backend/tests/test_orchestration_api.py backend/tests/test_project_memory_api.py backend/tests/test_rag_orchestrator_agent.py backend/tests/test_rag_orchestrator_service.py backend/tests/test_agent_runtime_lifespan.py -q
@@ -2025,7 +2025,7 @@ git add backend/app/review/auto_review_revoke.py backend/app/review/auto_review_
 git commit -m "feat: enforce revocable trusted serving"
 ```
 
-- [ ] **Step 8: Run/commit Task 6B, merge its exact commit, and run the integrated Task 6 gate**
+- [x] **Step 8: Run/commit Task 6B, merge its exact commit, and run the integrated Task 6 gate**
 
 In the Task 6B Mail/Document worktree based on the exact Task 6A commit:
 
@@ -2066,7 +2066,7 @@ If integration requires a SourceEvent/parser/permission/Review-visibility contra
 - Applies a versioned deterministic credential/secret scanner to the permission-filtered plaintext immediately before request assembly. Any high-confidence credential marker is zero-call human-only; C.5 never redacts and then validates a semantically changed claim.
 - Exact visible duplicate may become `reuse_trusted`; any non-exact visible collision, indexed hidden/legacy-unknown collision existence, stale/incomplete fingerprint projection, ambiguity, or lookup failure becomes human review without leaking metadata.
 
-- [ ] **Step 1: Write the policy matrix as table-driven tests**
+- [x] **Step 1: Write the policy matrix as table-driven tests**
 
 Include positive and hard-negative cases for:
 
@@ -2085,13 +2085,13 @@ high-confidence API key/password/token/connector-secret marker versus safe prose
 
 Assert forced-human cases do not ask for a validator request and source drift maps to needs-more-evidence. Assert policy decisions are identical for repeated frozen inputs and exact `Decimal('0.9800')` passes without rounding.
 
-- [ ] **Step 2: Run eligibility/policy tests and observe RED**
+- [x] **Step 2: Run eligibility/policy tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_eligibility.py backend/tests/test_auto_review_policy.py -q
 ```
 
-- [ ] **Step 3: Build canonical preflight without provider access**
+- [x] **Step 3: Build canonical preflight without provider access**
 
 Return a frozen result similar to:
 
@@ -2107,20 +2107,20 @@ class AutoReviewEligibilityResult:
 
 Build claim text only from promotion preview normalized fields. Load current evidence through candidate refs and canonical resolver, apply exact permission filtering first, then run `credential-scan:v1` over the exact candidate/evidence plaintext before creating ephemeral `Cxx`/`Exx` aliases. The scanner uses reviewed high-confidence provider-token/connector-secret/password-assignment patterns, bounded entropy checks only inside credential-like lexical contexts, and a frozen allowlist of documented fake/example forms. A match yields only allowlisted `sensitive_input_detected`, discards the text, makes no provider/cache/trace call, and never logs the matched bytes. Scanner rule changes require a policy-version bump and golden hard-negative review. Never attach canonical ids, URLs, permissions, or hidden collision details to the returned value.
 
-- [ ] **Step 4: Implement the pure policy engine**
+- [x] **Step 4: Implement the pure policy engine**
 
 Validate exact candidate slot set, exact two-field set, known unique evidence slots, direct-fact scope, supported verdict, exact decimal threshold, empty uncertainty/conflict lists, and matching version identities. `unknown` is schema-valid but always human. A malformed batch is represented by one bounded failure result and makes every member human-review.
 
 Run the server-side hidden/legacy-unknown `EXISTS` guard for every collision bucket even when one visible exact row exists. `reuse_trusted` is possible only for exactly one visible exact target and no hidden/legacy collision; visible multiplicity, mismatch, or any hidden existence is human-only. It identifies the exact canonical promotion target but does not bypass current evidence validation. The current candidate must still pass the same Terra structured validation, version/permission recheck, and deterministic policy threshold before the locked `reuse_existing` directive can run.
 
-- [ ] **Step 5: Run eligibility/policy tests and lint GREEN**
+- [x] **Step 5: Run eligibility/policy tests and lint GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_eligibility.py backend/tests/test_auto_review_policy.py -q
 uv run --locked ruff check backend/app/agent_runtime/auto_review_eligibility.py backend/app/agent_runtime/auto_review_input_safety.py backend/app/agent_runtime/auto_review_policy.py backend/app/agent_runtime/canonical_sources.py backend/app/knowledge/trusted_fingerprint_projection.py backend/app/knowledge/trusted_provenance.py backend/tests/test_auto_review_eligibility.py backend/tests/test_auto_review_policy.py
 ```
 
-- [ ] **Step 6: Commit the deterministic authority slice**
+- [x] **Step 6: Commit the deterministic authority slice**
 
 ```powershell
 git add backend/app/agent_runtime/auto_review_eligibility.py backend/app/agent_runtime/auto_review_input_safety.py backend/app/agent_runtime/auto_review_policy.py backend/app/agent_runtime/canonical_sources.py backend/app/knowledge/trusted_fingerprint_projection.py backend/app/knowledge/trusted_provenance.py backend/tests/test_auto_review_eligibility.py backend/tests/test_auto_review_policy.py
@@ -2145,7 +2145,7 @@ git commit -m "feat: enforce deterministic auto review policy"
 - Treats provider errors, timeout, parse error, usage ambiguity, and any batch-integrity violation as sanitized human-review fallback; no provider exception text reaches persistence or API.
 - Forces explicit model `verbose=False`, a per-call `langsmith.tracing_context(enabled=False)` boundary, an empty internal callback list, and `cache=False` on the isolated model/runnable. Readiness and the final invoke guard require LangChain debug off, `OPENAI_LOG` not debug, and the effective `openai` SDK logger above DEBUG; they never mutate those process-global controls. Validator construction accepts no external tracer/callback/cache or HTTP debug-hook injection. The only custom HTTP hook is the server-owned body-blind send-fence hook, whose contract exposes deadline/attempt metadata only and never reads/logs request or response bodies.
 
-- [ ] **Step 1: Write router, structured-output, privacy, and bounds tests**
+- [x] **Step 1: Write router, structured-output, privacy, and bounds tests**
 
 Use a fake chat model that records `with_structured_output` and `invoke` calls. Assert:
 
@@ -2172,13 +2172,13 @@ Use a fake chat model that records `with_structured_output` and `invoke` calls. 
 
 The fake returns an `AIMessage`/raw wrapper with deterministic usage metadata. No live API key or network is used.
 
-- [ ] **Step 2: Run validator/router tests and observe RED**
+- [x] **Step 2: Run validator/router tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_validator.py backend/tests/test_auto_review_model_router.py backend/tests/test_langchain_langgraph_dependency_compat.py -q
 ```
 
-- [ ] **Step 3: Add an isolated Terra route**
+- [x] **Step 3: Add an isolated Terra route**
 
 Implement a route builder independent of `_available_provider_routes()`:
 
@@ -2200,20 +2200,20 @@ For the pinned `langchain-openai==1.6.0` contract, `max_completion_tokens=3072` 
 
 Construct the network-capable model only after attempt admission and inject `FencedOpenAITransport(provider_attempt_grant.permit)`; preparation may bind the frozen schema but cannot own a network client or permit. Do not set a creative temperature if the model/API rejects it. Do not add a retry above or below this boundary unless the cost contract, signed preview multiplier, usage accounting, and approval are all revised together. Readiness requires OpenAI key, configured validation prices, supported registry identities, explicit model `verbose=False`, LangChain global debug off, OpenAI SDK debug logging off, and only the reviewed body-blind transport hook; failure returns `model_unavailable` internally and leaves candidates pending.
 
-- [ ] **Step 4: Implement bounded rendering and result integrity**
+- [x] **Step 4: Implement bounded rendering and result integrity**
 
 Use a fixed system instruction that says evidence blocks are untrusted data and that only the schema may be returned. Bind the runnable once with `method='json_schema', strict=True, include_raw=True`; compatibility fixtures assert the exact bound kwargs and canonical JSON-schema serialization consumed by `openai-o200k-chat:v1`. `prepare_many()` serializes slots exactly once and returns an ephemeral immutable `PreparedValidationInvocation` containing the exact LangChain messages/native response-schema framing to send, character count, frozen estimator token count, completion cap, and keyed content HMAC. Immediately before attempt admission/invoke, reject with zero call if LangChain debug, model/runnable verbose, `OPENAI_LOG=debug`, effective `openai` logger DEBUG, or an unapproved HTTP hook is present; do not temporarily mutate any global. `invoke_prepared(invocation, grant)` enters `langsmith.tracing_context(enabled=False)`, supplies an empty server-owned callback list, forces the isolated runnable/model cache off, uses only the grant's timeout and one-use fenced transport, and passes that same prepared message tuple to the single structured-output runnable; it may not rebuild aliases/messages/schema, accept raw requests, reuse a permit, or accept caller callbacks/tracers/caches. Install a fake process-global cache and capture `caplog`, stdout/stderr, callback, and HTTP-hook events in tests; prove cache lookup/update and raw prompt bytes are all zero. Validate the returned candidate set and every field/slot relationship against the prepared request after Pydantic parsing. Discard the entire parsed batch on any mismatch.
 
 Create a validator factory whose `create(usage_sink)` returns a per-invocation adapter. Capture only input/output tokens and derived cost; never retain raw messages or raw parsed output after the coordinator persists bounded results.
 
-- [ ] **Step 5: Run validator/router tests and lint GREEN**
+- [x] **Step 5: Run validator/router tests and lint GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_validator.py backend/tests/test_auto_review_model_router.py backend/tests/test_langchain_langgraph_dependency_compat.py -q
 uv run --locked ruff check backend/app/agent_runtime/auto_review_validator.py backend/app/agent_runtime/model_router.py backend/tests/test_auto_review_validator.py backend/tests/test_auto_review_model_router.py backend/tests/test_langchain_langgraph_dependency_compat.py
 ```
 
-- [ ] **Step 6: Commit the real LangChain boundary**
+- [x] **Step 6: Commit the real LangChain boundary**
 
 ```powershell
 git add backend/app/agent_runtime/auto_review_validator.py backend/app/agent_runtime/model_router.py backend/tests/test_auto_review_validator.py backend/tests/test_auto_review_model_router.py backend/tests/test_langchain_langgraph_dependency_compat.py
@@ -3348,11 +3348,12 @@ git commit -m "feat: review and audit automatic trust inline"
 
 **Release gate:** This task adds no new trust behavior. It proves code safety with deterministic/fake provider output, a disposable PostgreSQL+pgvector target, the complete non-Slack/frontend regression set, and a rollback smoke. Separately authorized sanitized paid Terra validation and Mini extraction compatibility gates are additionally required before shadow rollout, never during automated tests. They record aggregate evidence only and leave auto review disabled by default.
 
-**Execution status (2026-08-30):** Steps 1–2 and 4–12 are complete at behavior
-commit `4b9132a` plus the following documentation evidence commit. Steps 3 and
-3B remain intentionally unchecked because no paid-call authorization was given.
-This is a rollout gate, not unfinished product implementation; mode remains
-`disabled` until both live aggregate gates pass.
+**Execution status (2026-08-30):** Steps 1–12, including separately authorized
+paid Steps 3 and 3B, are complete. Behavior commit `4b9132a` established the
+deterministic release harness; the final paid-gate hardening bumped the Terra
+prompt and all five Mini prompt/output identities to v2. Both live aggregate
+gates pass. Operational mode remains `disabled`; release evidence does not
+authorize rollout.
 
 **Task 16 entry prerequisite:** Product Tasks 6–15 must already be implemented and reviewed. Before Step 4, `docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md` must first be separately user-approved and its infrastructure Tasks 1–11 implemented through their RED/GREEN/reviewed-commit checkpoints. That plan's Task 12 is this task's Steps 4–7 official profile proof. Its controller is the only authoritative backend release path; a focused `--child-id` result is development evidence only and never a release proof.
 
@@ -3386,15 +3387,17 @@ uv run --locked pytest backend/tests/test_auto_review_golden.py backend/tests/te
 
 Expected: all deterministic cases pass and no network/provider client is constructed.
 
-- [ ] **Step 3: Run the separately authorized paid Terra offline gate before shadow rollout**
+- [x] **Step 3: Run the separately authorized paid Terra offline gate before shadow rollout**
 
-2026-08-30 execution note: separately authorized and attempted. The first live
-request exposed an OpenAI `invalid_json_schema` rejection for the Pydantic
-Decimal score representation. That boundary was TDD-fixed and the official
-aggregate-only command was rerun. Provider schema validation then succeeded,
-but execution was blocked by `credit_balance_exhausted` /
-`insufficient_quota` (HTTP 429). This step remains unchecked; no live metric is
-recorded and rollout remains disabled.
+2026-08-30 execution note: separately authorized and passed after billing was
+restored. An initial post-schema run failed closed because the final two-case
+batch cross-cited another candidate's synthetic evidence slot. The TDD repair
+added explicit candidate-local allowlists, exact order/slot instructions, and
+`auto-review-validation:v2`; no fixture label or release threshold changed.
+The final live aggregate report passed with precision `1.0`, all seven
+prohibited counts `0`, queue reduction `0.055556`, recall `0.333333`,
+input/output tokens `3726/2554`, and estimated cost USD `0.038100`. Raw prompts,
+evidence, and model output were not recorded. Rollout remains disabled.
 
 This is never part of pytest, CI, normal implementation verification, or an automatic continuation. After the code is otherwise green, stop and obtain explicit user authorization for paid provider calls. Use only the reviewed sanitized golden fixture—never production source data—and run the exact production prompt/schema against `gpt-5.6-terra` with reasoning effort `medium`, `max_retries=0`, and the same bounds/cost policy. Write only aggregate confusion-matrix counts, precision, prohibited-case counts, exact `(purpose='validation', provider='openai', model='gpt-5.6-terra', reasoning_effort='medium')` safety key, prompt/output-contract/policy/cost-policy identities, token totals, and cost; discard raw prompts and model outputs.
 
@@ -3412,16 +3415,19 @@ if ($evalExit -ne 0) { throw "paid Terra aggregate gate failed with exit code $e
 
 The paid Terra gate must meet the same >=99% precision and zero prohibited-count criteria before an operator may authorize shadow. A Sol comparison is optional and requires a second explicit paid-call authorization; it is evaluation-only and can never become the C.5 validator or approval authority. If authorization is withheld or the gate fails, the implementation may be code-complete but rollout remains `disabled` and the docs must say the live model gate is pending/failed rather than copying deterministic metrics.
 
-- [ ] **Step 3B: Run the separately authorized paid Mini extraction compatibility gate before shadow rollout**
+- [x] **Step 3B: Run the separately authorized paid Mini extraction compatibility gate before shadow rollout**
 
-2026-08-30 execution note: separately authorized and attempted. The first live
-request exposed OpenAI `invalid_json_schema` rejections for Decimal score and
-discriminated `oneOf` schema artifacts. The gate now reuses the OpenAI SDK
-strict Pydantic conversion and TDD-tested provider normalization before the
-real LangChain JSON-schema call. The post-fix official command reached provider
-execution but was blocked by `credit_balance_exhausted` /
-`insufficient_quota` (HTTP 429). This step remains unchecked; no live metric is
-recorded and rollout remains disabled.
+2026-08-30 execution note: separately authorized and passed after billing was
+restored. Live outputs exposed an incomplete canonical prompt contract: the
+model could not infer item-type-specific required bindings, and the original
+parser incorrectly required different candidate fields to cite different
+source slots. TDD added candidate-local allowed slots, item-type field maps,
+one-binding-per-populated-field instructions, and reviewed c5-v2 prompt/output
+identities. A single valid slot may now support multiple different fields, but
+field keys remain unique and every populated field still requires an existing
+slot. The final live report passed `5/5` routes and `9/9` checks with
+input/output tokens `9439/954` and estimated cost USD `0.011372`. Raw prompts,
+evidence, and outputs were not recorded. Rollout remains disabled.
 
 This is a distinct paid-call authorization and is never implied by Terra approval. Use only the sanitized five-route fixture and the exact production Responses API renderer. The aggregate gate must prove the exact `(purpose='extraction', provider='openai', model='gpt-5.4-mini-2026-03-17', reasoning_effort='none')` safety key and extraction cost-policy, all five agent/route/prompt/output-contract identities, each prepared request stayed within 10,000 framed input tokens, each response satisfied the singular `candidate|no_candidate` contract, its exact item/payload/field-evidence schema, and the complete canonical-envelope 2,048-token guard, output usage stayed within 2,048 total tokens, one attempt and zero fallback/retry occurred, each full-cap route reserve equaled USD 0.016716, the five-route full-cap maximum equaled USD 0.083580, and authoritative usage/cost accounting matched USD 0.75/M input plus USD 4.50/M output. No extracted text is written or printed.
 
@@ -3586,43 +3592,40 @@ Expected: the documentation/evidence commit succeeds after all behavior slices a
 
 ## Final Implementation Review Checklist
 
-- [ ] Every task's named RED command was observed before production edits, and its GREEN command was rerun after the smallest implementation slice.
-- [ ] V2.0 schema dumps, four-status checkpoint, topology, builder key, paused tuple, status/resume/cancel behavior, and frontend transport remain exact.
-- [ ] V2.1 is a separately registered real LangGraph with real `interrupt()` and PostgreSQL-authoritative live counts; all-auto completion skips the interrupt only by approved routing.
-- [ ] Production validation reaches real LangChain `with_structured_output()` on OpenAI `gpt-5.6-terra` medium; there is no Luna/Sol/Gemini or deterministic production fallback.
-- [ ] The extraction registry contains exactly the five frozen agent entries; every V2.1 selected route uses OpenAI `gpt-5.4-mini-2026-03-17`, reasoning `none`, its exact strict singular output schema, 10,000/2,048 token caps, one attempt, and no alias/Azure/Gemini/fallback path.
-- [ ] Full-cap arithmetic is exact: at most five extraction calls reserve USD 0.083580, at most two validation calls reserve USD 0.097728, and the maximum combined reserve is USD 0.181308 under USD 0.20.
-- [ ] `max_retries=0`, one authoritative call ledger, atomic reservation, conservative unknown-usage charge, and child allocation prove that admission/reservation/replay cannot exceed or multiply the signed ceilings; a provider-reported actual overrun is charged exactly once, never approved, and opens the matching purpose breaker.
-- [ ] The deterministic versioned policy—not model confidence—owns approval, and exact `Decimal('0.9800')`, direct-fact, field/slot, permission, identity, version, and cost requirements are all enforced.
-- [ ] No raw source/model content, URL, canonical/external id, hidden/other ReviewItem id, alias mapping, prompt, rationale, provider error, or credential entered a checkpoint, validation row, signed token, or public summary. The separately access-controlled AuditLog may store only the exact current action target ReviewItem id required by its existing governed schema, never a hidden/related item id or raw content.
-- [ ] Public/internal permission is exact, restricted/unknown always fails closed, hidden collision uses existence only, and strictest source/item/knowledge permission is preserved.
-- [ ] Workflow-owner permission is re-resolved before/after provider and on resume, intersected with the auto-policy allowlist, and never replaced by the system actor's broader capability.
-- [ ] Every candidate starts pending; disabled/shadow cannot create trusted knowledge; decision/todo/inference/conflict/uncertainty stay human-reviewed.
-- [ ] Human and auto approvals/reaffirmations share one locked transition/promotion boundary and every post-migration effect has complete approval plus evidence provenance.
-- [ ] Exact duplicate reuse creates no knowledge duplicate; one provenance revoke cannot remove another provenance; last-provenance revoke is replay-safe and all-or-nothing.
-- [ ] Raw chunk indexing remains human/legacy-human only; shared per-document transaction locks, tombstone-aware conditional upsert, active search filtering, and commit-aware in-memory deletion make revoked vectors non-resurrectable.
-- [ ] Server and connector signatures are separate; only `server-source-content:v1` plus `current_document_version_id` authorizes C.5/current raw-chunk serving, and source drift, pointer ambiguity, critical-audit quarantine, or lookup failure is excluded before API/RAG/pgvector ranking and hidden counts.
-- [ ] V2.1 extraction and validation both use the credential scanner, global LangChain debug-off/explicit verbose-false guard, empty callbacks, disabled trace/cache, one immutable render, and provider-outside-transaction boundary; stdout/stderr capture proves zero raw prompt bytes.
-- [ ] Dry-run/status/page polling are zero-call; one signed preview and existing button authorize the paid run; changed preview requires a fresh explicit click.
-- [ ] The launch token binds the aggregate extraction plan, complete sorted extraction/validation safety snapshots, exact caps/prices/total budget, and rollout control epoch; start recomputes and locks them before creating a thread.
-- [ ] Mandatory-50 replacement audits and 10% canary audits are replay-safe; 100% requires exactly 50 human-confirmed mandatory audits plus a separate latched authorization after 500 enforce promotions and all other gates; 2% applies only to new full-enforce workflows; critical audit opens a persistent breaker and serving quarantine before revoke, and neither breaker close nor remediation failure can silently restore enforce or serving.
-- [ ] Review defaults to pending, automatic trust/audit/revoke stays on the same screen, and Timeline/History/Knowledge keep evidence while showing human versus automatic trust.
-- [ ] Golden precision is at least 99% with zero hard-negative, permission/version, duplicate, cross-item revoke, malformed-output, or replay violations.
-- [ ] The deterministic golden gate is never represented as Terra quality; a separately authorized sanitized Terra aggregate gate is recorded before shadow, or rollout remains disabled with the gate explicitly pending.
-- [ ] Deterministic extraction fixtures are never represented as live Mini compatibility; a separately authorized sanitized five-route Mini aggregate gate is recorded before shadow, or rollout remains disabled with that gate explicitly pending.
-- [ ] PostgreSQL, complete C.5, C/B compatibility, non-Slack, full backend comparison, frontend desktop/mobile, lock, Ruff, diff, secret, and rollback gates have fresh recorded evidence.
-- [ ] Config rollback preserves C.5 audit history; populated schema downgrade and local row-reset refuse destructive cleanup.
-- [ ] Key rotation refuses every non-terminal extraction/validation call and succeeds only after old-generation zero/one-attempt ledgers are terminally recovered and accounted without a provider retry.
-- [ ] Slack, CDC/streaming, Deliverable D retrieval, Deliverable E Neo4j GraphRAG, separate vector stores, and unrelated refactors remain untouched.
-- [ ] Default mode remains disabled and no push, merge, PR, or deployed rollout occurs without separate authorization.
+- [x] Every task's named RED command was observed before production edits, and its GREEN command was rerun after the smallest implementation slice.
+- [x] V2.0 schema dumps, four-status checkpoint, topology, builder key, paused tuple, status/resume/cancel behavior, and frontend transport remain exact.
+- [x] V2.1 is a separately registered real LangGraph with real `interrupt()` and PostgreSQL-authoritative live counts; all-auto completion skips the interrupt only by approved routing.
+- [x] Production validation reaches real LangChain `with_structured_output()` on OpenAI `gpt-5.6-terra` medium; there is no Luna/Sol/Gemini or deterministic production fallback.
+- [x] The extraction registry contains exactly the five frozen agent entries; every V2.1 selected route uses OpenAI `gpt-5.4-mini-2026-03-17`, reasoning `none`, its exact strict singular output schema, 10,000/2,048 token caps, one attempt, and no alias/Azure/Gemini/fallback path.
+- [x] Full-cap arithmetic is exact: at most five extraction calls reserve USD 0.083580, at most two validation calls reserve USD 0.097728, and the maximum combined reserve is USD 0.181308 under USD 0.20.
+- [x] `max_retries=0`, one authoritative call ledger, atomic reservation, conservative unknown-usage charge, and child allocation prove that admission/reservation/replay cannot exceed or multiply the signed ceilings; a provider-reported actual overrun is charged exactly once, never approved, and opens the matching purpose breaker.
+- [x] The deterministic versioned policy—not model confidence—owns approval, and exact `Decimal('0.9800')`, direct-fact, field/slot, permission, identity, version, and cost requirements are all enforced.
+- [x] No raw source/model content, URL, canonical/external id, hidden/other ReviewItem id, alias mapping, prompt, rationale, provider error, or credential entered a checkpoint, validation row, signed token, or public summary. The separately access-controlled AuditLog may store only the exact current action target ReviewItem id required by its existing governed schema, never a hidden/related item id or raw content.
+- [x] Public/internal permission is exact, restricted/unknown always fails closed, hidden collision uses existence only, and strictest source/item/knowledge permission is preserved.
+- [x] Workflow-owner permission is re-resolved before/after provider and on resume, intersected with the auto-policy allowlist, and never replaced by the system actor's broader capability.
+- [x] Every candidate starts pending; disabled/shadow cannot create trusted knowledge; decision/todo/inference/conflict/uncertainty stay human-reviewed.
+- [x] Human and auto approvals/reaffirmations share one locked transition/promotion boundary and every post-migration effect has complete approval plus evidence provenance.
+- [x] Exact duplicate reuse creates no knowledge duplicate; one provenance revoke cannot remove another provenance; last-provenance revoke is replay-safe and all-or-nothing.
+- [x] Raw chunk indexing remains human/legacy-human only; shared per-document transaction locks, tombstone-aware conditional upsert, active search filtering, and commit-aware in-memory deletion make revoked vectors non-resurrectable.
+- [x] Server and connector signatures are separate; only `server-source-content:v1` plus `current_document_version_id` authorizes C.5/current raw-chunk serving, and source drift, pointer ambiguity, critical-audit quarantine, or lookup failure is excluded before API/RAG/pgvector ranking and hidden counts.
+- [x] V2.1 extraction and validation both use the credential scanner, global LangChain debug-off/explicit verbose-false guard, empty callbacks, disabled trace/cache, one immutable render, and provider-outside-transaction boundary; stdout/stderr capture proves zero raw prompt bytes.
+- [x] Dry-run/status/page polling are zero-call; one signed preview and existing button authorize the paid run; changed preview requires a fresh explicit click.
+- [x] The launch token binds the aggregate extraction plan, complete sorted extraction/validation safety snapshots, exact caps/prices/total budget, and rollout control epoch; start recomputes and locks them before creating a thread.
+- [x] Mandatory-50 replacement audits and 10% canary audits are replay-safe; 100% requires exactly 50 human-confirmed mandatory audits plus a separate latched authorization after 500 enforce promotions and all other gates; 2% applies only to new full-enforce workflows; critical audit opens a persistent breaker and serving quarantine before revoke, and neither breaker close nor remediation failure can silently restore enforce or serving.
+- [x] Review defaults to pending, automatic trust/audit/revoke stays on the same screen, and Timeline/History/Knowledge keep evidence while showing human versus automatic trust.
+- [x] Golden precision is at least 99% with zero hard-negative, permission/version, duplicate, cross-item revoke, malformed-output, or replay violations.
+- [x] The deterministic golden gate is never represented as Terra quality; the separately authorized sanitized Terra aggregate gate is recorded before shadow.
+- [x] Deterministic extraction fixtures are never represented as live Mini compatibility; the separately authorized sanitized five-route Mini aggregate gate is recorded before shadow.
+- [x] PostgreSQL, complete C.5, C/B compatibility, non-Slack, full backend comparison, frontend desktop/mobile, lock, Ruff, diff, secret, and rollback gates have fresh recorded evidence.
+- [x] Config rollback preserves C.5 audit history; populated schema downgrade and local row-reset refuse destructive cleanup.
+- [x] Key rotation refuses every non-terminal extraction/validation call and succeeds only after old-generation zero/one-attempt ledgers are terminally recovered and accounted without a provider retry.
+- [x] Slack, CDC/streaming, Deliverable D retrieval, Deliverable E Neo4j GraphRAG, separate vector stores, and unrelated refactors remain untouched.
+- [x] Default mode remains disabled and no push, merge, PR, or deployed rollout occurs without separate authorization.
 
 ## Execution Handoff
 
-This plan is approved. Before product implementation begins, explicitly authorize it and choose one execution mode:
-
-1. **Subagent-Driven Development (recommended):** Stay in this task, invoke `superpowers:subagent-driven-development`, assign each independent task to a fresh implementation worker, and perform spec/code review checkpoints after every task.
-2. **Inline Plan Execution:** Stay in this task, invoke `superpowers:executing-plans`, execute the tasks sequentially with the named RED/GREEN/commit checkpoints.
-
-Creating and approving this document is still **planning**. The next unapproved step is actual product-code implementation, gated by an explicit implementation authorization and execution-mode choice. Plan approval alone does not authorize code/migration changes, pushing, merging, opening a PR, enabling a paid mode, or touching Slack.
-
-Tasks 1–5 are complete. The next product slice remains Task 6, then Tasks 7–15. Task 16 has an additional gate: `docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md` must be separately user-approved and implemented first at Task 16 entry. Completing that isolation plan permits the Task 16 release proof only; it does not automatically authorize Deliverable D.
+This approved plan is complete through Task 16 and both paid release gates.
+Operational rollout remains disabled and was not authorized by gate completion.
+The next product activity is **Deliverable D planning**, not implementation.
+Deliverable E follows D, and Slack recovery remains last. No push, merge, PR,
+deployment, or rollout is implied by this completion state.

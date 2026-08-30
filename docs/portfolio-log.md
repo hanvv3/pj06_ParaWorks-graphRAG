@@ -6,6 +6,35 @@ This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
 
+## 2026-08-30 C.5 live release gates complete
+
+- After billing was restored, the separately authorized aggregate-only Terra
+  and Mini gates both passed against sanitized fixtures through the production
+  LangChain structured-output paths. No raw prompt, evidence, model output,
+  credential, URL, or source id was persisted or printed.
+- Terra initially failed closed when the last batch cited another candidate's
+  synthetic evidence slot. TDD added candidate-local evidence allowlists and
+  bumped the validator prompt to `auto-review-validation:v2`. The final 18-case
+  report passed with precision `1.0`, every prohibited count `0`, queue
+  reduction `0.055556`, recall `0.333333`, tokens `3726/2554`, and estimated
+  cost USD `0.038100`.
+- Mini exposed two production-contract gaps that fake clients could not reveal:
+  item-type-specific field bindings were not explicit in the canonical prompt,
+  and the parser incorrectly required different fields to cite different source
+  slots. The c5-v2 prompt/output contracts now require exactly one binding for
+  every required or populated optional field, permit one valid source slot to
+  support multiple different fields, and still reject duplicate field keys or
+  unknown slots. The final five-route/ten-case report passed `5/5` routes and
+  `9/9` checks with tokens `9439/954` and estimated cost USD `0.011372`.
+- Fresh verification includes the official compatibility release profile:
+  `1,599 collected = 1,595 passed + 4 approved Slack deselections`, with zero
+  errors/skips/xfails, balanced leases `91/91`, no live provider during tests,
+  and disposable database/role residue `0/0`. Focused gates passed `119`, `226`,
+  and `23` tests; whole-tree Ruff, lock, and secret hygiene are green.
+- Deliverable C.5 is complete. Operational mode remains `disabled`; the next
+  activity is Deliverable D planning. Deliverable E follows D and Slack remains
+  last.
+
 ## 2026-08-30 C.5 live provider compatibility hardening
 
 - Separately authorized aggregate-only Terra and Mini gates uncovered real
@@ -39,8 +68,9 @@ demo story changes.
   the exact five Mini route renderers and singular schemas. Automated tests
   inject LangChain fake models, prove exact model/options and privacy, and make
   no network call. The later separately authorized attempts are recorded above;
-  they remain unpassed because of exhausted API credit, so rollout remains
-  `disabled`.
+  the initial attempts were blocked by exhausted API credit. The completed
+  reruns and live metrics are recorded in the newer entry above; rollout still
+  remains `disabled`.
 - Added a hermetic release controller with guarded child environments, exact
   node/event sidecars, module schema leases, disposable PostgreSQL+pgvector
   role/database ownership, cleanup precedence, and high-confidence tracked plus

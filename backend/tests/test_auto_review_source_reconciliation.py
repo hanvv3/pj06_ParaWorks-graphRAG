@@ -159,7 +159,7 @@ def _seed_explicit_history(
             validator_provider='openai',
             validator_model='gpt-5.6-terra',
             reasoning_effort='medium',
-            validator_prompt_version='auto-review-validation:v1',
+            validator_prompt_version='auto-review-validation:v2',
             validator_output_contract_version='candidate-validation-batch:v1',
             policy_version='auto-review-policy:v1',
             fingerprint_key_version='v1',

@@ -230,6 +230,40 @@ _OUTPUT_SCHEMAS: dict[str, type[BaseModel]] = {
     'todo_agent': TodoExtractionResult,
 }
 
+_CANDIDATE_CONTRACTS = {
+    'timeline_event': {
+        'required_evidence_fields': ['title', 'summary', 'result_summary'],
+        'optional_evidence_fields': [],
+    },
+    'history_event': {
+        'required_evidence_fields': ['title', 'summary', 'reason'],
+        'optional_evidence_fields': [],
+    },
+    'decision_record': {
+        'required_evidence_fields': ['title', 'summary', 'decision_summary'],
+        'optional_evidence_fields': [],
+    },
+    'todo': {
+        'required_evidence_fields': [
+            'title', 'summary', 'priority', 'priority_reason'
+        ],
+        'optional_evidence_fields': [
+            'task_summary', 'assignee', 'due_date', 'evidence_reason',
+            'source_type', 'project_tag',
+        ],
+    },
+}
+
+_AGENT_ITEM_TYPES = {
+    'mail_document_agent': (
+        'timeline_event', 'history_event', 'decision_record', 'todo'
+    ),
+    'timeline_agent': ('timeline_event',),
+    'history_agent': ('history_event',),
+    'decision_record_agent': ('decision_record',),
+    'todo_agent': ('todo',),
+}
+
 
 def _normalize_extraction_provider_schema(value: Any) -> None:
     if isinstance(value, list):
@@ -384,6 +418,27 @@ def _render_invocation(
             'result_kind': ['candidate', 'no_candidate'],
             'maximum_candidates': 1,
             'evidence_slots_must_be_exact': True,
+            'allowed_evidence_slot_ids': slots,
+            'allowed_item_types': list(_AGENT_ITEM_TYPES[policy.agent_name]),
+            'candidate_contracts': {
+                item_type: _CANDIDATE_CONTRACTS[item_type]
+                for item_type in _AGENT_ITEM_TYPES[policy.agent_name]
+            },
+            'field_evidence_binding_rules': {
+                'required_fields_exactly_once': True,
+                'populated_optional_fields_exactly_once': True,
+                'field_keys_unique': True,
+                'evidence_slot_reuse_across_fields_allowed': True,
+                'evidence_slot_ids_must_be_allowed': True,
+            },
+            'field_evidence_binding_instructions': [
+                'Emit exactly one binding object for each required field and each populated optional field.',
+                'Never emit two binding objects with the same field_key; when multiple evidence slots support one field, choose the single strongest slot.',
+                'The same allowed evidence_slot_id may support more than one different field_key.',
+                'Emit no binding for an unpopulated optional field and no field_key outside the selected item_type contract.',
+                'For todo, each non-null task_summary, assignee, due_date, evidence_reason, source_type, or project_tag requires its own binding; otherwise set that optional field to null.',
+                'Before responding, verify binding count equals required field count plus populated optional field count.',
+            ],
         },
         'evidence': evidence,
     }

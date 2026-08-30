@@ -77,11 +77,11 @@ def test_each_extraction_route_has_exact_agent_prompt_output_contract_and_one_ca
         (policy.agent_name, policy.prompt_version, policy.output_contract_version)
         for policy in EXTRACTION_ROUTE_POLICIES
     ] == [
-        ('mail_document_agent', 'mail-document-extraction:c5-v1', 'mail-document-candidate:c5-v1'),
-        ('timeline_agent', 'timeline-extraction:c5-v1', 'timeline-candidate:c5-v1'),
-        ('history_agent', 'history-extraction:c5-v1', 'history-candidate:c5-v1'),
-        ('decision_record_agent', 'decision-record-extraction:c5-v1', 'decision-record-candidate:c5-v1'),
-        ('todo_agent', 'todo-extraction:c5-v1', 'todo-candidate:c5-v1'),
+        ('mail_document_agent', 'mail-document-extraction:c5-v2', 'mail-document-candidate:c5-v2'),
+        ('timeline_agent', 'timeline-extraction:c5-v2', 'timeline-candidate:c5-v2'),
+        ('history_agent', 'history-extraction:c5-v2', 'history-candidate:c5-v2'),
+        ('decision_record_agent', 'decision-record-extraction:c5-v2', 'decision-record-candidate:c5-v2'),
+        ('todo_agent', 'todo-extraction:c5-v2', 'todo-candidate:c5-v2'),
     ]
     assert all(policy.max_candidates == 1 for policy in EXTRACTION_ROUTE_POLICIES)
     assert all(policy.max_provider_attempts == 1 for policy in EXTRACTION_ROUTE_POLICIES)
@@ -96,8 +96,8 @@ def test_extraction_registry_rejects_alias_azure_gemini_fallback_or_unknown_agen
         'model': 'gpt-5.4-mini-2026-03-17',
         'reasoning_effort': 'none',
         'route_version': 'auto-review-extraction-route:v1',
-        'prompt_version': 'timeline-extraction:c5-v1',
-        'output_contract_version': 'timeline-candidate:c5-v1',
+        'prompt_version': 'timeline-extraction:c5-v2',
+        'output_contract_version': 'timeline-candidate:c5-v2',
     }
     assert get_extraction_route('timeline_agent', **exact) is not None
     for mutation in (
