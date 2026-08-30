@@ -6,7 +6,7 @@
       "k": 3,
       "expected_source_ids": [
         "gmail-redis-decision",
-        "slack-redis-progress"
+        "drive-redis-progress"
       ],
       "chunks": [
         {
@@ -16,10 +16,10 @@
           "text": "Redis queue progress will be tracked in the company memory timeline."
         },
         {
-          "source_type": "slack",
-          "source_id": "slack-redis-progress",
-          "title": "Slack Redis progress update",
-          "text": "The Slack thread confirms Redis queue progress and embedding cost controls."
+          "source_type": "drive",
+          "source_id": "drive-redis-progress",
+          "title": "Drive Redis progress update",
+          "text": "The Drive note confirms Redis queue progress and embedding cost controls."
         },
         {
           "source_type": "calendar",

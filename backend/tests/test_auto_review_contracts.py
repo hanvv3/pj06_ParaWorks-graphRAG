@@ -510,6 +510,12 @@ def test_disabled_sqlite_smoke_may_use_process_local_placeholder_without_durable
         ('sqlite:///:memory:', 'disabled', True),
         ('sqlite:///:memory:', 'shadow', False),
     ],
+    ids=(
+        'postgres-disabled',
+        'sqlite-file-disabled',
+        'sqlite-memory-disabled',
+        'sqlite-memory-shadow',
+    ),
 )
 def test_process_local_sqlite_smoke_is_limited_to_disabled_in_memory_url(
     database_url: str, mode: str, expected: bool

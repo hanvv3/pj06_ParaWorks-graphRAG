@@ -125,6 +125,7 @@ def test_completed_todo_updates_existing_timeline_item_without_adding_todo_timel
             'project_key': 'project-alpha',
             'completed_at': timeline_items[0]['completed_at'],
             'completed_by': 'yonghee199702',
+            'resolution_source': 'human',
         }
     ]
     assert timeline_items[0]['completed_at']

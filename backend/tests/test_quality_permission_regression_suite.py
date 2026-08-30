@@ -1,13 +1,20 @@
+import hashlib
+
 from sqlalchemy.orm import Session
 
 from backend.app.agent_runtime.company_memory import (
     run_company_memory_agent_orchestration,
 )
 from backend.app.core.demo_auth import USERS
+from backend.app.ingestion.source_content_signature import (
+    SERVER_SOURCE_CONTENT_SIGNATURE_SCHEMA,
+    server_parser_policy_for_source,
+)
 from backend.app.models import (
     AgentRun,
     Document,
     DocumentChunk,
+    DocumentParserRun,
     DocumentVersion,
     ReviewItem,
     Source,
@@ -22,6 +29,10 @@ def seed_chunk(
     text: str,
     permission_level: str = 'internal',
 ) -> None:
+    signature = hashlib.sha256(f'{source_type}:{source_id}:{text}'.encode()).hexdigest()
+    raw_metadata = {'ts': '2026-05-02T09:00:00+09:00'}
+    if source_type == 'drive':
+        raw_metadata['mime_type'] = 'text/plain'
     source = Source(
         source_type=source_type,
         source_id=source_id,
@@ -29,7 +40,13 @@ def seed_chunk(
         title=f'{source_type} quality fixture',
         author='quality@example.com',
         permission_level=permission_level,
-        raw_metadata={'ts': '2026-05-02T09:00:00+09:00'},
+        raw_metadata=raw_metadata,
+        server_content_signature_schema=(
+            SERVER_SOURCE_CONTENT_SIGNATURE_SCHEMA
+            if source_type != 'slack'
+            else None
+        ),
+        server_content_signature=signature if source_type != 'slack' else None,
     )
     db.add(source)
     db.flush()
@@ -42,15 +59,54 @@ def seed_chunk(
     db.add(version)
     db.flush()
 
+    parser_run = None
+    if source_type != 'slack':
+        policy = server_parser_policy_for_source(
+            source_type,
+            mime_type=raw_metadata.get('mime_type'),
+        )
+        parser_run = DocumentParserRun(
+            document_id=document.id,
+            document_version_id=version.id,
+            source_id=source.id,
+            parser_name=policy.parser_name,
+            parser_status='parsed',
+            parser_status_reason=None,
+            mime_type=policy.mime_type,
+            document_version_label='v1',
+            content_signature=signature,
+            server_content_signature_schema=SERVER_SOURCE_CONTENT_SIGNATURE_SCHEMA,
+            server_content_signature=signature,
+            parser_policy_version=policy.parser_policy_version,
+            parser_version=policy.parser_version,
+            chunk_policy_version=policy.chunk_policy_version,
+            chunk_count=1,
+        )
+        db.add(parser_run)
+        db.flush()
     db.add(
         DocumentChunk(
             version_id=version.id,
             source_id=source.id,
+            parser_run_id=parser_run.id if parser_run is not None else None,
             chunk_index=0,
             text=text,
             source_snippet=text[:240],
             permission_level=permission_level,
             metadata_={'source_url': source.source_url, 'source_type': source_type},
+        )
+    )
+    document.current_document_version_id = version.id
+    db.add(
+        ReviewItem(
+            item_type='source_evidence',
+            payload={'source_ids': [source_id]},
+            source_links=[source.source_url],
+            source_snippets=[text[:240]],
+            confidence_score=1.0,
+            permission_level=permission_level,
+            status='approved',
+            resolution_source='human',
         )
     )
     db.commit()

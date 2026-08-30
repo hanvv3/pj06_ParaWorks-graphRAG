@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "failure_nodeids": [
+    "backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_runs_real_agent_services",
+    "backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_skips_agents_that_exceed_cost_budget",
+    "backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_uses_cache_when_evidence_is_unchanged",
+    "backend/tests/test_oauth_pkce.py::test_slack_oauth_pkce_generation",
+    "backend/tests/test_oauth_pkce.py::test_slack_callback_with_custom_redirect_uri_and_pkce",
+    "backend/tests/test_oauth_pkce.py::test_api_endpoints_support_redirect_uri",
+    "backend/tests/test_orchestration_api.py::test_company_memory_orchestration_api_runs_agent_services",
+    "backend/tests/test_quality_permission_regression_suite.py::test_quality_suite_company_memory_emits_review_checkpoint_without_paid_calls",
+    "backend/tests/test_quality_permission_regression_suite.py::test_quality_suite_cache_hit_does_not_duplicate_agent_runs_or_review_items",
+    "backend/tests/test_slack_oauth.py::test_slack_sync_endpoint_uses_installed_connection_token_without_exposing_it"
+  ]
+}
