@@ -204,10 +204,14 @@ Current state:
 Next priorities:
 
 1. Keep C.5 rollout disabled unless a separate operational rollout action is
-   explicitly authorized. Both paid release gates are complete.
-2. Enter the **planning stage** for Deliverable D Retriever Port and RAG Answer
-   Graph V2.
-3. Follow D with Deliverable E Neo4j GraphRAG, then handle Slack data
+   explicitly authorized. Both C.5 paid release gates are complete.
+2. The consolidated written **Deliverable D Core** Retriever Port and RAG
+   Answer Graph V2 spec is approved. Prepare its separate TDD implementation
+   plan next; that remains planning work and requires separate approval before
+   production code changes.
+3. Reach a separate D Core green checkpoint, then design, plan, approve, and
+   reach a separate green checkpoint for D.1 PostgreSQL answer cache.
+4. Follow D.1 with Deliverable E Neo4j GraphRAG, then handle Slack data
    reconstruction and its visible regression baseline last.
 
 ## 4. Shared Runtime Contracts
@@ -637,11 +641,15 @@ Tasks:
     Frontend gates passed desktop `58`, mobile `48`, and legacy desktop `9`;
     lint/build, lock, Ruff, diff, and secret scans passed.
 - User-directed execution order for the remaining program:
-  1. Plan Deliverable D Retriever Port and RAG Answer Graph V2 using Gmail, Drive,
-     Calendar, trusted knowledge, and deterministic fixtures.
-  2. Deliverable E Neo4j GraphRAG after D establishes the safe retriever and
-     answer contracts.
-  3. Slack data recovery and Slack-related regressions last, after choosing
+  1. Use the approved consolidated D Core written spec to separately plan,
+     approve, implement, and make Retriever Port and RAG
+     Answer Graph V2 green using Gmail, Drive, Calendar, trusted knowledge, and
+     deterministic fixtures.
+  2. Design, plan, separately approve, implement, and make D.1 PostgreSQL
+     answer cache green.
+  3. Deliverable E Neo4j GraphRAG after D Core and D.1 establish the safe
+     retriever, answer, and cache contracts.
+  4. Slack data recovery and Slack-related regressions last, after choosing
      between deterministic local reconstruction, a newly seeded Slack
      workspace, or an alternate chat connector.
 - Do not skip or hide Slack regressions while they are deferred. Keep the ten

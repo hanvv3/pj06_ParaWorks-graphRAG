@@ -1,6 +1,291 @@
 # ParaWorks Harness Session Handoff
 
-Updated: 2026-08-30
+Updated: 2026-08-31
+
+## 2026-08-30 Deliverable D Core written design
+
+- Branch `codex/rag-orchestrator-agent` now has the section-level approved D
+  Core direction consolidated at
+  `docs/superpowers/specs/2026-08-30-deliverable-d-core-rag-answer-graph-v2-design.md`.
+  The consolidated written spec is approved. This is planning/spec
+  documentation, not production implementation. The next task is a separate
+  TDD implementation plan and remains planning until that plan is approved.
+- D Core uses a separate exact-version `RagGraphRegistry` and a request-local
+  LangGraph `RagGraphState`; it does not use the durable Review Queue
+  `GraphVersionRegistry`, checkpointer, `AgentWorkflowThread`, or checkpoint
+  rows. API routes call an application facade rather than LangChain/LangGraph
+  directly. RAG registers only in a separate app-wide manifest registry; the
+  C.5 exact-five `review_agent_registry` remains sealed and unchanged.
+- Keyword and pgvector implement one application-level LangChain
+  `Runnable[RetrievalRequest, RetrievalResult]`. Internal
+  `serving_document_id` is distinct from V1 public `source_id`; raw is
+  `chunk:{id}` internally and exact `Source.source_id` publicly. The model sees
+  only `E1..E8`, and fresh canonical projection occurs after revalidating every
+  model-visible influence; public citations remain the selected subset and
+  output permission remains the strictest influence permission.
+- Trusted human/auto-approved knowledge is first. Current canonical
+  Gmail/Drive/Calendar raw evidence may support only `source_observation`; the
+  exact source-kind allowlist is `gmail | gmail_attachment | drive | calendar`.
+  D Core includes the incremental raw-observation indexing lane required for
+  keyword/pgvector parity, with Developer B/C shared-contract review. A live
+  production reindex or embedding spend requires separate operational
+  approval. Pending candidates and Slack are excluded. Preserve the exact ten
+  deferred Slack failures and repair Slack last. Actorless raw index jobs use a
+  canonical lineage/version/permission resolver; request-time V2 retrieval
+  composes that observation with `authorize(SecurityScope, observation)`.
+  Legacy trusted predicates and pgvector SQL remain unchanged, so disabled
+  mode does not broaden raw visibility and indexing never fabricates an
+  all-access actor. V2's trusted branch exact allowlist is the four promoted
+  canonical knowledge types; `chunk:*` is always a single
+  `source_observation` V2 member even when its legacy ReviewItem is approved.
+  The legacy chunk predicate remains compatibility-only and cannot launder a
+  raw row into `trusted_fact`. SecurityScope uses server-owned workspace mode,
+  typed `project_key:`/`source_pk:` refs, explicit all-current vs constrained
+  semantics, and fail-closed missing membership. Trusted multi-provenance is
+  globally strictest first, then selects only an actor-authorized link whose
+  every evidence child is visible; it never exposes an unauthorized
+  higher-priority link. Raw/trusted model text, source ids/URLs, and snippets
+  must be strict-scalar, NUL-free, and nonblank. Raw/current explicit snippets
+  must match the versioned parser rule `" ".join(text.split())[:240]`; invalid
+  evidence is excluded consistently and any D-tracked vector is tombstoned.
+- Direct `/ask` and `/search` preserve V1 character-count and lexical-term
+  semantics; D adds no 4,000-character or 1,000-term refusal to those surfaces.
+  Assistant keeps its existing 4,000-character current-message bound, an
+  8,000-character server-built contextual query, and the contextual-query-only
+  1,000-term ceiling. Other bounds are candidate window 50, `/search` results
+  5, answer slots 8, public hidden count 20, model input 12,000 serialized
+  chars, output 512 tokens, and total paid request ceiling USD `0.012` including
+  query embedding. Answer model is exact `gpt-5.4-mini-2026-03-17`, reasoning `none`,
+  strict structured output, one call, no retry or model fallback. The provider
+  schema is one hand-authored OpenAI-subset literal passed through LangChain's
+  exact strict wrapper; prompt-renderer/two-message JSON bytes and the
+  `"\n\n"` answer joiner are separately HMAC-bound. Server semantic validation
+  enforces block/reason XOR, slot/trust/length constraints, and rejects model
+  NUL/surrogates without repairing bytes. V1 projection HMACs additionally bind
+  score binary64 bits, matched-term order, nullable fields, and source arrays.
+  One immutable
+  `PreparedAnswerInvocation` binds the final rendered bytes, evidence slots,
+  HMAC, usage estimator, and cost reserve. Question/frame credential matches
+  block the whole provider call; unsafe evidence is dropped and the invocation
+  is completely re-prepared before any call. Pgvector also has one immutable
+  request-local query-embedding result with validated usage/cost, shared by
+  legacy/V2 shadow paths rather than mutable side-channel accounting. Pgvector
+  direct `/ask`/`/search` uses exact caller UTF-8 query bytes in both paths;
+  normalized text is validation/scanner-only and a hex+length HMAC preserves
+  byte-distinct Unicode identity. Pgvector admission reconciles the full
+  exact-four trusted plus raw serving corpus, not
+  raw alone. Corpus/index generations are checked before embedding and around
+  SQL; concurrent ingestion/promotion/revoke discards partial vectors and does
+  one same-scope keyword recomputation without another embedding. Answer paths
+  also fresh-recompute bounded hidden matches after generation, reusing the
+  same vector or falling back to same-scope keyword without a second embedding.
+  Production query embedding has stable family discriminator
+  `openai-embeddings-api:v1` and separate `rag-query-embedding-config:v1`
+  snapshot with exact 1,536 dimensions; config changes rebind the same family
+  instead of creating a fresh-ready bypass. Generation preflight counts compact
+  canonical JSON of exact messages plus the strict output schema with
+  `o200k_base`, no Unicode normalization, `+16` reply priming and `+512` safety.
+  Shared strict chat/embedding usage parsers reject coercion and conflicting
+  aliases. A returned response with invalid usage blocks the component family;
+  a response-less transport exception remains an ordinary reserved failure.
+  For query embedding, it preserves the full reserve but immediately closes
+  `retriever_unavailable`; keyword fallback, safe 200, downstream answer
+  preparation, and generation calls are all zero.
+  Query and corpus vectors must be canonical finite float32, exact-dimension,
+  and nonzero after conversion. Writer and DB readiness share this cosine-
+  indexability rule (`vector_norm(embedding) > 0`), so pgvector cannot report a
+  zero vector ready even though cosine indexes omit it.
+  D V2 also rejects pre-provenance `legacy_unbound` trusted rows that have no
+  valid explicit approval branch and no linked legacy ReviewItem. Its sole
+  legacy branch requires a non-null approved human/non-C5 ReviewItem and
+  nonblank, NUL-free, equal-length, byte-equal target/ReviewItem link-snippet arrays;
+  effective permission is their strictest value. Disabled legacy output remains
+  unchanged, while a shadow mismatch blocks stage advancement until evidence is
+  reviewed/migrated.
+- New `rag-run:v2` traces retain versioned keyed HMACs, bounded counts,
+  latency/usage/cost, and allowlisted errors only. They retain no question,
+  evidence text/URL/snippet, prompt, model output, provider error, state, or
+  checkpoint. Assistant intentionally retains its owner-bound conversation,
+  selected citation bytes, and identities/HMACs for every unselected model
+  influence; future dependency-set HMACs bind the full ordered influence set,
+  parent content, AgentRun/result, prompt/write-mode, and approval/evidence links.
+  V2 uses exact-byte content writes while legacy retains trimming. An additive nullable
+  parent marker distinguishes historical `legacy-per-dependency-sha256:v1`
+  rows from future `assistant-dependency-set-hmac:v2` writes; no backfill or
+  unguarded old-binary downgrade is allowed. Every future evidence-backed
+  Assistant write uses V2 HMAC even after mode rollback. The writer is
+  integrity-only: it may sign a disabled legacy dependency as
+  `legacy_v1_only` without promoting it into D retrieval/readiness; V2 graph
+  writes remain `rag_v2`. C.5 keeps one active
+  key; rotation intentionally redacts older keyed stored answers instead of
+  retaining an old keyring or re-signing history.
+  Every paid admission uses `status=running`, `run_record_phase=admission`, and
+  explicit sentinels. Its `rag-admission-identity:v1` binds configured surface/
+  backend plus query/security/config HMACs and is never an answer-cache lookup
+  key. Only a substantive, search, or safe terminal product projection writes
+  `run_record_phase=final`, effective source-window/permission/actual-model
+  fields, and `rag-final-product-identity:v1` over admission identity, result
+  HMAC, and surface; projectionless errors and complete shadow-only cost owners
+  use separate explicit D.1-ineligible final-error/final-shadow sentinels.
+  None of these identities enables D Core reuse.
+  Assistant's provider-free failed/final parent with exact-two terminal-zero
+  children is available only when no paid claim exists. Once pgvector query
+  embedding has returned a validated successful vector, an inter-component
+  refusal must reuse the existing run, preserve the embedding actual cost and
+  dispatch, terminalize the answer child at zero, and make no generation call.
+  A dead process, including a crash between embedding and generation, closes
+  the parent as failed/`abandoned_unknown` and never resumes provider work.
+- D Core has no answer reuse. D.1 is a separate default-disabled PostgreSQL
+  cache design/plan after D Core is green; Redis is considered only after a
+  measured bottleneck. E Neo4j GraphRAG follows D.1; CDC/streaming and Slack
+  remain deferred.
+- Keep the plan-required SQLite path as a deterministic, provider-free,
+  single-process smoke oracle only. A process-local mutex serializes writers
+  while a never-replaced process-lifetime OS lock rejects a second file-backed
+  smoke process. Neither is live, release, or paid-call authority; second-process,
+  pgvector, live, and paid modes refuse before any call. Production vector
+  writes remain PostgreSQL+pgvector-only, and D Core has no SQLite answer cache.
+- Rollout uses deployment-static `LANGGRAPH_RAG_V2_MODE` and
+  `LANGGRAPH_RAG_V2_STAGE=none|ask|search|assistant`; an operator can roll back
+  stage or mode. Shadow compares retrieval only and never performs dual answer
+  generation. Common-cohort comparison canonicalizes legacy output and allows
+  only five intended deltas: V2 raw observations, trusted-tier reorder, raw
+  public-id repair, bounded hidden-count semantics, and the user-only Assistant
+  context security delta. Any other mismatch
+  fails the gate.
+  The user authorized a first sanitized 30-case reserve envelope with an exact
+  maximum of USD `0.36`; a provider contract overrun is recorded unclamped and
+  fails/aborts the gate rather than being represented as a green bounded run.
+  The user's later note that up to USD `100` is available does not expand this
+  frozen first gate; only a future separately previewed/approved tuple may do so.
+  Exact execution remains unauthorized until the final
+  clean runner/fixture commit passes provider-free gates and the user confirms
+  its zero-call preview. No paid D call has occurred. A partial/crashed
+  restart, rerun, expansion, production traffic, raw-observation reindex, D.1,
+  or E paid call requires fresh user approval. The final preview must freeze
+  the 10/5/10/5 ask/Assistant keyword/pgvector manifest, Git hash, designated
+  validation PostgreSQL ledger/marker identity, validation database identity
+  HMAC, current generation, and exact current provider authority/envelope plus
+  two active family identity/state/version/generation/config-policy snapshot
+  HMACs. It does not contain an approval id/HMAC yet; only after the user
+  confirms that tuple may `authorization-bootstrap` fresh-match the same whole
+  provider snapshot and create its bound approval id/HMAC. Any reset, rebind,
+  supersession, breaker transition, or key rotation makes the old authorization
+  zero-call stale and requires a new preview/user approval. The DB
+  ledger is paired with an HMAC-bound
+  monotonic authority outside the repo and DB backup/restore set; any restore,
+  identity, generation, or marker mismatch is zero-dispatch and runner repair
+  is forbidden. The ledger allows exact 30 case claims, at most 30 generation
+  and 10 pgvector embedding component dispatches (40 total). The quality gate
+  binds a provider-free baseline definition and three pairwise-distinct
+  authenticated human review roles, with no paid LLM judge; green completion
+  requires exact 30/10/40. After all 30 frozen cases are terminal, an ordinary
+  case failure or a shortfall in the exact component/distribution counts closes
+  terminal `finished_failed` with the actual lower counts and no retry/resume.
+  Its authorization outcome is respectively `ordinary_execution_failed` or
+  `execution_contract_failed`; if adjudication was not reached, the quality
+  report is optional. Live calls use one
+  composite permit: the release dispatch and runtime AgentRun/cost reserve are
+  committed together in the exact same physical validation PostgreSQL
+  connection/transaction. One authorization-scoped singleton runner/fence owns
+  the whole 30-case execution through scoring, human adjudication, and the final
+  transition. Reviewed proof that it died or was drained terminalizes the
+  authorization as `aborted_execution_crash` with `abandoned_unknown`, preserves
+  committed costs/reserves, and forbids partial resume, provider retry, or
+  same-approval reuse. Any live current-corpus snapshot drift immediately
+  terminalizes it as `aborted_corpus_drift`, preserves committed and current
+  actual-or-reserve cost, permits no remaining call/scoring/report/retry/resume,
+  and requires a fresh preview and user approval. Any known overrun records
+  unclamped actual,
+  moves the whole gate to `aborted_overrun`, and permits no later component.
+  Runtime provider readiness uses a stable safety family and an external
+  deployment-wide HMAC latch; config/key/model version changes cannot bootstrap
+  around a block. It blocks every D-managed admission and later D re-enable
+  until reviewed reset, but disabled/non-cutover legacy calls keep exact V1
+  behavior after rollback. The latch is one canonical whole-family-set envelope with an
+  active-family map, preserved historical blockers, a global generation, and a
+  distinct never-replaced ACL-checked sidecar lock. The release marker has its
+  own distinct stable sidecar. Only signed data files are atomically replaced;
+  every init/read/recovery/admission/finalization locks the stable object first.
+  Live-release processes use a global validator requiring provider data/sidecar
+  and release data/sidecar to be four pairwise-distinct, non-symlink/non-reparse,
+  non-hardlinked leaf files; any cross-alias is zero-call/fail-stop. Ordinary
+  disabled/non-cutover startup requires no D authority artifacts and never
+  creates a dummy release authority. Provider-free `provider-safety-init` is the
+  sole provider-authority bootstrap; every non-bootstrap provider admin mutation,
+  actual D paid-component admission, and privileged release init/recovery/
+  preview/authorization/runner requires the initialized provider data/sidecar/DB
+  peer, and release roles validate all four provider/release leaf paths.
+  Its DB peer has a singleton generation/digest,
+  exact two active family rows, and append-only transition history. Only the
+  provider-free `provider-safety-init` may create generation 0 after proving
+  empty DB history, missing latch, and zero D paid attempts; it writes the file
+  first and one DB transaction second. It targets the deployment application
+  DB; the live gate specifically targets its exact validation DB, never a
+  cross-shared authority. A second init is refused, and the sole
+  recoverable partial-init shape is a reviewed valid-generation-0-file/empty-DB
+  recovery with zero attempts. Runtime pre-call and every post-call finalizer
+  use stable provider sidecar lock
+  -> DB singleton -> family -> run -> ordered cost-child locking. Live calls
+  extend this to provider sidecar -> release sidecar -> advisory ->
+  safety/release/run rows, with safety-first overrun finalization. Thus an external
+  blocker flush cannot race a stale-ready output commit and simultaneous
+  embedding/generation incidents cannot overwrite each other. Known provider
+  overrun blocks externally first, then commits the readiness breaker, failed
+  run, and exact two cost components before a separate Assistant safe-message
+  write. Normal supported/search outcomes use a two-phase contract: immutable
+  component costs commit first with the parent in
+  `cost_finalized_pending_projection`, then provider safety is reacquired and a
+  C.5-compatible corpus lock transaction revalidates every model influence,
+  selected citations, and hidden membership and atomically finalizes the
+  direct projection or Assistant message/dependencies plus parent outcome.
+  A dedicated pre-send evidence fence serializes source/revoke/permission/
+  promotion/parser/index mutation through immutable transport-body handoff.
+  A writer rollback never erases paid-call accounting or permits a provider
+  retry; bounded recovery closes the parent as `persistence_failed`. Every runtime paid component
+  first commits a full-reserve `dispatching` claim; an uncertain crash becomes
+  `abandoned_unknown` with no retry. Pgvector shadow keeps the legacy public
+  response/run but uses a separate internal `rag-run:v2` exact-two cost owner
+  for its one shared query embedding, avoiding both unaudited spend and double
+  charge.
+  Live `component_outcome` terminalizes cost only; `case_outcome` atomically
+  closes the case and AgentRun under the retained provider/release/corpus locks.
+  The terminal authorization outcome distinguishes ordinary execution failure,
+  execution-contract count failure, and the all-executed rubric-red
+  `quality_gate_failed`. An append-only quality report is optional for the first
+  two when adjudication was not reached, but required for rubric-red and green
+  completion.
+  Both external files use exact non-recursive signed-payload/HMAC envelopes;
+  canonical file and transition digests must also match their DB peers even
+  when generations match. Release DB rows are scoped by
+  `(ledger_uuid, ledger_epoch)`, transition generation is gapless within an
+  epoch, and generation 0 has no transition row. A reviewed restore recovery
+  creates a new epoch from the valid predecessor marker external-first, keeps
+  old rows read-only, and requires a fresh preview/user approval; a missing or
+  corrupt marker requires a new ledger UUID. If provider readiness changes
+  after the 30th case outcome, the case-null `authorization_abort_final`
+  transition preserves final aggregates instead of misusing a case-bound abort.
+- Assistant compatibility also covers pre-message first-turn behavior:
+  conversation titles/`initialQuery` use the common credential scanner before
+  lookup or commit. Owner-scoped conversation/message misses retain their exact
+  existence-hiding 404 responses rather than becoming RAG 403. Generic 500/502
+  paths refetch under an active request/conversation guard, reconcile the
+  authoritative rows once, and show Korean safe copy; a failed refetch keeps
+  one status-unknown frontend-only row whose action retries GET reconciliation,
+  never the non-idempotent POST. First-query navigation uses a consume-once
+  in-memory handoff rather than raw `?q=` URL/history data.
+- Assistant V2 retrieval context contains current/prior user rows only; answer
+  generation receives the current turn only. Prior assistant bytes never enter
+  V2 retrieval/model input, and shadow records that intended security delta.
+  The enforce facade/graph is the sole assistant-row writer and returns a typed
+  delivery state, so route/catch paths never append a second success/failure row.
+  V2 output is exact-byte plain text; only server-validated HTTP(S) citations
+  become links. Direct OpenAI identity is pinned to the standard global endpoint,
+  answer `service_tier=default`, and conservative list-rate charge accounting.
+- Next: invoke `superpowers:writing-plans` for a separate failing-test-first D
+  Core TDD implementation plan. That next task is still planning; do not change
+  production code before the implementation plan receives separate approval.
+  D.1 planning starts only after D Core is green.
 
 ## 2026-08-30 single-root local environment contract
 

@@ -1,10 +1,179 @@
 # ParaWorks Portfolio Log
 
-Last updated: 2026-08-30
+Last updated: 2026-08-31
 
 This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
+
+## 2026-08-30 Deliverable D Core RAG V2 design
+
+- Recorded the section-level approved direction for the Retriever Port and RAG
+  Answer Graph V2 boundary before Neo4j GraphRAG. The consolidated written spec
+  is now approved. `/ask`, `/search`, and Assistant will share an
+  actual LangChain `Runnable` retriever contract and an actual request-scoped
+  LangGraph conditional graph without a durable checkpointer.
+- Separated backend-independent `serving_document_id` from the existing V1
+  public `source_id`. The model sees only bounded `E1`-style evidence slots;
+  the server revalidates current permission/version/provenance and projects
+  selected canonical evidence back to the unchanged V1 citation shape.
+- Frozen trusted-knowledge-first retrieval with canonical Gmail, Drive, and
+  Calendar raw evidence (`gmail | gmail_attachment | drive | calendar`) as
+  `source_observation`; pending AI candidates and
+  Slack remain excluded. D Core explicitly includes the incremental
+  raw-observation indexing lane needed for keyword/pgvector parity, but a live
+  production reindex or embedding spend requires separate operational
+  approval. V2-only raw eligibility/read guards keep legacy disabled behavior
+  unchanged. A `chunk:*` remains `source_observation` in V2 even when a legacy
+  human ReviewItem is approved; only the four promoted canonical knowledge
+  types can enter the trusted branch, preventing duplicate-tier laundering.
+  Typed workspace/project/source constraints and every-child authorization
+  make multi-provenance citation selection executable and fail closed.
+  Candidate, result, hidden-count, model-input, generation-token,
+  and USD `0.012` request ceilings are explicit; pgvector embedding has one
+  immutable request-local usage/cost receipt. Direct `/ask` and `/search`
+  preserve their V1 character-count and lexical-term semantics, with no new
+  4,000-character or 1,000-term refusal; only Assistant retains its existing
+  4,000-character current-message bound and the 1,000-term contextual-query
+  ceiling. Exact model/config/policy HMACs,
+  strict no-coercion usage parsing, and canonical finite nonzero float32 vector
+  validation prevent metadata drift or a pgvector cosine-unindexable zero vector
+  from appearing ready. Corpus writer and DB readiness both enforce the same
+  cosine-indexability rule. The answer boundary freezes a hand-authored OpenAI-
+  subset JSON Schema, exact LangChain strict wrapper, prompt renderer bytes,
+  two-message JSON framing, and `"\n\n"` block joiner. Server validation adds
+  XOR/slot/trust/size checks rather than relying on generated Pydantic schemas.
+  Caller strings reject surrogates and U+0000 before DB/provider work; DB evidence
+  is rejected after canonical resolution but before serving/provider projection,
+  and model output is rejected after the provider response but before persistence
+  or public projection. Valid non-BMP bytes remain unchanged. Raw and trusted evidence
+  also require nonblank canonical text, URL, and snippet proof, including the
+  parser's versioned whitespace-compressed 240-character snippet rule.
+  Query-derived score bits, term order, nullable citation fields, and selected
+  source arrays are covered by exact V1 projection HMACs. D V2 rejects pre-provenance `legacy_unbound`
+  knowledge with neither a valid explicit approval link nor a linked ReviewItem;
+  only an exact approved human ReviewItem with matching nonempty
+  link/snippet evidence can use the legacy trusted branch, while disabled legacy
+  responses remain unchanged.
+- Split delivery into D Core, D.1 PostgreSQL answer cache, then E Neo4j
+  GraphRAG. Redis L2, CDC/streaming, Slack recovery, and answer reuse are not
+  part of D Core.
+- Approved `disabled | shadow | enforce` rollout with `/ask -> /search ->
+  Assistant` cutover and immediate rollback. Automated gates use fake models;
+  shadow classifies five intentional V2 deltas—including the user-only Assistant
+  context security delta—and fails every unclassified
+  permission, identity, rank, or projection mismatch.
+  The user approved a 30-case, USD `0.36` reserve envelope. Exact paid execution
+  remains unauthorized until implementation and provider-free gates are green,
+  a clean runner/fixture commit is frozen, and the user confirms its zero-call
+  preview. A partial/crashed restart, rerun, expansion, production traffic,
+  raw reindex, D.1, or E spend requires new approval. Later availability of a
+  USD `100` balance does not expand this frozen first gate. No paid call was made
+  during design work. The single-use release ledger is protected by a
+  PostgreSQL-external monotonic HMAC marker so database restore cannot revive
+  an old approval. It admits only 30 case claims, 30 generation and 10 pgvector
+  embedding component permits, each with a pre-call reserve. Known usage
+  overruns abort the whole gate and durably trip a stable-family external/DB
+  provider breaker before any Assistant message write. Returned-response strict
+  usage violations and invalid vectors abort for remediation; response-less
+  transport failures remain ordinary reserved failures. A response-less query-
+  embedding failure preserves its full reserve but immediately closes
+  `retriever_unavailable`; keyword fallback, safe 200, downstream answer
+  preparation, and generation calls are all zero. The deployment latch is a
+  whole-family-set, HMAC-bound envelope with one global lock/generation, so
+  simultaneous embedding and generation incidents cannot overwrite each
+  other. Provider and release data files each use a distinct never-replaced,
+  ACL-checked sidecar lock; only signed data files are atomically replaced, so
+  Windows/POSIX pathname replacement cannot split the lock. Live-release
+  processes use a four-path global validator that rejects data/lock equality,
+  hardlink, symlink, reparse, and case-fold aliases. Disabled/non-cutover startup
+  requires no D authority artifacts. Provider-free `provider-safety-init` is the
+  sole provider-authority bootstrap; every non-bootstrap provider admin mutation,
+  actual D paid admission, and privileged release init/recovery/preview/
+  authorization/runner requires the initialized provider authority. Every runtime
+  paid call durably claims its full reserve before
+  dispatch; pgvector shadow keeps the public legacy run while a separate
+  internal exact-two-component run owns the single shared embedding cost. The
+  live gate combines that runtime claim and its release claim into one permit
+  and one validation-PostgreSQL transaction; safety blocks are external-first.
+  Exact signed external envelopes, file/transition digests, and the validation
+  database identity HMAC prevent same-generation or restored-state reuse.
+  Provider safety can be initialized only by a zero-call, file-first bootstrap
+  with exact two active families and zero prior D paid attempts. Release history
+  is epoch-scoped and append-only; reviewed restore recovery advances to a new
+  epoch, preserves old rows, and always requires a fresh preview and user
+  approval. A final readiness race has a dedicated case-null abort rather than
+  fabricating a case mutation. After all 30 frozen cases are terminal, an
+  ordinary case failure or a shortfall in the exact component/distribution
+  counts closes the single-use authorization as terminal `finished_failed`,
+  retaining the actual lower dispatch count instead of leaving it started or
+  mislabeling it as a safety abort. One authorization-scoped singleton runner
+  owns all 30 cases through scoring, adjudication, and finalization. Reviewed
+  proof that it died or was drained closes the authorization as terminal
+  `aborted_execution_crash`/`abandoned_unknown`, preserves committed aggregates
+  and reserves, and permits no partial resume, retry, or same-approval reuse.
+  Any live current-corpus snapshot drift instead immediately closes it as
+  `aborted_corpus_drift`, preserving committed and in-flight actual-or-reserve
+  cost and permitting no remaining call, scoring, report, retry, or resume
+  before a fresh preview and user approval.
+  Transition digests list only rows actually mutated, not locked read-only cost
+  siblings. A provider breaker blocks every D-managed admission and later D
+  re-enable until reviewed reset, while disabled/non-cutover legacy behavior
+  remains unchanged after rollback.
+  Full trusted+raw index generations prevent pgvector from silently omitting
+  newly promoted knowledge. First-turn credential scanning, owner-hidden 404s,
+  and race-safe Assistant 500/502 reconciliation preserve the current one-screen
+  UX without leaking raw provider errors.
+- Paid-call accounting and evidence publication use a two-phase boundary:
+  exact component costs become durable first while the parent is explicitly
+  `cost_finalized_pending_projection`; then a C.5-compatible corpus-generation
+  lock transaction revalidates every model-visible influence, the selected
+  citation subset, and hidden membership, and atomically
+  finalizes the direct response projection or Assistant message/dependencies.
+  Paid admission stores `rag-admission-identity:v1` over configured surface/
+  backend plus query/security/config HMACs and retains admission sentinels
+  through phase 1; it is never an answer-cache lookup key. Only a substantive,
+  search, or safe terminal product projection writes `run_record_phase=final`,
+  the effective source-window/permission/actual-model fields, and
+  `rag-final-product-identity:v1` over admission identity, result HMAC, and
+  surface. Projectionless errors and complete shadow-only cost owners use
+  separate explicit D.1-ineligible final-error/final-shadow sentinels, and none
+  of these identities enables D Core reuse.
+  Provider-free zero-cost-parent finalization is valid only before any paid claim.
+  If Assistant pgvector has already claimed query embedding, a later
+  inter-component refusal is eligible only after a validated successful vector;
+  it reuses that run, preserves the embedding actual cost and dispatch,
+  terminalizes only the answer child at zero, and makes no generation call.
+  A dedicated pre-send evidence fence keeps canonical mutation writers out from
+  final recheck through immutable transport-body handoff. Provider safety is also
+  reacquired in phase 2, so a new breaker cannot race a stale-ready output commit.
+  Concurrent source revocation cannot slip between recheck and message commit,
+  and a product-write failure cannot erase spend or retry the provider.
+- Production OpenAI calls are pinned to the direct standard global endpoint;
+  answer generation requires returned `service_tier=default`, while embedding
+  has no service-tier request field. D charged cost is a conservative standard
+  list-rate bound, not an invoice reconstruction. Assistant V2 retrieval uses
+  current/prior user messages only, while generation receives the current turn
+  only. V2 content is exact-byte/plain-text, the facade is the sole assistant-row
+  writer, and all model-influence identities are HMAC-bound even when only a
+  citation subset is displayed.
+- The plan-required SQLite path remains a deterministic, provider-free,
+  single-process smoke oracle. A process-local mutex serializes writers and a
+  never-replaced process-lifetime OS lock rejects a second file-backed smoke
+  process. Neither is live, release, or paid-call authority; second-process,
+  pgvector, live, and paid modes refuse before any call. Production vector
+  writes remain PostgreSQL+pgvector-only, and D Core has no SQLite answer cache.
+- The live gate uses a provider-free pinned baseline definition, three pairwise-
+  distinct authenticated human review roles, and no paid LLM judge. Component
+  accounting finalizes before one atomic case/AgentRun projection. The terminal
+  authorization outcome distinguishes `ordinary_execution_failed`,
+  `execution_contract_failed`, and the all-executed rubric-red
+  `quality_gate_failed`; an append-only quality report is optional for the first
+  two when adjudication was not reached, but required for rubric-red and green
+  completion. No paid D call has occurred.
+- This entry records planning/spec work only. The written design is approved;
+  the next task is a separate TDD implementation plan, which is still planning
+  and must be separately approved before production code changes.
 
 ## 2026-08-30 Single-root local environment contract
 
