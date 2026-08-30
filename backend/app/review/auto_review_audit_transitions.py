@@ -7,9 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.models import (
+    AgentWorkflowThread,
     AutoReviewPostAudit,
     AutoReviewPromotionDecision,
     AutoReviewRolloutState,
+    AutoReviewValidation,
+    ReviewItem,
 )
 from backend.app.review.auto_review_revoke import (
     _SOURCE_INVALIDATION_CONTEXTS_INFO_KEY,
@@ -107,3 +110,70 @@ class AutoReviewAuditTransitionStore:
             raise TypeError(
                 'Source-invalidation context was not issued by reconciliation'
             )
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowComparisonResult:
+    review_item_id: int
+    changed: bool
+    supported: bool
+    excluded: bool
+
+
+class AutoReviewShadowComparisonStore:
+    """Records one later human outcome against an unchanged shadow prediction."""
+
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def record(
+        self,
+        *,
+        item: ReviewItem,
+        locked_rollout: AutoReviewRolloutState,
+    ) -> ShadowComparisonResult:
+        if item.workflow_thread_id is None:
+            return ShadowComparisonResult(item.id, False, False, False)
+        validations = tuple(
+            self._db.scalars(
+                select(AutoReviewValidation).where(
+                    AutoReviewValidation.review_item_id == item.id,
+                    AutoReviewValidation.workflow_thread_id
+                    == item.workflow_thread_id,
+                    AutoReviewValidation.status == 'completed',
+                    AutoReviewValidation.shadow_comparison_status == 'pending',
+                )
+            ).all()
+        )
+        if len(validations) != 1:
+            return ShadowComparisonResult(item.id, False, False, False)
+        validation = validations[0]
+        thread = self._db.get(AgentWorkflowThread, item.workflow_thread_id)
+        if (
+            thread is None
+            or locked_rollout.security_scope_id != thread.security_scope_id
+            or locked_rollout.policy_version != validation.policy_version
+        ):
+            raise ValueError('shadow comparison rollout identity changed')
+        now = datetime.now(UTC)
+        if thread.evidence_version_hash != validation.evidence_version_hash:
+            validation.shadow_comparison_status = 'excluded'
+            validation.shadow_exclusion_code = 'evidence_version_changed'
+            validation.shadow_human_resolution = None
+            validation.shadow_compared_at = now
+            self._db.flush([validation])
+            return ShadowComparisonResult(item.id, True, False, True)
+        if item.status not in {'approved', 'rejected', 'needs_more_evidence'}:
+            return ShadowComparisonResult(item.id, False, False, False)
+        supported = item.status == 'approved'
+        validation.shadow_comparison_status = 'completed'
+        validation.shadow_human_resolution = item.status
+        validation.shadow_exclusion_code = None
+        validation.shadow_compared_at = now
+        locked_rollout.shadow_completed_count += 1
+        if supported:
+            locked_rollout.shadow_supported_count += 1
+        locked_rollout.state_version += 1
+        locked_rollout.updated_at = now
+        self._db.flush([validation, locked_rollout])
+        return ShadowComparisonResult(item.id, True, supported, False)

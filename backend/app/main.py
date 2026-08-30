@@ -42,6 +42,9 @@ from backend.app.api.v1.router import api_router
 from backend.app.core.config import Settings, get_settings
 from backend.app.db.session import SessionLocal
 from backend.app.models.agent_workflows import AgentWorkflowThread
+from backend.app.review.auto_review_quality_revoke import (
+    AutoReviewQualityRevokeService,
+)
 from backend.app.review.auto_review_source_reconciliation import (
     SourceReconciliationResult,
     build_source_reconciliation_service,
@@ -120,6 +123,9 @@ def create_app(
             source_reconciliation = _recover_source_reconciliation_batch(
                 workflow_session_factory, settings=settings, limit=100
             )
+            quality_remediation_recovered = _recover_quality_remediation_batch(
+                workflow_session_factory, settings=settings, limit=100
+            )
             try:
                 catalog = build_review_agent_catalog(settings)
                 agent_registry = catalog.registry
@@ -158,6 +164,9 @@ def create_app(
             app.state.auto_review_validation_store = validation_store
             app.state.auto_review_validation_orchestrator = validation_orchestrator
             app.state.auto_review_source_reconciliation = source_reconciliation
+            app.state.auto_review_quality_remediation_recovered = (
+                quality_remediation_recovered
+            )
             yield
         finally:
             checkpoint_runtime.close()
@@ -211,6 +220,21 @@ def _recover_source_reconciliation_batch(
             remaining_count=1,
             readiness=False,
         )
+
+
+def _recover_quality_remediation_batch(
+    session_factory: WorkflowSessionFactory,
+    *,
+    settings: Settings,
+    limit: int,
+) -> int:
+    try:
+        with session_factory() as db:
+            return AutoReviewQualityRevokeService(
+                db, settings=settings
+            ).recover_pending_remediation(limit=limit)
+    except (SQLAlchemyError, ValueError):
+        return 0
 
 
 app = create_app()

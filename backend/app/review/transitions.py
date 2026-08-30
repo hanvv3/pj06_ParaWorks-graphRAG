@@ -78,6 +78,17 @@ from backend.app.review.actors import (
     _assert_approval_directive,
     _assert_review_resolution_actor,
 )
+from backend.app.review.auto_review_audit import (
+    AutoReviewPromotionReservationService,
+    PromotionReservationInput,
+)
+from backend.app.review.auto_review_audit_transitions import (
+    AutoReviewShadowComparisonStore,
+)
+from backend.app.review.auto_review_rollout import (
+    RolloutGateError,
+    RolloutSelectionInput,
+)
 from backend.app.schemas.auto_review import AUTO_REVIEW_POLICY_VERSION
 from backend.app.schemas.review_workflow import (
     COMPANY_MEMORY_SELECTION_POLICY_VERSION,
@@ -146,6 +157,10 @@ class _AutoApprovalLocator:
     authorized_percentage_at_launch: int
     rollout_authorization_generation: int
     rollout_control_epoch: int
+    requested_percentage: int
+    stored_percentage: int
+    workflow_execution_hmac: str
+    candidate_key: str
 
 
 class InvalidReviewTransition(ValueError):  # noqa: N818 - name is a frozen public contract
@@ -216,7 +231,16 @@ class ReviewTransitionService:
                         directive=directive,
                         locator=auto_locator,
                     )
-                    self._lock_and_require_rollout(db, locator=auto_locator)
+                    locked_rollout = self._lock_and_require_rollout(
+                        db, locator=auto_locator
+                    )
+                else:
+                    locked_rollout = None
+                shadow_rollout = (
+                    self._lock_shadow_rollout(db, preview=preview)
+                    if actor.actor_type == 'human'
+                    else None
+                )
                 validation_ids: list[int] = []
                 item = self._lock_approval_item(
                     db,
@@ -243,7 +267,17 @@ class ReviewTransitionService:
                         item=item,
                         actor=actor,
                     )
-                return self._transition_item(
+                    if locked_rollout is None:
+                        raise AutoReviewAdmissionNotReady(
+                            'Automatic review rollout lock is missing'
+                        )
+                    self._reserve_auto_promotion(
+                        db,
+                        item=item,
+                        locator=auto_locator,
+                        rollout=locked_rollout,
+                    )
+                result = self._transition_item(
                     db=db,
                     item=item,
                     action=action,
@@ -254,13 +288,37 @@ class ReviewTransitionService:
                         validation_ids[0] if validation_ids else None
                     ),
                 )
+                if shadow_rollout is not None:
+                    AutoReviewShadowComparisonStore(db).record(
+                        item=item,
+                        locked_rollout=shadow_rollout,
+                    )
+                return result
         if preview.candidate_contract_version == 'c5-v1':
-            item, _ = CanonicalReviewEvidenceStalenessResolver(
-                settings=self._settings
-            ).lock_item_and_resolve_drift(
-                db,
-                item_id=item_id,
-            )
+            with KeyedMutationGuard.generation_barrier(db):
+                lock_runtime_state(db, mode='share')
+                shadow_rollout = self._lock_shadow_rollout(db, preview=preview)
+                item, _ = CanonicalReviewEvidenceStalenessResolver(
+                    settings=self._settings
+                ).lock_item_and_resolve_drift(
+                    db,
+                    item_id=item_id,
+                )
+                result = self._transition_item(
+                    db=db,
+                    item=item,
+                    action=action,
+                    actor=actor,
+                    note=note,
+                    approval_directive=directive,
+                    locked_auto_validation_id=None,
+                )
+                if shadow_rollout is not None:
+                    AutoReviewShadowComparisonStore(db).record(
+                        item=item,
+                        locked_rollout=shadow_rollout,
+                    )
+                return result
         else:
             items = self._load_items(db, [item_id], for_update=True)
             if not items:
@@ -275,6 +333,34 @@ class ReviewTransitionService:
             approval_directive=directive,
             locked_auto_validation_id=None,
         )
+
+    @staticmethod
+    def _lock_shadow_rollout(
+        db: Session,
+        *,
+        preview: ReviewItem,
+    ) -> AutoReviewRolloutState | None:
+        if preview.workflow_thread_id is None:
+            return None
+        validation = db.scalar(
+            select(AutoReviewValidation).where(
+                AutoReviewValidation.review_item_id == preview.id,
+                AutoReviewValidation.workflow_thread_id
+                == preview.workflow_thread_id,
+                AutoReviewValidation.status == 'completed',
+                AutoReviewValidation.shadow_comparison_status == 'pending',
+            )
+        )
+        thread = db.get(AgentWorkflowThread, preview.workflow_thread_id)
+        if validation is None or thread is None:
+            return None
+        statement = select(AutoReviewRolloutState).where(
+            AutoReviewRolloutState.security_scope_id == thread.security_scope_id,
+            AutoReviewRolloutState.policy_version == validation.policy_version,
+        )
+        if db.get_bind().dialect.name == 'postgresql':
+            statement = statement.with_for_update()
+        return db.scalar(statement)
 
     def _lock_approval_item(
         self,
@@ -409,6 +495,7 @@ class ReviewTransitionService:
             request.authorized_percentage_at_launch,
             request.rollout_authorization_generation,
             request.rollout_control_epoch,
+            request.auto_review_enforce_percentage,
         )
         if (
             validation_call is None
@@ -435,6 +522,10 @@ class ReviewTransitionService:
             authorized_percentage_at_launch=int(required_rollout[0]),
             rollout_authorization_generation=int(required_rollout[1]),
             rollout_control_epoch=int(required_rollout[2]),
+            requested_percentage=int(required_rollout[3]),
+            stored_percentage=int(required_rollout[3]),
+            workflow_execution_hmac=workflow.input_hash,
+            candidate_key=preview.candidate_key or '',
         )
 
     def _require_exact_reaffirmation_collision_clear(
@@ -642,7 +733,7 @@ class ReviewTransitionService:
         db: Session,
         *,
         locator: _AutoApprovalLocator | None,
-    ) -> None:
+    ) -> AutoReviewRolloutState:
         if locator is None:
             raise AutoReviewAdmissionNotReady('Automatic review rollout is missing')
         statement = select(AutoReviewRolloutState).where(
@@ -650,7 +741,7 @@ class ReviewTransitionService:
             AutoReviewRolloutState.policy_version == locator.policy_version,
         )
         if db.get_bind().dialect.name == 'postgresql':
-            statement = statement.with_for_update(read=True)
+            statement = statement.with_for_update()
         rollout = db.scalar(statement)
         if (
             rollout is None
@@ -665,6 +756,67 @@ class ReviewTransitionService:
             raise AutoReviewAdmissionNotReady(
                 'Automatic review rollout authorization is stale'
             )
+        return rollout
+
+    def _reserve_auto_promotion(
+        self,
+        db: Session,
+        *,
+        item: ReviewItem,
+        locator: _AutoApprovalLocator,
+        rollout: AutoReviewRolloutState,
+    ) -> None:
+        if not locator.candidate_key or locator.requested_percentage not in {10, 100}:
+            raise AutoReviewAdmissionNotReady(
+                'Automatic review selection identity is incomplete'
+            )
+        request = PromotionReservationInput(
+            review_item_id=item.id,
+            security_scope_id=locator.security_scope_id,
+            policy_version=locator.policy_version,
+            selection=RolloutSelectionInput(
+                security_scope_hmac=build_keyed_fingerprint(
+                    {'security_scope_id': locator.security_scope_id},
+                    settings=self._settings,
+                    schema_version='auto-review-security-scope:v1',
+                    policy_version=locator.policy_version,
+                ),
+                workflow_execution_hmac=locator.workflow_execution_hmac,
+                candidate_key=locator.candidate_key,
+                policy_version=locator.policy_version,
+                rollout_control_epoch=locator.rollout_control_epoch,
+                rollout_authorization_generation=(
+                    locator.rollout_authorization_generation
+                ),
+                requested_percentage=locator.requested_percentage,  # type: ignore[arg-type]
+                authorized_percentage=(
+                    locator.authorized_percentage_at_launch  # type: ignore[arg-type]
+                ),
+                fingerprint_key_version=(
+                    self._settings.agent_runtime_fingerprint_key_version
+                ),
+                fingerprint_key_material_verifier=(
+                    fingerprint_key_material_verifier(
+                        self._settings.agent_runtime_fingerprint_secret
+                    )
+                ),
+            ),
+            requested_percentage=locator.requested_percentage,  # type: ignore[arg-type]
+            stored_percentage=locator.stored_percentage,  # type: ignore[arg-type]
+            authorized_percentage=(
+                locator.authorized_percentage_at_launch  # type: ignore[arg-type]
+            ),
+        )
+        try:
+            AutoReviewPromotionReservationService(
+                db, settings=self._settings
+            ).reserve_auto_promotion(
+                request,
+                locked_rollout=rollout,
+                locked_item=item,
+            )
+        except RolloutGateError as exc:
+            raise AutoReviewAdmissionNotReady(str(exc)) from None
 
     def _lock_and_require_auto_calls(
         self,

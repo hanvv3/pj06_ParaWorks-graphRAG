@@ -3292,3 +3292,26 @@ tests passed with 53 tests; ruff passed.
 - Next is C.5 Task 10, an actual implementation task: locked rollout/canary
   authority, deterministic audit selection, breaker handling, promotion
   coordination, and quality revoke. Slack remains last.
+
+## 2026-08-30 C.5 Task 10 complete
+
+- Task 10 is implementation-complete on `codex/rag-orchestrator-agent`.
+  Read-only default rollout state, monotonic authorization latches, stable
+  enforce/audit HMAC cohorts, mandatory audit slots, immutable promotion
+  decisions, and same-transaction selected audits now gate automatic approval.
+- Human audit and quality-coded revoke use a breaker-first durable quarantine.
+  Missing audits become manual critical audits, confirmed audits receive an
+  immutable correction, failed exact revoke stays remediation-required, and
+  lifespan recovery retries only persisted pending/failed remediation.
+- Human shadow outcomes update the rollout denominator exactly once only for
+  unchanged evidence. Breaker close keeps the authorization latch at zero and
+  refuses unresolved remediation or any corrected critical evidence.
+- Fresh fake-provider verification: focused Task 10 + transition/validation
+  suite `103 passed`; disposable PostgreSQL Task 10 suite `54 passed`; Ruff,
+  compile, and diff checks pass. No paid provider call, rollout enablement,
+  push, merge, or PR action occurred. Task 11 is the next actual implementation
+  slice: signed zero-call launch confirmation and version-selection facade.
+- Preserve the persisted schema spelling `first_50`. The Task 10 plan prose
+  uses `mandatory_50` in a few paragraphs, but the approved design and existing
+  database check constraint use `first_50`; changing that output schema requires
+  an explicit human decision.

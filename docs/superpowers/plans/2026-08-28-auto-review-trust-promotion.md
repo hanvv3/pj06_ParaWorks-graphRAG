@@ -2609,7 +2609,7 @@ git commit -m "feat: coordinate cached auto review validation"
 - Routes every quality-coded human revoke through the same breaker-first audit authority. A missing audit becomes `manual` critical, a pending audit becomes critical, and an already confirmed audit receives an immutable critical correction; none may use the normal direct-revoke path.
 - Allows breaker close only through an admin service with `auto_review_rollout_admin`, bounded reason, resolved remediation, affected-item adjudication, regression-gate reference, and zero audit corrections on the current policy row. Closing never automatically re-enables enforce; any correction requires a reviewed new policy version and fresh rollout gates.
 
-- [ ] **Step 1: Write the rollout state machine and sampling tests**
+- [x] **Step 1: Write the rollout state machine and sampling tests**
 
 Cover:
 
@@ -2681,13 +2681,13 @@ Cover:
 
 Test replay/concurrency so promotion ordinal, selected/completed/critical counters, and shadow counts increment once.
 
-- [ ] **Step 2: Run rollout/audit tests and observe RED**
+- [x] **Step 2: Run rollout/audit tests and observe RED**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_rollout.py backend/tests/test_auto_review_audit.py backend/tests/test_auto_review_quality_revoke.py backend/tests/test_auto_review_rollout_admin.py backend/tests/test_auto_review_orchestrator.py backend/tests/test_auto_review_postgres.py backend/tests/test_agent_runtime_lifespan.py -q
 ```
 
-- [ ] **Step 3: Implement locked, replay-safe rollout projection**
+- [x] **Step 3: Implement locked, replay-safe rollout projection**
 
 `AutoReviewRolloutPolicyService.peek_or_default()` is strictly read-only. When `(security_scope_id, policy_version)` is missing, it returns the exact sentinel `control_epoch=0`, latch/authorized percentage `0`, authorization generation `0`, breaker false, counters 0; it never inserts or allocates a generation. Zero-call preview signs only the control epoch plus latch/authorization/breaker fields, not metric counters or their optimistic `state_version`. Start first verifies the token, then in its first write transaction uses `INSERT ... ON CONFLICT DO NOTHING` and `SELECT ... FOR UPDATE` to `ensure_row()`. The inserted row has exactly the sentinel values and no raw operator identity. It re-compares every signed control field before thread creation; a concurrent authorization/breaker/control change increments `control_epoch` and becomes `cost_preview_changed`, while shadow/audit counter changes do not invalidate cost/authority. Two untouched first users converge on one default row and the canonical idempotent workflow. Gate calculations use Decimal precision and persisted human outcomes only:
 
@@ -2706,7 +2706,7 @@ Effective percentage is `min(requested_percentage, authorized_percentage_at_laun
 
 Every required purpose-specific provider-safety row is locked in sorted `(purpose, provider, model, reasoning_effort)` order before projection/rollout/Source/workflow whenever they participate: `shared key-generation barrier -> AutoReviewRuntimeKeyState FOR SHARE -> sorted AutoReviewProviderSafetyState FOR UPDATE/SHARE -> projection advisory lock when needed -> sorted rollout rows -> sorted Source rows -> sorted workflow rows -> call/validation -> ReviewItem`. Preview reads a bounded set snapshot without mutation; start, extraction E1/E2, validation claim/A3, and transaction B require every workflow-bound extraction row plus the validation row to exist, be closed, and match the configured provider/model/reasoning, registry-owned estimator, exact registry price tuple, and authorized purpose-specific cost-policy version. An overrun transaction increments only its purpose row's `overrun_count` once, appends the Task 9 call-attributed overrun event, updates the aggregate backpointer, and opens that breaker atomically with the actual charge before any later purpose check can pass. Initial provider authorization and operator clear similarly append exactly one operator-attributed `AutoReviewProviderSafetyEvent` using the current key identity; they never overwrite older events or share a mutable actor slot.
 
-- [ ] **Step 4: Create audit selection in the promotion transaction**
+- [x] **Step 4: Create audit selection in the promotion transaction**
 
 Freeze selection as unsigned full-digest arithmetic, not language/runtime hashing. Enforce candidate selection uses HMAC-SHA256 domain `auto-review-enforce-selection:v1`; audit cohort selection uses `auto-review-audit-selection:v1`. Both canonicalize UTF-8/NFC JSON with sorted compact keys over the security-scope HMAC, workflow-execution HMAC, candidate key, policy version, stored rollout state/generation, requested and authorized percentages, fingerprint key version/material verifier; audit selection additionally binds promotion ordinal, the stored enforce-selection fingerprint, and the locked mandatory confirmed/pending counters before this decision. Interpret all 32 digest bytes as one unsigned big-endian integer and select when `integer % 100 < percentage`. While `confirmed_mandatory_audit_count < 50`, a promotion is allowed only when `confirmed + pending < 50`; it deterministically selects `mandatory_50` and increments pending, regardless of ordinal. Full pending slots force human review rather than an unsampled auto approval. Store the resulting fingerprints/counter snapshot/result once; restart, input permutation, source invalidation, or later key/config changes never re-hash an existing decision.
 
@@ -2725,7 +2725,7 @@ Integrate the rollout authority into `AutoReviewOrchestrator` at both sides of t
 
 Human transitions that contribute shadow comparisons use one coordinator as well. An unlocked locator first discovers the V2.1 scope/policy/source/workflow ids. Reject/needs-more then acquires `shared generation/runtime -> rollout -> sorted Source FOR SHARE -> workflow -> ReviewItem`, rechecks identity/status/evidence, commits the human transition and exactly one unchanged-evidence comparison together. Human approve follows `shared generation/runtime -> projection -> rollout -> sorted Source FOR SHARE -> workflow -> ReviewItem -> provenance/knowledge`, preserving the Task 5 projection rules. V2.0 transitions and V2.1 transitions with no shadow record keep their existing behavior. No path locks a ReviewItem/workflow and then tries to acquire Source, rollout, or projection, so concurrent human, automatic, ingestion, and reconciliation transactions converge without deadlock or double-counting.
 
-- [ ] **Step 5: Implement breaker-first critical audit with durable recovery**
+- [x] **Step 5: Implement breaker-first critical audit with durable recovery**
 
 Transaction 1 validates the authorized auditor, normalizes the required bounded human reason, and delegates to the shared `AutoReviewAuditTransitionStore`, which persists that immutable access-controlled reason with the outcome/auditor identity, finalizes the critical outcome exactly once, increments counters once, opens the breaker, sets audit status `remediation_required` with system-only code `revoke_pending`, appends the matching control event, and commits. Neither the reason nor source/model content enters public projection, AuditLog, or normal logs. That committed audit state is also the durable serving quarantine: every trusted-serving API/RAG/pgvector predicate immediately excludes only the affected auto approval effect, even if the process crashes before revoke, while `ReviewEvidenceVisibilityService` keeps it actionable to an authorized reviewer. Independent human provenance remains eligible. The same store handles non-critical human confirmation; it is the only writer of selected-audit status/counters and uses actor HMAC domain `auto-review-audit-actor:v1`. Transaction 2 invokes exact idempotent revoke. On success, transaction 3 marks the audit completed and retains immutable critical attribution/reason; on any bounded failure it retains `remediation_required`, quarantine, and a bounded failure code. Restart recovery performs only an unlocked bounded id scan of `revoke_pending` rows; for each id it enters the normal generation/runtime/projection/rollout/Source/workflow/ReviewItem/audit order, rechecks the row, and retries exact revoke idempotently. It never holds an audit-row lock while acquiring an earlier global lock; concurrent workers converge on the already-locked canonical item/audit state. Never roll back the already-open breaker or quarantine, and never leave a critical committed outcome without a durable recovery marker.
 
@@ -2747,14 +2747,14 @@ python -m backend.app.admin.auto_review_rollout recover-remediation --limit 100
 
 The CLI has no subject/secret/raw-output option, prints only aggregate counts, modes, generations, state versions and breaker/readiness booleans, and uses exit `0` success, `2` bounded authorization/configuration/CAS refusal, `3` unresolved remediation/readiness failure. Public Review routes expose none of these mutations. Final lifespan ordering is exact: key bootstrap/projection status, then one bounded source-reconciliation recovery batch, then (after Task 12 installs it) one bounded extraction/validation call-ledger recovery batch, then one bounded `recover_pending_remediation(limit=100)` pass. Repeated source, call-ledger, and rollout admin CLIs are the operator continuation paths.
 
-- [ ] **Step 6: Run rollout/audit tests and lint GREEN**
+- [x] **Step 6: Run rollout/audit tests and lint GREEN**
 
 ```powershell
 uv run --locked pytest backend/tests/test_auto_review_rollout.py backend/tests/test_auto_review_audit.py backend/tests/test_auto_review_quality_revoke.py backend/tests/test_auto_review_rollout_admin.py backend/tests/test_auto_review_postgres.py backend/tests/test_agent_runtime_lifespan.py -q
 uv run --locked ruff check backend/app/review/auto_review_rollout.py backend/app/review/auto_review_audit.py backend/app/review/auto_review_quality_revoke.py backend/app/review/auto_review_audit_transitions.py backend/app/admin/auto_review_rollout.py backend/app/agent_runtime/auto_review_orchestrator.py backend/app/review/transitions.py backend/app/review/auto_review_resolution.py backend/app/main.py backend/tests/test_auto_review_rollout.py backend/tests/test_auto_review_audit.py backend/tests/test_auto_review_quality_revoke.py backend/tests/test_auto_review_rollout_admin.py backend/tests/test_auto_review_orchestrator.py backend/tests/test_auto_review_postgres.py backend/tests/test_agent_runtime_lifespan.py
 ```
 
-- [ ] **Step 7: Commit the rollout safety slice**
+- [x] **Step 7: Commit the rollout safety slice**
 
 ```powershell
 git add backend/app/review/auto_review_rollout.py backend/app/review/auto_review_audit.py backend/app/review/auto_review_quality_revoke.py backend/app/review/auto_review_audit_transitions.py backend/app/admin/auto_review_rollout.py backend/app/agent_runtime/auto_review_orchestrator.py backend/app/review/transitions.py backend/app/review/auto_review_resolution.py backend/app/main.py backend/tests/test_auto_review_rollout.py backend/tests/test_auto_review_audit.py backend/tests/test_auto_review_quality_revoke.py backend/tests/test_auto_review_rollout_admin.py backend/tests/test_auto_review_orchestrator.py backend/tests/test_auto_review_postgres.py backend/tests/test_agent_runtime_lifespan.py

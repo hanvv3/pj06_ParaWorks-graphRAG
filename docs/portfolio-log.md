@@ -5072,3 +5072,24 @@ Cost/security note:
   schema: Task 9 unit/lifespan `63 passed`, PostgreSQL integration `13 passed`,
   plus the existing provenance regression boundary. No live LLM, connector, or
   embedding call and no rollout enablement occurred.
+
+## 2026-08-30 C.5 Task 10 rollout, audit, and remediation authority
+
+- Added fail-closed rollout resolution with a read-only missing-row sentinel,
+  explicit 0/10/100 authorization latch, control epochs/generations, stable
+  full-digest HMAC selection, and mandatory first-50 human audit slots.
+- Every automatic approval now reserves an immutable promotion decision and
+  any selected post-audit in its locked approval transaction. Shadow-mode
+  predictions are compared exactly once with later human outcomes only when
+  the evidence version is unchanged.
+- Critical audits and quality-coded revokes commit their breaker and serving
+  quarantine before exact revoke. Missing/pending/confirmed audit cases
+  converge on manual critical audit, critical completion, or immutable
+  correction respectively; failed revoke remains restart-recoverable.
+- The restricted rollout control plane authorizes only one stage at a time and
+  closes a breaker only after remediation, while keeping authorization at zero.
+  Corrected critical evidence permanently requires a separately reviewed new
+  policy.
+- Fresh deterministic verification passed `103` focused tests and `54`
+  PostgreSQL-backed tests. No live provider, connector, or embedding call was
+  made, and rollout remained disabled.

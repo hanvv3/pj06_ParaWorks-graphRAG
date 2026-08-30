@@ -1457,10 +1457,11 @@ class AutoReviewValidationStore:
                 allow_open=True,
                 require_current_registry=False,
             )
-            rollout_matches = self._lock_rollout_authority(
+            rollout_authority = self._lock_rollout_authority(
                 db,
                 workflow_thread_id=context.workflow_thread_id,
             )
+            rollout_matches = bool(rollout_authority)
             source_states = self._lock_source_states(
                 db,
                 workflow_thread_id=context.workflow_thread_id,
@@ -1538,10 +1539,11 @@ class AutoReviewValidationStore:
                 allow_open=True,
                 require_current_registry=False,
             )
-            rollout_matches = self._lock_rollout_authority(
+            rollout_authority = self._lock_rollout_authority(
                 db,
                 workflow_thread_id=context.workflow_thread_id,
             )
+            rollout_matches = bool(rollout_authority)
             source_states = self._lock_source_states(
                 db,
                 workflow_thread_id=context.workflow_thread_id,
@@ -1692,6 +1694,18 @@ class AutoReviewValidationStore:
                 row.estimated_cost_usd = costs[index]
                 row.cache_hit = False
                 row.completed_at = now
+                if (
+                    workflow_request.auto_review_mode == 'shadow'
+                    and item.policy_decision in {'auto_approve', 'reuse_trusted'}
+                ):
+                    row.shadow_comparison_status = 'pending'
+                    row.shadow_human_resolution = None
+                    row.shadow_exclusion_code = None
+                    row.shadow_compared_at = None
+                    if isinstance(rollout_authority, AutoReviewRolloutState):
+                        rollout_authority.shadow_predicted_count += 1
+                        rollout_authority.state_version += 1
+                        rollout_authority.updated_at = now
                 projections.append(
                     self._projection(row, slot_index=index, cache_hit=False)
                 )
@@ -2110,7 +2124,7 @@ class AutoReviewValidationStore:
         *,
         allow_open: bool,
         require_current_registry: bool = True,
-    ) -> bool:
+    ) -> AutoReviewRolloutState | bool:
         registry_matches = (
             state.authorized_cost_policy_version
             == AUTO_REVIEW_COST_POLICY_VERSION
@@ -2149,19 +2163,19 @@ class AutoReviewValidationStore:
                 AutoReviewRolloutState.policy_version
                 == workflow_request.auto_review_policy_version,
             )
-            .with_for_update(read=True)
+            .with_for_update()
         )
         effective_mode = expected_mode or workflow_request.auto_review_mode
         if rollout is None:
             return effective_mode != 'enforce'
-        return bool(
+        return rollout if (
             not rollout.breaker_open
             and rollout.control_epoch == workflow_request.rollout_control_epoch
             and rollout.authorization_generation
             == workflow_request.rollout_authorization_generation
             and rollout.max_authorized_percentage
             >= (workflow_request.authorized_percentage_at_launch or 0)
-        )
+        ) else False
 
     @staticmethod
     def _lock_source_states(

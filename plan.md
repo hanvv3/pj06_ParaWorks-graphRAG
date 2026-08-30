@@ -149,14 +149,17 @@ Current state:
 - PostgreSQL restart, reconciliation, exact-batch launch, concurrent Review
   transition, concurrent resume, terminal-race, checkpoint privacy, and exact
   cleanup coverage is release-verified with zero PostgreSQL skips.
-- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–9 are implemented
+- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–10 are implemented
   and independently verified. Deterministic eligibility/policy authority and
   the isolated real LangChain `gpt-5.6-terra` validator boundary now join the
   exact source/current-version, revocation, serving, and vector-state
-  contracts. Task 9 now adds PostgreSQL-authoritative one-call validation
+  contracts. Task 9 adds PostgreSQL-authoritative one-call validation
   leases, atomic workflow cost reservations, restart-safe replay, key/rollout/
-  source/permission revalidation, and bounded observation persistence. Product
-  Tasks 10–16 remain unstarted; no paid provider call or
+  source/permission revalidation, and bounded observation persistence. Task 10
+  adds fail-closed rollout latches, stable canary/audit cohorts, immutable
+  promotion decisions, breaker-first quality quarantine/revoke, recovery, and
+  human shadow comparison accounting. Product Tasks 11–16 remain unstarted;
+  no paid provider call or
   rollout enablement occurred.
 - A later Task 16 release-gate dry run exposed a test-infrastructure boundary,
   not a Task 5 product regression: one shared PostgreSQL `public` schema caused
@@ -172,17 +175,14 @@ Current state:
 
 Next priorities:
 
-1. Implement C.5 product Task 10 as the next approved TDD slice, adding the
-   locked rollout/audit promotion authority around Task 9's persisted
-   validation observations.
-2. Continue C.5 product Tasks 11–16 in the approved order; keep rollout disabled
+1. Continue C.5 product Tasks 11–16 in the approved order; keep rollout disabled
    and live paid-provider benchmarks separately authorized. At Task 16 entry,
    first implement the whole-suite PostgreSQL isolation boundary after its
    detailed plan is separately approved; planning it now does not reorder
-   Tasks 7–15.
-3. After all C.5 product tasks are complete, plan Deliverable D Retriever Port
+   Tasks 11–15.
+2. After all C.5 product tasks are complete, plan Deliverable D Retriever Port
    and RAG Answer Graph V2, followed by Deliverable E Neo4j GraphRAG.
-4. Continue frontend consistency only in its planned C.5 tasks, and keep Slack
+3. Continue frontend consistency only in its planned C.5 tasks, and keep Slack
    data reconstruction plus its visible regression baseline last.
 
 ## 4. Shared Runtime Contracts
@@ -483,8 +483,8 @@ Tasks:
     checkpoint runtimes/pools/savers; A is closed and disposed before B exists.
   - This historical boundary is superseded: the C.5 design/spec, implementation
     plan, and exact execution profile are finalized.
-- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–9 implemented
-  and verified; product Task 10 is the next implementation slice.
+- Deliverable C.5 Auto-Review Trust Promotion: product Tasks 1–10 implemented
+  and verified; product Task 11 is the next implementation slice.
   - Approved spec:
     `docs/superpowers/specs/2026-08-28-auto-review-trust-promotion-design.md`.
   - Implementation plan:
@@ -506,7 +506,10 @@ Tasks:
     8. Isolated real LangChain Terra validator boundary: complete.
     9. Persistent validation lease/cost/replay/revalidation orchestration:
        complete and PostgreSQL-verified.
-    10. Tasks 10–16, Deliverable D/E, and Slack recovery: not started; Task 10
+    10. Locked rollout/canary authority, immutable promotion/audit decisions,
+        breaker-first quality revoke/recovery, and shadow comparison: complete
+        and PostgreSQL-verified.
+    11. Tasks 11–16, Deliverable D/E, and Slack recovery: not started; Task 11
         is the next implementation slice.
   - Separates canonical source evidence, pending AI knowledge, and trusted
     knowledge. Raw evidence is not official knowledge and C.5 does not broaden

@@ -66,6 +66,7 @@ def test_app_lifespan_starts_exposes_and_closes_checkpoint_runtime_once(
         assert app.state.review_model_readiness.ready is True
         assert app.state.auto_review_validation_store is not None
         assert app.state.auto_review_validation_orchestrator is not None
+        assert app.state.auto_review_quality_remediation_recovered == 0
         assert client.get('/health').status_code == 200
 
     assert events == ['factory', 'start:False', 'close']

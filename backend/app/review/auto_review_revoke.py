@@ -99,6 +99,53 @@ _SOURCE_INVALIDATION_CONTEXTS_INFO_KEY = (
 )
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class QualityRevokeContext:
+    """Session-bound capability minted after durable quality quarantine."""
+
+    session_identity: int
+    review_item_id: int
+    assessment_id: int
+    reason_code: AutoReviewRevokeReasonCode
+    remediation_kind: Literal['audit', 'correction']
+    remediation_id: int
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise TypeError('Quality-revoke contexts are minted only by the coordinator')
+
+    def __copy__(self) -> NoReturn:
+        raise TypeError('Quality-revoke contexts cannot be copied')
+
+    def __deepcopy__(self, memo: dict[int, object]) -> NoReturn:
+        raise TypeError('Quality-revoke contexts cannot be copied')
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError('Quality-revoke contexts cannot be serialized')
+
+
+_QUALITY_REVOKE_CONTEXTS_INFO_KEY = 'paraworks_c5_quality_revoke_contexts'
+
+
+def mint_quality_revoke_context(
+    db: Session,
+    *,
+    review_item_id: int,
+    assessment_id: int,
+    reason_code: AutoReviewRevokeReasonCode,
+    remediation_kind: Literal['audit', 'correction'],
+    remediation_id: int,
+) -> QualityRevokeContext:
+    context = object.__new__(QualityRevokeContext)
+    object.__setattr__(context, 'session_identity', id(db))
+    object.__setattr__(context, 'review_item_id', review_item_id)
+    object.__setattr__(context, 'assessment_id', assessment_id)
+    object.__setattr__(context, 'reason_code', reason_code)
+    object.__setattr__(context, 'remediation_kind', remediation_kind)
+    object.__setattr__(context, 'remediation_id', remediation_id)
+    db.info.setdefault(_QUALITY_REVOKE_CONTEXTS_INFO_KEY, {})[id(context)] = context
+    return context
+
+
 @dataclass(frozen=True, slots=True)
 class AutoReviewRevokeResult:
     review_item_id: int
@@ -160,6 +207,28 @@ class AutoReviewRevokeService:
             )
             contexts.pop(id(context), None)
 
+    def revoke_quality(
+        self,
+        *,
+        context: QualityRevokeContext,
+        actor: ReviewResolutionActor,
+    ) -> AutoReviewRevokeResult:
+        """Run exact revoke only for a persisted critical audit/correction."""
+        self._validate_quality_context(context)
+        try:
+            return self._revoke(
+                review_item_id=context.review_item_id,
+                actor=actor,
+                reason_code=context.reason_code,
+                quality_context=context,
+            )
+        except Exception:
+            self._db.rollback()
+            raise
+        finally:
+            contexts = self._db.info.get(_QUALITY_REVOKE_CONTEXTS_INFO_KEY, {})
+            contexts.pop(id(context), None)
+
     def _revoke(
         self,
         *,
@@ -167,21 +236,26 @@ class AutoReviewRevokeService:
         actor: ReviewResolutionActor,
         reason_code: AutoReviewRevokeReasonCode,
         source_invalidation_context: SourceInvalidationRevokeContext | None = None,
+        quality_context: QualityRevokeContext | None = None,
     ) -> AutoReviewRevokeResult:
         _assert_review_resolution_actor(actor)
         system_invalidation = source_invalidation_context is not None
+        quality_revoke = quality_context is not None
         if system_invalidation:
             if actor.actor_type != 'auto_policy':
                 raise AutoReviewRevokeRefused('forbidden')
         else:
-            if (
+            if quality_revoke and actor.actor_type == 'auto_policy':
+                if actor.policy_version != 'auto-review-quality-recovery:v1':
+                    raise AutoReviewRevokeRefused('forbidden')
+            elif (
                 actor.actor_type != 'human'
                 or 'human_review' not in actor.capabilities
             ):
                 raise AutoReviewRevokeRefused('forbidden')
             if reason_code not in _REASON_CODES:
                 raise AutoReviewRevokeRefused('invalid_reason_code')
-            if reason_code != 'business_withdrawal':
+            if reason_code != 'business_withdrawal' and not quality_revoke:
                 raise AutoReviewRevokeRefused('quality_audit_required')
 
         planned_links = tuple(
@@ -251,6 +325,8 @@ class AutoReviewRevokeService:
                 AutoReviewAuditTransitionStore(
                     self._db
                 ).complete_source_invalidated(source_invalidation_context)
+            elif quality_revoke:
+                self._validate_quality_authority(quality_context)
             else:
                 self._validate_audit_gate(item.id)
             if (
@@ -262,7 +338,7 @@ class AutoReviewRevokeService:
 
             links = self._lock_active_links(item.id)
             self._validate_complete_links(links)
-            if assessment is None and not system_invalidation:
+            if assessment is None and not system_invalidation and not quality_revoke:
                 assessment = self._create_assessment(
                     item=item,
                     actor=actor,
@@ -484,6 +560,57 @@ class AutoReviewRevokeService:
             raise TypeError(
                 'Source-invalidation context was not issued by reconciliation'
             )
+
+    def _validate_quality_context(self, context: QualityRevokeContext) -> None:
+        if not isinstance(context, QualityRevokeContext):
+            raise TypeError('A quality-revoke context is required')
+        if context.session_identity != id(self._db):
+            raise TypeError('Quality-revoke context belongs to another session')
+        issued = self._db.info.get(_QUALITY_REVOKE_CONTEXTS_INFO_KEY, {}).get(
+            id(context)
+        )
+        if issued is not context:
+            raise TypeError('Quality-revoke context was not issued by the coordinator')
+
+    def _validate_quality_authority(self, context: QualityRevokeContext) -> None:
+        assessment = self._db.get(
+            AutoReviewRevocationAssessment, context.assessment_id
+        )
+        if (
+            assessment is None
+            or assessment.review_item_id != context.review_item_id
+            or assessment.reason_code != context.reason_code
+        ):
+            raise AutoReviewRevokeRefused('quality_authority_missing')
+        if context.remediation_kind == 'audit':
+            audit = self._db.get(AutoReviewPostAudit, context.remediation_id)
+            if (
+                audit is None
+                or audit.review_item_id != context.review_item_id
+                or audit.outcome not in {
+                    'incorrect',
+                    'permission_violation',
+                    'source_version_violation',
+                    'policy_violation',
+                }
+                or audit.status != 'remediation_required'
+                or audit.system_resolution_code
+                not in {'revoke_pending', 'revoke_failed'}
+            ):
+                raise AutoReviewRevokeRefused('quality_authority_missing')
+            return
+        correction = self._db.get(
+            AutoReviewAuditCorrection, context.remediation_id
+        )
+        if (
+            correction is None
+            or correction.review_item_id != context.review_item_id
+            or correction.assessment_id != context.assessment_id
+            or correction.status != 'remediation_required'
+            or correction.system_resolution_code
+            not in {'revoke_pending', 'revoke_failed'}
+        ):
+            raise AutoReviewRevokeRefused('quality_authority_missing')
 
     def _lock_active_links(
         self, review_item_id: int
