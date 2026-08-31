@@ -4,6 +4,7 @@ import importlib.util
 import inspect as pyinspect
 import os
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -16,7 +17,13 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import IntegrityError
 
+from backend.app.agent_runtime.rag_advisory_locks import (
+    RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+    register_advisory_identity_db,
+)
+from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
 from backend.app.core.config import get_settings
+from backend.tests.test_rag_v2_costs import _snapshot
 
 REVISION = 'e2b3c4d5f6a7'
 PREVIOUS_REVISION = 'd1a2b3c4e5f6'
@@ -54,7 +61,9 @@ def sqlite_migration(
 
 def _load_migration_module():
     assert MIGRATION_PATH.is_file()
-    spec = importlib.util.spec_from_file_location('rag_v2_task11_migration', MIGRATION_PATH)
+    spec = importlib.util.spec_from_file_location(
+        'rag_v2_task11_migration', MIGRATION_PATH
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -78,9 +87,9 @@ def test_sqlite_head_upgrade_is_additive_and_leaves_historical_rows_null(
     with engine.begin() as connection:
         connection.execute(
             text(
-                "INSERT INTO agent_runs (agent_name,prompt_version,status,source_window,"
-                "cache_key,model_name,input_tokens,output_tokens,total_tokens,"
-                "estimated_cost_usd,permission_level,metadata,started_at) VALUES "
+                'INSERT INTO agent_runs (agent_name,prompt_version,status,source_window,'
+                'cache_key,model_name,input_tokens,output_tokens,total_tokens,'
+                'estimated_cost_usd,permission_level,metadata,started_at) VALUES '
                 "('legacy','rag-answer:v1','complete','legacy','legacy','deterministic',"
                 "0,0,0,0.0,'internal','{}',CURRENT_TIMESTAMP)"
             )
@@ -91,7 +100,10 @@ def test_sqlite_head_upgrade_is_additive_and_leaves_historical_rows_null(
     schema = inspect(engine)
     assert set(schema.get_table_names()) >= NEW_TABLES
     with engine.connect() as connection:
-        assert connection.scalar(text('SELECT version_num FROM alembic_version')) == REVISION
+        assert (
+            connection.scalar(text('SELECT version_num FROM alembic_version'))
+            == REVISION
+        )
         row = connection.execute(
             text(
                 'SELECT run_contract_version, run_record_phase, '
@@ -109,7 +121,9 @@ def test_alembic_exposes_one_head() -> None:
     assert ScriptDirectory.from_config(config).get_heads() == [REVISION]
 
 
-def test_postgresql_guard_installers_declare_deferred_lifecycle_and_generation_guards() -> None:
+def test_postgresql_guard_installers_declare_deferred_lifecycle_and_generation_guards() -> (
+    None
+):
     migration = _load_migration_module()
     runtime_source = pyinspect.getsource(migration._install_postgresql_runtime_guards)
     generation_source = pyinspect.getsource(
@@ -122,6 +136,10 @@ def test_postgresql_guard_installers_declare_deferred_lifecycle_and_generation_g
     assert 'rag_provider_safety_transition_append_only' in runtime_source
     assert 'rag_advisory_lock_registry_append_only' in runtime_source
     assert 'pg_advisory_xact_lock' not in runtime_source
+    assert 'authority-wide generation-0 bootstrap' in runtime_source
+    assert 'targeted family transition state mismatch' in runtime_source
+    assert 'untouched bootstrap family drift' in runtime_source
+    assert 'new_state_version IS DISTINCT FROM 1' in runtime_source
 
     assert 'rag_mark_corpus_generation_mutation' in generation_source
     assert 'rag_mark_vector_generation_mutation' in generation_source
@@ -136,9 +154,13 @@ def test_postgresql_runtime_installer_emits_complete_relational_guards(
 ) -> None:
     migration = _load_migration_module()
     statements: list[str] = []
-    bind = type('Bind', (), {'dialect': type('Dialect', (), {'name': 'postgresql'})()})()
+    bind = type(
+        'Bind', (), {'dialect': type('Dialect', (), {'name': 'postgresql'})()}
+    )()
     monkeypatch.setattr(migration.op, 'get_bind', lambda: bind)
-    monkeypatch.setattr(migration.op, 'execute', lambda statement: statements.append(str(statement)))
+    monkeypatch.setattr(
+        migration.op, 'execute', lambda statement: statements.append(str(statement))
+    )
 
     migration._install_postgresql_runtime_guards()
     emitted = '\n'.join(statements)
@@ -158,7 +180,10 @@ def test_postgresql_runtime_installer_emits_complete_relational_guards(
     assert 'abandoned_count = 0 OR terminal_count + abandoned_count <> 2' in emitted
     assert 'transition.prior_state_version IS DISTINCT FROM' in emitted
     assert 'prior_transition.new_state_version' in emitted
-    assert 'transition.new_state_version IS DISTINCT FROM readiness.state_version' in emitted
+    assert (
+        'transition.new_state_version IS DISTINCT FROM readiness.state_version'
+        in emitted
+    )
     assert 'transition.envelope_digest <> authority.envelope_digest' in emitted
     assert 'transition.reviewed_transition_reference_hmac IS DISTINCT FROM' in emitted
     assert 'readiness.reviewed_gate_reference_hmac' in emitted
@@ -169,9 +194,7 @@ def test_postgresql_runtime_installer_emits_complete_relational_guards(
     assert 'rag_assistant_integrity_guard_linked_run' in emitted
     assert emitted.rfind(
         'CREATE CONSTRAINT TRIGGER rag_assistant_integrity_guard_linked_run'
-    ) > emitted.rfind(
-        'DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_linked_run'
-    )
+    ) > emitted.rfind('DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_linked_run')
     assert "linked.run_contract_version IS DISTINCT FROM 'rag-run:v2'" in emitted
     assert "dependency_serving_scope IS DISTINCT FROM 'rag_v2'" in emitted
     assert "dependency_serving_scope IS DISTINCT FROM 'legacy_v1_only'" in emitted
@@ -184,9 +207,13 @@ def test_postgresql_runtime_downgrade_drops_linked_run_trigger_before_function(
 ) -> None:
     migration = _load_migration_module()
     statements: list[str] = []
-    bind = type('Bind', (), {'dialect': type('Dialect', (), {'name': 'postgresql'})()})()
+    bind = type(
+        'Bind', (), {'dialect': type('Dialect', (), {'name': 'postgresql'})()}
+    )()
     monkeypatch.setattr(migration.op, 'get_bind', lambda: bind)
-    monkeypatch.setattr(migration.op, 'execute', lambda statement: statements.append(str(statement)))
+    monkeypatch.setattr(
+        migration.op, 'execute', lambda statement: statements.append(str(statement))
+    )
 
     migration._drop_postgresql_runtime_guards()
     emitted = '\n'.join(statements)
@@ -327,10 +354,87 @@ def _pg_parent(
     )
 
 
+def test_postgresql_provider_safety_service_commits_one_whole_set_history_per_generation(
+    postgres_runtime_migration: Engine,
+    tmp_path: Path,
+) -> None:
+    engine = postgres_runtime_migration
+    with engine.begin() as connection:
+        capability = register_advisory_identity_db(
+            connection,
+            RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+            identity_namespace='static',
+        )
+    service = RagProviderSafetyService(
+        latch_path=tmp_path / 'provider-safety.json',
+        identity_secret=b'task12-postgres-provider-safety-secret',
+        designated_environment_id='task12-postgres',
+        advisory_capability=capability,
+    )
+    snapshots = (_snapshot('query_embedding'), _snapshot('answer_generation'))
+    with engine.connect() as connection:
+        service.bootstrap(
+            connection,
+            snapshots,
+            reviewed_transition_reference_hmac='9' * 64,
+        )
+        service.mark_rebind_required(
+            connection,
+            'answer_generation',
+            expected_global_safety_generation=0,
+            expected_state_version=1,
+            reviewed_transition_reference_hmac='1' * 64,
+        )
+        rebound = replace(
+            snapshots[1],
+            authorized_model_config_snapshot_hmac='d' * 64,
+            authorized_policy_snapshot_hmac='e' * 64,
+        )
+        service.reviewed_rebind(
+            connection,
+            'answer_generation',
+            rebound,
+            expected_global_safety_generation=1,
+            expected_state_version=2,
+            reviewed_transition_reference_hmac='2' * 64,
+        )
+        successor = replace(
+            rebound,
+            model='gpt-5.6-luna',
+            reasoning_or_config_identity='reasoning:low',
+            authorized_policy_snapshot_hmac='f' * 64,
+        )
+        service.reviewed_supersession(
+            connection,
+            'answer_generation',
+            successor,
+            expected_global_safety_generation=2,
+            expected_state_version=3,
+            reviewed_transition_reference_hmac='3' * 64,
+            actor_subject_hmac='4' * 64,
+        )
+        assert (
+            service.require_ready(
+                connection, 'answer_generation', successor
+            ).global_safety_generation
+            == 3
+        )
+        assert connection.execute(
+            text(
+                'SELECT global_safety_generation FROM '
+                'rag_provider_safety_transitions ORDER BY global_safety_generation'
+            )
+        ).scalars().all() == [0, 1, 2, 3]
+
+
 def _pg_component(connection, parent_id: int, component: str, state: str) -> int:
     ordinal = 0 if component == 'query_embedding' else 1
     model = 'text-embedding-3-small' if ordinal == 0 else 'gpt-5.4-mini-2026-03-17'
-    config = 'rag-query-embedding-config:v1' if ordinal == 0 else 'rag-answer-model-config:v1'
+    config = (
+        'rag-query-embedding-config:v1'
+        if ordinal == 0
+        else 'rag-answer-model-config:v1'
+    )
     cost = 'rag-query-embedding-cost:v1' if ordinal == 0 else 'rag-answer-cost:v1'
     estimator = (
         'openai-cl100k-text-embedding-3-small:v1'
@@ -369,7 +473,7 @@ def _pg_component(connection, parent_id: int, component: str, state: str) -> int
 def _pg_conversation(connection) -> int:
     return connection.scalar(
         text(
-            "INSERT INTO assistant_conversations (user_id,title,created_at,updated_at) "
+            'INSERT INTO assistant_conversations (user_id,title,created_at,updated_at) '
             "VALUES ('owner','title',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) RETURNING id"
         )
     )
@@ -425,7 +529,9 @@ def _pg_dependency(
 ) -> None:
     legacy = parent_origin == 'legacy_evidence'
     dependency_kind = 'legacy_unbound' if legacy else 'trusted_knowledge'
-    scope = None if historical_null_scope else ('legacy_v1_only' if legacy else 'rag_v2')
+    scope = (
+        None if historical_null_scope else ('legacy_v1_only' if legacy else 'rag_v2')
+    )
     role = None if historical_null_scope else 'selected_citation'
     connection.execute(
         text(
@@ -455,9 +561,7 @@ def _pg_dependency(
             'scope': scope,
             'role': role,
             'child_hmac': None if historical_null_scope else 'c' * 64,
-            'legacy_hmac': (
-                'd' * 64 if legacy and not historical_null_scope else None
-            ),
+            'legacy_hmac': ('d' * 64 if legacy and not historical_null_scope else None),
             'model_hmac': None if historical_null_scope else 'e' * 64,
             'citation_hmac': None if historical_null_scope else 'f' * 64,
             'selected_hmac': None if historical_null_scope else '1' * 64,
@@ -470,17 +574,22 @@ def _pg_dependency(
             'support': None if legacy or historical_null_scope else 'trusted_fact',
         },
     )
+
+
 def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
     postgres_runtime_migration: Engine,
 ) -> None:
     engine = postgres_runtime_migration
     with engine.connect() as connection:
-        assert connection.scalar(
-            text(
-                "SELECT count(*) FROM pg_trigger WHERE tgname = "
-                "'rag_assistant_integrity_guard_linked_run' AND NOT tgisinternal"
+        assert (
+            connection.scalar(
+                text(
+                    'SELECT count(*) FROM pg_trigger WHERE tgname = '
+                    "'rag_assistant_integrity_guard_linked_run' AND NOT tgisinternal"
+                )
             )
-        ) == 1
+            == 1
+        )
 
     with pytest.raises(IntegrityError), engine.begin() as connection:
         legacy_run = connection.scalar(
@@ -524,7 +633,9 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
                     completed_at=datetime.now(UTC),
                 )
                 _pg_component(connection, linked_run_id, 'query_embedding', 'terminal')
-                _pg_component(connection, linked_run_id, 'answer_generation', 'terminal')
+                _pg_component(
+                    connection, linked_run_id, 'answer_generation', 'terminal'
+                )
                 connection.execute(
                     text(
                         'UPDATE agent_runs SET metadata=CAST(:metadata AS json) WHERE id=:id'
@@ -532,9 +643,7 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
                     {
                         'id': linked_run_id,
                         'metadata': '{"outcome":"supported_answer",'
-                        '"rag_result_hmac":"'
-                        + 'a' * 64
-                        + '"}',
+                        '"rag_result_hmac":"' + 'a' * 64 + '"}',
                     },
                 )
             message_id = _pg_integrity_message(
@@ -561,14 +670,18 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
 
     with engine.begin() as connection:
         source_parent = _pg_parent(connection)
-        query_id = _pg_component(connection, source_parent, 'query_embedding', 'not_attempted')
+        query_id = _pg_component(
+            connection, source_parent, 'query_embedding', 'not_attempted'
+        )
         _pg_component(connection, source_parent, 'answer_generation', 'not_attempted')
 
     with pytest.raises(IntegrityError), engine.begin() as connection:
         target_parent = _pg_parent(connection)
         _pg_component(connection, target_parent, 'answer_generation', 'not_attempted')
         connection.execute(
-            text('UPDATE agent_run_cost_components SET agent_run_id=:target WHERE id=:child'),
+            text(
+                'UPDATE agent_run_cost_components SET agent_run_id=:target WHERE id=:child'
+            ),
             {'target': target_parent, 'child': query_id},
         )
 
@@ -590,15 +703,29 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
                 '(id,authority_uuid,designated_environment_id,global_safety_generation,'
                 'envelope_digest,fingerprint_key_version,fingerprint_key_material_verifier,'
                 'created_at,updated_at) VALUES '
-                "(1,'00000000-0000-0000-0000-000000000001','test',1,:digest,'key',"
+                "(1,'00000000-0000-0000-0000-000000000001','test',0,:digest,'key',"
                 ':verifier,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)'
             ),
             {'digest': 'c' * 64, 'verifier': 'd' * 64},
         )
         readiness_ids: list[int] = []
         for component, model, config, cost, estimator, review in (
-            ('query_embedding', 'text-embedding-3-small', 'rag-query-embedding-config:v1', 'rag-query-embedding-cost:v1', 'openai-cl100k-text-embedding-3-small:v1', '1' * 64),
-            ('answer_generation', 'gpt-5.4-mini-2026-03-17', 'rag-answer-model-config:v1', 'rag-answer-cost:v1', 'openai-o200k-rag-answer:v1', '2' * 64),
+            (
+                'query_embedding',
+                'text-embedding-3-small',
+                'rag-query-embedding-config:v1',
+                'rag-query-embedding-cost:v1',
+                'openai-cl100k-text-embedding-3-small:v1',
+                '1' * 64,
+            ),
+            (
+                'answer_generation',
+                'gpt-5.4-mini-2026-03-17',
+                'rag-answer-model-config:v1',
+                'rag-answer-cost:v1',
+                'openai-o200k-rag-answer:v1',
+                '2' * 64,
+            ),
         ):
             readiness_ids.append(
                 connection.scalar(
@@ -612,25 +739,34 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
                         'authorized_policy_snapshot_hmac,state,state_version,'
                         'family_safety_generation,reviewed_gate_reference_hmac,created_at,updated_at) '
                         "VALUES (1,:component,'openai',:model,:config,true,:config,:config_hmac,"
-                        ":cost,:estimator,'key',:verifier,:policy,'ready',1,0,:review,"
+                        ":cost,:estimator,'key',:verifier,:policy,'ready',1,0,NULL,"
                         'CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) RETURNING id'
                     ),
-                    {'component': component, 'model': model, 'config': config, 'config_hmac': 'e' * 64, 'cost': cost, 'estimator': estimator, 'verifier': 'd' * 64, 'policy': 'f' * 64, 'review': review},
+                    {
+                        'component': component,
+                        'model': model,
+                        'config': config,
+                        'config_hmac': 'e' * 64,
+                        'cost': cost,
+                        'estimator': estimator,
+                        'verifier': 'd' * 64,
+                        'policy': 'f' * 64,
+                        'review': review,
+                    },
                 )
             )
-        for generation, readiness_id, review in ((0, readiness_ids[0], '1' * 64), (1, readiness_ids[1], '2' * 64)):
-            connection.execute(
-                text(
-                    'INSERT INTO rag_provider_safety_transitions '
-                    '(authority_id,readiness_id,global_safety_generation,transition_kind,'
-                    'prior_state,new_state,prior_state_version,new_state_version,'
-                    'prior_family_safety_generation,new_family_safety_generation,'
-                    'envelope_digest,reviewed_transition_reference_hmac,created_at) VALUES '
-                    "(1,:readiness,:generation,'bootstrap',NULL,'ready',NULL,1,NULL,0,"
-                    ':digest,:review,CURRENT_TIMESTAMP)'
-                ),
-                {'readiness': readiness_id, 'generation': generation, 'digest': 'c' * 64, 'review': review},
-            )
+        connection.execute(
+            text(
+                'INSERT INTO rag_provider_safety_transitions '
+                '(authority_id,readiness_id,global_safety_generation,transition_kind,'
+                'prior_state,new_state,prior_state_version,new_state_version,'
+                'prior_family_safety_generation,new_family_safety_generation,'
+                'envelope_digest,reviewed_transition_reference_hmac,created_at) VALUES '
+                "(1,NULL,0,'bootstrap',NULL,NULL,NULL,NULL,NULL,NULL,"
+                ':digest,:review,CURRENT_TIMESTAMP)'
+            ),
+            {'digest': 'c' * 64, 'review': 'c' * 64},
+        )
 
     with pytest.raises(IntegrityError), engine.begin() as connection:
         connection.execute(
@@ -662,7 +798,7 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
         )
         conversation_id = connection.scalar(
             text(
-                "INSERT INTO assistant_conversations (user_id,title,created_at,updated_at) "
+                'INSERT INTO assistant_conversations (user_id,title,created_at,updated_at) '
                 "VALUES ('owner','title',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) RETURNING id"
             )
         )
@@ -681,7 +817,7 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
                 "'assistant-evidence:v1',1,'rag_v2_exact',"
                 "'assistant-message-content-hmac:v1',:hmac,'key',:hmac,"
                 "'rag_assembled',:hmac,:hmac,:run,'assistant-dependency-set-hmac:v2',"
-                ':hmac,:hmac,:hmac,CAST(\'{}\' AS json),CURRENT_TIMESTAMP)'
+                ":hmac,:hmac,:hmac,CAST('{}' AS json),CURRENT_TIMESTAMP)"
             ),
             {'conversation': conversation_id, 'run': linked, 'hmac': 'a' * 64},
         )

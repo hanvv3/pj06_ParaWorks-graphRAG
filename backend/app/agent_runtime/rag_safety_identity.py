@@ -47,7 +47,8 @@ def identities_match(left: object, right: object) -> bool:
 
 def admission_identity(value: object, *, secret: bytes) -> str:
     return rag_identity_hmac(
-        value, secret=secret, schema_version='rag-admission-cache-identity:v1'
+        value, secret=secret, schema_version='rag-admission-identity:v1',
+        policy_version='rag-run:v2',
     )
 
 
@@ -76,4 +77,39 @@ def provider_safety_snapshot_identity(value: object, *, secret: bytes) -> str:
     return rag_identity_hmac(
         value, secret=secret, schema_version='rag-provider-safety-snapshot:v1',
         policy_version='rag-provider-safety:v1',
+    )
+
+
+def projection_owner_identity(value: object, *, secret: bytes) -> str:
+    return rag_identity_hmac(
+        value, secret=secret, schema_version='rag-projection-owner-fence:v1',
+        policy_version='rag-run:v2',
+    )
+
+
+def final_product_identity(value: object, *, secret: bytes) -> str:
+    return rag_identity_hmac(
+        value, secret=secret, schema_version='rag-final-product-identity:v1',
+        policy_version='rag-answer-cache-key:v2',
+    )
+
+
+def final_shadow_identity(value: object, *, secret: bytes) -> str:
+    return rag_identity_hmac(
+        value, secret=secret, schema_version='rag-final-shadow-identity:v1',
+        policy_version='rag-shadow:v2',
+    )
+
+
+def final_error_identity(value: object, *, secret: bytes) -> str:
+    return rag_identity_hmac(
+        value, secret=secret, schema_version='rag-final-error-identity:v1',
+        policy_version='rag-run:v2',
+    )
+
+
+def implementation_plan_reference_identity(value: object, *, secret: bytes) -> str:
+    return rag_identity_hmac(
+        value, secret=secret, schema_version='rag-implementation-plan-reference:v1',
+        policy_version='rag-run:v2',
     )

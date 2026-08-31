@@ -424,19 +424,42 @@ def _install_postgresql_runtime_guards() -> None:
           IF transition.envelope_digest <> authority.envelope_digest THEN
             RAISE EXCEPTION 'provider authority mutation requires exact transition';
           END IF;
+          -- authority-wide generation-0 bootstrap has no family target.
+          IF authority.global_safety_generation = 0 AND
+             (transition.transition_kind <> 'bootstrap' OR
+              transition.readiness_id IS NOT NULL OR
+              transition.prior_state IS NOT NULL OR transition.new_state IS NOT NULL) THEN
+            RAISE EXCEPTION 'provider generation-0 bootstrap is invalid';
+          END IF;
           FOR readiness IN SELECT * FROM rag_provider_readiness LOOP
             SELECT * INTO transition FROM rag_provider_safety_transitions
               WHERE readiness_id = readiness.id
               ORDER BY global_safety_generation DESC LIMIT 1;
-            IF NOT FOUND OR transition.authority_id <> readiness.authority_id OR
+            IF NOT FOUND THEN
+              IF readiness.state <> 'ready' OR readiness.state_version <> 1 OR
+                 readiness.family_safety_generation <> 0 OR
+                 readiness.reviewed_gate_reference_hmac IS NOT NULL THEN
+                RAISE EXCEPTION 'untouched bootstrap family drift';
+              END IF;
+              CONTINUE;
+            END IF;
+            IF transition.authority_id <> readiness.authority_id OR
                transition.new_state IS DISTINCT FROM readiness.state OR
                transition.new_state_version IS DISTINCT FROM readiness.state_version OR
                transition.new_family_safety_generation IS DISTINCT FROM
                  readiness.family_safety_generation OR
-               transition.envelope_digest <> authority.envelope_digest OR
                transition.reviewed_transition_reference_hmac IS DISTINCT FROM
                  readiness.reviewed_gate_reference_hmac THEN
-              RAISE EXCEPTION 'provider readiness mutation requires exact transition';
+              RAISE EXCEPTION 'targeted family transition state mismatch';
+            END IF;
+            IF (transition.prior_state_version IS NULL AND
+                transition.new_state_version IS DISTINCT FROM 1) OR
+               (transition.prior_state_version IS NOT NULL AND
+                transition.new_state_version IS DISTINCT FROM
+                  transition.prior_state_version + 1) OR
+               transition.new_family_safety_generation IS DISTINCT FROM
+                 transition.global_safety_generation THEN
+              RAISE EXCEPTION 'targeted family transition monotonicity mismatch';
             END IF;
             SELECT * INTO prior_transition FROM rag_provider_safety_transitions
               WHERE readiness_id = readiness.id

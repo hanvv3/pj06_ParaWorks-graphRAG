@@ -23,11 +23,14 @@ def test_two_argument_postgres_advisory_lock_and_durable_registry():
     engine = create_engine(POSTGRES_URL)
     identity = {'lock_name': 'task12-gated-test', 'nonce': str(uuid4())}
     with engine.connect() as connection:
-        pair = register_advisory_identity_db(
+        capability = register_advisory_identity_db(
             connection, identity, identity_namespace='dynamic'
         )
-        assert register_advisory_identity_db(
+        connection.commit()
+        repeated = register_advisory_identity_db(
             connection, identity, identity_namespace='dynamic'
-        ) == pair
-        acquire_advisory_lock(connection, pair, shared=False)
-        release_advisory_lock(connection, pair, shared=False)
+        )
+        assert repeated.key == capability.key
+        connection.commit()
+        acquire_advisory_lock(connection, capability, shared=False)
+        release_advisory_lock(connection, capability, shared=False)

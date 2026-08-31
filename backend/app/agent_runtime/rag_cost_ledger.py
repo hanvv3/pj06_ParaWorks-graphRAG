@@ -21,6 +21,7 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
     StrictProviderOutcome,
 )
 from backend.app.agent_runtime.rag_safety_identity import (
+    admission_identity,
     dispatch_fence_identity,
     process_instance_identity,
     provider_safety_snapshot_identity,
@@ -28,6 +29,7 @@ from backend.app.agent_runtime.rag_safety_identity import (
     require_lower_hmac,
     runtime_cost_identity,
 )
+from backend.app.agent_runtime.rag_v2_identity import exact_utf8_bytes
 from backend.app.models.agent_runs import AgentRun
 from backend.app.models.rag_runtime import AgentRunCostComponent
 from backend.app.rag.retrieval import PreparedPaidCallBudget, RagPaidComponent
@@ -150,7 +152,7 @@ class RagCostLedger:
         current_text_hmac: str,
         retrieval_query_hmac: str,
         security_scope_fingerprint: str,
-        admission_cache_identity_hmac: str,
+        admission_cache_identity_hmac: str | None,
         source_window: str,
         components: tuple[
             tuple[AuthorizedProviderPolicySnapshot, PreparedPaidCallBudget],
@@ -173,7 +175,6 @@ class RagCostLedger:
             raise ValueError('RAG admission is invalid')
         for value in (
             current_text_hmac, retrieval_query_hmac, security_scope_fingerprint,
-            admission_cache_identity_hmac,
         ):
             require_lower_hmac(value)
         normalized = []
@@ -197,6 +198,34 @@ class RagCostLedger:
         total_reserved = sum(
             (budget.reserved_cost_usd for _, budget in normalized), _ZERO
         )
+        computed_admission_hmac = admission_identity(
+            {
+                'answer_provider_policy_snapshot_hmac': (
+                    normalized[1][0].authorized_policy_snapshot_hmac
+                    if mode == 'enforce' and surface in {'ask', 'assistant'}
+                    else None
+                ),
+                'configured_backend': configured_backend,
+                'current_text_hmac': current_text_hmac,
+                'cutover_stage': cutover_stage,
+                'graph_version': 'company-memory-rag-answer-v2.0',
+                'mode': mode,
+                'query_context_version_bytes': exact_utf8_bytes(query_context_version),
+                'query_embedding_provider_policy_snapshot_hmac': (
+                    normalized[0][0].authorized_policy_snapshot_hmac
+                    if configured_backend == 'pgvector' else None
+                ),
+                'retrieval_policy_version': 'rag-retrieval-policy:v2.0',
+                'retrieval_query_hmac': retrieval_query_hmac,
+                'security_scope_fingerprint': security_scope_fingerprint,
+                'surface': surface,
+            }, secret=self._secret,
+        )
+        if (
+            admission_cache_identity_hmac is not None
+            and admission_cache_identity_hmac != computed_admission_hmac
+        ):
+            raise ValueError('caller admission identity does not match server authority')
         runtime_hmac = runtime_cost_identity(
             {
                 'agent_run_id': agent_run_id,
@@ -220,7 +249,7 @@ class RagCostLedger:
             prompt_version='rag-answer:v2',
             status='running',
             source_window=source_window,
-            cache_key='rag-v2-admission:' + admission_cache_identity_hmac,
+            cache_key='rag-v2-admission:' + computed_admission_hmac,
             model_name='rag-v2-admission',
             generation_provider=None,
             input_tokens=0,
@@ -276,7 +305,7 @@ class RagCostLedger:
             security_scope_fingerprint=security_scope_fingerprint,
             query_embedding_provider_policy_snapshot_hmac=normalized[0][0].authorized_policy_snapshot_hmac,
             answer_provider_policy_snapshot_hmac=normalized[1][0].authorized_policy_snapshot_hmac,
-            admission_cache_identity_hmac=admission_cache_identity_hmac,
+            admission_cache_identity_hmac=computed_admission_hmac,
             source_window=source_window,  # type: ignore[arg-type]
             status='running',
             run_record_phase='admission',

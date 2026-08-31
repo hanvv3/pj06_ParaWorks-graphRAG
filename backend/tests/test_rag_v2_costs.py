@@ -88,7 +88,7 @@ def _admit(ledger: RagCostLedger, run_id: int) -> None:
         current_text_hmac='1' * 64,
         retrieval_query_hmac='2' * 64,
         security_scope_fingerprint='3' * 64,
-        admission_cache_identity_hmac='4' * 64,
+        admission_cache_identity_hmac=None,
         source_window='rag-v2:admission:enforce:ask:keyword',
         components=(
             (_snapshot('query_embedding'), _budget('query_embedding', '0.000010')),
@@ -112,7 +112,7 @@ def test_literal_sets_are_exact_and_admission_commits_exact_two_children():
         current_text_hmac='1' * 64,
         retrieval_query_hmac='2' * 64,
         security_scope_fingerprint='3' * 64,
-        admission_cache_identity_hmac='4' * 64,
+        admission_cache_identity_hmac=None,
         source_window='rag-v2:admission:enforce:ask:keyword',
         components=(
             (_snapshot('query_embedding'), _budget('query_embedding', '0.000001')),
@@ -219,7 +219,9 @@ def test_projectionless_failure_closes_exact_two_terminal_zero_children():
     )
     assert terminal.run_record_phase == 'admission_only'
     assert terminal.source_window == 'rag-v2:admission:enforce:ask:keyword'
-    assert terminal.cache_key == 'rag-v2-admission:' + '4' * 64
+    assert terminal.cache_key == (
+        'rag-v2-admission:' + terminal.admission_cache_identity_hmac
+    )
     assert terminal.terminal_identity_hmac is None
     assert all(
         final.attempted is False
@@ -305,7 +307,7 @@ def test_admission_rejects_source_window_not_derived_from_route(
             current_text_hmac='1' * 64,
             retrieval_query_hmac='2' * 64,
             security_scope_fingerprint='3' * 64,
-            admission_cache_identity_hmac='4' * 64,
+            admission_cache_identity_hmac=None,
             source_window=window,
             components=(
                 (_snapshot('query_embedding'), _budget('query_embedding', '0.000010')),

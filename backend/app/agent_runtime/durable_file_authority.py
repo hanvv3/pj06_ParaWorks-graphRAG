@@ -7,6 +7,16 @@ import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from threading import Lock, RLock
+
+_PROCESS_LOCKS_GUARD = Lock()
+_PROCESS_LOCKS: dict[str, RLock] = {}
+
+
+def _process_lock(path: Path) -> RLock:
+    identity = os.path.normcase(str(path.absolute()))
+    with _PROCESS_LOCKS_GUARD:
+        return _PROCESS_LOCKS.setdefault(identity, RLock())
 
 
 class DurableFileAuthorityError(RuntimeError):
@@ -51,6 +61,11 @@ class DurableFileAuthority:
 
     @contextmanager
     def locked(self) -> Iterator[None]:
+        with _process_lock(self.lock_path), self._locked_file():
+            yield
+
+    @contextmanager
+    def _locked_file(self) -> Iterator[None]:
         if self._runtime:
             if (
                 not self.path.parent.is_dir()
