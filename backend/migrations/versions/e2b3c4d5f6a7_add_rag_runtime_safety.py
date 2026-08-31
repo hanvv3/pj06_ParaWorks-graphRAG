@@ -544,8 +544,9 @@ def _install_postgresql_runtime_guards() -> None:
           IF parent.content_write_mode IS NULL THEN RETURN; END IF;
           IF parent.content_write_mode = 'rag_v2_exact' THEN
             SELECT * INTO linked FROM agent_runs WHERE id = parent.linked_agent_run_id;
-            IF NOT FOUND OR linked.run_contract_version <> 'rag-run:v2' OR
-               linked.run_record_phase <> 'final' OR
+            IF NOT FOUND OR
+               linked.run_contract_version IS DISTINCT FROM 'rag-run:v2' OR
+               linked.run_record_phase IS DISTINCT FROM 'final' OR
                linked.status NOT IN ('complete', 'failed') OR
                linked.completed_at IS NULL OR
                linked.metadata ->> 'rag_result_hmac' IS DISTINCT FROM
@@ -558,10 +559,10 @@ def _install_postgresql_runtime_guards() -> None:
                  count(*) FILTER (WHERE dependency_role = 'selected_citation'),
                  count(*) FILTER (WHERE
                    (parent.content_origin = 'rag_assembled' AND
-                    dependency_serving_scope <> 'rag_v2') OR
+                    dependency_serving_scope IS DISTINCT FROM 'rag_v2') OR
                    (parent.content_origin = 'legacy_evidence' AND
-                    (dependency_serving_scope <> 'legacy_v1_only' OR
-                     dependency_role <> 'selected_citation'))),
+                    (dependency_serving_scope IS DISTINCT FROM 'legacy_v1_only' OR
+                     dependency_role IS DISTINCT FROM 'selected_citation'))),
                  count(*) FILTER (WHERE
                    dependency_set_hmac IS DISTINCT FROM parent.dependency_set_hmac OR
                    fingerprint_key_version IS DISTINCT FROM
@@ -627,8 +628,6 @@ def _install_postgresql_runtime_guards() -> None:
           AFTER INSERT OR UPDATE OR DELETE ON assistant_message_evidence_dependencies
           DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
           EXECUTE FUNCTION rag_validate_assistant_integrity();
-        DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_linked_run
-          ON agent_runs;
         CREATE CONSTRAINT TRIGGER rag_assistant_integrity_guard_linked_run
           AFTER UPDATE OR DELETE ON agent_runs
           DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
@@ -642,8 +641,6 @@ def _install_postgresql_runtime_guards() -> None:
         END $$;
         DROP TRIGGER IF EXISTS rag_provider_safety_transition_append_only
           ON rag_provider_safety_transitions;
-        DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_linked_run
-          ON agent_runs;
         CREATE TRIGGER rag_provider_safety_transition_append_only
           BEFORE UPDATE OR DELETE ON rag_provider_safety_transitions
           FOR EACH ROW EXECUTE FUNCTION rag_refuse_append_only_mutation();
@@ -663,6 +660,8 @@ def _drop_postgresql_runtime_guards() -> None:
           ON rag_advisory_lock_key_registry;
         DROP TRIGGER IF EXISTS rag_provider_safety_transition_append_only
           ON rag_provider_safety_transitions;
+        DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_linked_run
+          ON agent_runs;
         DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_child
           ON assistant_message_evidence_dependencies;
         DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_parent

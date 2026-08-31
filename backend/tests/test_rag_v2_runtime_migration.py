@@ -167,8 +167,36 @@ def test_postgresql_runtime_installer_emits_complete_relational_guards(
     assert 'serving_dependency_count' in emitted
     assert 'fingerprint_key_version IS DISTINCT FROM' in emitted
     assert 'rag_assistant_integrity_guard_linked_run' in emitted
-    assert "linked.run_contract_version <> 'rag-run:v2'" in emitted
+    assert emitted.rfind(
+        'CREATE CONSTRAINT TRIGGER rag_assistant_integrity_guard_linked_run'
+    ) > emitted.rfind(
+        'DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_linked_run'
+    )
+    assert "linked.run_contract_version IS DISTINCT FROM 'rag-run:v2'" in emitted
+    assert "dependency_serving_scope IS DISTINCT FROM 'rag_v2'" in emitted
+    assert "dependency_serving_scope IS DISTINCT FROM 'legacy_v1_only'" in emitted
+    assert "dependency_role IS DISTINCT FROM 'selected_citation'" in emitted
     assert "linked.metadata ->> 'rag_result_hmac' IS DISTINCT FROM" in emitted
+
+
+def test_postgresql_runtime_downgrade_drops_linked_run_trigger_before_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration = _load_migration_module()
+    statements: list[str] = []
+    bind = type('Bind', (), {'dialect': type('Dialect', (), {'name': 'postgresql'})()})()
+    monkeypatch.setattr(migration.op, 'get_bind', lambda: bind)
+    monkeypatch.setattr(migration.op, 'execute', lambda statement: statements.append(str(statement)))
+
+    migration._drop_postgresql_runtime_guards()
+    emitted = '\n'.join(statements)
+    trigger_drop = emitted.index(
+        'DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_linked_run'
+    )
+    function_drop = emitted.index(
+        'DROP FUNCTION IF EXISTS rag_validate_assistant_integrity()'
+    )
+    assert trigger_drop < function_drop
 
 
 def test_sqlite_revision_declares_exact_new_columns_indexes_and_foreign_keys(
@@ -338,10 +366,199 @@ def _pg_component(connection, parent_id: int, component: str, state: str) -> int
     )
 
 
+def _pg_conversation(connection) -> int:
+    return connection.scalar(
+        text(
+            "INSERT INTO assistant_conversations (user_id,title,created_at,updated_at) "
+            "VALUES ('owner','title',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) RETURNING id"
+        )
+    )
+
+
+def _pg_integrity_message(
+    connection,
+    *,
+    conversation_id: int,
+    origin: str,
+    linked_run_id: int | None,
+    dependency_count: int,
+) -> int:
+    rag_v2 = origin != 'legacy_evidence'
+    return connection.scalar(
+        text(
+            'INSERT INTO assistant_messages '
+            '(conversation_id,role,content,citations,source_ids,source_links,'
+            'source_snippets,hidden_match_count,evidence_contract_version,'
+            'serving_dependency_count,content_write_mode,content_hmac_schema_version,'
+            'assistant_message_content_hmac,content_hmac_key_version,'
+            'content_hmac_key_material_verifier,content_origin,content_origin_hmac,'
+            'rag_result_hmac,linked_agent_run_id,dependency_set_hmac_schema_version,'
+            'dependency_set_hmac,parent_selected_evidence_projection_hmac,'
+            'model_influence_set_hmac,metadata,created_at) VALUES '
+            "(:conversation,'assistant','answer','[]','[]','[]','[]',0,"
+            "'assistant-evidence:v1',:dependency_count,:mode,"
+            "'assistant-message-content-hmac:v1',:hmac,'key',:hmac,"
+            ':origin,:hmac,:rag_result,:linked_run,'
+            "'assistant-dependency-set-hmac:v2',:hmac,:hmac,:influence,"
+            "CAST('{}' AS json),CURRENT_TIMESTAMP) RETURNING id"
+        ),
+        {
+            'conversation': conversation_id,
+            'dependency_count': dependency_count,
+            'mode': 'rag_v2_exact' if rag_v2 else 'legacy_trimmed',
+            'hmac': 'a' * 64,
+            'origin': origin,
+            'rag_result': 'a' * 64 if rag_v2 else None,
+            'linked_run': linked_run_id,
+            'influence': 'a' * 64 if rag_v2 else None,
+        },
+    )
+
+
+def _pg_dependency(
+    connection,
+    *,
+    message_id: int,
+    ordinal: int,
+    parent_origin: str,
+    historical_null_scope: bool,
+) -> None:
+    legacy = parent_origin == 'legacy_evidence'
+    dependency_kind = 'legacy_unbound' if legacy else 'trusted_knowledge'
+    scope = None if historical_null_scope else ('legacy_v1_only' if legacy else 'rag_v2')
+    role = None if historical_null_scope else 'selected_citation'
+    connection.execute(
+        text(
+            'INSERT INTO assistant_message_evidence_dependencies '
+            '(assistant_message_id,candidate_ordinal,serving_document_id,dependency_kind,'
+            'dependency_set_hmac,serving_content_hash,permission_level,'
+            'fingerprint_key_version,fingerprint_key_material_verifier,knowledge_type,'
+            'knowledge_id,legacy_human_base,dependency_serving_scope,dependency_role,'
+            'dependency_child_hmac,legacy_dependency_identity_hmac,model_content_hmac,'
+            'canonical_citation_projection_hmac,selected_v1_citation_projection_hmac,'
+            'serving_identity_hmac,serving_version_fingerprint,support_mode,created_at) '
+            'VALUES (:message,:ordinal,:document,:kind,:hmac,:content_hash,'
+            "'internal','key',:hmac,:knowledge_type,:knowledge_id,:legacy_human,"
+            ':scope,:role,:child_hmac,:legacy_hmac,:model_hmac,:citation_hmac,'
+            ':selected_hmac,:serving_hmac,:version_hmac,:support,CURRENT_TIMESTAMP)'
+        ),
+        {
+            'message': message_id,
+            'ordinal': ordinal,
+            'document': f'dependency:{parent_origin}:{ordinal}',
+            'kind': dependency_kind,
+            'hmac': 'a' * 64,
+            'content_hash': 'b' * 64,
+            'knowledge_type': None if legacy else 'decision',
+            'knowledge_id': None if legacy else ordinal + 1,
+            'legacy_human': not legacy,
+            'scope': scope,
+            'role': role,
+            'child_hmac': None if historical_null_scope else 'c' * 64,
+            'legacy_hmac': (
+                'd' * 64 if legacy and not historical_null_scope else None
+            ),
+            'model_hmac': None if historical_null_scope else 'e' * 64,
+            'citation_hmac': None if historical_null_scope else 'f' * 64,
+            'selected_hmac': None if historical_null_scope else '1' * 64,
+            'serving_hmac': (
+                '2' * 64 if not legacy and not historical_null_scope else None
+            ),
+            'version_hmac': (
+                '3' * 64 if not legacy and not historical_null_scope else None
+            ),
+            'support': None if legacy or historical_null_scope else 'trusted_fact',
+        },
+    )
 def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
     postgres_runtime_migration: Engine,
 ) -> None:
     engine = postgres_runtime_migration
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text(
+                "SELECT count(*) FROM pg_trigger WHERE tgname = "
+                "'rag_assistant_integrity_guard_linked_run' AND NOT tgisinternal"
+            )
+        ) == 1
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        legacy_run = connection.scalar(
+            text(
+                'INSERT INTO agent_runs '
+                '(agent_name,prompt_version,status,source_window,cache_key,model_name,'
+                'input_tokens,output_tokens,total_tokens,estimated_cost_usd,permission_level,'
+                'metadata,started_at,completed_at) VALUES '
+                "('legacy','rag-answer:v1','complete','legacy','legacy','deterministic',"
+                "0,0,0,0.0,'internal',CAST(:metadata AS json),CURRENT_TIMESTAMP,"
+                'CURRENT_TIMESTAMP) RETURNING id'
+            ),
+            {'metadata': '{"rag_result_hmac":"' + 'a' * 64 + '"}'},
+        )
+        conversation_id = _pg_conversation(connection)
+        connection.execute(
+            text(
+                'INSERT INTO assistant_messages '
+                '(conversation_id,role,content,citations,source_ids,source_links,'
+                'source_snippets,hidden_match_count,evidence_contract_version,'
+                'serving_dependency_count,content_write_mode,content_hmac_schema_version,'
+                'assistant_message_content_hmac,content_hmac_key_version,'
+                'content_hmac_key_material_verifier,content_origin,content_origin_hmac,'
+                'rag_result_hmac,linked_agent_run_id,metadata,created_at) VALUES '
+                "(:conversation,'assistant','canned','[]','[]','[]','[]',0,'none-v1',0,"
+                "'rag_v2_exact','assistant-message-content-hmac:v1',:hmac,'key',:hmac,"
+                "'rag_canned',:hmac,:hmac,:run,CAST('{}' AS json),CURRENT_TIMESTAMP)"
+            ),
+            {'conversation': conversation_id, 'hmac': 'a' * 64, 'run': legacy_run},
+        )
+
+    for origin in ('rag_assembled', 'legacy_evidence'):
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            linked_run_id = None
+            if origin == 'rag_assembled':
+                linked_run_id = _pg_parent(
+                    connection,
+                    phase='final',
+                    status='complete',
+                    outcome='supported_answer',
+                    completed_at=datetime.now(UTC),
+                )
+                _pg_component(connection, linked_run_id, 'query_embedding', 'terminal')
+                _pg_component(connection, linked_run_id, 'answer_generation', 'terminal')
+                connection.execute(
+                    text(
+                        'UPDATE agent_runs SET metadata=CAST(:metadata AS json) WHERE id=:id'
+                    ),
+                    {
+                        'id': linked_run_id,
+                        'metadata': '{"outcome":"supported_answer",'
+                        '"rag_result_hmac":"'
+                        + 'a' * 64
+                        + '"}',
+                    },
+                )
+            message_id = _pg_integrity_message(
+                connection,
+                conversation_id=_pg_conversation(connection),
+                origin=origin,
+                linked_run_id=linked_run_id,
+                dependency_count=2,
+            )
+            _pg_dependency(
+                connection,
+                message_id=message_id,
+                ordinal=0,
+                parent_origin=origin,
+                historical_null_scope=False,
+            )
+            _pg_dependency(
+                connection,
+                message_id=message_id,
+                ordinal=1,
+                parent_origin=origin,
+                historical_null_scope=True,
+            )
+
     with engine.begin() as connection:
         source_parent = _pg_parent(connection)
         query_id = _pg_component(connection, source_parent, 'query_embedding', 'not_attempted')
