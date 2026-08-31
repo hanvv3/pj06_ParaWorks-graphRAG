@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import importlib.util
 import inspect as pyinspect
+import os
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import IntegrityError
 
 from backend.app.core.config import get_settings
 
@@ -125,6 +131,46 @@ def test_postgresql_guard_installers_declare_deferred_lifecycle_and_generation_g
     assert 'vector_index_states' in generation_source
 
 
+def test_postgresql_runtime_installer_emits_complete_relational_guards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration = _load_migration_module()
+    statements: list[str] = []
+    bind = type('Bind', (), {'dialect': type('Dialect', (), {'name': 'postgresql'})()})()
+    monkeypatch.setattr(migration.op, 'get_bind', lambda: bind)
+    monkeypatch.setattr(migration.op, 'execute', lambda statement: statements.append(str(statement)))
+
+    migration._install_postgresql_runtime_guards()
+    emitted = '\n'.join(statements)
+
+    assert 'rag_validate_agent_run_v2_costs_for' in emitted
+    assert 'OLD.agent_run_id IS DISTINCT FROM NEW.agent_run_id' in emitted
+    assert 'PERFORM rag_validate_agent_run_v2_costs_for(OLD.agent_run_id)' in emitted
+    assert 'PERFORM rag_validate_agent_run_v2_costs_for(NEW.agent_run_id)' in emitted
+    assert "parent_phase = 'admission'" in emitted
+    assert "parent_phase = 'cost_finalized_pending_projection'" in emitted
+    assert "parent_phase = 'final'" in emitted
+    assert "parent_phase = 'admission_only'" in emitted
+    assert "metadata ->> 'outcome'" in emitted
+    assert 'abandoned_count <> 0 OR terminal_count = 2' in emitted
+    assert 'parent_projection_fence IS NULL OR' in emitted
+    assert 'not_attempted_count <> 0 OR dispatching_count <> 0' in emitted
+    assert 'abandoned_count = 0 OR terminal_count + abandoned_count <> 2' in emitted
+    assert 'transition.prior_state_version IS DISTINCT FROM' in emitted
+    assert 'prior_transition.new_state_version' in emitted
+    assert 'transition.new_state_version IS DISTINCT FROM readiness.state_version' in emitted
+    assert 'transition.envelope_digest <> authority.envelope_digest' in emitted
+    assert 'transition.reviewed_transition_reference_hmac IS DISTINCT FROM' in emitted
+    assert 'readiness.reviewed_gate_reference_hmac' in emitted
+    assert 'provider readiness family identity is immutable' in emitted
+    assert 'rag_validate_assistant_integrity_for' in emitted
+    assert 'serving_dependency_count' in emitted
+    assert 'fingerprint_key_version IS DISTINCT FROM' in emitted
+    assert 'rag_assistant_integrity_guard_linked_run' in emitted
+    assert "linked.run_contract_version <> 'rag-run:v2'" in emitted
+    assert "linked.metadata ->> 'rag_result_hmac' IS DISTINCT FROM" in emitted
+
+
 def test_sqlite_revision_declares_exact_new_columns_indexes_and_foreign_keys(
     sqlite_migration: tuple[Config, str],
 ) -> None:
@@ -190,3 +236,235 @@ def test_sqlite_exact_downgrade_removes_only_second_revision(
         engine.connect().scalar(text('SELECT version_num FROM alembic_version'))
         == PREVIOUS_REVISION
     )
+
+
+@pytest.fixture
+def postgres_runtime_migration(monkeypatch: pytest.MonkeyPatch) -> Iterator[Engine]:
+    database_url = os.getenv('PARAWORKS_TEST_POSTGRES_URL')
+    if not database_url:
+        pytest.skip('PARAWORKS_TEST_POSTGRES_URL is unavailable for Task 11 guards')
+    parsed = make_url(database_url)
+    if parsed.host != '127.0.0.1' or parsed.port != 55432:
+        pytest.fail('Task 11 PostgreSQL checks require disposable 127.0.0.1:55432')
+    admin = create_engine(database_url)
+    schema_name = f'rag_task11_{uuid4().hex}'
+    with admin.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA {schema_name}'))
+    query = dict(parsed.query)
+    query['options'] = f'-csearch_path={schema_name},public'
+    isolated_url = parsed.set(query=query).render_as_string(hide_password=False)
+    monkeypatch.setenv('PARAWORKS_DEMO_MODE', 'false')
+    monkeypatch.setenv('PARAWORKS_DATABASE_URL', isolated_url)
+    get_settings.cache_clear()
+    command.upgrade(Config('alembic.ini'), 'head')
+    engine = create_engine(isolated_url)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+        get_settings.cache_clear()
+        with admin.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA {schema_name} CASCADE'))
+        admin.dispose()
+
+
+def _pg_parent(
+    connection,
+    *,
+    phase: str = 'admission',
+    status: str = 'running',
+    outcome: str | None = None,
+    completed_at: datetime | None = None,
+    fence: str | None = None,
+) -> int:
+    return connection.scalar(
+        text(
+            'INSERT INTO agent_runs '
+            '(agent_name,prompt_version,status,source_window,cache_key,model_name,'
+            'input_tokens,output_tokens,total_tokens,estimated_cost_usd,permission_level,'
+            'metadata,started_at,completed_at,run_contract_version,run_record_phase,'
+            'total_charged_cost_usd,projection_owner_fence_hmac) VALUES '
+            "('rag_orchestrator_agent','rag-answer:v2',:status,'runtime-test','runtime-test',"
+            "'rag-v2-admission',0,0,0,0.0,'restricted',CAST(:metadata AS json),"
+            "CURRENT_TIMESTAMP,:completed_at,'rag-run:v2',:phase,0.000000,:fence) "
+            'RETURNING id'
+        ),
+        {
+            'status': status,
+            'metadata': '{}' if outcome is None else '{"outcome":"' + outcome + '"}',
+            'completed_at': completed_at,
+            'phase': phase,
+            'fence': fence,
+        },
+    )
+
+
+def _pg_component(connection, parent_id: int, component: str, state: str) -> int:
+    ordinal = 0 if component == 'query_embedding' else 1
+    model = 'text-embedding-3-small' if ordinal == 0 else 'gpt-5.4-mini-2026-03-17'
+    config = 'rag-query-embedding-config:v1' if ordinal == 0 else 'rag-answer-model-config:v1'
+    cost = 'rag-query-embedding-cost:v1' if ordinal == 0 else 'rag-answer-cost:v1'
+    estimator = (
+        'openai-cl100k-text-embedding-3-small:v1'
+        if ordinal == 0
+        else 'openai-o200k-rag-answer:v1'
+    )
+    return connection.scalar(
+        text(
+            'INSERT INTO agent_run_cost_components '
+            '(agent_run_id,component,component_ordinal,dispatch_state,attempted,'
+            'dispatch_count,reserved_input_tokens,reserved_output_tokens,'
+            'actual_input_tokens,actual_output_tokens,reserved_cost_usd,charged_cost_usd,'
+            'charge_basis,overrun,provider,model,authorized_model_config_version,'
+            'authorized_model_config_snapshot_hmac,authorized_cost_policy_version,'
+            'authorized_token_estimator_version,authorized_policy_snapshot_hmac,'
+            'terminal_outcome,created_at,updated_at) VALUES '
+            '(:parent,:component,:ordinal,:state,false,0,0,0,NULL,NULL,0.000000,'
+            "0.000000,'zero',false,'openai',:model,:config,:config_hmac,:cost,"
+            ':estimator,:policy_hmac,NULL,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) RETURNING id'
+        ),
+        {
+            'parent': parent_id,
+            'component': component,
+            'ordinal': ordinal,
+            'state': state,
+            'model': model,
+            'config': config,
+            'config_hmac': 'a' * 64,
+            'cost': cost,
+            'estimator': estimator,
+            'policy_hmac': 'b' * 64,
+        },
+    )
+
+
+def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
+    postgres_runtime_migration: Engine,
+) -> None:
+    engine = postgres_runtime_migration
+    with engine.begin() as connection:
+        source_parent = _pg_parent(connection)
+        query_id = _pg_component(connection, source_parent, 'query_embedding', 'not_attempted')
+        _pg_component(connection, source_parent, 'answer_generation', 'not_attempted')
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        target_parent = _pg_parent(connection)
+        _pg_component(connection, target_parent, 'answer_generation', 'not_attempted')
+        connection.execute(
+            text('UPDATE agent_run_cost_components SET agent_run_id=:target WHERE id=:child'),
+            {'target': target_parent, 'child': query_id},
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        invalid_final = _pg_parent(
+            connection,
+            phase='final',
+            status='complete',
+            outcome='supported_answer',
+            completed_at=datetime.now(UTC),
+        )
+        _pg_component(connection, invalid_final, 'query_embedding', 'not_attempted')
+        _pg_component(connection, invalid_final, 'answer_generation', 'not_attempted')
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                'INSERT INTO rag_provider_safety_authorities '
+                '(id,authority_uuid,designated_environment_id,global_safety_generation,'
+                'envelope_digest,fingerprint_key_version,fingerprint_key_material_verifier,'
+                'created_at,updated_at) VALUES '
+                "(1,'00000000-0000-0000-0000-000000000001','test',1,:digest,'key',"
+                ':verifier,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)'
+            ),
+            {'digest': 'c' * 64, 'verifier': 'd' * 64},
+        )
+        readiness_ids: list[int] = []
+        for component, model, config, cost, estimator, review in (
+            ('query_embedding', 'text-embedding-3-small', 'rag-query-embedding-config:v1', 'rag-query-embedding-cost:v1', 'openai-cl100k-text-embedding-3-small:v1', '1' * 64),
+            ('answer_generation', 'gpt-5.4-mini-2026-03-17', 'rag-answer-model-config:v1', 'rag-answer-cost:v1', 'openai-o200k-rag-answer:v1', '2' * 64),
+        ):
+            readiness_ids.append(
+                connection.scalar(
+                    text(
+                        'INSERT INTO rag_provider_readiness '
+                        '(authority_id,component,provider,model,reasoning_or_config_identity,'
+                        'active,authorized_model_config_version,'
+                        'authorized_model_config_snapshot_hmac,authorized_cost_policy_version,'
+                        'authorized_token_estimator_version,authorized_fingerprint_key_version,'
+                        'authorized_fingerprint_key_material_verifier,'
+                        'authorized_policy_snapshot_hmac,state,state_version,'
+                        'family_safety_generation,reviewed_gate_reference_hmac,created_at,updated_at) '
+                        "VALUES (1,:component,'openai',:model,:config,true,:config,:config_hmac,"
+                        ":cost,:estimator,'key',:verifier,:policy,'ready',1,0,:review,"
+                        'CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) RETURNING id'
+                    ),
+                    {'component': component, 'model': model, 'config': config, 'config_hmac': 'e' * 64, 'cost': cost, 'estimator': estimator, 'verifier': 'd' * 64, 'policy': 'f' * 64, 'review': review},
+                )
+            )
+        for generation, readiness_id, review in ((0, readiness_ids[0], '1' * 64), (1, readiness_ids[1], '2' * 64)):
+            connection.execute(
+                text(
+                    'INSERT INTO rag_provider_safety_transitions '
+                    '(authority_id,readiness_id,global_safety_generation,transition_kind,'
+                    'prior_state,new_state,prior_state_version,new_state_version,'
+                    'prior_family_safety_generation,new_family_safety_generation,'
+                    'envelope_digest,reviewed_transition_reference_hmac,created_at) VALUES '
+                    "(1,:readiness,:generation,'bootstrap',NULL,'ready',NULL,1,NULL,0,"
+                    ':digest,:review,CURRENT_TIMESTAMP)'
+                ),
+                {'readiness': readiness_id, 'generation': generation, 'digest': 'c' * 64, 'review': review},
+            )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE rag_provider_readiness SET state='rebind_required', "
+                'state_version=2,family_safety_generation=1 WHERE id=:id'
+            ),
+            {'id': readiness_ids[0]},
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        linked = _pg_parent(
+            connection,
+            phase='final',
+            status='complete',
+            outcome='supported_answer',
+            completed_at=datetime.now(UTC),
+        )
+        _pg_component(connection, linked, 'query_embedding', 'terminal')
+        _pg_component(connection, linked, 'answer_generation', 'terminal')
+        connection.execute(
+            text('UPDATE agent_runs SET metadata=CAST(:metadata AS json) WHERE id=:id'),
+            {
+                'id': linked,
+                'metadata': '{"outcome":"supported_answer","rag_result_hmac":"'
+                + 'a' * 64
+                + '"}',
+            },
+        )
+        conversation_id = connection.scalar(
+            text(
+                "INSERT INTO assistant_conversations (user_id,title,created_at,updated_at) "
+                "VALUES ('owner','title',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) RETURNING id"
+            )
+        )
+        connection.execute(
+            text(
+                'INSERT INTO assistant_messages '
+                '(conversation_id,role,content,citations,source_ids,source_links,'
+                'source_snippets,hidden_match_count,evidence_contract_version,'
+                'serving_dependency_count,content_write_mode,content_hmac_schema_version,'
+                'assistant_message_content_hmac,content_hmac_key_version,'
+                'content_hmac_key_material_verifier,content_origin,content_origin_hmac,'
+                'rag_result_hmac,linked_agent_run_id,dependency_set_hmac_schema_version,'
+                'dependency_set_hmac,parent_selected_evidence_projection_hmac,'
+                'model_influence_set_hmac,metadata,created_at) VALUES '
+                "(:conversation,'assistant','answer','[]','[]','[]','[]',0,"
+                "'assistant-evidence:v1',1,'rag_v2_exact',"
+                "'assistant-message-content-hmac:v1',:hmac,'key',:hmac,"
+                "'rag_assembled',:hmac,:hmac,:run,'assistant-dependency-set-hmac:v2',"
+                ':hmac,:hmac,:hmac,CAST(\'{}\' AS json),CURRENT_TIMESTAMP)'
+            ),
+            {'conversation': conversation_id, 'run': linked, 'hmac': 'a' * 64},
+        )

@@ -244,44 +244,106 @@ def _install_postgresql_runtime_guards() -> None:
     if op.get_bind().dialect.name != 'postgresql':
         return
     op.execute(sa.text("""
-        CREATE OR REPLACE FUNCTION rag_validate_agent_run_v2_costs()
-        RETURNS trigger LANGUAGE plpgsql AS $$
+        CREATE OR REPLACE FUNCTION rag_validate_agent_run_v2_costs_for(
+          target_run_id bigint
+        ) RETURNS void LANGUAGE plpgsql AS $$
         DECLARE
-          target_run_id bigint;
           parent_version text;
+          parent_phase text;
+          parent_status text;
+          parent_outcome text;
+          parent_completed_at timestamptz;
+          parent_projection_fence text;
           parent_total numeric(24,6);
           child_count integer;
           child_components integer;
           child_total numeric(24,6);
+          not_attempted_count integer;
+          dispatching_count integer;
+          terminal_count integer;
+          abandoned_count integer;
+        BEGIN
+          IF target_run_id IS NULL THEN RETURN; END IF;
+          SELECT run_contract_version, run_record_phase, status,
+                 metadata ->> 'outcome', completed_at,
+                 projection_owner_fence_hmac, total_charged_cost_usd
+            INTO parent_version, parent_phase, parent_status, parent_outcome,
+                 parent_completed_at, parent_projection_fence, parent_total
+            FROM agent_runs WHERE id = target_run_id;
+          SELECT count(*), count(DISTINCT component),
+                 COALESCE(sum(charged_cost_usd), 0.000000),
+                 count(*) FILTER (WHERE dispatch_state = 'not_attempted'),
+                 count(*) FILTER (WHERE dispatch_state = 'dispatching'),
+                 count(*) FILTER (WHERE dispatch_state = 'terminal'),
+                 count(*) FILTER (WHERE dispatch_state = 'abandoned_unknown')
+            INTO child_count, child_components, child_total,
+                 not_attempted_count, dispatching_count, terminal_count,
+                 abandoned_count
+            FROM agent_run_cost_components WHERE agent_run_id = target_run_id;
+          IF parent_version IS NULL THEN
+            IF child_count <> 0 THEN
+              RAISE EXCEPTION 'legacy or missing AgentRun cannot own D cost children';
+            END IF;
+            RETURN;
+          END IF;
+          IF parent_version <> 'rag-run:v2' OR parent_total IS NULL OR
+             child_count <> 2 OR child_components <> 2 OR
+             NOT EXISTS (SELECT 1 FROM agent_run_cost_components
+                         WHERE agent_run_id = target_run_id
+                           AND component = 'query_embedding'
+                           AND component_ordinal = 0) OR
+             NOT EXISTS (SELECT 1 FROM agent_run_cost_components
+                         WHERE agent_run_id = target_run_id
+                           AND component = 'answer_generation'
+                           AND component_ordinal = 1) OR
+             child_total <> parent_total THEN
+            RAISE EXCEPTION 'rag-run:v2 requires exact two balanced cost children';
+          END IF;
+          IF parent_phase = 'admission' THEN
+            IF parent_status <> 'running' OR parent_outcome IS NOT NULL OR
+               parent_completed_at IS NOT NULL OR parent_projection_fence IS NOT NULL OR
+               abandoned_count <> 0 OR terminal_count = 2 THEN
+              RAISE EXCEPTION 'invalid rag-run:v2 admission lifecycle';
+            END IF;
+          ELSIF parent_phase = 'cost_finalized_pending_projection' THEN
+            IF parent_status <> 'running' OR parent_outcome IS NULL OR
+               parent_completed_at IS NOT NULL OR parent_projection_fence IS NULL OR
+               terminal_count <> 2 THEN
+              RAISE EXCEPTION 'invalid rag-run:v2 pending-projection lifecycle';
+            END IF;
+          ELSIF parent_phase = 'final' THEN
+            IF parent_status NOT IN ('complete', 'failed') OR parent_outcome IS NULL OR
+               parent_completed_at IS NULL OR terminal_count <> 2 OR
+               not_attempted_count <> 0 OR dispatching_count <> 0 OR
+               abandoned_count <> 0 THEN
+              RAISE EXCEPTION 'invalid rag-run:v2 final lifecycle';
+            END IF;
+          ELSIF parent_phase = 'admission_only' THEN
+            IF parent_status <> 'failed' OR parent_outcome <> 'abandoned_unknown' OR
+               parent_completed_at IS NULL OR parent_projection_fence IS NOT NULL OR
+               not_attempted_count <> 0 OR dispatching_count <> 0 OR
+               abandoned_count = 0 OR terminal_count + abandoned_count <> 2 THEN
+              RAISE EXCEPTION 'invalid rag-run:v2 admission-only lifecycle';
+            END IF;
+          ELSE
+            RAISE EXCEPTION 'invalid rag-run:v2 phase';
+          END IF;
+        END $$;
+        CREATE OR REPLACE FUNCTION rag_validate_agent_run_v2_costs()
+        RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
           IF TG_TABLE_NAME = 'agent_runs' THEN
-            target_run_id := COALESCE(NEW.id, OLD.id);
+            PERFORM rag_validate_agent_run_v2_costs_for(COALESCE(NEW.id, OLD.id));
           ELSE
-            target_run_id := COALESCE(NEW.agent_run_id, OLD.agent_run_id);
-          END IF;
-          SELECT run_contract_version, total_charged_cost_usd
-            INTO parent_version, parent_total
-            FROM agent_runs WHERE id = target_run_id;
-          SELECT count(*),
-                 count(DISTINCT component),
-                 COALESCE(sum(charged_cost_usd), 0.000000)
-            INTO child_count, child_components, child_total
-            FROM agent_run_cost_components WHERE agent_run_id = target_run_id;
-          IF parent_version = 'rag-run:v2' THEN
-            IF parent_total IS NULL OR child_count <> 2 OR child_components <> 2 OR
-               NOT EXISTS (SELECT 1 FROM agent_run_cost_components
-                           WHERE agent_run_id = target_run_id
-                             AND component = 'query_embedding'
-                             AND component_ordinal = 0) OR
-               NOT EXISTS (SELECT 1 FROM agent_run_cost_components
-                           WHERE agent_run_id = target_run_id
-                             AND component = 'answer_generation'
-                             AND component_ordinal = 1) OR
-               child_total <> parent_total THEN
-              RAISE EXCEPTION 'rag-run:v2 requires exact two balanced cost children';
+            IF TG_OP IN ('UPDATE', 'DELETE') THEN
+              PERFORM rag_validate_agent_run_v2_costs_for(OLD.agent_run_id);
             END IF;
-          ELSIF child_count <> 0 THEN
-            RAISE EXCEPTION 'legacy AgentRun cannot own D cost children';
+            IF TG_OP IN ('INSERT', 'UPDATE') AND
+               (TG_OP <> 'UPDATE' OR OLD.agent_run_id IS DISTINCT FROM NEW.agent_run_id) THEN
+              PERFORM rag_validate_agent_run_v2_costs_for(NEW.agent_run_id);
+            ELSIF TG_OP = 'UPDATE' THEN
+              PERFORM rag_validate_agent_run_v2_costs_for(NEW.agent_run_id);
+            END IF;
           END IF;
           RETURN NULL;
         END $$;
@@ -315,16 +377,17 @@ def _install_postgresql_runtime_guards() -> None:
         CREATE OR REPLACE FUNCTION rag_validate_provider_safety_whole_set()
         RETURNS trigger LANGUAGE plpgsql AS $$
         DECLARE
+          authority rag_provider_safety_authorities%ROWTYPE;
+          readiness rag_provider_readiness%ROWTYPE;
+          transition rag_provider_safety_transitions%ROWTYPE;
+          prior_transition rag_provider_safety_transitions%ROWTYPE;
           authority_count integer;
-          authority_generation bigint;
           active_count integer;
           transition_count bigint;
           min_generation bigint;
           max_generation bigint;
         BEGIN
-          SELECT count(*), max(global_safety_generation)
-            INTO authority_count, authority_generation
-            FROM rag_provider_safety_authorities;
+          SELECT count(*) INTO authority_count FROM rag_provider_safety_authorities;
           IF authority_count = 0 THEN
             IF EXISTS (SELECT 1 FROM rag_provider_readiness) OR
                EXISTS (SELECT 1 FROM rag_provider_safety_transitions) THEN
@@ -336,6 +399,8 @@ def _install_postgresql_runtime_guards() -> None:
              NOT EXISTS (SELECT 1 FROM rag_provider_safety_authorities WHERE id = 1) THEN
             RAISE EXCEPTION 'provider safety authority must be exact singleton';
           END IF;
+          SELECT * INTO STRICT authority
+            FROM rag_provider_safety_authorities WHERE id = 1;
           SELECT count(*) INTO active_count FROM rag_provider_readiness
             WHERE active = true;
           IF active_count <> 2 OR
@@ -348,12 +413,91 @@ def _install_postgresql_runtime_guards() -> None:
           SELECT count(*), min(global_safety_generation), max(global_safety_generation)
             INTO transition_count, min_generation, max_generation
             FROM rag_provider_safety_transitions WHERE authority_id = 1;
-          IF transition_count <> authority_generation + 1 OR min_generation <> 0 OR
-             max_generation <> authority_generation THEN
+          IF transition_count <> authority.global_safety_generation + 1 OR
+             min_generation <> 0 OR
+             max_generation <> authority.global_safety_generation THEN
             RAISE EXCEPTION 'provider safety transition generations must be gapless';
           END IF;
+          SELECT * INTO STRICT transition FROM rag_provider_safety_transitions
+            WHERE authority_id = 1
+              AND global_safety_generation = authority.global_safety_generation;
+          IF transition.envelope_digest <> authority.envelope_digest THEN
+            RAISE EXCEPTION 'provider authority mutation requires exact transition';
+          END IF;
+          FOR readiness IN SELECT * FROM rag_provider_readiness LOOP
+            SELECT * INTO transition FROM rag_provider_safety_transitions
+              WHERE readiness_id = readiness.id
+              ORDER BY global_safety_generation DESC LIMIT 1;
+            IF NOT FOUND OR transition.authority_id <> readiness.authority_id OR
+               transition.new_state IS DISTINCT FROM readiness.state OR
+               transition.new_state_version IS DISTINCT FROM readiness.state_version OR
+               transition.new_family_safety_generation IS DISTINCT FROM
+                 readiness.family_safety_generation OR
+               transition.envelope_digest <> authority.envelope_digest OR
+               transition.reviewed_transition_reference_hmac IS DISTINCT FROM
+                 readiness.reviewed_gate_reference_hmac THEN
+              RAISE EXCEPTION 'provider readiness mutation requires exact transition';
+            END IF;
+            SELECT * INTO prior_transition FROM rag_provider_safety_transitions
+              WHERE readiness_id = readiness.id
+                AND global_safety_generation < transition.global_safety_generation
+              ORDER BY global_safety_generation DESC LIMIT 1;
+            IF FOUND THEN
+              IF transition.prior_state IS DISTINCT FROM prior_transition.new_state OR
+                 transition.prior_state_version IS DISTINCT FROM
+                   prior_transition.new_state_version OR
+                 transition.prior_family_safety_generation IS DISTINCT FROM
+                   prior_transition.new_family_safety_generation THEN
+                RAISE EXCEPTION 'provider transition prior snapshot mismatch';
+              END IF;
+            ELSIF transition.prior_state IS NOT NULL OR
+                  transition.prior_state_version IS NOT NULL OR
+                  transition.prior_family_safety_generation IS NOT NULL THEN
+              RAISE EXCEPTION 'provider bootstrap transition must have null prior snapshot';
+            END IF;
+          END LOOP;
           RETURN NULL;
         END $$;
+        CREATE OR REPLACE FUNCTION rag_require_audited_provider_mutation()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF TG_OP = 'DELETE' THEN
+            RAISE EXCEPTION 'provider safety current rows cannot be deleted';
+          END IF;
+          IF TG_TABLE_NAME = 'rag_provider_safety_authorities' THEN
+            IF OLD.authority_uuid IS DISTINCT FROM NEW.authority_uuid OR
+               OLD.designated_environment_id IS DISTINCT FROM
+                 NEW.designated_environment_id OR
+               NEW.global_safety_generation <> OLD.global_safety_generation + 1 OR
+               NEW.envelope_digest IS NOT DISTINCT FROM OLD.envelope_digest THEN
+              RAISE EXCEPTION 'provider authority update requires audited generation';
+            END IF;
+          ELSE
+            IF OLD.authority_id IS DISTINCT FROM NEW.authority_id OR
+               OLD.component IS DISTINCT FROM NEW.component OR
+               OLD.provider IS DISTINCT FROM NEW.provider OR
+               OLD.model IS DISTINCT FROM NEW.model OR
+               OLD.reasoning_or_config_identity IS DISTINCT FROM
+                 NEW.reasoning_or_config_identity THEN
+              RAISE EXCEPTION 'provider readiness family identity is immutable';
+            END IF;
+            IF NEW.state_version <> OLD.state_version + 1 OR
+               NEW.family_safety_generation <> OLD.family_safety_generation + 1 THEN
+              RAISE EXCEPTION 'provider readiness update requires audited generation';
+            END IF;
+          END IF;
+          RETURN NEW;
+        END $$;
+        DROP TRIGGER IF EXISTS rag_provider_safety_authority_audited_mutation
+          ON rag_provider_safety_authorities;
+        CREATE TRIGGER rag_provider_safety_authority_audited_mutation
+          BEFORE UPDATE OR DELETE ON rag_provider_safety_authorities
+          FOR EACH ROW EXECUTE FUNCTION rag_require_audited_provider_mutation();
+        DROP TRIGGER IF EXISTS rag_provider_readiness_audited_mutation
+          ON rag_provider_readiness;
+        CREATE TRIGGER rag_provider_readiness_audited_mutation
+          BEFORE UPDATE OR DELETE ON rag_provider_readiness
+          FOR EACH ROW EXECUTE FUNCTION rag_require_audited_provider_mutation();
         DROP TRIGGER IF EXISTS rag_provider_safety_whole_set_guard_authority
           ON rag_provider_safety_authorities;
         CREATE CONSTRAINT TRIGGER rag_provider_safety_whole_set_guard_authority
@@ -374,6 +518,123 @@ def _install_postgresql_runtime_guards() -> None:
           EXECUTE FUNCTION rag_validate_provider_safety_whole_set();
     """))
     op.execute(sa.text("""
+        CREATE OR REPLACE FUNCTION rag_validate_assistant_integrity_for(
+          target_message_id bigint
+        ) RETURNS void LANGUAGE plpgsql AS $$
+        DECLARE
+          parent assistant_messages%ROWTYPE;
+          linked agent_runs%ROWTYPE;
+          child_count integer;
+          ordinal_count integer;
+          minimum_ordinal integer;
+          maximum_ordinal integer;
+          selected_count integer;
+          scope_mismatch_count integer;
+          hmac_mismatch_count integer;
+        BEGIN
+          IF target_message_id IS NULL THEN RETURN; END IF;
+          SELECT * INTO parent FROM assistant_messages WHERE id = target_message_id;
+          IF NOT FOUND THEN
+            IF EXISTS (SELECT 1 FROM assistant_message_evidence_dependencies
+                       WHERE assistant_message_id = target_message_id) THEN
+              RAISE EXCEPTION 'Assistant dependencies require a parent message';
+            END IF;
+            RETURN;
+          END IF;
+          IF parent.content_write_mode IS NULL THEN RETURN; END IF;
+          IF parent.content_write_mode = 'rag_v2_exact' THEN
+            SELECT * INTO linked FROM agent_runs WHERE id = parent.linked_agent_run_id;
+            IF NOT FOUND OR linked.run_contract_version <> 'rag-run:v2' OR
+               linked.run_record_phase <> 'final' OR
+               linked.status NOT IN ('complete', 'failed') OR
+               linked.completed_at IS NULL OR
+               linked.metadata ->> 'rag_result_hmac' IS DISTINCT FROM
+                 parent.rag_result_hmac THEN
+              RAISE EXCEPTION 'RAG Assistant message requires linked final rag-run:v2';
+            END IF;
+          END IF;
+          SELECT count(*), count(DISTINCT candidate_ordinal),
+                 min(candidate_ordinal), max(candidate_ordinal),
+                 count(*) FILTER (WHERE dependency_role = 'selected_citation'),
+                 count(*) FILTER (WHERE
+                   (parent.content_origin = 'rag_assembled' AND
+                    dependency_serving_scope <> 'rag_v2') OR
+                   (parent.content_origin = 'legacy_evidence' AND
+                    (dependency_serving_scope <> 'legacy_v1_only' OR
+                     dependency_role <> 'selected_citation'))),
+                 count(*) FILTER (WHERE
+                   dependency_set_hmac IS DISTINCT FROM parent.dependency_set_hmac OR
+                   fingerprint_key_version IS DISTINCT FROM
+                     parent.content_hmac_key_version OR
+                   fingerprint_key_material_verifier IS DISTINCT FROM
+                     parent.content_hmac_key_material_verifier)
+            INTO child_count, ordinal_count, minimum_ordinal, maximum_ordinal,
+                 selected_count, scope_mismatch_count, hmac_mismatch_count
+            FROM assistant_message_evidence_dependencies
+            WHERE assistant_message_id = target_message_id;
+          IF parent.content_origin = 'rag_canned' THEN
+            IF child_count <> 0 OR parent.serving_dependency_count <> 0 THEN
+              RAISE EXCEPTION 'canned Assistant message cannot own dependencies';
+            END IF;
+          ELSIF parent.content_origin IN ('rag_assembled', 'legacy_evidence') THEN
+            IF child_count <> parent.serving_dependency_count OR child_count <= 0 OR
+               ordinal_count <> child_count OR minimum_ordinal <> 0 OR
+               maximum_ordinal <> child_count - 1 OR selected_count <= 0 OR
+               scope_mismatch_count <> 0 OR hmac_mismatch_count <> 0 THEN
+              RAISE EXCEPTION 'Assistant dependency whole-set mismatch';
+            END IF;
+          ELSE
+            RAISE EXCEPTION 'unknown Assistant content origin';
+          END IF;
+        END $$;
+        CREATE OR REPLACE FUNCTION rag_validate_assistant_integrity()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE
+          dependent_message_id bigint;
+        BEGIN
+          IF TG_TABLE_NAME = 'agent_runs' THEN
+            FOR dependent_message_id IN
+              SELECT id FROM assistant_messages
+              WHERE linked_agent_run_id = COALESCE(NEW.id, OLD.id)
+            LOOP
+              PERFORM rag_validate_assistant_integrity_for(dependent_message_id);
+            END LOOP;
+          ELSIF TG_TABLE_NAME = 'assistant_messages' THEN
+            PERFORM rag_validate_assistant_integrity_for(COALESCE(NEW.id, OLD.id));
+          ELSE
+            IF TG_OP IN ('UPDATE', 'DELETE') THEN
+              PERFORM rag_validate_assistant_integrity_for(OLD.assistant_message_id);
+            END IF;
+            IF TG_OP IN ('INSERT', 'UPDATE') AND
+               (TG_OP <> 'UPDATE' OR OLD.assistant_message_id IS DISTINCT FROM
+                 NEW.assistant_message_id) THEN
+              PERFORM rag_validate_assistant_integrity_for(NEW.assistant_message_id);
+            ELSIF TG_OP = 'UPDATE' THEN
+              PERFORM rag_validate_assistant_integrity_for(NEW.assistant_message_id);
+            END IF;
+          END IF;
+          RETURN NULL;
+        END $$;
+        DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_parent
+          ON assistant_messages;
+        CREATE CONSTRAINT TRIGGER rag_assistant_integrity_guard_parent
+          AFTER INSERT OR UPDATE OR DELETE ON assistant_messages
+          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+          EXECUTE FUNCTION rag_validate_assistant_integrity();
+        DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_child
+          ON assistant_message_evidence_dependencies;
+        CREATE CONSTRAINT TRIGGER rag_assistant_integrity_guard_child
+          AFTER INSERT OR UPDATE OR DELETE ON assistant_message_evidence_dependencies
+          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+          EXECUTE FUNCTION rag_validate_assistant_integrity();
+        DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_linked_run
+          ON agent_runs;
+        CREATE CONSTRAINT TRIGGER rag_assistant_integrity_guard_linked_run
+          AFTER UPDATE OR DELETE ON agent_runs
+          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+          EXECUTE FUNCTION rag_validate_assistant_integrity();
+    """))
+    op.execute(sa.text("""
         CREATE OR REPLACE FUNCTION rag_refuse_append_only_mutation()
         RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
@@ -381,6 +642,8 @@ def _install_postgresql_runtime_guards() -> None:
         END $$;
         DROP TRIGGER IF EXISTS rag_provider_safety_transition_append_only
           ON rag_provider_safety_transitions;
+        DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_linked_run
+          ON agent_runs;
         CREATE TRIGGER rag_provider_safety_transition_append_only
           BEFORE UPDATE OR DELETE ON rag_provider_safety_transitions
           FOR EACH ROW EXECUTE FUNCTION rag_refuse_append_only_mutation();
@@ -400,11 +663,19 @@ def _drop_postgresql_runtime_guards() -> None:
           ON rag_advisory_lock_key_registry;
         DROP TRIGGER IF EXISTS rag_provider_safety_transition_append_only
           ON rag_provider_safety_transitions;
+        DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_child
+          ON assistant_message_evidence_dependencies;
+        DROP TRIGGER IF EXISTS rag_assistant_integrity_guard_parent
+          ON assistant_messages;
         DROP TRIGGER IF EXISTS rag_provider_safety_whole_set_guard_transition
           ON rag_provider_safety_transitions;
         DROP TRIGGER IF EXISTS rag_provider_safety_whole_set_guard_readiness
           ON rag_provider_readiness;
         DROP TRIGGER IF EXISTS rag_provider_safety_whole_set_guard_authority
+          ON rag_provider_safety_authorities;
+        DROP TRIGGER IF EXISTS rag_provider_readiness_audited_mutation
+          ON rag_provider_readiness;
+        DROP TRIGGER IF EXISTS rag_provider_safety_authority_audited_mutation
           ON rag_provider_safety_authorities;
         DROP TRIGGER IF EXISTS rag_terminal_cost_component_immutable
           ON agent_run_cost_components;
@@ -412,9 +683,13 @@ def _drop_postgresql_runtime_guards() -> None:
           ON agent_run_cost_components;
         DROP TRIGGER IF EXISTS rag_agent_run_v2_costs_guard_parent ON agent_runs;
         DROP FUNCTION IF EXISTS rag_refuse_append_only_mutation();
+        DROP FUNCTION IF EXISTS rag_validate_assistant_integrity();
+        DROP FUNCTION IF EXISTS rag_validate_assistant_integrity_for(bigint);
         DROP FUNCTION IF EXISTS rag_validate_provider_safety_whole_set();
+        DROP FUNCTION IF EXISTS rag_require_audited_provider_mutation();
         DROP FUNCTION IF EXISTS rag_refuse_terminal_cost_component_mutation();
         DROP FUNCTION IF EXISTS rag_validate_agent_run_v2_costs();
+        DROP FUNCTION IF EXISTS rag_validate_agent_run_v2_costs_for(bigint);
     """))
 
 

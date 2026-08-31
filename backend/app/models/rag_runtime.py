@@ -206,12 +206,13 @@ class RagProviderReadiness(Base):
             name='ck_rag_provider_readiness_hmacs',
         ),
         CheckConstraint(
-            'CASE WHEN overrun_agent_run_id IS NULL THEN '
-            '(overrun_input_tokens IS NULL AND '
-            'overrun_output_tokens IS NULL AND overrun_cost_usd IS NULL AND '
-            'overrun_observed_at IS NULL) ELSE '
-            'overrun_input_tokens >= 0 AND overrun_output_tokens >= 0 AND '
-            'overrun_cost_usd >= 0 AND overrun_observed_at IS NOT NULL END',
+            'CASE WHEN overrun_agent_run_id IS NULL AND '
+            'overrun_input_tokens IS NULL AND overrun_output_tokens IS NULL AND '
+            'overrun_cost_usd IS NULL AND overrun_observed_at IS NULL THEN true ELSE '
+            'overrun_agent_run_id IS NOT NULL AND overrun_input_tokens IS NOT NULL AND '
+            'overrun_output_tokens IS NOT NULL AND overrun_cost_usd IS NOT NULL AND '
+            'overrun_observed_at IS NOT NULL AND overrun_input_tokens >= 0 AND '
+            'overrun_output_tokens >= 0 AND overrun_cost_usd >= 0 END',
             name='ck_rag_provider_readiness_overrun',
         ),
         CheckConstraint(
@@ -276,6 +277,25 @@ class RagProviderSafetyTransition(Base):
             'length(envelope_digest) = 64 AND '
             'length(reviewed_transition_reference_hmac) = 64',
             name='ck_rag_provider_safety_transition_shape',
+        ),
+        CheckConstraint(
+            '(readiness_id IS NULL AND prior_state IS NULL AND new_state IS NULL AND '
+            'prior_state_version IS NULL AND new_state_version IS NULL AND '
+            'prior_family_safety_generation IS NULL AND '
+            'new_family_safety_generation IS NULL) OR '
+            '(readiness_id IS NOT NULL AND new_state IS NOT NULL AND '
+            "new_state IN ('ready', 'rebind_required', 'blocked_overrun', "
+            "'blocked_remediation') AND new_state_version IS NOT NULL AND "
+            'new_state_version >= 1 AND new_family_safety_generation IS NOT NULL AND '
+            'new_family_safety_generation >= 0 AND '
+            '((prior_state IS NULL AND prior_state_version IS NULL AND '
+            'prior_family_safety_generation IS NULL) OR '
+            '(prior_state IS NOT NULL AND prior_state IN '
+            "('ready', 'rebind_required', 'blocked_overrun', 'blocked_remediation') AND "
+            'prior_state_version IS NOT NULL AND prior_state_version >= 1 AND '
+            'prior_family_safety_generation IS NOT NULL AND '
+            'prior_family_safety_generation >= 0)))',
+            name='ck_rag_provider_safety_transition_family_snapshot',
         ),
     )
 

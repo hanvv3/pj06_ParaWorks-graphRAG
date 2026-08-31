@@ -89,24 +89,39 @@ class AssistantMessage(Base):
             'rag_result_hmac IS NOT NULL AND length(rag_result_hmac) = 64 AND '
             'linked_agent_run_id IS NOT NULL) OR '
             "(content_write_mode = 'legacy_trimmed' AND "
-            "content_origin = 'legacy_evidence'))) END",
+            "content_origin = 'legacy_evidence' AND rag_result_hmac IS NULL AND "
+            'linked_agent_run_id IS NULL))) END',
             name='ck_assistant_messages_content_integrity',
         ),
         CheckConstraint(
-            "content_write_mode IS NULL OR ((content_origin = 'rag_canned' AND "
-            "evidence_contract_version = 'none-v1' AND serving_dependency_count = 0 AND "
+            "content_write_mode IS NULL OR ((content_write_mode = 'rag_v2_exact' AND "
+            "content_origin = 'rag_canned' AND evidence_contract_version IS NOT NULL AND "
+            "evidence_contract_version = 'none-v1' AND serving_dependency_count IS NOT NULL "
+            'AND serving_dependency_count = 0 AND '
             'dependency_set_hmac_schema_version IS NULL AND dependency_set_hmac IS NULL AND '
             'parent_selected_evidence_projection_hmac IS NULL AND '
             'model_influence_set_hmac IS NULL) OR '
-            "(content_origin IN ('rag_assembled', 'legacy_evidence') AND "
-            "evidence_contract_version = 'assistant-evidence:v1' AND "
-            'serving_dependency_count > 0 AND dependency_set_hmac_schema_version = '
-            "'assistant-dependency-set-hmac:v2' AND length(dependency_set_hmac) = 64 AND "
+            "(content_write_mode = 'rag_v2_exact' AND content_origin = 'rag_assembled' AND "
+            "evidence_contract_version IS NOT NULL AND evidence_contract_version = "
+            "'assistant-evidence:v1' AND serving_dependency_count IS NOT NULL AND "
+            'serving_dependency_count > 0 AND '
+            'dependency_set_hmac_schema_version IS NOT NULL AND '
+            "dependency_set_hmac_schema_version = 'assistant-dependency-set-hmac:v2' AND "
+            'dependency_set_hmac IS NOT NULL AND length(dependency_set_hmac) = 64 AND '
+            'parent_selected_evidence_projection_hmac IS NOT NULL AND '
             'length(parent_selected_evidence_projection_hmac) = 64 AND '
-            "((content_origin = 'rag_assembled' AND "
+            'model_influence_set_hmac IS NOT NULL AND '
             'length(model_influence_set_hmac) = 64) OR '
-            "(content_origin = 'legacy_evidence' AND "
-            'model_influence_set_hmac IS NULL))))',
+            "(content_write_mode = 'legacy_trimmed' AND content_origin = 'legacy_evidence' "
+            'AND evidence_contract_version IS NOT NULL AND evidence_contract_version = '
+            "'assistant-evidence:v1' AND serving_dependency_count IS NOT NULL AND "
+            'serving_dependency_count > 0 AND '
+            'dependency_set_hmac_schema_version IS NOT NULL AND '
+            "dependency_set_hmac_schema_version = 'assistant-dependency-set-hmac:v2' AND "
+            'dependency_set_hmac IS NOT NULL AND length(dependency_set_hmac) = 64 AND '
+            'parent_selected_evidence_projection_hmac IS NOT NULL AND '
+            'length(parent_selected_evidence_projection_hmac) = 64 AND '
+            'model_influence_set_hmac IS NULL))',
             name='ck_assistant_messages_content_origin_xor',
         ),
     )

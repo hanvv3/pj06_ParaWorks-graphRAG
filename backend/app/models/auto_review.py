@@ -821,9 +821,13 @@ class AssistantMessageEvidenceDependency(Base):
         ),
         CheckConstraint(
             'dependency_serving_scope IS NULL OR '
-            '(length(dependency_set_hmac) = 64 AND length(dependency_child_hmac) = 64 AND '
+            '(dependency_role IS NOT NULL AND dependency_set_hmac IS NOT NULL AND '
+            'length(dependency_set_hmac) = 64 AND dependency_child_hmac IS NOT NULL AND '
+            'length(dependency_child_hmac) = 64 AND '
+            'fingerprint_key_material_verifier IS NOT NULL AND '
             'length(fingerprint_key_material_verifier) = 64 AND '
-            'length(model_content_hmac) = 64 AND '
+            'model_content_hmac IS NOT NULL AND length(model_content_hmac) = 64 AND '
+            'canonical_citation_projection_hmac IS NOT NULL AND '
             'length(canonical_citation_projection_hmac) = 64 AND '
             '(approval_provenance_hmac IS NULL OR '
             'length(approval_provenance_hmac) = 64) AND '
@@ -834,7 +838,12 @@ class AssistantMessageEvidenceDependency(Base):
             'length(selected_v1_citation_projection_hmac) = 64) AND '
             '(serving_identity_hmac IS NULL OR length(serving_identity_hmac) = 64) AND '
             '(serving_version_fingerprint IS NULL OR '
-            'length(serving_version_fingerprint) = 64))',
+            'length(serving_version_fingerprint) = 64) AND '
+            "((dependency_role = 'selected_citation' AND "
+            'selected_v1_citation_projection_hmac IS NOT NULL AND '
+            'length(selected_v1_citation_projection_hmac) = 64) OR '
+            "(dependency_role = 'unselected_model_influence' AND "
+            'selected_v1_citation_projection_hmac IS NULL)))',
             name='ck_assistant_message_dependency_v2_hmacs',
         ),
         CheckConstraint(

@@ -539,6 +539,30 @@ def test_readiness_rejects_partial_overrun_and_reset_attribution() -> None:
         db.add(_readiness(overrun_agent_run_id=123))
         with pytest.raises(IntegrityError):
             db.commit()
+
+
+def test_provider_transition_rejects_partial_family_snapshot() -> None:
+    engine = create_engine('sqlite://')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(
+            models.RagProviderSafetyTransition(
+                authority_id=1,
+                readiness_id=1,
+                global_safety_generation=0,
+                transition_kind='bootstrap',
+                prior_state=None,
+                new_state=None,
+                prior_state_version=None,
+                new_state_version=1,
+                prior_family_safety_generation=None,
+                new_family_safety_generation=0,
+                envelope_digest='a' * 64,
+                reviewed_transition_reference_hmac='b' * 64,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db.commit()
         db.rollback()
 
         db.add(_readiness(reset_by='reviewer'))
@@ -575,5 +599,176 @@ def test_advisory_registry_rejects_out_of_range_or_noncanonical_shape(
                 lock_identity_canonical_bytes=payload,
             )
         )
+        with pytest.raises(IntegrityError):
+            db.commit()
+
+
+@pytest.mark.parametrize(
+    'missing_field',
+    (
+        'overrun_agent_run_id',
+        'overrun_input_tokens',
+        'overrun_output_tokens',
+        'overrun_cost_usd',
+        'overrun_observed_at',
+    ),
+)
+def test_provider_overrun_attribution_rejects_each_missing_field(
+    missing_field: str,
+) -> None:
+    engine = create_engine('sqlite://')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        parent = _v2_parent()
+        db.add(parent)
+        db.flush()
+        values: dict[str, object] = {
+            'overrun_agent_run_id': parent.id,
+            'overrun_input_tokens': 7,
+            'overrun_output_tokens': 3,
+            'overrun_cost_usd': Decimal('0.010000'),
+            'overrun_observed_at': datetime.now(UTC),
+            'state': 'blocked_overrun',
+        }
+        values[missing_field] = None
+        db.add(_readiness(**values))
+        with pytest.raises(IntegrityError):
+            db.commit()
+
+
+def _assembled_message_values(conversation_id: int, run_id: int) -> dict[str, object]:
+    return {
+        'conversation_id': conversation_id,
+        'role': 'assistant',
+        'content': 'assembled',
+        'evidence_contract_version': 'assistant-evidence:v1',
+        'serving_dependency_count': 1,
+        'content_write_mode': 'rag_v2_exact',
+        'content_hmac_schema_version': 'assistant-message-content-hmac:v1',
+        'assistant_message_content_hmac': 'a' * 64,
+        'content_hmac_key_version': 'runtime-key-v1',
+        'content_hmac_key_material_verifier': 'b' * 64,
+        'content_origin': 'rag_assembled',
+        'content_origin_hmac': 'c' * 64,
+        'rag_result_hmac': 'd' * 64,
+        'linked_agent_run_id': run_id,
+        'dependency_set_hmac_schema_version': 'assistant-dependency-set-hmac:v2',
+        'dependency_set_hmac': 'e' * 64,
+        'parent_selected_evidence_projection_hmac': 'f' * 64,
+        'model_influence_set_hmac': '1' * 64,
+    }
+
+
+@pytest.mark.parametrize(
+    'missing_field',
+    (
+        'evidence_contract_version',
+        'serving_dependency_count',
+        'dependency_set_hmac_schema_version',
+        'dependency_set_hmac',
+        'parent_selected_evidence_projection_hmac',
+        'model_influence_set_hmac',
+    ),
+)
+def test_assembled_message_rejects_each_nullable_required_field(
+    missing_field: str,
+) -> None:
+    engine = create_engine('sqlite://')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = models.AssistantConversation(user_id='owner', title='title')
+        parent = _v2_parent(
+            status='complete',
+            run_record_phase='final',
+            completed_at=datetime.now(UTC),
+        )
+        db.add_all([conversation, parent])
+        db.flush()
+        values = _assembled_message_values(conversation.id, parent.id)
+        values[missing_field] = None
+        db.add(models.AssistantMessage(**values))
+        with pytest.raises(IntegrityError):
+            db.commit()
+
+
+@pytest.mark.parametrize('contaminating_field', ('rag_result_hmac', 'linked_agent_run_id'))
+def test_legacy_trimmed_integrity_rejects_rag_v2_only_fields(
+    contaminating_field: str,
+) -> None:
+    engine = create_engine('sqlite://')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = models.AssistantConversation(user_id='owner', title='title')
+        parent = _v2_parent()
+        db.add_all([conversation, parent])
+        db.flush()
+        values = _assembled_message_values(conversation.id, parent.id)
+        values.update(
+            content_write_mode='legacy_trimmed',
+            content_origin='legacy_evidence',
+            model_influence_set_hmac=None,
+            rag_result_hmac=None,
+            linked_agent_run_id=None,
+        )
+        values[contaminating_field] = '2' * 64 if contaminating_field.endswith('hmac') else parent.id
+        db.add(models.AssistantMessage(**values))
+        with pytest.raises(IntegrityError):
+            db.commit()
+
+
+@pytest.mark.parametrize(
+    'missing_field',
+    (
+        'dependency_role',
+        'dependency_child_hmac',
+        'model_content_hmac',
+        'canonical_citation_projection_hmac',
+        'selected_v1_citation_projection_hmac',
+    ),
+)
+def test_v2_dependency_rejects_each_nullable_required_field(
+    missing_field: str,
+) -> None:
+    engine = create_engine('sqlite://')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = models.AssistantConversation(user_id='owner', title='title')
+        message = models.AssistantMessage(
+            **_assembled_message_values(1, 1),
+        )
+        db.add(conversation)
+        db.flush()
+        message.conversation_id = conversation.id
+        db.add(message)
+        db.flush()
+        values: dict[str, object] = {
+            'assistant_message_id': message.id,
+            'candidate_ordinal': 0,
+            'serving_document_id': 'chunk:1',
+            'dependency_kind': 'raw_chunk',
+            'dependency_set_hmac': 'e' * 64,
+            'serving_content_hash': '3' * 64,
+            'permission_level': 'internal',
+            'fingerprint_key_version': 'runtime-key-v1',
+            'fingerprint_key_material_verifier': 'b' * 64,
+            'document_chunk_id': 1,
+            'document_version_id': 1,
+            'source_id': 1,
+            'parser_run_id': 1,
+            'server_content_signature_schema': 'server-source-content:v1',
+            'server_content_signature': '4' * 64,
+            'legacy_human_base': False,
+            'dependency_serving_scope': 'rag_v2',
+            'dependency_role': 'selected_citation',
+            'dependency_child_hmac': '5' * 64,
+            'model_content_hmac': '6' * 64,
+            'canonical_citation_projection_hmac': '7' * 64,
+            'selected_v1_citation_projection_hmac': '8' * 64,
+            'serving_identity_hmac': '9' * 64,
+            'serving_version_fingerprint': 'a' * 64,
+            'support_mode': 'source_observation',
+        }
+        values[missing_field] = None
+        db.add(models.AssistantMessageEvidenceDependency(**values))
         with pytest.raises(IntegrityError):
             db.commit()
