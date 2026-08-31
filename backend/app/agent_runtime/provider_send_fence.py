@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime
 from typing import Any, Generic, Protocol, TypeVar
 
@@ -65,3 +66,44 @@ class ProviderAttemptGrant(Protocol, Generic[_T]):
 
     @property
     def authoritative_lease_expires_at(self) -> datetime: ...
+
+
+def run_shared_advisory_send_fence(
+    *,
+    connection_factory: Callable[[], object],
+    key: tuple[int, int],
+    recheck: Callable[[], None],
+    send: Callable[[], _T],
+) -> _T:
+    """Run the final evidence recheck/send under a dedicated shared PG lock."""
+    connection = connection_factory()
+    locked = False
+    try:
+        connection.exec_driver_sql(  # type: ignore[attr-defined]
+            'SELECT pg_advisory_lock_shared(%s, %s)', key
+        )
+        locked = True
+        recheck()
+        return send()
+    finally:
+        unlock_error: BaseException | None = None
+        valid_unlock = not locked
+        if locked:
+            try:
+                result = connection.exec_driver_sql(  # type: ignore[attr-defined]
+                    'SELECT pg_advisory_unlock_shared(%s, %s)', key
+                )
+                valid_unlock = result.scalar_one() is True
+            except BaseException as exc:
+                unlock_error = exc
+                with suppress(Exception):
+                    connection.invalidate()  # type: ignore[attr-defined]
+            finally:
+                if not valid_unlock:
+                    with suppress(Exception):
+                        connection.invalidate()  # type: ignore[attr-defined]
+        connection.close()  # type: ignore[attr-defined]
+        if unlock_error is not None:
+            raise unlock_error
+        if locked and not valid_unlock:
+            raise ProviderSendFenceError('shared advisory unlock was not confirmed')

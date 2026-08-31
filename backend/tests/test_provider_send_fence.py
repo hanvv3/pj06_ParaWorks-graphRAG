@@ -17,6 +17,7 @@ from backend.app.agent_runtime.provider_send_fence import (
     FencedProviderSendPermit,
     ProviderAttemptGrant,
     ProviderSendFenceError,
+    run_shared_advisory_send_fence,
 )
 from backend.app.agent_runtime.review_v21_extraction import (
     ExtractionCallLedger,
@@ -267,3 +268,63 @@ def test_every_terminal_or_authority_loss_removes_indirect_and_permit_dispatch(
     with pytest.raises(ProviderSendFenceError):
         grant.permit.consume_at_dispatch()
     assert called is False
+
+
+def test_rag_shared_advisory_fence_uses_dedicated_connection_and_exact_unlock():
+    events = []
+
+    class Result:
+        def scalar_one(self):
+            return True
+
+    class Connection:
+        def exec_driver_sql(self, sql, params):
+            events.append((sql, params))
+            return Result()
+
+        def close(self):
+            events.append('close')
+
+    connection = Connection()
+    value = run_shared_advisory_send_fence(
+        connection_factory=lambda: connection,
+        key=(10, -20),
+        recheck=lambda: events.append('recheck'),
+        send=lambda: events.append('send') or 'ok',
+    )
+    assert value == 'ok'
+    assert events == [
+        ('SELECT pg_advisory_lock_shared(%s, %s)', (10, -20)),
+        'recheck',
+        'send',
+        ('SELECT pg_advisory_unlock_shared(%s, %s)', (10, -20)),
+        'close',
+    ]
+
+
+def test_rag_shared_advisory_fence_invalidates_and_closes_on_uncertain_unlock():
+    events = []
+
+    class Result:
+        def scalar_one(self):
+            return False
+
+    class Connection:
+        def exec_driver_sql(self, sql, params):
+            events.append((sql, params))
+            return Result()
+
+        def invalidate(self):
+            events.append('invalidate')
+
+        def close(self):
+            events.append('close')
+
+    with pytest.raises(ProviderSendFenceError, match='unlock'):
+        run_shared_advisory_send_fence(
+            connection_factory=Connection,
+            key=(1, 2),
+            recheck=lambda: None,
+            send=lambda: None,
+        )
+    assert events[-2:] == ['invalidate', 'close']

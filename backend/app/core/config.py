@@ -39,6 +39,7 @@ class Settings(BaseSettings):
         'local-development-agent-runtime-fingerprint-secret'
     )
     agent_runtime_fingerprint_key_version: str = 'v1'
+    paraworks_provider_safety_latch_path: str = '.paraworks/provider-safety.json'
     auto_review_mode: Literal['disabled', 'shadow', 'enforce'] = 'disabled'
     auto_review_enforce_percentage: Annotated[
         Literal[0, 10, 100], BeforeValidator(_coerce_integer_literal)
