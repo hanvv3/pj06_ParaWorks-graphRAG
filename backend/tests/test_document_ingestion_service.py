@@ -2,22 +2,40 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
+from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
+from backend.app.agent_runtime.keyed_mutation_guard import (
+    KeyedMutationGuard,
+    acquire_projection,
+    lock_runtime_state,
+)
 from backend.app.api.v1 import search as search_api
 from backend.app.connectors.base import SourceEvent
+from backend.app.core.config import Settings
+from backend.app.documents.service import (
+    parsed_document_from_source_event,
+    persist_parsed_document,
+)
 from backend.app.ingestion import service as ingestion_service
 from backend.app.ingestion.service import ingest_events, ingest_events_with_result
+from backend.app.ingestion.source_content_signature import (
+    canonical_source_content_signature,
+    server_parser_policy_for_event,
+)
 from backend.app.models import (
+    AutoReviewRuntimeKeyState,
     Document,
     DocumentChunk,
     DocumentParserRun,
     DocumentVersion,
+    RagServingCorpusGeneration,
     ReviewItem,
     Source,
     VectorIndexState,
 )
 from backend.app.rag.indexing import build_rag_index_documents
+from backend.app.rag.serving_generation import lock_rag_serving_generation
 from backend.app.rag.vector_store import VectorMatch, VectorSearchResult
 
 
@@ -92,6 +110,203 @@ def slack_event_for_id(source_id: str) -> SourceEvent:
         permission_level='internal',
         raw_metadata={'content_signature': 'slack-connector-signature'},
     )
+
+
+def _rag_settings() -> Settings:
+    return Settings(
+        database_url='sqlite://',
+        agent_runtime_fingerprint_secret=(
+            'task-5-document-authority-secret-at-least-32-bytes'
+        ),
+        agent_runtime_fingerprint_key_version='task5-document-authority-v1',
+        openai_embedding_model='fake-embedding:v1',
+        openai_embedding_dimensions=2,
+    )
+
+
+def _seed_document_authority_rows(db: Session, *, settings: Settings) -> None:
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db.add_all(
+        [
+            AutoReviewRuntimeKeyState(
+                component='auto_review_trust_promotion',
+                fingerprint_key_version=(
+                    settings.agent_runtime_fingerprint_key_version
+                ),
+                fingerprint_key_material_verifier=verifier,
+                generation=1,
+                ready=True,
+            ),
+            RagServingCorpusGeneration(
+                id=1,
+                corpus_generation=0,
+                vector_index_generation=0,
+                embedding_model=settings.openai_embedding_model,
+                embedding_dimensions=settings.openai_embedding_dimensions,
+                index_policy_version='rag-v2-serving-index:v1',
+                pgvector_cosine_policy_version='pgvector-cosine-indexable:v1',
+                fingerprint_key_version=(
+                    settings.agent_runtime_fingerprint_key_version
+                ),
+                fingerprint_key_material_verifier=verifier,
+            ),
+        ]
+    )
+
+
+def _canonical_persist_fixture(db: Session) -> tuple[Source, SourceEvent]:
+    event = drive_event()
+    source = Source(
+        source_type=event.source_type,
+        source_id=event.source_id,
+        source_url=event.source_url,
+        title=event.title,
+        author=event.author,
+        permission_level=event.permission_level,
+        raw_metadata={},
+    )
+    db.add(source)
+    db.flush()
+    return source, event
+
+
+def _assert_no_parsed_document_rows(db: Session) -> None:
+    assert db.query(Document).count() == 0
+    assert db.query(DocumentVersion).count() == 0
+    assert db.query(DocumentParserRun).count() == 0
+    assert db.query(DocumentChunk).count() == 0
+
+
+def test_canonical_persist_rejects_missing_context_before_malformed_pair(
+    db_session: Session,
+) -> None:
+    source, event = _canonical_persist_fixture(db_session)
+    parsed = parsed_document_from_source_event(event)
+    server_signature = canonical_source_content_signature(event)
+
+    with pytest.raises(TypeError, match='locked RAG generation context'):
+        persist_parsed_document(
+            db_session,
+            source=source,
+            title=event.title,
+            parsed=parsed,
+            metadata={},
+            server_signature=server_signature,
+            parser_policy=None,
+            rag_generation_context=None,
+        )
+
+    _assert_no_parsed_document_rows(db_session)
+
+
+def test_canonical_persist_rejects_share_context_before_malformed_pair(
+    db_session: Session,
+) -> None:
+    settings = _rag_settings()
+    source, event = _canonical_persist_fixture(db_session)
+    parser_policy = server_parser_policy_for_event(event)
+    _seed_document_authority_rows(db_session, settings=settings)
+    db_session.commit()
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        share_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+            for_update=False,
+        )
+        acquire_projection(db_session, key_context)
+        with pytest.raises(TypeError, match='mutation-authorized'):
+            persist_parsed_document(
+                db_session,
+                source=source,
+                title=event.title,
+                parsed=parsed_document_from_source_event(event),
+                metadata={},
+                server_signature=None,
+                parser_policy=parser_policy,
+                rag_generation_context=share_context,
+            )
+        _assert_no_parsed_document_rows(db_session)
+        assert list(db_session.new) == []
+        assert list(db_session.dirty) == []
+        db_session.rollback()
+
+
+def test_canonical_persist_rejects_foreign_context_before_malformed_pair(
+    db_session: Session,
+) -> None:
+    settings = _rag_settings()
+    source, event = _canonical_persist_fixture(db_session)
+    server_signature = canonical_source_content_signature(event)
+    _seed_document_authority_rows(db_session, settings=settings)
+    db_session.commit()
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        generation_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+        )
+        acquire_projection(db_session, key_context)
+        foreign_session = sessionmaker(bind=db_session.get_bind())()
+        try:
+            with pytest.raises(TypeError, match='another session'):
+                persist_parsed_document(
+                    foreign_session,
+                    source=source,
+                    title=event.title,
+                    parsed=parsed_document_from_source_event(event),
+                    metadata={},
+                    server_signature=server_signature,
+                    parser_policy=None,
+                    rag_generation_context=generation_context,
+                )
+            _assert_no_parsed_document_rows(foreign_session)
+            assert list(foreign_session.new) == []
+            assert list(foreign_session.dirty) == []
+        finally:
+            foreign_session.close()
+        db_session.rollback()
+
+
+@pytest.mark.parametrize('close_root', ['rollback', 'commit'])
+def test_canonical_persist_rejects_closed_context_before_malformed_pair(
+    db_session: Session,
+    close_root: str,
+) -> None:
+    settings = _rag_settings()
+    source, event = _canonical_persist_fixture(db_session)
+    server_signature = canonical_source_content_signature(event)
+    _seed_document_authority_rows(db_session, settings=settings)
+    db_session.commit()
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        generation_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+        )
+        acquire_projection(db_session, key_context)
+        getattr(db_session, close_root)()
+        with pytest.raises(TypeError, match='transaction'):
+            persist_parsed_document(
+                db_session,
+                source=source,
+                title=event.title,
+                parsed=parsed_document_from_source_event(event),
+                metadata={},
+                server_signature=server_signature,
+                parser_policy=None,
+                rag_generation_context=generation_context,
+            )
+
+    _assert_no_parsed_document_rows(db_session)
 
 def test_ingest_drive_parsed_document_preserves_parser_metadata(db_session: Session) -> None:
     event = drive_event()
