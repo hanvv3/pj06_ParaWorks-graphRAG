@@ -546,15 +546,20 @@ def test_answer_real_component_ceiling_refuses_without_clamping(
     ) == Decimal('0.051200')
 
 
-def test_policy_and_authority_have_no_attribute_mutation_bypass() -> None:
-    policy = _policy()
+def test_policy_is_opaque_and_exposes_no_secret_authority_or_tokenizer() -> None:
+    settings = _settings()
+    policy = _policy(settings)
 
-    with pytest.raises((AttributeError, TypeError)):
-        object.__setattr__(
-            policy._authority,
-            'query_input_usd_per_1m',
-            Decimal('9.020000'),
-        )
+    assert settings.agent_runtime_fingerprint_secret not in repr(policy)
+    assert not hasattr(policy, '_authority')
+    assert not hasattr(policy, '_secret')
+    assert not hasattr(policy, '_integrity_hmac')
+    with pytest.raises(TypeError):
+        iter(policy)
+    with pytest.raises(TypeError):
+        tuple(policy)
+    with pytest.raises(TypeError):
+        policy[0]
     with pytest.raises((AttributeError, TypeError)):
         object.__setattr__(policy, '_query_policy_hmac', '0' * 64)
 
@@ -565,23 +570,14 @@ def test_policy_and_authority_have_no_attribute_mutation_bypass() -> None:
     assert prepared.reserved_cost_usd == Decimal('0.000001')
 
 
-def test_tuple_base_constructor_cannot_forge_same_hmac_different_behavior() -> None:
+def test_object_new_unregistered_policy_is_typed_zero_call_refusal() -> None:
     policy = _policy()
-    forged_authority = policy._authority._replace(
-        query_input_usd_per_1m=Decimal('9.020000'),
-    )
-    forged = tuple.__new__(
-        RagCostPolicy,
-        (forged_authority, *policy[1:]),
-    )
+    forged = object.__new__(RagCostPolicy)
     query = QueryEmbeddingCostInput(
         '한국어 그래프 검색'.encode(),
         policy.query_embedding_model_config_snapshot_hmac,
     )
 
-    assert forged[8] == (
-        policy.authorized_policy_snapshot_hmac('query_embedding')
-    )
     with pytest.raises(RagPolicyUnavailableError) as readiness_exc:
         forged.authorized_policy_snapshot_hmac('query_embedding')
     with pytest.raises(RagPolicyUnavailableError) as exc_info:
@@ -591,63 +587,107 @@ def test_tuple_base_constructor_cannot_forge_same_hmac_different_behavior() -> N
     assert exc_info.value.code == 'retriever_not_configured'
 
 
+def test_policy_subclass_is_rejected() -> None:
+    with pytest.raises(TypeError, match='subclass'):
+        class _ForgedPolicy(RagCostPolicy):
+            pass
+
+
 @pytest.mark.parametrize('operation', (copy.copy, copy.deepcopy, pickle.dumps))
-def test_policy_and_authority_reject_copy_deepcopy_and_pickle(
+def test_policy_rejects_copy_deepcopy_and_pickle(
     operation: Callable[[object], object],
 ) -> None:
     policy = _policy()
 
     with pytest.raises(TypeError, match='non-transferable'):
         operation(policy)
-    with pytest.raises(TypeError, match='non-transferable'):
-        operation(policy._authority)
 
 
-def test_query_tokenizer_core_drift_is_zero_call_refusal(
+@pytest.mark.parametrize('encoding_name', ('cl100k_base', 'o200k_base'))
+def test_fake_core_with_approved_token_bytes_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    encoding_name: str,
+) -> None:
+    tokenizer = tiktoken.get_encoding(encoding_name)
+    approved_core = tokenizer._core_bpe
+
+    class _FakeCore:
+        def token_byte_values(self):
+            return approved_core.token_byte_values()
+
+        def encode(self, text, allowed_special):
+            return [0]
+
+    monkeypatch.setattr(tokenizer, '_core_bpe', _FakeCore())
+
+    with pytest.raises(ValueError, match='tokenizer'):
+        _policy()
+
+
+@pytest.mark.parametrize(
+    ('component', 'unavailable_code'),
+    (
+        ('query_embedding', 'retriever_not_configured'),
+        ('answer_generation', 'model_unavailable'),
+    ),
+)
+def test_encode_time_core_swap_discards_count_and_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+    unavailable_code: str,
+) -> None:
+    policy = _policy()
+    original_encode = tiktoken.Encoding.encode
+    replacement_core = tiktoken.get_encoding(
+        'o200k_base' if component == 'query_embedding' else 'cl100k_base'
+    )._core_bpe
+    changed: list[tuple[tiktoken.Encoding, object]] = []
+
+    def encode_and_swap(self, text, **kwargs):
+        result = original_encode(self, text, **kwargs)
+        changed.append((self, self._core_bpe))
+        self._core_bpe = replacement_core
+        return result
+
+    monkeypatch.setattr(tiktoken.Encoding, 'encode', encode_and_swap)
+    try:
+        with pytest.raises(RagPolicyUnavailableError) as exc_info:
+            if component == 'query_embedding':
+                policy.prepare_query_embedding(QueryEmbeddingCostInput(
+                    '한국어 그래프 검색'.encode(),
+                    policy.query_embedding_model_config_snapshot_hmac,
+                ))
+            else:
+                policy.prepare_answer_generation(
+                    _answer_input(policy, content='한국어 근거 답변')
+                )
+    finally:
+        for tokenizer, original_core in changed:
+            tokenizer._core_bpe = original_core
+
+    assert exc_info.value.code == unavailable_code
+
+
+def test_global_cached_tokenizer_core_drift_cannot_reach_private_clones(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = _policy()
-    authorized = policy.authorized_policy_snapshot_hmac('query_embedding')
     query = QueryEmbeddingCostInput(
         '한국어 그래프 검색'.encode(),
         policy.query_embedding_model_config_snapshot_hmac,
     )
-    before = policy.prepare_query_embedding(query)
+    answer = _answer_input(policy, content='한국어 근거 답변')
+    before_query = policy.prepare_query_embedding(query)
+    before_answer = policy.prepare_answer_generation(answer)
     query_tokenizer = tiktoken.get_encoding('cl100k_base')
     answer_tokenizer = tiktoken.get_encoding('o200k_base')
-    monkeypatch.setattr(
-        query_tokenizer,
-        '_core_bpe',
-        answer_tokenizer._core_bpe,
-    )
+    query_core = query_tokenizer._core_bpe
+    answer_core = answer_tokenizer._core_bpe
+    monkeypatch.setattr(query_tokenizer, '_core_bpe', answer_core)
+    monkeypatch.setattr(answer_tokenizer, '_core_bpe', query_core)
 
-    with pytest.raises(RagPolicyUnavailableError) as exc_info:
-        policy.prepare_query_embedding(query)
-
-    assert before.estimated_input_tokens > 0
-    assert exc_info.value.code == 'retriever_not_configured'
-    assert policy.authorized_policy_snapshot_hmac('query_embedding') == authorized
-
-
-def test_answer_tokenizer_core_drift_is_zero_call_refusal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = _policy()
-    authorized = policy.authorized_policy_snapshot_hmac('answer_generation')
-    value = _answer_input(policy, content='한국어 근거 답변')
-    answer_tokenizer = tiktoken.get_encoding('o200k_base')
-    query_tokenizer = tiktoken.get_encoding('cl100k_base')
-    monkeypatch.setattr(
-        answer_tokenizer,
-        '_core_bpe',
-        query_tokenizer._core_bpe,
-    )
-
-    with pytest.raises(RagPolicyUnavailableError) as exc_info:
-        policy.prepare_answer_generation(value)
-
-    assert exc_info.value.code == 'model_unavailable'
-    assert policy.authorized_policy_snapshot_hmac('answer_generation') == authorized
+    assert policy.prepare_query_embedding(query) == before_query
+    assert policy.prepare_answer_generation(answer) == before_answer
 
 
 def test_answer_exact_rounded_component_ceiling_passes(

@@ -4,9 +4,12 @@ import hashlib
 import hmac
 import json
 from decimal import ROUND_CEILING, Decimal, localcontext
+from threading import RLock
 from typing import Final, NamedTuple
+from weakref import WeakKeyDictionary
 
 import tiktoken
+import tiktoken._tiktoken as _tiktoken
 
 from backend.app.admin.auto_review_keys import (
     fingerprint_key_material_verifier,
@@ -62,10 +65,10 @@ ANSWER_FRAMING_SAFETY_TOKENS: Final = 512
 _MILLION: Final = Decimal(1_000_000)
 _SIX_PLACES: Final = Decimal('0.000001')
 _QUERY_TOKENIZER_REGISTRY_FINGERPRINT: Final = (
-    '63b5d6ada84960562bd70fa2a070fd3bbbaace803c856f2b1ee319356fb00514'
+    'a65dff0b0e3cfda66925523c59433c0e929e02454ddd43f8cafe9de3d99f0fd3'
 )
 _ANSWER_TOKENIZER_REGISTRY_FINGERPRINT: Final = (
-    'afe42a4292bc9a7d1c45cd547d7401936dbb04a48a6966165456579552d0fb8c'
+    'a3f5661718c52b8999530b4865249f2a51f7e69117b983191553a7805a8b8e08'
 )
 _MAX_TOKENIZER_TOKENS: Final = 250_000
 _MAX_TOKENIZER_DEFINITION_BYTES: Final = 64 * 1_024 * 1_024
@@ -109,6 +112,31 @@ class _RagCostAuthority(NamedTuple):
 
     def __reduce_ex__(self, protocol: int) -> None:
         raise TypeError('RAG cost authority is non-transferable')
+
+
+class _PrivateTokenizer(NamedTuple):
+    encoding: tiktoken.Encoding
+    core: _tiktoken.CoreBPE
+    definition_fingerprint: str
+
+
+class _PolicyState(NamedTuple):
+    authority: _RagCostAuthority
+    secret: bytes
+    key_version: str
+    key_material_verifier: str
+    answer_schema_hmac: str
+    answer_prompt_renderer_hmac: str
+    query_config_hmac: str
+    answer_config_hmac: str
+    query_policy_hmac: str
+    answer_policy_hmac: str
+    query_tokenizer: _PrivateTokenizer
+    answer_tokenizer: _PrivateTokenizer
+
+
+_POLICY_STATES: WeakKeyDictionary[object, _PolicyState] = WeakKeyDictionary()
+_POLICY_STATES_LOCK = RLock()
 
 
 class RagCostPolicyError(ValueError):
@@ -155,23 +183,34 @@ def _answer_output_schema_hmac(
     )
 
 
-class RagCostPolicy(tuple):
-    __slots__ = ()
+class RagCostPolicy:
+    __slots__ = ('__weakref__',)
 
-    def __new__(
-        cls,
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError('RAG cost policy subclassing is forbidden')
+
+    def __init__(
+        self,
         *,
         settings: Settings,
         answer_output_schema_hmac: str,
         answer_prompt_renderer_hmac: str,
-    ) -> RagCostPolicy:
-        if type(settings) is not Settings:
+    ) -> None:
+        if type(self) is not RagCostPolicy or type(settings) is not Settings:
             raise ValueError('RAG cost policy settings are invalid')
         if not is_lower_hex_64(answer_output_schema_hmac) or not is_lower_hex_64(
             answer_prompt_renderer_hmac
         ):
             raise ValueError('RAG answer policy identities are invalid')
         authority = _build_cost_authority()
+        query_tokenizer = _clone_approved_tokenizer(
+            authority.query_tokenizer_encoding,
+            expected_fingerprint=authority.query_tokenizer_fingerprint,
+        )
+        answer_tokenizer = _clone_approved_tokenizer(
+            authority.answer_tokenizer_encoding,
+            expected_fingerprint=authority.answer_tokenizer_fingerprint,
+        )
         secret, key_version = fingerprint_secret_bytes(settings)
         key_material_verifier = fingerprint_key_material_verifier(
             settings.agent_runtime_fingerprint_secret
@@ -200,31 +239,24 @@ class RagCostPolicy(tuple):
             answer_output_schema_hmac=answer_output_schema_hmac,
             answer_prompt_renderer_hmac=answer_prompt_renderer_hmac,
         )
-        integrity_hmac = _build_policy_integrity_hmac(
+        state = _PolicyState(
             authority=authority,
             secret=secret,
             key_version=key_version,
             key_material_verifier=key_material_verifier,
-            answer_output_schema_hmac=answer_output_schema_hmac,
+            answer_schema_hmac=answer_output_schema_hmac,
             answer_prompt_renderer_hmac=answer_prompt_renderer_hmac,
             query_config_hmac=query_config_hmac,
             answer_config_hmac=answer_config_hmac,
             query_policy_hmac=query_policy_hmac,
             answer_policy_hmac=answer_policy_hmac,
+            query_tokenizer=query_tokenizer,
+            answer_tokenizer=answer_tokenizer,
         )
-        return tuple.__new__(cls, (
-            authority,
-            secret,
-            key_version,
-            key_material_verifier,
-            answer_output_schema_hmac,
-            answer_prompt_renderer_hmac,
-            query_config_hmac,
-            answer_config_hmac,
-            query_policy_hmac,
-            answer_policy_hmac,
-            integrity_hmac,
-        ))
+        with _POLICY_STATES_LOCK:
+            if self in _POLICY_STATES:
+                raise ValueError('RAG cost policy is already initialized')
+            _POLICY_STATES[self] = state
 
     def __copy__(self) -> None:
         raise TypeError('RAG cost policy is non-transferable')
@@ -236,72 +268,30 @@ class RagCostPolicy(tuple):
         raise TypeError('RAG cost policy is non-transferable')
 
     @property
-    def _authority(self) -> _RagCostAuthority:
-        return self[0]
-
-    @property
-    def _secret(self) -> bytes:
-        return self[1]
-
-    @property
-    def _key_version(self) -> str:
-        return self[2]
-
-    @property
-    def _key_material_verifier(self) -> str:
-        return self[3]
-
-    @property
-    def _answer_schema_hmac(self) -> str:
-        return self[4]
-
-    @property
-    def _answer_prompt_renderer_hmac(self) -> str:
-        return self[5]
-
-    @property
-    def _query_config_hmac(self) -> str:
-        return self[6]
-
-    @property
-    def _answer_config_hmac(self) -> str:
-        return self[7]
-
-    @property
-    def _query_policy_hmac(self) -> str:
-        return self[8]
-
-    @property
-    def _answer_policy_hmac(self) -> str:
-        return self[9]
-
-    @property
-    def _integrity_hmac(self) -> str:
-        return self[10]
-
-    @property
     def query_embedding_model_config_snapshot_hmac(self) -> str:
-        self._require_integrity('retriever_not_configured')
-        return self[6]
+        return _policy_state(
+            self,
+            'retriever_not_configured',
+        ).query_config_hmac
 
     @property
     def answer_model_config_snapshot_hmac(self) -> str:
-        self._require_integrity('model_unavailable')
-        return self[7]
+        return _policy_state(self, 'model_unavailable').answer_config_hmac
 
     def authorized_policy_snapshot_hmac(
         self,
         component: RagPaidComponent,
     ) -> str:
         selected = _exact_component(component)
-        self._require_integrity(
+        state = _policy_state(
+            self,
             'retriever_not_configured'
             if selected == 'query_embedding'
-            else 'model_unavailable'
+            else 'model_unavailable',
         )
         if selected == 'query_embedding':
-            return self[8]
-        return self[9]
+            return state.query_policy_hmac
+        return state.answer_policy_hmac
 
     def require_authorized_policy_snapshot(
         self,
@@ -324,7 +314,7 @@ class RagCostPolicy(tuple):
         self,
         value: QueryEmbeddingCostInput,
     ) -> PreparedPaidCallBudget:
-        self._require_integrity('retriever_not_configured')
+        state = _policy_state(self, 'retriever_not_configured')
         if (
             type(value) is not QueryEmbeddingCostInput
             or type(value.retrieval_query_utf8) is not bytes
@@ -333,24 +323,19 @@ class RagCostPolicy(tuple):
             raise ValueError('query embedding cost input is invalid')
         if not hmac.compare_digest(
             value.model_config_snapshot_hmac,
-            self[6],
+            state.query_config_hmac,
         ):
             raise RagPolicyUnavailableError('retriever_not_configured')
         try:
             text = value.retrieval_query_utf8.decode('utf-8', errors='strict')
         except UnicodeDecodeError:
             raise ValueError('query embedding input must be strict UTF-8') from None
-        authority = self[0]
-        tokenizer = _resolve_verified_tokenizer(
-            authority.query_tokenizer_encoding,
-            expected_fingerprint=authority.query_tokenizer_fingerprint,
+        authority = state.authority
+        encoded_tokens = _count_private_tokens(
+            state.query_tokenizer,
+            text,
             unavailable_code='retriever_not_configured',
         )
-        encoded_tokens = len(tokenizer.encode(
-            text,
-            allowed_special=set(),
-            disallowed_special=(),
-        ))
         if encoded_tokens > authority.max_query_tokens:
             raise RagBudgetExceededError
         reserved = _rounded_cost(
@@ -366,7 +351,7 @@ class RagCostPolicy(tuple):
         )
         estimator_input_hmac = keyed_fingerprint(
             exact_utf8_bytes(text),
-            secret=self[1],
+            secret=state.secret,
             schema_version='rag-query-embedding-estimator-input-bytes:v1',
             policy_version=authority.query_estimator_version,
         )
@@ -375,7 +360,7 @@ class RagCostPolicy(tuple):
             estimated_input_tokens=encoded_tokens,
             maximum_output_tokens=0,
             reserved_cost_usd=reserved,
-            cost_policy_snapshot_hmac=self[8],
+            cost_policy_snapshot_hmac=state.query_policy_hmac,
             estimator_input_hmac=estimator_input_hmac,
         )
 
@@ -383,7 +368,7 @@ class RagCostPolicy(tuple):
         self,
         value: AnswerGenerationCostInput,
     ) -> PreparedPaidCallBudget:
-        self._require_integrity('model_unavailable')
+        state = _policy_state(self, 'model_unavailable')
         if (
             type(value) is not AnswerGenerationCostInput
             or type(value.exact_messages_json) is not bytes
@@ -393,7 +378,7 @@ class RagCostPolicy(tuple):
             raise ValueError('answer generation cost input is invalid')
         if not hmac.compare_digest(
             value.model_config_snapshot_hmac,
-            self[7],
+            state.answer_config_hmac,
         ):
             raise RagPolicyUnavailableError('model_unavailable')
 
@@ -403,35 +388,30 @@ class RagCostPolicy(tuple):
         if type(schema) is not dict:
             raise ValueError('answer response schema must be an object')
         observed_schema_hmac = _answer_output_schema_hmac(
-            self[1],
+            state.secret,
             value.exact_response_schema_json,
         )
         if not hmac.compare_digest(
             observed_schema_hmac,
-            self[4],
+            state.answer_schema_hmac,
         ):
             raise RagPolicyUnavailableError('model_unavailable')
 
         estimator_bytes = _canonical_json_bytes({
             'messages': messages,
-            'model_config_identity': self[0].answer_model_config_identity,
+            'model_config_identity': state.authority.answer_model_config_identity,
             'output_schema': schema,
             'output_schema_identity': 'rag-answer-blocks:v1',
         })
         estimator_text = estimator_bytes.decode('utf-8')
-        authority = self[0]
+        authority = state.authority
         if len(estimator_text) > authority.max_answer_serialized_chars:
             raise RagBudgetExceededError
-        tokenizer = _resolve_verified_tokenizer(
-            authority.answer_tokenizer_encoding,
-            expected_fingerprint=authority.answer_tokenizer_fingerprint,
+        encoded_tokens = _count_private_tokens(
+            state.answer_tokenizer,
+            estimator_text,
             unavailable_code='model_unavailable',
         )
-        encoded_tokens = len(tokenizer.encode(
-            estimator_text,
-            allowed_special=set(),
-            disallowed_special=(),
-        ))
         framed_tokens = (
             encoded_tokens
             + authority.answer_reply_priming_tokens
@@ -452,7 +432,7 @@ class RagCostPolicy(tuple):
         )
         estimator_hmac = keyed_fingerprint(
             exact_utf8_bytes(estimator_text),
-            secret=self[1],
+            secret=state.secret,
             schema_version='rag-generation-estimator-input-bytes:v1',
             policy_version=authority.answer_estimator_version,
         )
@@ -461,7 +441,7 @@ class RagCostPolicy(tuple):
             estimated_input_tokens=framed_tokens,
             maximum_output_tokens=authority.max_answer_output_tokens,
             reserved_cost_usd=reserved,
-            cost_policy_snapshot_hmac=self[9],
+            cost_policy_snapshot_hmac=state.answer_policy_hmac,
             estimator_input_hmac=estimator_hmac,
         )
 
@@ -471,13 +451,14 @@ class RagCostPolicy(tuple):
         usage: StrictProviderUsage,
     ) -> Decimal:
         selected = _exact_component(component)
-        self._require_integrity(
+        state = _policy_state(
+            self,
             'retriever_not_configured'
             if selected == 'query_embedding'
-            else 'model_unavailable'
+            else 'model_unavailable',
         )
         strict_usage = validate_strict_provider_usage(usage)
-        authority = self[0]
+        authority = state.authority
         if selected == 'query_embedding':
             if strict_usage.output_tokens != 0:
                 raise ValueError('query embedding output usage must be zero')
@@ -496,92 +477,19 @@ class RagCostPolicy(tuple):
             authority=authority,
         )
 
-    def _require_integrity(self, unavailable_code: str) -> None:
-        try:
-            if type(self) is not RagCostPolicy or len(self) != 11:
-                raise ValueError
-            observed = self[10]
-            if type(observed) is not str:
-                raise ValueError
-            expected = _build_policy_integrity_hmac(
-                authority=self[0],
-                secret=self[1],
-                key_version=self[2],
-                key_material_verifier=self[3],
-                answer_output_schema_hmac=self[4],
-                answer_prompt_renderer_hmac=self[5],
-                query_config_hmac=self[6],
-                answer_config_hmac=self[7],
-                query_policy_hmac=self[8],
-                answer_policy_hmac=self[9],
-            )
-        except (IndexError, TypeError, ValueError):
-            raise RagPolicyUnavailableError(unavailable_code) from None
-        if not hmac.compare_digest(observed, expected):
-            raise RagPolicyUnavailableError(unavailable_code)
 
-def _build_policy_integrity_hmac(
-    *,
-    authority: _RagCostAuthority,
-    secret: bytes,
-    key_version: str,
-    key_material_verifier: str,
-    answer_output_schema_hmac: str,
-    answer_prompt_renderer_hmac: str,
-    query_config_hmac: str,
-    answer_config_hmac: str,
-    query_policy_hmac: str,
-    answer_policy_hmac: str,
-) -> str:
-    if type(authority) is not _RagCostAuthority:
-        raise ValueError('RAG cost authority is invalid')
-    policy_identities = (
-        key_version,
-        key_material_verifier,
-        answer_output_schema_hmac,
-        answer_prompt_renderer_hmac,
-        query_config_hmac,
-        answer_config_hmac,
-        query_policy_hmac,
-        answer_policy_hmac,
-    )
-    if any(type(value) is not str or not value for value in policy_identities):
-        raise ValueError('RAG cost policy integrity registry is invalid')
-    return keyed_fingerprint(
-        {
-            'authority': [
-                _price_identity(authority.component_ceiling_usd),
-                _price_identity(authority.query_input_usd_per_1m),
-                authority.query_cost_policy_version,
-                authority.query_estimator_version,
-                authority.query_tokenizer_encoding,
-                authority.query_count_rule,
-                authority.max_query_tokens,
-                _price_identity(authority.answer_input_usd_per_1m),
-                _price_identity(authority.answer_output_usd_per_1m),
-                authority.answer_cost_policy_version,
-                authority.answer_estimator_version,
-                authority.answer_tokenizer_encoding,
-                authority.answer_count_rule,
-                authority.max_answer_serialized_chars,
-                authority.max_answer_input_tokens,
-                authority.max_answer_output_tokens,
-                authority.answer_reply_priming_tokens,
-                authority.answer_framing_safety_tokens,
-                authority.rounding_identity,
-                format(authority.cost_divisor, 'f'),
-                format(authority.rounding_quantum, 'f'),
-                authority.rounding_mode,
-                authority.answer_model_config_identity,
-                authority.query_tokenizer_fingerprint,
-                authority.answer_tokenizer_fingerprint,
-            ],
-            'policy': list(policy_identities),
-        },
-        secret=secret,
-        schema_version='rag-cost-policy-internal-integrity:v1',
-        policy_version='rag-cost-policy-internal-integrity:v1',
-    )
+def _policy_state(
+    policy: object,
+    unavailable_code: str,
+) -> _PolicyState:
+    if type(policy) is not RagCostPolicy:
+        raise RagPolicyUnavailableError(unavailable_code)
+    with _POLICY_STATES_LOCK:
+        state = _POLICY_STATES.get(policy)
+    if type(state) is not _PolicyState:
+        raise RagPolicyUnavailableError(unavailable_code)
+    return state
+
 
 
 def _build_query_policy_hmac(
@@ -819,20 +727,6 @@ def _build_cost_authority() -> _RagCostAuthority:
     ):
         raise ValueError('RAG cost rounding registry is invalid')
 
-    _, query_tokenizer_fingerprint = _resolve_exact_tokenizer(
-        QUERY_EMBEDDING_TOKENIZER_ENCODING
-    )
-    _, answer_tokenizer_fingerprint = _resolve_exact_tokenizer(
-        ANSWER_TOKENIZER_ENCODING
-    )
-    if not hmac.compare_digest(
-        query_tokenizer_fingerprint,
-        _QUERY_TOKENIZER_REGISTRY_FINGERPRINT,
-    ) or not hmac.compare_digest(
-        answer_tokenizer_fingerprint,
-        _ANSWER_TOKENIZER_REGISTRY_FINGERPRINT,
-    ):
-        raise ValueError('RAG tokenizer registry is not approved')
     return _RagCostAuthority(
         component_ceiling_usd=RAG_COMPONENT_CEILING_USD,
         query_input_usd_per_1m=QUERY_EMBEDDING_INPUT_USD_PER_1M,
@@ -857,58 +751,138 @@ def _build_cost_authority() -> _RagCostAuthority:
         rounding_quantum=_SIX_PLACES,
         rounding_mode=ROUND_CEILING,
         answer_model_config_identity=RAG_ANSWER_MODEL_CONFIG_VERSION,
-        query_tokenizer_fingerprint=query_tokenizer_fingerprint,
-        answer_tokenizer_fingerprint=answer_tokenizer_fingerprint,
+        query_tokenizer_fingerprint=_QUERY_TOKENIZER_REGISTRY_FINGERPRINT,
+        answer_tokenizer_fingerprint=_ANSWER_TOKENIZER_REGISTRY_FINGERPRINT,
     )
 
 
-def _resolve_verified_tokenizer(
+def _clone_approved_tokenizer(
     name: str,
     *,
     expected_fingerprint: str,
-    unavailable_code: str,
-) -> tiktoken.Encoding:
+) -> _PrivateTokenizer:
     try:
-        tokenizer, observed_fingerprint = _resolve_exact_tokenizer(name)
-    except ValueError:
-        raise RagPolicyUnavailableError(unavailable_code) from None
-    if not hmac.compare_digest(observed_fingerprint, expected_fingerprint):
-        raise RagPolicyUnavailableError(unavailable_code)
-    return tokenizer
-
-
-def _resolve_exact_tokenizer(name: str) -> tuple[tiktoken.Encoding, str]:
-    try:
-        tokenizer = tiktoken.get_encoding(name)
-        resolved_name = tokenizer.name
+        source = tiktoken.get_encoding(name)
     except Exception:
         raise ValueError('RAG tokenizer is unavailable') from None
     if (
-        type(tokenizer) is not tiktoken.Encoding
-        or type(resolved_name) is not str
-        or resolved_name != name
+        type(source) is not tiktoken.Encoding
+        or type(source._core_bpe) is not _tiktoken.CoreBPE
+        or type(source.name) is not str
+        or source.name != name
     ):
         raise ValueError('RAG tokenizer identity is invalid')
-    return tokenizer, _tokenizer_definition_fingerprint(tokenizer)
+    snapshot = _tokenizer_definition_snapshot(source)
+    observed_fingerprint = _tokenizer_snapshot_fingerprint(snapshot)
+    if not hmac.compare_digest(observed_fingerprint, expected_fingerprint):
+        raise ValueError('RAG tokenizer registry is not approved')
+    _, pattern, mergeable_ranks, special_tokens, _, _ = snapshot
+    try:
+        clone = tiktoken.Encoding(
+            name,
+            pat_str=pattern,
+            mergeable_ranks=mergeable_ranks,
+            special_tokens=special_tokens,
+        )
+    except Exception:
+        raise ValueError('RAG tokenizer clone is unavailable') from None
+    if (
+        type(clone) is not tiktoken.Encoding
+        or clone is source
+        or type(clone._core_bpe) is not _tiktoken.CoreBPE
+    ):
+        raise ValueError('RAG tokenizer clone identity is invalid')
+    clone_fingerprint = _tokenizer_definition_fingerprint(clone)
+    if not hmac.compare_digest(clone_fingerprint, expected_fingerprint):
+        raise ValueError('RAG tokenizer clone definition is invalid')
+    return _PrivateTokenizer(
+        encoding=clone,
+        core=clone._core_bpe,
+        definition_fingerprint=clone_fingerprint,
+    )
+
+
+def _count_private_tokens(
+    private: _PrivateTokenizer,
+    text: str,
+    *,
+    unavailable_code: str,
+) -> int:
+    tokenizer = _verified_private_encoding(private, unavailable_code)
+    try:
+        tokens = tokenizer.encode(
+            text,
+            allowed_special=set(),
+            disallowed_special=(),
+        )
+    except Exception:
+        raise RagPolicyUnavailableError(unavailable_code) from None
+    _verified_private_encoding(private, unavailable_code)
+    if type(tokens) is not list or any(type(token) is not int for token in tokens):
+        raise RagPolicyUnavailableError(unavailable_code)
+    return len(tokens)
+
+
+def _verified_private_encoding(
+    private: object,
+    unavailable_code: str,
+) -> tiktoken.Encoding:
+    try:
+        if (
+            type(private) is not _PrivateTokenizer
+            or type(private.encoding) is not tiktoken.Encoding
+            or type(private.core) is not _tiktoken.CoreBPE
+            or type(private.encoding._core_bpe) is not _tiktoken.CoreBPE
+            or private.encoding._core_bpe is not private.core
+            or type(private.definition_fingerprint) is not str
+        ):
+            raise ValueError
+        observed = _tokenizer_definition_fingerprint(private.encoding)
+    except (AttributeError, TypeError, ValueError):
+        raise RagPolicyUnavailableError(unavailable_code) from None
+    if not hmac.compare_digest(observed, private.definition_fingerprint):
+        raise RagPolicyUnavailableError(unavailable_code)
+    return private.encoding
 
 
 def _tokenizer_definition_fingerprint(
     tokenizer: tiktoken.Encoding,
 ) -> str:
+    return _tokenizer_snapshot_fingerprint(
+        _tokenizer_definition_snapshot(tokenizer)
+    )
+
+
+def _tokenizer_definition_snapshot(
+    tokenizer: tiktoken.Encoding,
+) -> tuple[
+    str,
+    str,
+    dict[bytes, int],
+    dict[str, int],
+    int,
+    tuple[bytes, ...],
+]:
     try:
         name = tokenizer.name
         pattern = tokenizer._pat_str
+        mergeable_ranks = tokenizer._mergeable_ranks
         special_tokens = tokenizer._special_tokens
-        token_byte_values = tokenizer._core_bpe.token_byte_values()
+        core = tokenizer._core_bpe
+        token_byte_values = core.token_byte_values()
         max_token_value = tokenizer.max_token_value
     except Exception:
         raise ValueError('RAG tokenizer definition is unavailable') from None
     if (
-        type(name) is not str
+        type(tokenizer) is not tiktoken.Encoding
+        or type(core) is not _tiktoken.CoreBPE
+        or type(name) is not str
         or type(pattern) is not str
+        or type(mergeable_ranks) is not dict
         or type(special_tokens) is not dict
         or type(token_byte_values) is not list
         or not token_byte_values
+        or len(mergeable_ranks) > _MAX_TOKENIZER_TOKENS
         or len(token_byte_values) > _MAX_TOKENIZER_TOKENS
         or len(special_tokens) > _MAX_TOKENIZER_SPECIAL_TOKENS
         or type(max_token_value) is not int
@@ -920,37 +894,96 @@ def _tokenizer_definition_fingerprint(
     pattern_bytes = pattern.encode('utf-8', errors='strict')
     if len(pattern_bytes) > _MAX_TOKENIZER_PATTERN_BYTES:
         raise ValueError('RAG tokenizer definition is invalid')
-    digest = hashlib.sha256(b'rag-tokenizer-definition:v1\0')
-    _update_sized_digest(digest, name_bytes)
-    _update_sized_digest(digest, pattern_bytes)
-    digest.update(len(token_byte_values).to_bytes(8, 'big'))
     total_bytes = len(name_bytes) + len(pattern_bytes)
+    copied_ranks: dict[bytes, int] = {}
+    seen_ranks: set[int] = set()
+    try:
+        rank_items = tuple(mergeable_ranks.items())
+    except Exception:
+        raise ValueError('RAG tokenizer definition is unstable') from None
+    if len(rank_items) != len(mergeable_ranks):
+        raise ValueError('RAG tokenizer definition is unstable')
+    for token_bytes, rank in rank_items:
+        if (
+            type(token_bytes) is not bytes
+            or type(rank) is not int
+            or rank < 0
+            or rank >= 2**64
+            or rank in seen_ranks
+        ):
+            raise ValueError('RAG tokenizer definition is invalid')
+        total_bytes += len(token_bytes)
+        if total_bytes > _MAX_TOKENIZER_DEFINITION_BYTES:
+            raise ValueError('RAG tokenizer definition is invalid')
+        copied_ranks[token_bytes] = rank
+        seen_ranks.add(rank)
+
+    copied_token_values: list[bytes] = []
     for token_bytes in token_byte_values:
         if type(token_bytes) is not bytes:
             raise ValueError('RAG tokenizer definition is invalid')
         total_bytes += len(token_bytes)
         if total_bytes > _MAX_TOKENIZER_DEFINITION_BYTES:
             raise ValueError('RAG tokenizer definition is invalid')
-        _update_sized_digest(digest, token_bytes)
+        copied_token_values.append(token_bytes)
 
-    special_items: list[tuple[str, int]] = []
+    copied_specials: dict[str, int] = {}
     for token, rank in special_tokens.items():
         if (
             type(token) is not str
             or type(rank) is not int
             or rank < 0
+            or rank >= 2**64
         ):
             raise ValueError('RAG tokenizer definition is invalid')
-        special_items.append((token, rank))
-    special_items.sort(key=lambda item: item[0])
-    digest.update(len(special_items).to_bytes(8, 'big'))
-    for token, rank in special_items:
         token_bytes = token.encode('utf-8', errors='strict')
         if len(token_bytes) > _MAX_TOKENIZER_SPECIAL_TEXT_BYTES:
             raise ValueError('RAG tokenizer definition is invalid')
         total_bytes += len(token_bytes)
         if total_bytes > _MAX_TOKENIZER_DEFINITION_BYTES:
             raise ValueError('RAG tokenizer definition is invalid')
+        copied_specials[token] = rank
+    return (
+        name,
+        pattern,
+        copied_ranks,
+        copied_specials,
+        max_token_value,
+        tuple(copied_token_values),
+    )
+
+
+def _tokenizer_snapshot_fingerprint(
+    snapshot: tuple[
+        str,
+        str,
+        dict[bytes, int],
+        dict[str, int],
+        int,
+        tuple[bytes, ...],
+    ],
+) -> str:
+    name, pattern, mergeable_ranks, special_tokens, max_token_value, core_tokens = (
+        snapshot
+    )
+    digest = hashlib.sha256(b'rag-tokenizer-definition:v2\0')
+    _update_sized_digest(digest, name.encode('utf-8', errors='strict'))
+    _update_sized_digest(digest, pattern.encode('utf-8', errors='strict'))
+    rank_items = sorted(
+        mergeable_ranks.items(),
+        key=lambda item: (item[1], item[0]),
+    )
+    digest.update(len(rank_items).to_bytes(8, 'big'))
+    for token_bytes, rank in rank_items:
+        _update_sized_digest(digest, token_bytes)
+        digest.update(rank.to_bytes(8, 'big'))
+    digest.update(len(core_tokens).to_bytes(8, 'big'))
+    for token_bytes in core_tokens:
+        _update_sized_digest(digest, token_bytes)
+    special_items = sorted(special_tokens.items())
+    digest.update(len(special_items).to_bytes(8, 'big'))
+    for token, rank in special_items:
+        token_bytes = token.encode('utf-8', errors='strict')
         _update_sized_digest(digest, token_bytes)
         digest.update(rank.to_bytes(8, 'big'))
     digest.update(max_token_value.to_bytes(8, 'big'))
