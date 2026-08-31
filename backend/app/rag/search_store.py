@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from enum import StrEnum
 
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
@@ -77,303 +77,883 @@ class PgVectorSearchAdapter:
         )
 
 
+class KeywordSqlTruth(StrEnum):
+    TRUE = 'true'
+    FALSE = 'false'
+    UNKNOWN = 'unknown'
+
+
+class KeywordBooleanOperator(StrEnum):
+    AND = 'and'
+    OR = 'or'
+
+
+class KeywordComparisonOperator(StrEnum):
+    EQ = 'eq'
+    NE = 'ne'
+    IN = 'in'
+    EQUAL_ANY = 'equal_any'
+    NOT_EQUAL_ALL = 'not_equal_all'
+    IS_TRUE = 'is_true'
+    IS_NOT_NULL = 'is_not_null'
+
+
+class KeywordExistence(StrEnum):
+    EXISTS = 'exists'
+    NOT_EXISTS = 'not_exists'
+
+
+class KeywordFunctionName(StrEnum):
+    SPLIT_PART = 'split_part'
+    CARDINALITY = 'cardinality'
+
+
+class PostgresKeywordBindTarget(StrEnum):
+    TIMEOUT = 'timeout'
+    SEARCH = 'search'
+
+
+class _KeywordBindSource(StrEnum):
+    CONSTANT = 'constant'
+    TERMS = 'terms'
+    REQUEST = 'request'
+    SETTINGS = 'settings'
+
+
+class _KeywordBindTransform(StrEnum):
+    TO_TUPLE = 'to_tuple'
+    STRIP_LOWER = 'strip_lower'
+    REMOVE_PREFIX_EACH = 'remove_prefix_each'
+    INT_EACH = 'int_each'
+    FINGERPRINT_VERIFIER = 'fingerprint_verifier'
+
+
 @dataclass(frozen=True, slots=True)
-class PostgresKeywordApprovalLink:
-    workspace_scope_id: str
-    active: bool
-    resolution_source: str
-    child_source_ids: tuple[int, ...]
+class _KeywordBindTransformSpec:
+    operation: _KeywordBindTransform
+    argument: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PostgresKeywordBindSpec:
+    name: str
+    sql_type: str
+    target: PostgresKeywordBindTarget
+    source: _KeywordBindSource
+    path: tuple[str, ...] = ()
+    constant: object = None
+    transforms: tuple[_KeywordBindTransformSpec, ...] = ()
+
+
+POSTGRES_KEYWORD_BIND_SPECS = (
+    PostgresKeywordBindSpec(
+        name='timeout_value',
+        sql_type='text',
+        target=PostgresKeywordBindTarget.TIMEOUT,
+        source=_KeywordBindSource.CONSTANT,
+        constant='5000ms',
+    ),
+    PostgresKeywordBindSpec(
+        name='query_terms',
+        sql_type='text[]',
+        target=PostgresKeywordBindTarget.SEARCH,
+        source=_KeywordBindSource.TERMS,
+        transforms=(
+            _KeywordBindTransformSpec(_KeywordBindTransform.TO_TUPLE),
+        ),
+    ),
+    PostgresKeywordBindSpec(
+        name='phrase_lower',
+        sql_type='text',
+        target=PostgresKeywordBindTarget.SEARCH,
+        source=_KeywordBindSource.REQUEST,
+        path=('retrieval_query_text',),
+        transforms=(
+            _KeywordBindTransformSpec(_KeywordBindTransform.STRIP_LOWER),
+        ),
+    ),
+    PostgresKeywordBindSpec(
+        name='lexical_contract_version',
+        sql_type='text',
+        target=PostgresKeywordBindTarget.SEARCH,
+        source=_KeywordBindSource.CONSTANT,
+        constant=RAG_LEXICAL_COMPAT_VERSION,
+    ),
+    PostgresKeywordBindSpec(
+        name='fingerprint_key_version',
+        sql_type='text',
+        target=PostgresKeywordBindTarget.SEARCH,
+        source=_KeywordBindSource.SETTINGS,
+        path=('agent_runtime_fingerprint_key_version',),
+    ),
+    PostgresKeywordBindSpec(
+        name='key_material_verifier',
+        sql_type='text',
+        target=PostgresKeywordBindTarget.SEARCH,
+        source=_KeywordBindSource.SETTINGS,
+        path=('agent_runtime_fingerprint_secret',),
+        transforms=(
+            _KeywordBindTransformSpec(
+                _KeywordBindTransform.FINGERPRINT_VERIFIER
+            ),
+        ),
+    ),
+    PostgresKeywordBindSpec(
+        name='project_keys',
+        sql_type='text[]',
+        target=PostgresKeywordBindTarget.SEARCH,
+        source=_KeywordBindSource.REQUEST,
+        path=('security_scope', 'project_constraints'),
+        transforms=(
+            _KeywordBindTransformSpec(
+                _KeywordBindTransform.REMOVE_PREFIX_EACH,
+                'project_key:',
+            ),
+        ),
+    ),
+    PostgresKeywordBindSpec(
+        name='source_ids',
+        sql_type='bigint[]',
+        target=PostgresKeywordBindTarget.SEARCH,
+        source=_KeywordBindSource.REQUEST,
+        path=('security_scope', 'source_constraints'),
+        transforms=(
+            _KeywordBindTransformSpec(
+                _KeywordBindTransform.REMOVE_PREFIX_EACH,
+                'source_pk:',
+            ),
+            _KeywordBindTransformSpec(_KeywordBindTransform.INT_EACH),
+        ),
+    ),
+    PostgresKeywordBindSpec(
+        name='source_id_texts',
+        sql_type='text[]',
+        target=PostgresKeywordBindTarget.SEARCH,
+        source=_KeywordBindSource.REQUEST,
+        path=('security_scope', 'source_constraints'),
+        transforms=(
+            _KeywordBindTransformSpec(
+                _KeywordBindTransform.REMOVE_PREFIX_EACH,
+                'source_pk:',
+            ),
+        ),
+    ),
+    PostgresKeywordBindSpec(
+        name='workspace_scope_id',
+        sql_type='text',
+        target=PostgresKeywordBindTarget.SEARCH,
+        source=_KeywordBindSource.REQUEST,
+        path=('security_scope', 'workspace_scope_id'),
+    ),
+)
+
+
+def _resolve_keyword_bind_path(root: object, path: tuple[str, ...]) -> object:
+    value = root
+    for attribute in path:
+        value = getattr(value, attribute)
+    return value
+
+
+def _apply_keyword_bind_transform(
+    value: object,
+    transform: _KeywordBindTransformSpec,
+) -> object:
+    if transform.operation is _KeywordBindTransform.TO_TUPLE:
+        return tuple(value)  # type: ignore[arg-type]
+    if transform.operation is _KeywordBindTransform.STRIP_LOWER:
+        return str(value).strip().lower()
+    if transform.operation is _KeywordBindTransform.REMOVE_PREFIX_EACH:
+        prefix = transform.argument or ''
+        return tuple(str(item).removeprefix(prefix) for item in value)  # type: ignore[union-attr]
+    if transform.operation is _KeywordBindTransform.INT_EACH:
+        return tuple(int(item) for item in value)  # type: ignore[union-attr]
+    if transform.operation is _KeywordBindTransform.FINGERPRINT_VERIFIER:
+        return fingerprint_key_material_verifier(str(value))
+    raise ValueError(f'unsupported keyword bind transform: {transform.operation}')
+
+
+def build_postgres_keyword_bind_values(
+    *,
+    request: RetrievalRequest,
+    terms: tuple[str, ...],
+    settings: Settings,
+) -> dict[str, object]:
+    roots = {
+        _KeywordBindSource.TERMS: terms,
+        _KeywordBindSource.REQUEST: request,
+        _KeywordBindSource.SETTINGS: settings,
+    }
+    values: dict[str, object] = {}
+    for spec in POSTGRES_KEYWORD_BIND_SPECS:
+        value = (
+            spec.constant
+            if spec.source is _KeywordBindSource.CONSTANT
+            else _resolve_keyword_bind_path(roots[spec.source], spec.path)
+        )
+        for transform in spec.transforms:
+            value = _apply_keyword_bind_transform(value, transform)
+        values[spec.name] = value
+    return values
+
+
+@dataclass(frozen=True, slots=True)
+class PostgresKeywordRelationRow:
+    relation: str
+    columns: tuple[tuple[str, str | int | bool | None], ...]
 
 
 @dataclass(frozen=True, slots=True)
 class PostgresKeywordResourceCandidate:
     serving_document_id: str
     serving_kind: str
-    project_key: str | None
-    raw_source_id: int | None
     score: float
-    links: tuple[PostgresKeywordApprovalLink, ...]
+    relation_rows: tuple[PostgresKeywordRelationRow, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class PostgresKeywordResourceParameters:
-    workspace_scope_id: str
-    project_keys: tuple[str, ...] | None
-    source_ids: tuple[int, ...] | None
+class KeywordColumn:
+    alias: str
+    name: str
 
-    @classmethod
-    def from_security_scope(
-        cls,
-        scope: SecurityScope,
-    ) -> PostgresKeywordResourceParameters:
-        return cls(
-            workspace_scope_id=scope.workspace_scope_id,
-            project_keys=tuple(
-                value.removeprefix('project_key:')
-                for value in scope.project_constraints
-            ),
-            source_ids=tuple(
-                int(value.removeprefix('source_pk:'))
-                for value in scope.source_constraints
-            ),
+
+@dataclass(frozen=True, slots=True)
+class KeywordParameter:
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordLiteral:
+    value: object
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordFunction:
+    name: KeywordFunctionName
+    arguments: tuple[object, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordCast:
+    expression: object
+    sql_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordConstantPredicate:
+    truth: KeywordSqlTruth
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordComparisonPredicate:
+    left: object
+    operator: KeywordComparisonOperator
+    right: object | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordBooleanPredicate:
+    operator: KeywordBooleanOperator
+    children: tuple[object, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordRelation:
+    table: str
+    alias: str
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordExistsPredicate:
+    relation: KeywordRelation
+    where: object
+    polarity: KeywordExistence
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordRule:
+    name: str
+    predicate: object
+
+
+def _keyword_sql_and(values: tuple[KeywordSqlTruth, ...]) -> KeywordSqlTruth:
+    if KeywordSqlTruth.FALSE in values:
+        return KeywordSqlTruth.FALSE
+    if KeywordSqlTruth.UNKNOWN in values:
+        return KeywordSqlTruth.UNKNOWN
+    return KeywordSqlTruth.TRUE
+
+
+def _keyword_sql_or(values: tuple[KeywordSqlTruth, ...]) -> KeywordSqlTruth:
+    if KeywordSqlTruth.TRUE in values:
+        return KeywordSqlTruth.TRUE
+    if KeywordSqlTruth.UNKNOWN in values:
+        return KeywordSqlTruth.UNKNOWN
+    return KeywordSqlTruth.FALSE
+
+
+def _keyword_literal_sql(value: object) -> str:
+    if value is None:
+        return 'NULL'
+    if value is True:
+        return 'TRUE'
+    if value is False:
+        return 'FALSE'
+    if isinstance(value, str):
+        return "'" + value.replace("'", "''") + "'"
+    if isinstance(value, tuple):
+        return '(' + ', '.join(_keyword_literal_sql(item) for item in value) + ')'
+    return str(value)
+
+
+def _postgres_keyword_bind_spec(name: str) -> PostgresKeywordBindSpec:
+    matches = tuple(spec for spec in POSTGRES_KEYWORD_BIND_SPECS if spec.name == name)
+    if len(matches) != 1:
+        raise ValueError(f'unknown PostgreSQL keyword bind: {name}')
+    return matches[0]
+
+
+def _render_postgres_keyword_expression(expression: object) -> str:
+    if isinstance(expression, KeywordColumn):
+        return f'{expression.alias}.{expression.name}'
+    if isinstance(expression, KeywordParameter):
+        spec = _postgres_keyword_bind_spec(expression.name)
+        return f'CAST(:{spec.name} AS {spec.sql_type})'
+    if isinstance(expression, KeywordLiteral):
+        return _keyword_literal_sql(expression.value)
+    if isinstance(expression, KeywordFunction):
+        arguments = ', '.join(
+            _render_postgres_keyword_expression(argument)
+            for argument in expression.arguments
         )
+        return f'{expression.name.value}({arguments})'
+    if isinstance(expression, KeywordCast):
+        return (
+            f'CAST({_render_postgres_keyword_expression(expression.expression)} '
+            f'AS {expression.sql_type})'
+        )
+    raise TypeError(f'unsupported keyword SQL expression: {type(expression)!r}')
 
 
-class _KeywordResourcePredicateNode(Protocol):
-    def render(self, *, alias: str) -> str: ...
-
-    def evaluate(
-        self,
-        candidate: PostgresKeywordResourceCandidate,
-        parameters: PostgresKeywordResourceParameters,
-    ) -> bool: ...
-
-
-@dataclass(frozen=True, slots=True)
-class _AllResourcePredicates:
-    children: tuple[_KeywordResourcePredicateNode, ...]
-
-    def render(self, *, alias: str) -> str:
-        return '(' + ' AND '.join(
-            child.render(alias=alias) for child in self.children
+def render_postgres_keyword_predicate(predicate: object) -> str:
+    if isinstance(predicate, KeywordRule):
+        return render_postgres_keyword_predicate(predicate.predicate)
+    if isinstance(predicate, KeywordConstantPredicate):
+        if predicate.truth is KeywordSqlTruth.UNKNOWN:
+            return 'NULL'
+        return predicate.truth.value.upper()
+    if isinstance(predicate, KeywordBooleanPredicate):
+        separator = f' {predicate.operator.value.upper()} '
+        return '(' + separator.join(
+            render_postgres_keyword_predicate(child)
+            for child in predicate.children
         ) + ')'
-
-    def evaluate(
-        self,
-        candidate: PostgresKeywordResourceCandidate,
-        parameters: PostgresKeywordResourceParameters,
-    ) -> bool:
-        return all(child.evaluate(candidate, parameters) for child in self.children)
-
-
-@dataclass(frozen=True, slots=True)
-class _AnyResourcePredicate:
-    children: tuple[_KeywordResourcePredicateNode, ...]
-
-    def render(self, *, alias: str) -> str:
-        return '(' + ' OR '.join(
-            child.render(alias=alias) for child in self.children
-        ) + ')'
-
-    def evaluate(
-        self,
-        candidate: PostgresKeywordResourceCandidate,
-        parameters: PostgresKeywordResourceParameters,
-    ) -> bool:
-        return any(child.evaluate(candidate, parameters) for child in self.children)
-
-
-@dataclass(frozen=True, slots=True)
-class _ServingKindPredicate:
-    serving_kind: str
-
-    def render(self, *, alias: str) -> str:
-        return f"{alias}.serving_kind = '{self.serving_kind}'"
-
-    def evaluate(
-        self,
-        candidate: PostgresKeywordResourceCandidate,
-        parameters: PostgresKeywordResourceParameters,
-    ) -> bool:
-        del parameters
-        return candidate.serving_kind == self.serving_kind
+    if isinstance(predicate, KeywordComparisonPredicate):
+        left = _render_postgres_keyword_expression(predicate.left)
+        if predicate.operator is KeywordComparisonOperator.IS_TRUE:
+            return f'{left} IS TRUE'
+        if predicate.operator is KeywordComparisonOperator.IS_NOT_NULL:
+            return f'{left} IS NOT NULL'
+        if predicate.right is None:
+            raise ValueError(f'{predicate.operator.value} requires a right operand')
+        right = _render_postgres_keyword_expression(predicate.right)
+        operators = {
+            KeywordComparisonOperator.EQ: '=',
+            KeywordComparisonOperator.NE: '<>',
+            KeywordComparisonOperator.IN: 'IN',
+            KeywordComparisonOperator.EQUAL_ANY: '= ANY',
+            KeywordComparisonOperator.NOT_EQUAL_ALL: '<> ALL',
+        }
+        operator = operators[predicate.operator]
+        if predicate.operator in {
+            KeywordComparisonOperator.EQUAL_ANY,
+            KeywordComparisonOperator.NOT_EQUAL_ALL,
+        }:
+            return f'{left} {operator}({right})'
+        return f'{left} {operator} {right}'
+    if isinstance(predicate, KeywordExistsPredicate):
+        prefix = (
+            'EXISTS'
+            if predicate.polarity is KeywordExistence.EXISTS
+            else 'NOT EXISTS'
+        )
+        return (
+            f'{prefix} (SELECT 1 FROM {predicate.relation.table} '
+            f'AS {predicate.relation.alias} WHERE '
+            f'{render_postgres_keyword_predicate(predicate.where)})'
+        )
+    raise TypeError(f'unsupported keyword SQL predicate: {type(predicate)!r}')
 
 
-@dataclass(frozen=True, slots=True)
-class _RawScopePredicate:
-    def render(self, *, alias: str) -> str:
-        return f"""
-CAST(:project_keys AS text[]) IS NOT NULL
-AND CAST(:source_ids AS bigint[]) IS NOT NULL
-AND cardinality(CAST(:project_keys AS text[])) = 0
-AND (
-  cardinality(CAST(:source_ids AS bigint[])) = 0
-  OR EXISTS (
-    SELECT 1 FROM document_chunks AS chunk
-    WHERE chunk.id = split_part({alias}.serving_document_id, ':', 2)::bigint
-      AND chunk.source_id = ANY(CAST(:source_ids AS bigint[]))
-  )
-)
-""".strip()
+def _keyword_relation_value(
+    row: PostgresKeywordRelationRow,
+    column_name: str,
+) -> object:
+    matches = tuple(value for name, value in row.columns if name == column_name)
+    if len(matches) != 1:
+        return None
+    return matches[0]
 
-    def evaluate(
-        self,
-        candidate: PostgresKeywordResourceCandidate,
-        parameters: PostgresKeywordResourceParameters,
-    ) -> bool:
-        if parameters.project_keys is None or parameters.source_ids is None:
-            return False
-        return bool(
-            not parameters.project_keys
-            and (
-                not parameters.source_ids
-                or candidate.raw_source_id in parameters.source_ids
+
+def _evaluate_keyword_expression(
+    expression: object,
+    *,
+    candidate: PostgresKeywordResourceCandidate,
+    bind_values: Mapping[str, object],
+    relation_context: Mapping[str, PostgresKeywordRelationRow],
+) -> object:
+    if isinstance(expression, KeywordColumn):
+        if expression.alias == 'projection':
+            return getattr(candidate, expression.name, None)
+        row = relation_context.get(expression.alias)
+        return None if row is None else _keyword_relation_value(row, expression.name)
+    if isinstance(expression, KeywordParameter):
+        return bind_values.get(expression.name)
+    if isinstance(expression, KeywordLiteral):
+        return expression.value
+    if isinstance(expression, KeywordFunction):
+        arguments = tuple(
+            _evaluate_keyword_expression(
+                argument,
+                candidate=candidate,
+                bind_values=bind_values,
+                relation_context=relation_context,
             )
+            for argument in expression.arguments
         )
-
-
-@dataclass(frozen=True, slots=True)
-class _TrustedProjectPredicate:
-    def render(self, *, alias: str) -> str:
-        return f"""
-CAST(:project_keys AS text[]) IS NOT NULL
-AND (
-  cardinality(CAST(:project_keys AS text[])) = 0
-  OR (
-    (split_part({alias}.serving_document_id, ':', 1) = 'decision_record'
-     AND EXISTS (
-       SELECT 1 FROM decision_records AS knowledge
-       WHERE knowledge.id = split_part({alias}.serving_document_id, ':', 2)::bigint
-         AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-     ))
-    OR (split_part({alias}.serving_document_id, ':', 1) = 'history_event'
-     AND EXISTS (
-       SELECT 1 FROM history_events AS knowledge
-       WHERE knowledge.id = split_part({alias}.serving_document_id, ':', 2)::bigint
-         AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-     ))
-    OR (split_part({alias}.serving_document_id, ':', 1) = 'timeline_event'
-     AND EXISTS (
-       SELECT 1 FROM timeline_events AS knowledge
-       WHERE knowledge.id = split_part({alias}.serving_document_id, ':', 2)::bigint
-         AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-     ))
-    OR (split_part({alias}.serving_document_id, ':', 1) = 'todo'
-     AND EXISTS (
-       SELECT 1 FROM todos AS knowledge
-       WHERE knowledge.id = split_part({alias}.serving_document_id, ':', 2)::bigint
-         AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-     ))
-  )
-)
-""".strip()
-
-    def evaluate(
-        self,
-        candidate: PostgresKeywordResourceCandidate,
-        parameters: PostgresKeywordResourceParameters,
-    ) -> bool:
-        if parameters.project_keys is None:
-            return False
-        return bool(
-            not parameters.project_keys
-            or candidate.project_key in parameters.project_keys
+        if any(argument is None for argument in arguments):
+            return None
+        if expression.name is KeywordFunctionName.SPLIT_PART:
+            value, delimiter, index = arguments
+            parts = str(value).split(str(delimiter))
+            position = int(index) - 1
+            return parts[position] if 0 <= position < len(parts) else ''
+        if expression.name is KeywordFunctionName.CARDINALITY:
+            return len(arguments[0])  # type: ignore[arg-type]
+        raise ValueError(f'unsupported keyword function: {expression.name}')
+    if isinstance(expression, KeywordCast):
+        value = _evaluate_keyword_expression(
+            expression.expression,
+            candidate=candidate,
+            bind_values=bind_values,
+            relation_context=relation_context,
         )
+        if value is None:
+            return None
+        if expression.sql_type == 'bigint':
+            return int(value)
+        if expression.sql_type == 'text':
+            return str(value)
+        raise ValueError(f'unsupported keyword cast: {expression.sql_type}')
+    raise TypeError(f'unsupported keyword expression: {type(expression)!r}')
 
 
-def _approval_target_sql(*, alias: str) -> str:
-    return f"""
-(
-  (split_part({alias}.serving_document_id, ':', 1) = 'decision_record'
-   AND approval.knowledge_type IN ('decision', 'decision_record'))
-  OR (
-    split_part({alias}.serving_document_id, ':', 1) <> 'decision_record'
-    AND approval.knowledge_type = split_part({alias}.serving_document_id, ':', 1)
-  )
-)
-AND approval.knowledge_id = split_part({alias}.serving_document_id, ':', 2)::bigint
-AND approval.active IS TRUE
-""".strip()
-
-
-@dataclass(frozen=True, slots=True)
-class _TrustedExplicitPredicate:
-    def render(self, *, alias: str) -> str:
-        target = _approval_target_sql(alias=alias)
-        return f"""
-CAST(:source_id_texts AS text[]) IS NOT NULL
-AND EXISTS (
-  SELECT 1
-  FROM trusted_knowledge_approval_links AS approval
-  WHERE {target}
-    AND approval.security_scope_id = :workspace_scope_id
-    AND approval.resolution_source IN ('human', 'auto_policy')
-    AND EXISTS (
-      SELECT 1 FROM trusted_knowledge_evidence_links AS child
-      WHERE child.approval_link_id = approval.id
+def _evaluate_keyword_comparison(
+    predicate: KeywordComparisonPredicate,
+    *,
+    candidate: PostgresKeywordResourceCandidate,
+    bind_values: Mapping[str, object],
+    relation_context: Mapping[str, PostgresKeywordRelationRow],
+) -> KeywordSqlTruth:
+    left = _evaluate_keyword_expression(
+        predicate.left,
+        candidate=candidate,
+        bind_values=bind_values,
+        relation_context=relation_context,
     )
-    AND (
-      cardinality(CAST(:source_id_texts AS text[])) = 0
-      OR NOT EXISTS (
-        SELECT 1 FROM trusted_knowledge_evidence_links AS child
-        WHERE child.approval_link_id = approval.id
-          AND child.canonical_source_id
-              <> ALL(CAST(:source_id_texts AS text[]))
-      )
+    if predicate.operator is KeywordComparisonOperator.IS_TRUE:
+        return KeywordSqlTruth.TRUE if left is True else KeywordSqlTruth.FALSE
+    if predicate.operator is KeywordComparisonOperator.IS_NOT_NULL:
+        return KeywordSqlTruth.TRUE if left is not None else KeywordSqlTruth.FALSE
+    if predicate.right is None:
+        raise ValueError(f'{predicate.operator.value} requires a right operand')
+    right = _evaluate_keyword_expression(
+        predicate.right,
+        candidate=candidate,
+        bind_values=bind_values,
+        relation_context=relation_context,
     )
-)
-""".strip()
+    if left is None or right is None:
+        return KeywordSqlTruth.UNKNOWN
+    if predicate.operator is KeywordComparisonOperator.EQ:
+        result = left == right
+    elif predicate.operator is KeywordComparisonOperator.NE:
+        result = left != right
+    elif predicate.operator in {
+        KeywordComparisonOperator.IN,
+        KeywordComparisonOperator.EQUAL_ANY,
+    }:
+        items = tuple(right)  # type: ignore[arg-type]
+        if any(item is not None and left == item for item in items):
+            return KeywordSqlTruth.TRUE
+        if any(item is None for item in items):
+            return KeywordSqlTruth.UNKNOWN
+        result = False
+    elif predicate.operator is KeywordComparisonOperator.NOT_EQUAL_ALL:
+        items = tuple(right)  # type: ignore[arg-type]
+        if any(item is not None and left == item for item in items):
+            return KeywordSqlTruth.FALSE
+        if any(item is None for item in items):
+            return KeywordSqlTruth.UNKNOWN
+        result = True
+    else:
+        raise ValueError(f'unsupported keyword comparison: {predicate.operator}')
+    return KeywordSqlTruth.TRUE if result else KeywordSqlTruth.FALSE
 
-    def evaluate(
-        self,
-        candidate: PostgresKeywordResourceCandidate,
-        parameters: PostgresKeywordResourceParameters,
-    ) -> bool:
-        if parameters.source_ids is None:
-            return False
-        return any(
-            link.active
-            and link.workspace_scope_id == parameters.workspace_scope_id
-            and link.resolution_source in {'human', 'auto_policy'}
-            and bool(link.child_source_ids)
-            and (
-                not parameters.source_ids
-                or all(
-                    source_id in parameters.source_ids
-                    for source_id in link.child_source_ids
-                )
-            )
-            for link in candidate.links
+
+def evaluate_postgres_keyword_predicate(
+    predicate: object,
+    *,
+    candidate: PostgresKeywordResourceCandidate,
+    bind_values: Mapping[str, object],
+    _relation_context: Mapping[str, PostgresKeywordRelationRow] | None = None,
+) -> KeywordSqlTruth:
+    relation_context = _relation_context or {}
+    if isinstance(predicate, KeywordRule):
+        return evaluate_postgres_keyword_predicate(
+            predicate.predicate,
+            candidate=candidate,
+            bind_values=bind_values,
+            _relation_context=relation_context,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class _TrustedLegacyPredicate:
-    def render(self, *, alias: str) -> str:
-        target = _approval_target_sql(alias=alias)
-        return f"""
-CAST(:source_id_texts AS text[]) IS NOT NULL
-AND cardinality(CAST(:source_id_texts AS text[])) = 0
-AND NOT EXISTS (
-  SELECT 1
-  FROM trusted_knowledge_approval_links AS approval
-  WHERE {target}
-)
-""".strip()
-
-    def evaluate(
-        self,
-        candidate: PostgresKeywordResourceCandidate,
-        parameters: PostgresKeywordResourceParameters,
-    ) -> bool:
-        if parameters.source_ids is None:
-            return False
-        return not parameters.source_ids and not any(
-            link.active for link in candidate.links
+    if isinstance(predicate, KeywordConstantPredicate):
+        return predicate.truth
+    if isinstance(predicate, KeywordComparisonPredicate):
+        return _evaluate_keyword_comparison(
+            predicate,
+            candidate=candidate,
+            bind_values=bind_values,
+            relation_context=relation_context,
         )
-
-
-POSTGRES_KEYWORD_RESOURCE_PREDICATE = _AnyResourcePredicate(
-    children=(
-        _AllResourcePredicates(
-            children=(
-                _ServingKindPredicate('raw_chunk'),
-                _RawScopePredicate(),
+    if isinstance(predicate, KeywordBooleanPredicate):
+        values = tuple(
+            evaluate_postgres_keyword_predicate(
+                child,
+                candidate=candidate,
+                bind_values=bind_values,
+                _relation_context=relation_context,
             )
-        ),
-        _AllResourcePredicates(
-            children=(
-                _ServingKindPredicate('trusted_knowledge'),
-                _TrustedProjectPredicate(),
-                _AnyResourcePredicate(
-                    children=(
-                        _TrustedExplicitPredicate(),
-                        _TrustedLegacyPredicate(),
-                    )
+            for child in predicate.children
+        )
+        if predicate.operator is KeywordBooleanOperator.AND:
+            return _keyword_sql_and(values)
+        return _keyword_sql_or(values)
+    if isinstance(predicate, KeywordExistsPredicate):
+        matched = any(
+            evaluate_postgres_keyword_predicate(
+                predicate.where,
+                candidate=candidate,
+                bind_values=bind_values,
+                _relation_context={
+                    **relation_context,
+                    predicate.relation.alias: row,
+                },
+            )
+            is KeywordSqlTruth.TRUE
+            for row in candidate.relation_rows
+            if row.relation == predicate.relation.table
+        )
+        if predicate.polarity is KeywordExistence.NOT_EXISTS:
+            matched = not matched
+        return KeywordSqlTruth.TRUE if matched else KeywordSqlTruth.FALSE
+    raise TypeError(f'unsupported keyword predicate: {type(predicate)!r}')
+
+
+def _keyword_and(*children: object) -> KeywordBooleanPredicate:
+    return KeywordBooleanPredicate(KeywordBooleanOperator.AND, children)
+
+
+def _keyword_or(*children: object) -> KeywordBooleanPredicate:
+    return KeywordBooleanPredicate(KeywordBooleanOperator.OR, children)
+
+
+def _keyword_rule(name: str, predicate: object) -> KeywordRule:
+    return KeywordRule(name=name, predicate=predicate)
+
+
+def _keyword_eq(left: object, right: object) -> KeywordComparisonPredicate:
+    return KeywordComparisonPredicate(left, KeywordComparisonOperator.EQ, right)
+
+
+def _keyword_split_part(expression: object, index: int) -> KeywordFunction:
+    return KeywordFunction(
+        KeywordFunctionName.SPLIT_PART,
+        (expression, KeywordLiteral(':'), KeywordLiteral(index)),
+    )
+
+
+_PROJECTION_DOCUMENT_ID = KeywordColumn('projection', 'serving_document_id')
+_PROJECTION_KIND = KeywordColumn('projection', 'serving_kind')
+_DOCUMENT_KIND = _keyword_split_part(_PROJECTION_DOCUMENT_ID, 1)
+_DOCUMENT_ROW_ID = KeywordCast(
+    _keyword_split_part(_PROJECTION_DOCUMENT_ID, 2),
+    'bigint',
+)
+
+
+def _keyword_project_branch(
+    *,
+    document_kind: str,
+    table: str,
+    rule_name: str,
+) -> KeywordBooleanPredicate:
+    relation = KeywordRelation(table, 'knowledge')
+    return _keyword_and(
+        _keyword_eq(_DOCUMENT_KIND, KeywordLiteral(document_kind)),
+        KeywordExistsPredicate(
+            relation=relation,
+            polarity=KeywordExistence.EXISTS,
+            where=_keyword_and(
+                _keyword_eq(KeywordColumn('knowledge', 'id'), _DOCUMENT_ROW_ID),
+                _keyword_rule(
+                    rule_name,
+                    KeywordComparisonPredicate(
+                        KeywordColumn('knowledge', 'project_key'),
+                        KeywordComparisonOperator.EQUAL_ANY,
+                        KeywordParameter('project_keys'),
+                    ),
                 ),
-            )
+            ),
         ),
     )
+
+
+def _keyword_approval_target(*, active_rule_name: str) -> object:
+    approval = 'approval'
+    return _keyword_and(
+        _keyword_or(
+            _keyword_and(
+                _keyword_eq(_DOCUMENT_KIND, KeywordLiteral('decision_record')),
+                KeywordComparisonPredicate(
+                    KeywordColumn(approval, 'knowledge_type'),
+                    KeywordComparisonOperator.IN,
+                    KeywordLiteral(('decision', 'decision_record')),
+                ),
+            ),
+            _keyword_and(
+                KeywordComparisonPredicate(
+                    _DOCUMENT_KIND,
+                    KeywordComparisonOperator.NE,
+                    KeywordLiteral('decision_record'),
+                ),
+                _keyword_eq(
+                    KeywordColumn(approval, 'knowledge_type'),
+                    _DOCUMENT_KIND,
+                ),
+            ),
+        ),
+        _keyword_eq(KeywordColumn(approval, 'knowledge_id'), _DOCUMENT_ROW_ID),
+        _keyword_rule(
+            active_rule_name,
+            KeywordComparisonPredicate(
+                KeywordColumn(approval, 'active'),
+                KeywordComparisonOperator.IS_TRUE,
+            ),
+        ),
+    )
+
+
+_RAW_RESOURCE_PREDICATE = _keyword_and(
+    _keyword_eq(_PROJECTION_KIND, KeywordLiteral('raw_chunk')),
+    KeywordComparisonPredicate(
+        KeywordParameter('project_keys'),
+        KeywordComparisonOperator.IS_NOT_NULL,
+    ),
+    KeywordComparisonPredicate(
+        KeywordParameter('source_ids'),
+        KeywordComparisonOperator.IS_NOT_NULL,
+    ),
+    _keyword_eq(
+        KeywordFunction(
+            KeywordFunctionName.CARDINALITY,
+            (KeywordParameter('project_keys'),),
+        ),
+        KeywordLiteral(0),
+    ),
+    _keyword_or(
+        _keyword_eq(
+            KeywordFunction(
+                KeywordFunctionName.CARDINALITY,
+                (KeywordParameter('source_ids'),),
+            ),
+            KeywordLiteral(0),
+        ),
+        KeywordExistsPredicate(
+            relation=KeywordRelation('document_chunks', 'chunk'),
+            polarity=KeywordExistence.EXISTS,
+            where=_keyword_and(
+                _keyword_eq(KeywordColumn('chunk', 'id'), _DOCUMENT_ROW_ID),
+                _keyword_rule(
+                    'raw_source_membership',
+                    KeywordComparisonPredicate(
+                        KeywordColumn('chunk', 'source_id'),
+                        KeywordComparisonOperator.EQUAL_ANY,
+                        KeywordParameter('source_ids'),
+                    ),
+                ),
+            ),
+        ),
+    ),
+)
+
+
+_TRUSTED_PROJECT_PREDICATE = _keyword_and(
+    KeywordComparisonPredicate(
+        KeywordParameter('project_keys'),
+        KeywordComparisonOperator.IS_NOT_NULL,
+    ),
+    _keyword_or(
+        _keyword_eq(
+            KeywordFunction(
+                KeywordFunctionName.CARDINALITY,
+                (KeywordParameter('project_keys'),),
+            ),
+            KeywordLiteral(0),
+        ),
+        _keyword_project_branch(
+            document_kind='decision_record',
+            table='decision_records',
+            rule_name='decision_project_membership',
+        ),
+        _keyword_project_branch(
+            document_kind='history_event',
+            table='history_events',
+            rule_name='history_project_membership',
+        ),
+        _keyword_project_branch(
+            document_kind='timeline_event',
+            table='timeline_events',
+            rule_name='timeline_project_membership',
+        ),
+        _keyword_project_branch(
+            document_kind='todo',
+            table='todos',
+            rule_name='todo_project_membership',
+        ),
+    ),
+)
+
+
+_EXPLICIT_LINK_PREDICATE = _keyword_rule(
+    'explicit_link_exists',
+    KeywordExistsPredicate(
+        relation=KeywordRelation(
+            'trusted_knowledge_approval_links',
+            'approval',
+        ),
+        polarity=KeywordExistence.EXISTS,
+        where=_keyword_and(
+            _keyword_approval_target(active_rule_name='explicit_active'),
+            _keyword_rule(
+                'explicit_workspace',
+                _keyword_eq(
+                    KeywordColumn('approval', 'security_scope_id'),
+                    KeywordParameter('workspace_scope_id'),
+                ),
+            ),
+            _keyword_rule(
+                'explicit_resolution',
+                KeywordComparisonPredicate(
+                    KeywordColumn('approval', 'resolution_source'),
+                    KeywordComparisonOperator.IN,
+                    KeywordLiteral(('human', 'auto_policy')),
+                ),
+            ),
+            KeywordExistsPredicate(
+                relation=KeywordRelation(
+                    'trusted_knowledge_evidence_links',
+                    'child',
+                ),
+                polarity=KeywordExistence.EXISTS,
+                where=_keyword_eq(
+                    KeywordColumn('child', 'approval_link_id'),
+                    KeywordColumn('approval', 'id'),
+                ),
+            ),
+            _keyword_rule(
+                'explicit_sources_not_null',
+                KeywordComparisonPredicate(
+                    KeywordParameter('source_id_texts'),
+                    KeywordComparisonOperator.IS_NOT_NULL,
+                ),
+            ),
+            _keyword_or(
+                _keyword_rule(
+                    'explicit_source_empty',
+                    _keyword_eq(
+                        KeywordFunction(
+                            KeywordFunctionName.CARDINALITY,
+                            (KeywordParameter('source_id_texts'),),
+                        ),
+                        KeywordLiteral(0),
+                    ),
+                ),
+                _keyword_rule(
+                    'every_child_violation_absence',
+                    KeywordExistsPredicate(
+                        relation=KeywordRelation(
+                            'trusted_knowledge_evidence_links',
+                            'child',
+                        ),
+                        polarity=KeywordExistence.NOT_EXISTS,
+                        where=_keyword_and(
+                            _keyword_eq(
+                                KeywordColumn('child', 'approval_link_id'),
+                                KeywordColumn('approval', 'id'),
+                            ),
+                            KeywordComparisonPredicate(
+                                KeywordColumn('child', 'canonical_source_id'),
+                                KeywordComparisonOperator.NOT_EQUAL_ALL,
+                                KeywordParameter('source_id_texts'),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    ),
+)
+
+
+_LEGACY_LINK_PREDICATE = _keyword_and(
+    KeywordComparisonPredicate(
+        KeywordParameter('source_id_texts'),
+        KeywordComparisonOperator.IS_NOT_NULL,
+    ),
+    _keyword_eq(
+        KeywordFunction(
+            KeywordFunctionName.CARDINALITY,
+            (KeywordParameter('source_id_texts'),),
+        ),
+        KeywordLiteral(0),
+    ),
+    _keyword_rule(
+        'legacy_active_link_absence',
+        KeywordExistsPredicate(
+            relation=KeywordRelation(
+                'trusted_knowledge_approval_links',
+                'approval',
+            ),
+            polarity=KeywordExistence.NOT_EXISTS,
+            where=_keyword_approval_target(active_rule_name='legacy_active'),
+        ),
+    ),
+)
+
+
+POSTGRES_KEYWORD_RESOURCE_PREDICATE = _keyword_rule(
+    'root_resource_group',
+    _keyword_or(
+        _RAW_RESOURCE_PREDICATE,
+        _keyword_and(
+            _keyword_eq(
+                _PROJECTION_KIND,
+                KeywordLiteral('trusted_knowledge'),
+            ),
+            _TRUSTED_PROJECT_PREDICATE,
+            _keyword_or(_EXPLICIT_LINK_PREDICATE, _LEGACY_LINK_PREDICATE),
+        ),
+    ),
 )
 
 
@@ -395,13 +975,13 @@ WITH coarse_candidates AS (
     ON generation.id = projection.corpus_generation_id
    AND generation.corpus_generation = projection.corpus_generation
   WHERE projection.corpus_generation_id = 1
-    AND projection.lexical_contract_version = :lexical_contract_version
-    AND projection.fingerprint_key_version = :fingerprint_key_version
-    AND projection.fingerprint_key_material_verifier = :key_material_verifier
+    AND projection.lexical_contract_version = __BIND_lexical_contract_version__
+    AND projection.fingerprint_key_version = __BIND_fingerprint_key_version__
+    AND projection.fingerprint_key_material_verifier = __BIND_key_material_verifier__
     AND projection.effective_permission IN ('public', 'internal', 'restricted')
     AND EXISTS (
       SELECT 1
-      FROM unnest(CAST(:query_terms AS text[])) AS coarse_term(term)
+      FROM unnest(__BIND_query_terms__) AS coarse_term(term)
       WHERE strpos(projection.searchable_lower, coarse_term.term) > 0
     )
     AND (__RESOURCE_PREDICATE__)
@@ -414,8 +994,8 @@ WITH coarse_candidates AS (
   CROSS JOIN LATERAL rag_python_lexical_score_v1(
     projection.title_lower,
     projection.searchable_lower,
-    CAST(:query_terms AS text[]),
-    CAST(:phrase_lower AS text)
+    __BIND_query_terms__,
+    __BIND_phrase_lower__
   ) AS scored
 ), relevant_candidates AS (
   SELECT *
@@ -436,23 +1016,38 @@ ORDER BY
 
 
 def build_postgres_keyword_search_sql(
-    predicate: _KeywordResourcePredicateNode,
+    predicate: object,
 ) -> str:
     marker = '__RESOURCE_PREDICATE__'
     if _POSTGRES_KEYWORD_SEARCH_SQL_TEMPLATE.count(marker) != 1:
         raise RuntimeError('PostgreSQL keyword resource predicate marker is invalid')
-    return _POSTGRES_KEYWORD_SEARCH_SQL_TEMPLATE.replace(
+    sql = _POSTGRES_KEYWORD_SEARCH_SQL_TEMPLATE.replace(
         marker,
-        predicate.render(alias='projection'),
+        render_postgres_keyword_predicate(predicate),
     )
+    for spec in POSTGRES_KEYWORD_BIND_SPECS:
+        bind_marker = f'__BIND_{spec.name}__'
+        occurrences = sql.count(bind_marker)
+        if spec.target is PostgresKeywordBindTarget.SEARCH and occurrences:
+            sql = sql.replace(
+                bind_marker,
+                _render_postgres_keyword_expression(KeywordParameter(spec.name)),
+            )
+    if '__BIND_' in sql:
+        raise RuntimeError('PostgreSQL keyword bind marker is invalid')
+    return sql
 
 
 POSTGRES_KEYWORD_SEARCH_SQL = build_postgres_keyword_search_sql(
     POSTGRES_KEYWORD_RESOURCE_PREDICATE
 )
+POSTGRES_KEYWORD_TIMEOUT_SQL = (
+    "SELECT set_config('statement_timeout', "
+    + _render_postgres_keyword_expression(KeywordParameter('timeout_value'))
+    + ', true)'
+)
 
 _SQLITE_ORACLE_MAX_PROJECTIONS = 10_000
-_POSTGRES_STATEMENT_TIMEOUT_MS = 5_000
 
 
 class KeywordSearchUnavailableError(RuntimeError):
@@ -494,38 +1089,29 @@ class SqlAlchemyKeywordSearchStore:
         *,
         terms: tuple[str, ...],
     ) -> tuple[ClassifiedRetrievalCandidate, ...]:
-        self._db.execute(
-            text("SELECT set_config('statement_timeout', :timeout_value, true)"),
-            {'timeout_value': f'{_POSTGRES_STATEMENT_TIMEOUT_MS}ms'},
+        bind_values = build_postgres_keyword_bind_values(
+            request=request,
+            terms=terms,
+            settings=self._settings,
         )
-        scope = request.security_scope
+        timeout_values = {
+            spec.name: bind_values[spec.name]
+            for spec in POSTGRES_KEYWORD_BIND_SPECS
+            if spec.target is PostgresKeywordBindTarget.TIMEOUT
+        }
+        search_values = {
+            spec.name: bind_values[spec.name]
+            for spec in POSTGRES_KEYWORD_BIND_SPECS
+            if spec.target is PostgresKeywordBindTarget.SEARCH
+        }
+        self._db.execute(
+            text(POSTGRES_KEYWORD_TIMEOUT_SQL),
+            timeout_values,
+        )
         rows = tuple(
             self._db.execute(
                 text(POSTGRES_KEYWORD_SEARCH_SQL),
-                {
-                    'query_terms': list(terms),
-                    'phrase_lower': request.retrieval_query_text.strip().lower(),
-                    'lexical_contract_version': RAG_LEXICAL_COMPAT_VERSION,
-                    'fingerprint_key_version': (
-                        self._settings.agent_runtime_fingerprint_key_version
-                    ),
-                    'key_material_verifier': fingerprint_key_material_verifier(
-                        self._settings.agent_runtime_fingerprint_secret
-                    ),
-                    'project_keys': [
-                        value.removeprefix('project_key:')
-                        for value in scope.project_constraints
-                    ],
-                    'source_ids': [
-                        int(value.removeprefix('source_pk:'))
-                        for value in scope.source_constraints
-                    ],
-                    'source_id_texts': [
-                        value.removeprefix('source_pk:')
-                        for value in scope.source_constraints
-                    ],
-                    'workspace_scope_id': scope.workspace_scope_id,
-                },
+                search_values,
             )
             .mappings()
             .all()

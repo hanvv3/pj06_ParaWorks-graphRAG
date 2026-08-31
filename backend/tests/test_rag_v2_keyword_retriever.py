@@ -43,14 +43,31 @@ from backend.app.rag.retrieval import (
     StrictProviderUsage,
 )
 from backend.app.rag.search_store import (
+    POSTGRES_KEYWORD_BIND_SPECS,
     POSTGRES_KEYWORD_RESOURCE_PREDICATE,
     POSTGRES_KEYWORD_SEARCH_SQL,
+    KeywordBooleanOperator,
+    KeywordBooleanPredicate,
+    KeywordColumn,
+    KeywordComparisonOperator,
+    KeywordComparisonPredicate,
+    KeywordConstantPredicate,
+    KeywordExistence,
+    KeywordExistsPredicate,
+    KeywordLiteral,
+    KeywordParameter,
+    KeywordRelation,
+    KeywordRule,
     KeywordSearchTimeoutError,
-    PostgresKeywordApprovalLink,
+    KeywordSqlTruth,
+    PostgresKeywordBindTarget,
+    PostgresKeywordRelationRow,
     PostgresKeywordResourceCandidate,
-    PostgresKeywordResourceParameters,
     SqlAlchemyKeywordSearchStore,
+    build_postgres_keyword_bind_values,
     build_postgres_keyword_search_sql,
+    evaluate_postgres_keyword_predicate,
+    render_postgres_keyword_predicate,
 )
 from backend.app.rag.serving_contracts import (
     EvidenceAccessClassification,
@@ -97,11 +114,21 @@ def _production_predicate_top_50(
     rows: tuple[PostgresKeywordResourceCandidate, ...],
     scope: SecurityScope,
 ) -> tuple[PostgresKeywordResourceCandidate, ...]:
-    parameters = PostgresKeywordResourceParameters.from_security_scope(scope)
+    request = _request(scope=scope)
+    parameters = build_postgres_keyword_bind_values(
+        request=request,
+        terms=tokenize_rag_lexical_query(request.retrieval_query_text),
+        settings=_settings(),
+    )
     eligible = tuple(
         row
         for row in rows
-        if POSTGRES_KEYWORD_RESOURCE_PREDICATE.evaluate(row, parameters)
+        if evaluate_postgres_keyword_predicate(
+            POSTGRES_KEYWORD_RESOURCE_PREDICATE,
+            candidate=row,
+            bind_values=parameters,
+        )
+        is KeywordSqlTruth.TRUE
     )
     return tuple(
         sorted(
@@ -112,6 +139,77 @@ def _production_predicate_top_50(
                 row.serving_document_id,
             ),
         )[:50]
+    )
+
+
+def _relation_row(
+    relation: str,
+    **columns: str | int | bool | None,
+) -> PostgresKeywordRelationRow:
+    return PostgresKeywordRelationRow(
+        relation=relation,
+        columns=tuple(columns.items()),
+    )
+
+
+def _resource_row(
+    serving_document_id: str,
+    *,
+    serving_kind: str = 'trusted_knowledge',
+    project_key: str | None = 'project-a',
+    raw_source_id: int | None = None,
+    score: float = 1.0,
+    links: tuple[tuple[str, bool, str, tuple[int, ...]], ...] = (),
+) -> PostgresKeywordResourceCandidate:
+    document_kind, identifier_text = serving_document_id.split(':', 1)
+    identifier = int(identifier_text)
+    relation_rows: list[PostgresKeywordRelationRow] = []
+    if serving_kind == 'raw_chunk' and raw_source_id is not None:
+        relation_rows.append(
+            _relation_row('document_chunks', id=identifier, source_id=raw_source_id)
+        )
+    knowledge_relations = {
+        'decision_record': 'decision_records',
+        'history_event': 'history_events',
+        'timeline_event': 'timeline_events',
+        'todo': 'todos',
+    }
+    if serving_kind == 'trusted_knowledge' and project_key is not None:
+        relation_rows.append(
+            _relation_row(
+                knowledge_relations[document_kind],
+                id=identifier,
+                project_key=project_key,
+            )
+        )
+    for approval_id, (workspace, active, resolution, children) in enumerate(
+        links,
+        start=1,
+    ):
+        relation_rows.append(
+            _relation_row(
+                'trusted_knowledge_approval_links',
+                id=approval_id,
+                knowledge_type=document_kind,
+                knowledge_id=identifier,
+                active=active,
+                security_scope_id=workspace,
+                resolution_source=resolution,
+            )
+        )
+        relation_rows.extend(
+            _relation_row(
+                'trusted_knowledge_evidence_links',
+                approval_link_id=approval_id,
+                canonical_source_id=str(source_id),
+            )
+            for source_id in children
+        )
+    return PostgresKeywordResourceCandidate(
+        serving_document_id=serving_document_id,
+        serving_kind=serving_kind,
+        score=score,
+        relation_rows=tuple(relation_rows),
     )
 
 
@@ -633,21 +731,24 @@ def test_postgresql_query_scores_before_limit_and_uses_literal_complete_superset
     assert sql.count('CAST(:project_keys AS text[]) IS NOT NULL') == 2
     assert sql.count('CAST(:source_ids AS bigint[]) IS NOT NULL') == 1
     assert sql.count('CAST(:source_id_texts AS text[]) IS NOT NULL') == 2
-    assert 'approval.security_scope_id = :workspace_scope_id' in sql
+    assert (
+        'approval.security_scope_id = CAST(:workspace_scope_id AS text)'
+        in sql
+    )
     assert 'approval.active IS TRUE' in sql
     assert sql.count(
         'FROM trusted_knowledge_approval_links AS approval'
     ) == 2
     assert (
-        'AND NOT EXISTS ( SELECT 1 '
+        'AND NOT EXISTS (SELECT 1 '
         'FROM trusted_knowledge_approval_links AS approval'
     ) in sql
     assert build_postgres_keyword_search_sql(
         POSTGRES_KEYWORD_RESOURCE_PREDICATE
     ) == POSTGRES_KEYWORD_SEARCH_SQL
-    assert 'TRUE OR EXISTS' not in POSTGRES_KEYWORD_RESOURCE_PREDICATE.render(
-        alias='projection'
-    )
+    assert render_postgres_keyword_predicate(
+        POSTGRES_KEYWORD_RESOURCE_PREDICATE
+    ) in POSTGRES_KEYWORD_SEARCH_SQL
 
 
 @pytest.mark.parametrize(
@@ -665,38 +766,20 @@ def test_production_resource_predicate_excludes_foreign_workspace_before_top_50(
     scope: SecurityScope,
 ) -> None:
     foreign = tuple(
-        PostgresKeywordResourceCandidate(
-            serving_document_id=f'history_event:{index}',
-            serving_kind='trusted_knowledge',
+        _resource_row(
+            f'history_event:{index}',
             project_key='project-a',
-            raw_source_id=None,
             score=3.0,
-            links=(
-                PostgresKeywordApprovalLink(
-                    workspace_scope_id='workspace-foreign',
-                    active=True,
-                    resolution_source='human',
-                    child_source_ids=(1,),
-                ),
-            ),
+            links=(('workspace-foreign', True, 'human', (1,)),),
         )
         for index in range(1, 61)
     )
     valid = tuple(
-        PostgresKeywordResourceCandidate(
-            serving_document_id=f'history_event:{index}',
-            serving_kind='trusted_knowledge',
+        _resource_row(
+            f'history_event:{index}',
             project_key='project-a',
-            raw_source_id=None,
             score=1.0,
-            links=(
-                PostgresKeywordApprovalLink(
-                    workspace_scope_id=scope.workspace_scope_id,
-                    active=True,
-                    resolution_source='auto_policy',
-                    child_source_ids=(1,),
-                ),
-            ),
+            links=((scope.workspace_scope_id, True, 'auto_policy', (1,)),),
         )
         for index in range(101, 152)
     )
@@ -720,94 +803,485 @@ def test_production_resource_predicate_keeps_explicit_and_legacy_branches_disjoi
         source_constraints=('source_pk:7',),
         allowed_permission_levels=('public',),
     )
-    foreign_explicit = PostgresKeywordResourceCandidate(
-        serving_document_id='history_event:1',
-        serving_kind='trusted_knowledge',
+    foreign_explicit = _resource_row(
+        'history_event:1',
         project_key='project-a',
-        raw_source_id=None,
         score=2.0,
-        links=(
-            PostgresKeywordApprovalLink(
-                workspace_scope_id='workspace-foreign',
-                active=True,
-                resolution_source='human',
-                child_source_ids=(7,),
-            ),
-        ),
+        links=(('workspace-foreign', True, 'human', (7,)),),
     )
-    current_explicit = replace(
-        foreign_explicit,
-        links=(
-            replace(
-                foreign_explicit.links[0],
-                workspace_scope_id=all_scope.workspace_scope_id,
-            ),
-        ),
+    current_explicit = _resource_row(
+        'history_event:1',
+        project_key='project-a',
+        score=2.0,
+        links=((all_scope.workspace_scope_id, True, 'human', (7,)),),
     )
-    legacy = replace(foreign_explicit, serving_document_id='history_event:2', links=())
+    legacy = _resource_row('history_event:2', project_key='project-a')
 
-    all_parameters = PostgresKeywordResourceParameters.from_security_scope(all_scope)
-    project_parameters = PostgresKeywordResourceParameters.from_security_scope(
-        project_scope
-    )
-    source_parameters = PostgresKeywordResourceParameters.from_security_scope(
-        source_scope
-    )
-    predicate = POSTGRES_KEYWORD_RESOURCE_PREDICATE
-    assert not predicate.evaluate(foreign_explicit, all_parameters)
-    assert predicate.evaluate(current_explicit, all_parameters)
-    assert predicate.evaluate(current_explicit, project_parameters)
-    assert not predicate.evaluate(
-        replace(current_explicit, project_key='project-foreign'),
-        project_parameters,
-    )
-    assert predicate.evaluate(legacy, all_parameters)
-    assert not predicate.evaluate(legacy, source_parameters)
-    assert not predicate.evaluate(
-        replace(
-            current_explicit,
-            links=(
-                replace(current_explicit.links[0], child_source_ids=(8,)),
+    def truth(row, scope):
+        request = _request(scope=scope)
+        binds = build_postgres_keyword_bind_values(
+            request=request,
+            terms=tokenize_rag_lexical_query(request.retrieval_query_text),
+            settings=_settings(),
+        )
+        return evaluate_postgres_keyword_predicate(
+            POSTGRES_KEYWORD_RESOURCE_PREDICATE,
+            candidate=row,
+            bind_values=binds,
+        )
+
+    assert truth(foreign_explicit, all_scope) is KeywordSqlTruth.FALSE
+    assert truth(current_explicit, all_scope) is KeywordSqlTruth.TRUE
+    assert truth(current_explicit, project_scope) is KeywordSqlTruth.TRUE
+    assert (
+        truth(
+            _resource_row(
+                'history_event:1',
+                project_key='project-foreign',
+                links=((all_scope.workspace_scope_id, True, 'human', (7,)),),
             ),
-        ),
-        source_parameters,
+            project_scope,
+        )
+        is KeywordSqlTruth.FALSE
     )
+    assert truth(legacy, all_scope) is KeywordSqlTruth.TRUE
+    assert truth(legacy, source_scope) is KeywordSqlTruth.FALSE
+    wrong_child = _resource_row(
+        'history_event:1',
+        links=((all_scope.workspace_scope_id, True, 'human', (8,)),),
+    )
+    assert truth(wrong_child, source_scope) is KeywordSqlTruth.FALSE
 
 
 def test_production_resource_predicate_handles_null_empty_and_raw_without_bypass() -> None:
-    predicate = POSTGRES_KEYWORD_RESOURCE_PREDICATE
-    empty = PostgresKeywordResourceParameters(
-        workspace_scope_id='workspace-1',
-        project_keys=(),
-        source_ids=(),
-    )
-    null_projects = replace(empty, project_keys=None)
-    null_sources = replace(empty, source_ids=None)
-    raw = PostgresKeywordResourceCandidate(
-        serving_document_id='chunk:1',
+    raw = _resource_row(
+        'chunk:1',
         serving_kind='raw_chunk',
         project_key=None,
         raw_source_id=7,
-        score=1.0,
-        links=(),
     )
-    legacy = PostgresKeywordResourceCandidate(
-        serving_document_id='history_event:1',
-        serving_kind='trusted_knowledge',
-        project_key='project-a',
-        raw_source_id=None,
-        score=1.0,
-        links=(),
+    legacy = _resource_row('history_event:1')
+    request = _request()
+    empty = build_postgres_keyword_bind_values(
+        request=request,
+        terms=tokenize_rag_lexical_query(request.retrieval_query_text),
+        settings=_settings(),
     )
 
-    assert predicate.evaluate(raw, empty)
-    assert predicate.evaluate(legacy, empty)
-    assert predicate.evaluate(raw, replace(empty, source_ids=(7,)))
-    assert not predicate.evaluate(raw, replace(empty, source_ids=(8,)))
-    assert not predicate.evaluate(raw, null_projects)
-    assert not predicate.evaluate(raw, null_sources)
-    assert not predicate.evaluate(legacy, null_projects)
-    assert not predicate.evaluate(legacy, null_sources)
+    def truth(row, **overrides):
+        return evaluate_postgres_keyword_predicate(
+            POSTGRES_KEYWORD_RESOURCE_PREDICATE,
+            candidate=row,
+            bind_values={**empty, **overrides},
+        )
+
+    assert truth(raw) is KeywordSqlTruth.TRUE
+    assert truth(legacy) is KeywordSqlTruth.TRUE
+    assert truth(raw, source_ids=(7,)) is KeywordSqlTruth.TRUE
+    assert truth(raw, source_ids=(8,)) is KeywordSqlTruth.FALSE
+    assert truth(raw, project_keys=None) is KeywordSqlTruth.FALSE
+    assert truth(raw, source_ids=None) is KeywordSqlTruth.FALSE
+    assert truth(legacy, project_keys=None) is KeywordSqlTruth.FALSE
+    assert truth(legacy, source_id_texts=None) is KeywordSqlTruth.FALSE
+
+
+def _replace_predicate_rule(predicate, rule_name, mutation):
+    replacements = 0
+
+    def visit(node):
+        nonlocal replacements
+        if isinstance(node, KeywordRule):
+            if node.name == rule_name:
+                replacements += 1
+                return replace(node, predicate=mutation(node.predicate))
+            return replace(node, predicate=visit(node.predicate))
+        if isinstance(node, KeywordBooleanPredicate):
+            return replace(node, children=tuple(visit(child) for child in node.children))
+        if isinstance(node, KeywordExistsPredicate):
+            return replace(node, where=visit(node.where))
+        return node
+
+    result = visit(predicate)
+    assert replacements == 1
+    return result
+
+
+def _mutate_comparison(operator: KeywordComparisonOperator):
+    def mutate(node):
+        assert isinstance(node, KeywordComparisonPredicate)
+        return replace(node, operator=operator)
+
+    return mutate
+
+
+def _mutate_existence(polarity: KeywordExistence):
+    def mutate(node):
+        assert isinstance(node, KeywordExistsPredicate)
+        return replace(node, polarity=polarity)
+
+    return mutate
+
+
+def _mutate_boolean(operator: KeywordBooleanOperator):
+    def mutate(node):
+        assert isinstance(node, KeywordBooleanPredicate)
+        return replace(node, operator=operator)
+
+    return mutate
+
+
+def _constant_true(node):
+    del node
+    return KeywordConstantPredicate(KeywordSqlTruth.TRUE)
+
+
+def _mutation_case(case_name: str):
+    all_scope = _scope()
+    source_scope = _scope(
+        resource_scope_mode='constrained',
+        source_constraints=('source_pk:7',),
+    )
+    project_scope = _scope(
+        resource_scope_mode='constrained',
+        project_constraints=('project_key:project-a',),
+    )
+    current = _resource_row(
+        'history_event:1',
+        links=(('workspace-1', True, 'human', (7,)),),
+    )
+    cases = {
+        'foreign-workspace': (
+            _resource_row(
+                'history_event:1',
+                links=(('workspace-foreign', True, 'human', (7,)),),
+            ),
+            all_scope,
+            {},
+            KeywordSqlTruth.FALSE,
+        ),
+        'current-explicit': (current, source_scope, {}, KeywordSqlTruth.TRUE),
+        'current-project': (current, project_scope, {}, KeywordSqlTruth.TRUE),
+        'inactive-explicit': (
+            _resource_row(
+                'history_event:1',
+                links=(('workspace-1', False, 'human', (7,)),),
+            ),
+            source_scope,
+            {},
+            KeywordSqlTruth.FALSE,
+        ),
+        'wrong-resolution': (
+            _resource_row(
+                'history_event:1',
+                links=(('workspace-1', True, 'model', (7,)),),
+            ),
+            source_scope,
+            {},
+            KeywordSqlTruth.FALSE,
+        ),
+        'legacy': (
+            _resource_row('history_event:2'),
+            all_scope,
+            {},
+            KeywordSqlTruth.TRUE,
+        ),
+        'raw-source': (
+            _resource_row(
+                'chunk:1',
+                serving_kind='raw_chunk',
+                project_key=None,
+                raw_source_id=7,
+            ),
+            source_scope,
+            {},
+            KeywordSqlTruth.TRUE,
+        ),
+        'null-source-array': (
+            current,
+            source_scope,
+            {'source_id_texts': None},
+            KeywordSqlTruth.FALSE,
+        ),
+        'empty-source-array': (
+            current,
+            all_scope,
+            {},
+            KeywordSqlTruth.TRUE,
+        ),
+    }
+    return cases[case_name]
+
+
+@pytest.mark.parametrize(
+    ('mutation_name', 'rule_name', 'mutation', 'case_name'),
+    (
+        ('workspace-bypass', 'explicit_workspace', _constant_true, 'foreign-workspace'),
+        (
+            'workspace-comparator',
+            'explicit_workspace',
+            _mutate_comparison(KeywordComparisonOperator.NE),
+            'current-explicit',
+        ),
+        (
+            'project-comparator',
+            'history_project_membership',
+            _mutate_comparison(KeywordComparisonOperator.NOT_EQUAL_ALL),
+            'current-project',
+        ),
+        ('explicit-active', 'explicit_active', _constant_true, 'inactive-explicit'),
+        (
+            'explicit-resolution',
+            'explicit_resolution',
+            _constant_true,
+            'wrong-resolution',
+        ),
+        (
+            'explicit-existence',
+            'explicit_link_exists',
+            _mutate_existence(KeywordExistence.NOT_EXISTS),
+            'current-explicit',
+        ),
+        (
+            'legacy-absence',
+            'legacy_active_link_absence',
+            _mutate_existence(KeywordExistence.EXISTS),
+            'legacy',
+        ),
+        (
+            'every-child-polarity',
+            'every_child_violation_absence',
+            _mutate_existence(KeywordExistence.EXISTS),
+            'current-explicit',
+        ),
+        (
+            'raw-source-comparator',
+            'raw_source_membership',
+            _mutate_comparison(KeywordComparisonOperator.NOT_EQUAL_ALL),
+            'raw-source',
+        ),
+        (
+            'root-or-grouping',
+            'root_resource_group',
+            _mutate_boolean(KeywordBooleanOperator.AND),
+            'current-explicit',
+        ),
+        (
+            'null-guard',
+            'explicit_sources_not_null',
+            _constant_true,
+            'null-source-array',
+        ),
+        (
+            'empty-array',
+            'explicit_source_empty',
+            _mutate_comparison(KeywordComparisonOperator.NE),
+            'empty-source-array',
+        ),
+    ),
+)
+def test_declarative_predicate_mutations_change_sql_and_fail_executed_matrix(
+    mutation_name,
+    rule_name,
+    mutation,
+    case_name,
+) -> None:
+    del mutation_name
+    candidate, scope, overrides, expected = _mutation_case(case_name)
+    request = _request(scope=scope)
+    bind_values = build_postgres_keyword_bind_values(
+        request=request,
+        terms=tokenize_rag_lexical_query(request.retrieval_query_text),
+        settings=_settings(),
+    )
+    bind_values = {**bind_values, **overrides}
+    mutant = _replace_predicate_rule(
+        POSTGRES_KEYWORD_RESOURCE_PREDICATE,
+        rule_name,
+        mutation,
+    )
+
+    assert (
+        evaluate_postgres_keyword_predicate(
+            POSTGRES_KEYWORD_RESOURCE_PREDICATE,
+            candidate=candidate,
+            bind_values=bind_values,
+        )
+        is expected
+    )
+    assert build_postgres_keyword_search_sql(mutant) != POSTGRES_KEYWORD_SEARCH_SQL
+    assert (
+        evaluate_postgres_keyword_predicate(
+            mutant,
+            candidate=candidate,
+            bind_values=bind_values,
+        )
+        is not expected
+    )
+
+
+def test_postgresql_search_uses_single_typed_bind_spec_factory() -> None:
+    class _Dialect:
+        name = 'postgresql'
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _EmptyResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _FakePostgresSession:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def get_bind(self):
+            return _Bind()
+
+        def execute(self, statement, parameters):
+            self.calls.append((str(statement), dict(parameters)))
+            return _EmptyResult()
+
+    scope = _scope(
+        resource_scope_mode='constrained',
+        project_constraints=('project_key:project-a',),
+        source_constraints=('source_pk:7',),
+    )
+    request = _request(query='  Alpha Roadmap  ', scope=scope)
+    session = _FakePostgresSession()
+    store = SqlAlchemyKeywordSearchStore(
+        db=session,  # type: ignore[arg-type]
+        settings=_settings(),
+    )
+
+    assert store.search(request) == ()
+    assert tuple(
+        (spec.name, spec.sql_type, spec.target)
+        for spec in POSTGRES_KEYWORD_BIND_SPECS
+    ) == (
+        ('timeout_value', 'text', PostgresKeywordBindTarget.TIMEOUT),
+        ('query_terms', 'text[]', PostgresKeywordBindTarget.SEARCH),
+        ('phrase_lower', 'text', PostgresKeywordBindTarget.SEARCH),
+        ('lexical_contract_version', 'text', PostgresKeywordBindTarget.SEARCH),
+        ('fingerprint_key_version', 'text', PostgresKeywordBindTarget.SEARCH),
+        ('key_material_verifier', 'text', PostgresKeywordBindTarget.SEARCH),
+        ('project_keys', 'text[]', PostgresKeywordBindTarget.SEARCH),
+        ('source_ids', 'bigint[]', PostgresKeywordBindTarget.SEARCH),
+        ('source_id_texts', 'text[]', PostgresKeywordBindTarget.SEARCH),
+        ('workspace_scope_id', 'text', PostgresKeywordBindTarget.SEARCH),
+    )
+    assert session.calls == [
+        (
+            "SELECT set_config('statement_timeout', CAST(:timeout_value AS text), true)",
+            {'timeout_value': '5000ms'},
+        ),
+        (
+            POSTGRES_KEYWORD_SEARCH_SQL,
+            {
+                'query_terms': ('alpha', 'roadmap'),
+                'phrase_lower': 'alpha roadmap',
+                'lexical_contract_version': 'rag-keyword-lexical-compat:v1',
+                'fingerprint_key_version': 'keyword-test-v1',
+                'key_material_verifier': (
+                    '881dd0aac1d34d5412742640d9a75e64705a016327fb31cb19ed8853ff036f65'
+                ),
+                'project_keys': ('project-a',),
+                'source_ids': (7,),
+                'source_id_texts': ('7',),
+                'workspace_scope_id': 'workspace-1',
+            },
+        ),
+    ]
+
+
+def test_generic_evaluator_uses_sql_three_valued_logic_and_where_true_only() -> None:
+    candidate = PostgresKeywordResourceCandidate(
+        serving_document_id='history_event:1',
+        serving_kind='trusted_knowledge',
+        score=1.0,
+        relation_rows=(
+            _relation_row('nullable_rows', id=1, nullable=None),
+        ),
+    )
+    assert render_postgres_keyword_predicate(
+        KeywordConstantPredicate(KeywordSqlTruth.UNKNOWN)
+    ) == 'NULL'
+    unknown_comparisons = (
+        KeywordComparisonPredicate(
+            KeywordParameter('nullable'),
+            KeywordComparisonOperator.EQ,
+            KeywordLiteral(1),
+        ),
+        KeywordComparisonPredicate(
+            KeywordLiteral(1),
+            KeywordComparisonOperator.IN,
+            KeywordLiteral((2, None)),
+        ),
+        KeywordComparisonPredicate(
+            KeywordLiteral(1),
+            KeywordComparisonOperator.EQUAL_ANY,
+            KeywordLiteral((2, None)),
+        ),
+        KeywordComparisonPredicate(
+            KeywordLiteral(1),
+            KeywordComparisonOperator.NOT_EQUAL_ALL,
+            KeywordLiteral((2, None)),
+        ),
+    )
+    for comparison in unknown_comparisons:
+        assert (
+            evaluate_postgres_keyword_predicate(
+                comparison,
+                candidate=candidate,
+                bind_values={'nullable': None},
+            )
+            is KeywordSqlTruth.UNKNOWN
+        )
+
+    for boolean_predicate in (
+        KeywordBooleanPredicate(
+            KeywordBooleanOperator.AND,
+            (
+                KeywordConstantPredicate(KeywordSqlTruth.TRUE),
+                unknown_comparisons[0],
+            ),
+        ),
+        KeywordBooleanPredicate(
+            KeywordBooleanOperator.OR,
+            (
+                KeywordConstantPredicate(KeywordSqlTruth.FALSE),
+                unknown_comparisons[0],
+            ),
+        ),
+    ):
+        assert (
+            evaluate_postgres_keyword_predicate(
+                boolean_predicate,
+                candidate=candidate,
+                bind_values={'nullable': None},
+            )
+            is KeywordSqlTruth.UNKNOWN
+        )
+
+    exists_with_unknown_where = KeywordExistsPredicate(
+        relation=KeywordRelation('nullable_rows', 'nullable'),
+        polarity=KeywordExistence.EXISTS,
+        where=KeywordComparisonPredicate(
+            KeywordColumn('nullable', 'nullable'),
+            KeywordComparisonOperator.EQ,
+            KeywordLiteral(1),
+        ),
+    )
+    assert (
+        evaluate_postgres_keyword_predicate(
+            exists_with_unknown_where,
+            candidate=candidate,
+            bind_values={},
+        )
+        is KeywordSqlTruth.FALSE
+    )
 
 
 def test_sqlite_oracle_uses_canonical_projection_and_permission_second_stage(
