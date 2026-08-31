@@ -26,7 +26,13 @@ class Settings(BaseSettings):
     paraworks_database_url: str | None = None
     paraworks_demo_database_url: str | None = None
     langgraph_review_v2_enabled: bool = False
-    langgraph_rag_v2_enabled: bool = False
+    langgraph_rag_v2_enabled: bool = Field(default=False, frozen=True)
+    langgraph_rag_v2_mode: Literal['disabled', 'shadow', 'enforce'] = Field(
+        default='disabled', frozen=True
+    )
+    langgraph_rag_v2_stage: Literal['none', 'ask', 'search', 'assistant'] = Field(
+        default='none', frozen=True
+    )
     langgraph_strict_msgpack: bool = False
     langgraph_checkpoint_retention_days: int = Field(default=30, ge=1, le=3650)
     agent_runtime_fingerprint_secret: str = (
@@ -106,7 +112,10 @@ class Settings(BaseSettings):
     assistant_email_agent_timeout_seconds: float = 12.0
     assistant_email_agent_min_confidence: float = 0.72
     rag_embedding_max_estimated_cost_usd: float | None = 0.001
-    rag_use_pgvector_search: bool = False
+    rag_retrieval_backend: Literal['keyword', 'pgvector'] = Field(
+        default='keyword', frozen=True
+    )
+    rag_use_pgvector_search: bool = Field(default=False, frozen=True)
     slack_bot_token: str | None = None
     slack_user_token: str | None = None
     slack_channel_ids: str = ''

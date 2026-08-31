@@ -8,6 +8,12 @@ from backend.app.agent_runtime.checkpointing import (
     CheckpointUnavailableError,
 )
 from backend.app.agent_runtime.model_router import ReviewModelUnavailableError
+from backend.app.agent_runtime.rag_v2_contracts import (
+    COMPANY_MEMORY_RAG_GRAPH_VERSION,
+    COMPANY_MEMORY_RAG_STATE_SCHEMA_VERSION,
+    COMPANY_MEMORY_RAG_WORKFLOW,
+)
+from backend.app.agent_runtime.rag_v2_registry import RagGraphRegistration
 from backend.app.core.config import Settings, get_settings
 from backend.app.main import create_app
 from backend.app.models.agent_workflows import AgentWorkflowThread
@@ -27,6 +33,25 @@ class _FakeCheckpointRuntime:
 
     def close(self) -> None:
         self.events.append('close')
+
+
+def _build_test_rag_graph_registration() -> RagGraphRegistration:
+    from langgraph.graph import END, START, StateGraph
+    from typing_extensions import TypedDict
+
+    class State(TypedDict):
+        value: str
+
+    builder = StateGraph(State)
+    builder.add_node('pass_through', lambda state: state)
+    builder.add_edge(START, 'pass_through')
+    builder.add_edge('pass_through', END)
+    return RagGraphRegistration(
+        workflow_name=COMPANY_MEMORY_RAG_WORKFLOW,
+        graph_version=COMPANY_MEMORY_RAG_GRAPH_VERSION,
+        state_schema_version=COMPANY_MEMORY_RAG_STATE_SCHEMA_VERSION,
+        graph=builder.compile(),
+    )
 
 
 def test_create_app_does_not_start_checkpoint_runtime_before_lifespan() -> None:
@@ -98,6 +123,30 @@ def test_app_lifespan_registers_immutable_v2_graph_even_when_new_runs_disabled(
     assert callable(builder)
     assert callable(builder_v21)
     assert events == ['start:False', 'close']
+
+
+def test_lifespan_exposes_rag_registries_separately_from_review_registries(
+    db_session: Session,
+) -> None:
+    runtime = _FakeCheckpointRuntime([])
+    app = create_app(
+        checkpoint_runtime_factory=lambda _settings: runtime,  # type: ignore[arg-type]
+        workflow_session_factory=sessionmaker(
+            bind=db_session.get_bind(), expire_on_commit=False
+        ),
+        rag_graph_factory=_build_test_rag_graph_registration,
+    )
+
+    with TestClient(app):
+        assert app.state.rag_graph_registry is not app.state.agent_graph_registry
+        assert app.state.agent_manifest_registry is not app.state.review_agent_registry
+        assert app.state.rag_graph_registry.resolve(
+            COMPANY_MEMORY_RAG_WORKFLOW,
+            COMPANY_MEMORY_RAG_GRAPH_VERSION,
+        )
+        assert app.state.agent_manifest_registry.names == ('rag_orchestrator_agent',)
+        assert len(app.state.review_agent_registry.names) == 5
+        assert 'rag_orchestrator_agent' not in app.state.review_agent_registry.names
 
 
 def test_disabled_start_preserves_nonterminal_existing_review_threads(

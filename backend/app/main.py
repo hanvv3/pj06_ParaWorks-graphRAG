@@ -29,6 +29,11 @@ from backend.app.agent_runtime.graph_versions import (
     register_company_memory_review_versions,
 )
 from backend.app.agent_runtime.model_router import ReviewModelUnavailableError
+from backend.app.agent_runtime.rag_v2_registry import (
+    RagGraphRegistration,
+    RagGraphRegistry,
+    build_rag_manifest_registry,
+)
 from backend.app.agent_runtime.registry import AgentRegistry
 from backend.app.agent_runtime.review_v2_agents import (
     APPROVED_REVIEW_AGENT_MANIFESTS,
@@ -67,6 +72,7 @@ from backend.app.schemas.review_workflow import (
 
 CheckpointRuntimeFactory = Callable[[Settings], CheckpointRuntime]
 WorkflowSessionFactory = Callable[[], Session]
+RagGraphFactory = Callable[[], RagGraphRegistration]
 
 _NONTERMINAL_REVIEW_THREAD_STATUSES = (
     'created',
@@ -98,6 +104,7 @@ def create_app(
     *,
     checkpoint_runtime_factory: CheckpointRuntimeFactory = build_checkpoint_runtime,
     workflow_session_factory: WorkflowSessionFactory = SessionLocal,
+    rag_graph_factory: RagGraphFactory | None = None,
 ) -> FastAPI:
     settings = get_settings()
     checkpoint_runtime = checkpoint_runtime_factory(settings)
@@ -106,6 +113,10 @@ def create_app(
     async def lifespan(app: FastAPI):
         graph_registry = GraphVersionRegistry()
         register_company_memory_review_versions(graph_registry)
+        rag_graph_registry = RagGraphRegistry()
+        if rag_graph_factory is not None:
+            rag_graph_registry.register(rag_graph_factory())
+        agent_manifest_registry = build_rag_manifest_registry()
         preserve_existing_review_threads = (
             not settings.langgraph_review_v2_enabled
             and _has_nonterminal_review_v2_threads(workflow_session_factory)
@@ -188,6 +199,8 @@ def create_app(
             )
             app.state.agent_checkpoint_runtime = checkpoint_runtime
             app.state.agent_graph_registry = graph_registry
+            app.state.rag_graph_registry = rag_graph_registry
+            app.state.agent_manifest_registry = agent_manifest_registry
             app.state.review_agent_catalog = catalog
             app.state.review_agent_registry = agent_registry
             app.state.review_model_readiness = model_readiness

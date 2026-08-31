@@ -9,6 +9,7 @@ from backend.app.agent_runtime import (
     build_evidence_cache_key,
     estimate_agent_run_cost,
 )
+from backend.app.agent_runtime.rag_v2_contracts import RAG_ANSWER_PROMPT_VERSION
 
 RAG_ORCHESTRATOR_AGENT_NAME = 'rag_orchestrator_agent'
 RAG_ORCHESTRATOR_AGENT_PROMPT_VERSION = 'rag-answer:v1'
@@ -17,10 +18,10 @@ RAG_ORCHESTRATOR_AGENT_MODEL_NAME = 'fake-rag-orchestrator-model'
 RAG_ORCHESTRATOR_AGENT_MANIFEST = AgentManifest(
     name=RAG_ORCHESTRATOR_AGENT_NAME,
     owner='Developer C',
-    input_contract='EvidencePacket',
-    output_contract='RagAnswer',
-    prompt_versions=(RAG_ORCHESTRATOR_AGENT_PROMPT_VERSION,),
-    supported_permissions=('internal', 'restricted'),
+    input_contract='RagGraphInput',
+    output_contract='RagGraphOutput',
+    prompt_versions=(RAG_ORCHESTRATOR_AGENT_PROMPT_VERSION, RAG_ANSWER_PROMPT_VERSION),
+    supported_permissions=('public', 'internal', 'restricted'),
     capabilities=('question_answering', 'rag_answering', 'orchestration'),
 )
 

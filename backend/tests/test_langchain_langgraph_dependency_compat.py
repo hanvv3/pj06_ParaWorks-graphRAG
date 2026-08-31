@@ -187,6 +187,46 @@ def test_state_graph_accepts_typed_runtime_context() -> None:
     assert result == {'text': 'runtime-ok'}
 
 
+def test_rag_v2_registry_uses_the_real_compiled_state_graph_type() -> None:
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.graph.state import CompiledStateGraph
+    from typing_extensions import TypedDict
+
+    from backend.app.agent_runtime.rag_v2_contracts import (
+        COMPANY_MEMORY_RAG_GRAPH_VERSION,
+        COMPANY_MEMORY_RAG_STATE_SCHEMA_VERSION,
+        COMPANY_MEMORY_RAG_WORKFLOW,
+    )
+    from backend.app.agent_runtime.rag_v2_registry import (
+        RagGraphRegistration,
+        RagGraphRegistry,
+    )
+
+    class State(TypedDict):
+        value: str
+
+    builder = StateGraph(State)
+    builder.add_node('pass_through', lambda state: state)
+    builder.add_edge(START, 'pass_through')
+    builder.add_edge('pass_through', END)
+    graph = builder.compile()
+    registry = RagGraphRegistry()
+    registry.register(
+        RagGraphRegistration(
+            workflow_name=COMPANY_MEMORY_RAG_WORKFLOW,
+            graph_version=COMPANY_MEMORY_RAG_GRAPH_VERSION,
+            state_schema_version=COMPANY_MEMORY_RAG_STATE_SCHEMA_VERSION,
+            graph=graph,
+        )
+    )
+
+    assert isinstance(graph, CompiledStateGraph)
+    assert registry.resolve(
+        COMPANY_MEMORY_RAG_WORKFLOW,
+        COMPANY_MEMORY_RAG_GRAPH_VERSION,
+    ) is graph
+
+
 def test_state_graph_routes_with_conditional_edge() -> None:
     from typing import Literal
 
