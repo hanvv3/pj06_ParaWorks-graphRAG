@@ -81,6 +81,7 @@ from backend.app.agent_runtime.rag_v2_identity import (
     StrictUnicodeScalarValidator,
     exact_utf8_bytes,
     security_scope_fingerprint,
+    verify_serialized_security_scope_fingerprint,
 )
 from backend.app.agent_runtime.rag_v2_registry import (
     RagGraphRegistration,
@@ -182,6 +183,7 @@ __all__ = [
     'require_resumable_checkpoint',
     'score_project_aliases',
     'security_scope_fingerprint',
+    'verify_serialized_security_scope_fingerprint',
 ]
 
 _LAZY_EXPORTS = {

@@ -11,6 +11,8 @@ from backend.app.agents.rag_orchestrator_agent.v2_input import (
     prepare_assistant_request_text,
     prepare_direct_request_text,
 )
+from backend.app.schemas.ask import AskRequest
+from backend.app.schemas.search import SearchRequest
 
 KEY = b'test-only-rag-v2-fingerprint-key'
 
@@ -31,10 +33,19 @@ def _message(
 
 
 def test_direct_request_preserves_whitespace_and_long_caller_text_exactly() -> None:
-    caller_text = '   ' + ('질문 ' * 1_001)
+    whitespace_only = ' \t '
+    caller_text = '😀' * 4_001
 
+    whitespace_prepared = prepare_direct_request_text(whitespace_only, key=KEY)
     prepared = prepare_direct_request_text(caller_text, key=KEY)
 
+    assert AskRequest(question=whitespace_only).question == whitespace_only
+    assert SearchRequest(query=whitespace_only).query == whitespace_only
+    assert AskRequest(question=caller_text).question == caller_text
+    assert SearchRequest(query=caller_text).query == caller_text
+    assert len(caller_text) == 4_001
+    assert whitespace_prepared.caller_text == whitespace_only
+    assert whitespace_prepared.retrieval_query_text == whitespace_only
     assert prepared.caller_text == caller_text
     assert prepared.retrieval_query_text == caller_text
     assert prepared.answer_question_text == caller_text
@@ -73,17 +84,35 @@ def test_assistant_context_is_chronological_user_only_deduplicated_and_retrieval
     assert '최근 대화:' not in prepared.answer_question_text
 
 
-def test_assistant_context_truncates_at_500_scalars_and_drops_oldest_whole_lines() -> None:
+def test_assistant_context_preserves_500_scalars_and_ellipsizes_501_scalars() -> None:
+    exact_500 = 'x' * 500
+    over_500 = 'y' * 501
+    prepared = prepare_assistant_request_text(
+        'current',
+        (
+            _message(1, seconds=1, content=exact_500),
+            _message(2, seconds=2, content=over_500),
+        ),
+        key=KEY,
+    )
+
+    assert f'user: {exact_500}' in prepared.retrieval_query_text
+    assert f"user: {'y' * 499}…" in prepared.retrieval_query_text
+
+
+def test_assistant_context_drops_only_oldest_whole_lines_above_8000_scalars() -> None:
     long_prior = 'x' * 501
-    current = 'q' * 7_700
+    current = 'q' * 5_200
     messages = tuple(
-        _message(index, seconds=index, content=long_prior + str(index))
+        _message(index, seconds=index, content=str(index) + long_prior)
         for index in range(1, 7)
     )
 
     prepared = prepare_assistant_request_text(current, messages, key=KEY)
 
-    assert 'user: ' + ('x' * 499) + '…' not in prepared.retrieval_query_text
+    assert f"user: 1{'x' * 498}…" not in prepared.retrieval_query_text
+    assert f"user: 2{'x' * 498}…" in prepared.retrieval_query_text
+    assert f"user: 6{'x' * 498}…" in prepared.retrieval_query_text
     assert len(prepared.retrieval_query_text) <= 8_000
     assert prepared.retrieval_query_text.endswith(f'현재 질문: {current}')
 

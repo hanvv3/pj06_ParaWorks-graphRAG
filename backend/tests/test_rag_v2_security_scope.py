@@ -8,6 +8,7 @@ from backend.app.agent_runtime.rag_v2_identity import (
     SecurityScope,
     ServerRagSecurityScopeResolver,
     security_scope_fingerprint,
+    verify_serialized_security_scope_fingerprint,
 )
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
@@ -71,11 +72,54 @@ def test_security_scope_requires_exact_mode_namespace_order_and_narrowing() -> N
     assert constrained.source_constraints == ('source_pk:2', 'source_pk:10')
 
 
-def test_scope_fingerprint_binds_every_scope_field_without_exposing_raw_principal() -> None:
+def test_scope_fingerprint_binds_every_valid_mutable_scope_field() -> None:
     settings = Settings(agent_runtime_fingerprint_secret='scope-test-secret', agent_runtime_fingerprint_key_version='scope-v1')
-    scope = _scope()
-    baseline = security_scope_fingerprint(scope, settings=settings)
+    all_scope = _scope()
+    constrained = _scope(
+        resource_scope_mode='constrained',
+        project_constraints=('project_key:a',),
+        source_constraints=('source_pk:2',),
+    )
+    baseline = security_scope_fingerprint(constrained, settings=settings)
 
     assert len(baseline) == 64
-    assert baseline != security_scope_fingerprint(replace(scope, workspace_scope_id='scope-2'), settings=settings)
-    assert baseline != security_scope_fingerprint(replace(scope, principal_subject='user-2'), settings=settings)
+    alternatives = (
+        replace(constrained, principal_subject='user-2'),
+        replace(constrained, workspace_scope_id='scope-2'),
+        replace(constrained, project_constraints=('project_key:b',)),
+        replace(constrained, source_constraints=('source_pk:3',)),
+        replace(constrained, allowed_permission_levels=('public',)),
+        all_scope,
+    )
+    assert all(
+        baseline != security_scope_fingerprint(alternative, settings=settings)
+        for alternative in alternatives
+    )
+
+
+@pytest.mark.parametrize(
+    'field', ('auth_policy_version', 'permission_policy_version'),
+)
+def test_security_scope_rejects_non_frozen_policy_versions(field: str) -> None:
+    with pytest.raises(ValueError):
+        _scope(**{field: 'other-policy:v1'})
+
+
+def test_serialized_scope_fingerprint_mismatch_stops_all_downstream_sentinels() -> None:
+    settings = Settings(agent_runtime_fingerprint_secret='scope-test-secret', agent_runtime_fingerprint_key_version='scope-v1')
+    scope = _scope()
+    calls = {'query': 0, 'embedding': 0, 'db': 0}
+
+    def guarded_harness() -> None:
+        verify_serialized_security_scope_fingerprint(
+            scope,
+            serialized_fingerprint='0' * 64,
+            settings=settings,
+        )
+        calls['query'] += 1
+        calls['embedding'] += 1
+        calls['db'] += 1
+
+    with pytest.raises(ValueError):
+        guarded_harness()
+    assert calls == {'query': 0, 'embedding': 0, 'db': 0}

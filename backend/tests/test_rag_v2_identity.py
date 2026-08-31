@@ -43,6 +43,12 @@ def test_public_citation_url_accepts_absolute_http_urls_without_rewriting() -> N
     assert validator.validate(value) == value
 
 
+@pytest.mark.parametrize('control', ('\x7f', '\x80', '\x9f'))
+def test_public_citation_url_rejects_unicode_control_scalars(control: str) -> None:
+    with pytest.raises(ValueError):
+        RagPublicCitationUrlValidator().validate(f'https://example.test/{control}')
+
+
 @pytest.mark.parametrize(
     'value',
     (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -49,7 +50,10 @@ class RagPublicCitationUrlValidator:
 
     def validate(self, value: str) -> str:
         value = StrictUnicodeScalarValidator.validate(value)
-        if not value or any(character.isspace() or ord(character) <= 0x1F for character in value):
+        if not value or any(
+            character.isspace() or unicodedata.category(character) == 'Cc'
+            for character in value
+        ):
             raise ValueError('citation URL is invalid')
         if '\\' in value:
             raise ValueError('citation URL is ambiguous')
@@ -89,6 +93,10 @@ class SecurityScope:
         _require_nonblank_exact(self.workspace_scope_id)
         _require_nonblank_exact(self.auth_policy_version)
         _require_nonblank_exact(self.permission_policy_version)
+        if self.auth_policy_version != _AUTH_POLICY_VERSION:
+            raise ValueError('security scope auth policy version is invalid')
+        if self.permission_policy_version != _PERMISSION_POLICY_VERSION:
+            raise ValueError('security scope permission policy version is invalid')
         if self.resource_scope_mode not in {'all_current_scope', 'constrained'}:
             raise ValueError('security scope mode is invalid')
         _validate_project_constraints(self.project_constraints)
@@ -151,6 +159,19 @@ def security_scope_fingerprint(scope: SecurityScope, *, settings: Settings) -> s
         schema_version='rag-security-scope-fingerprint:v1',
         policy_version=_SECURITY_SCOPE_CONTRACT_VERSION,
     )
+
+
+def verify_serialized_security_scope_fingerprint(
+    scope: SecurityScope,
+    *,
+    serialized_fingerprint: str,
+    settings: Settings,
+) -> None:
+    expected = security_scope_fingerprint(scope, settings=settings)
+    if type(serialized_fingerprint) is not str or not hmac.compare_digest(
+        expected, serialized_fingerprint
+    ):
+        raise ValueError('serialized security scope fingerprint does not match')
 
 
 def _require_nonblank_exact(value: str) -> None:
