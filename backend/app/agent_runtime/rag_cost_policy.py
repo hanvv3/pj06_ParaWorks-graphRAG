@@ -325,7 +325,7 @@ def _create_rag_cost_policy_type(
             def answer_artifact_signer(kind: str, payload: object) -> str:
                 domains = {
                     'rendered_input': (
-                        'rag-rendered-answer-input:v1',
+                        'rag-rendered-model-input-bytes:v1',
                         'rag-answer:v2',
                     ),
                     'block_text': (

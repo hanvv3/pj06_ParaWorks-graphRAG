@@ -53,7 +53,7 @@ def test_rag_answer_route_binds_exact_openai_model_and_strict_schema(monkeypatch
             'streaming': False,
             'verbose': False,
             'cache': False,
-            'callbacks': None,
+            'callbacks': [],
         }
     ]
     assert structured_calls == [

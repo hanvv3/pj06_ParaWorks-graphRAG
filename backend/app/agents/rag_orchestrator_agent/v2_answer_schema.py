@@ -183,10 +183,10 @@ class RagAnswerOutputValidator:
         *,
         slots: tuple[EvidenceSlot, ...],
     ) -> ValidatedAnswerBlocks:
-        if type(payload) is not dict or set(payload) != {
-            'answer_blocks',
-            'insufficient_evidence_reason',
-        }:
+        if type(payload) is not dict or not _exact_key_set(
+            payload,
+            ('answer_blocks', 'insufficient_evidence_reason'),
+        ):
             raise ValueError
         raw_blocks = payload['answer_blocks']
         reason = payload['insufficient_evidence_reason']
@@ -209,11 +209,10 @@ class RagAnswerOutputValidator:
         selected: list[EvidenceSlotId] = []
         total_text = 0
         for ordinal, raw_block in enumerate(raw_blocks):
-            if type(raw_block) is not dict or set(raw_block) != {
-                'text',
-                'evidence_slot_ids',
-                'support_mode',
-            }:
+            if type(raw_block) is not dict or not _exact_key_set(
+                raw_block,
+                ('text', 'evidence_slot_ids', 'support_mode'),
+            ):
                 raise ValueError
             text = raw_block['text']
             _validate_bounded_text(text, maximum=1200)
@@ -309,3 +308,10 @@ def _validate_bounded_text(value: object, *, maximum: int) -> None:
         if code_point == 0 or 0xD800 <= code_point <= 0xDFFF:
             raise ValueError
     value.encode('utf-8', errors='strict')
+
+
+def _exact_key_set(value: dict[object, object], expected: tuple[str, ...]) -> bool:
+    keys = tuple(value.keys())
+    if any(type(key) is not str for key in keys):
+        return False
+    return len(keys) == len(expected) and set(keys) == set(expected)

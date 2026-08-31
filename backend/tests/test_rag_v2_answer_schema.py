@@ -293,3 +293,36 @@ def test_semantic_validator_exact_bounds_and_cross_block_reuse() -> None:
         {'answer_blocks': [], 'insufficient_evidence_reason': 'x' * 400},
         slots=slots,
     ).insufficient_reason == 'x' * 400
+
+
+class _KeyStr(str):
+    pass
+
+
+@pytest.mark.parametrize(
+    'payload',
+    (
+        {
+            _KeyStr('answer_blocks'): [],
+            'insufficient_evidence_reason': 'reason',
+        },
+        {
+            'answer_blocks': [
+                {
+                    _KeyStr('text'): 'x',
+                    'evidence_slot_ids': ['E1'],
+                    'support_mode': 'trusted_fact',
+                }
+            ],
+            'insufficient_evidence_reason': None,
+        },
+    ),
+)
+def test_semantic_validator_rejects_string_subclass_keys(payload: object) -> None:
+    with pytest.raises(ValueError, match='invalid') as exc_info:
+        RagAnswerOutputValidator(signer=_signer).validate(
+            payload,
+            slots=(_slot('E1', 'trusted_fact'),),
+        )
+
+    assert exc_info.value.__cause__ is None

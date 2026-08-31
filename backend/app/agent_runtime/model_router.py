@@ -89,7 +89,7 @@ def build_rag_answer_model_route(*, settings: Settings) -> RoutedRagAnswerModel:
             streaming=False,
             verbose=False,
             cache=False,
-            callbacks=None,
+            callbacks=[],
         )
         model = raw_model.with_structured_output(
             ANSWER_OUTPUT_SCHEMA_PROVIDER_FORMAT,
