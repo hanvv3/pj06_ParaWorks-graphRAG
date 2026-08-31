@@ -40,6 +40,10 @@ from backend.app.models.knowledge import (
     Todo,
 )
 from backend.app.models.messages import Message, MessageChannel
+from backend.app.models.rag_serving import (
+    RagLexicalServingProjection,
+    RagServingCorpusGeneration,
+)
 from backend.app.models.review import ReviewItem
 from backend.app.models.source import (
     Document,
@@ -84,6 +88,8 @@ __all__ = [
     'Todo',
     'Message',
     'MessageChannel',
+    'RagLexicalServingProjection',
+    'RagServingCorpusGeneration',
     'ReviewItem',
     'ReviewItemEvidenceRef',
     'Document',
