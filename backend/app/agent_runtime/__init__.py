@@ -57,7 +57,6 @@ from backend.app.agent_runtime.project_routing import (
     route_projects_for_candidates,
     score_project_aliases,
 )
-from backend.app.agent_runtime.registry import AgentRegistry
 from backend.app.agent_runtime.rag_v2_contracts import (
     COMPANY_MEMORY_RAG_GRAPH_VERSION,
     COMPANY_MEMORY_RAG_STATE_SCHEMA_VERSION,
@@ -89,6 +88,7 @@ from backend.app.agent_runtime.rag_v2_registry import (
     RagRuntimeVersionUnavailableError,
     build_rag_manifest_registry,
 )
+from backend.app.agent_runtime.registry import AgentRegistry
 from backend.app.agent_runtime.retention import (
     CheckpointPruneResult,
     prune_expired_checkpoints,
