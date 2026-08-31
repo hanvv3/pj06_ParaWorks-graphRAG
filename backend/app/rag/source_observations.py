@@ -45,9 +45,14 @@ class CanonicalSourceObservationResolver:
 
     def resolve_for_index(self, chunk_id: int) -> IndexableSourceObservation | None:
         try:
-            return self._resolve_for_index(chunk_id)
+            return self.resolve_for_index_strict(chunk_id)
         except (SQLAlchemyError, TypeError, UnicodeError, ValueError):
             return None
+
+    def resolve_for_index_strict(
+        self, chunk_id: int
+    ) -> IndexableSourceObservation | None:
+        return self._resolve_for_index(chunk_id)
 
     def resolve_projection_for_scope(
         self,
@@ -55,8 +60,19 @@ class CanonicalSourceObservationResolver:
         *,
         scope: SecurityScope,
     ) -> CanonicalServingProjection | None:
+        try:
+            return self.resolve_projection_for_scope_strict(chunk_id, scope=scope)
+        except (SQLAlchemyError, TypeError, UnicodeError, ValueError):
+            return None
+
+    def resolve_projection_for_scope_strict(
+        self,
+        chunk_id: int,
+        *,
+        scope: SecurityScope,
+    ) -> CanonicalServingProjection | None:
         """Return public raw bytes only after a fresh scoped canonical read."""
-        observation = self.resolve_for_index(chunk_id)
+        observation = self.resolve_for_index_strict(chunk_id)
         if observation is None:
             return None
         access = CanonicalSourceObservationEligibilityService().classify_access(
@@ -292,7 +308,7 @@ def _observation_is_consistent(observation: IndexableSourceObservation) -> bool:
         and evidence.support_mode == 'source_observation'
         and identity.version_envelope is raw_version
         and evidence.version_envelope is raw_version
-        and isinstance(evidence.provenance, RawChunkProvenance)
+        and type(evidence.provenance) is RawChunkProvenance
         and evidence.provenance.raw_version is raw_version
         and identity.serving_document_id
         == evidence.serving_document_id

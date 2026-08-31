@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import operator
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
@@ -23,14 +24,18 @@ from backend.app.models import (
 )
 from backend.app.rag.evidence_projection import (
     CanonicalEvidenceProjector,
+    CanonicalProjectionInfrastructureError,
+    FrozenDict,
+    HiddenMembershipSnapshot,
+    PreparedModelInfluenceSet,
     ProjectionFence,
-    build_hidden_membership_hmac,
     build_model_influence_dependency_hmac,
     build_model_influence_set_hmac,
     build_prepared_model_influence_observation_hmac,
     build_v1_citation_projection_hmac,
     build_v1_search_result_set_projection_hmac,
     build_v1_selected_evidence_projection_hmac,
+    derive_hidden_membership,
 )
 from backend.app.rag.retrieval import RetrievalCandidate, rank_evidence_slots
 from backend.app.rag.serving_contracts import (
@@ -83,14 +88,16 @@ def _projection(ordinal: int, *, trusted: bool = False) -> CanonicalServingProje
     model_content = f'canonical content {ordinal}'
     source_url = f'https://mail.example.test/messages/{ordinal}'
     source_snippet = f'canonical snippet {ordinal}'
+    public_source_id = document_id if trusted else f'gmail:{ordinal}'
+    public_source_type = 'history_event' if trusted else 'gmail'
     model_hmac = build_model_content_hmac(
         serving_kind=serving_kind,
         model_content=model_content,
         settings=_settings(),  # type: ignore[arg-type]
     )
     citation_hmac = build_canonical_citation_projection_hmac(
-        public_source_id=f'gmail:{ordinal}',
-        public_source_type='gmail',
+        public_source_id=public_source_id,
+        public_source_type=public_source_type,
         source_url=source_url,
         source_snippet=source_snippet,
         effective_permission='internal',
@@ -138,8 +145,8 @@ def _projection(ordinal: int, *, trusted: bool = False) -> CanonicalServingProje
     identity = ServingEvidenceIdentity(
         serving_document_id=document_id,
         serving_kind=serving_kind,  # type: ignore[arg-type]
-        public_source_id=f'gmail:{ordinal}',
-        public_source_type='gmail',
+        public_source_id=public_source_id,
+        public_source_type=public_source_type,
         effective_permission='internal',
         model_content_hmac=model_hmac,
         canonical_citation_projection_hmac=citation_hmac,
@@ -149,8 +156,8 @@ def _projection(ordinal: int, *, trusted: bool = False) -> CanonicalServingProje
     evidence = ServingEvidence(
         serving_document_id=document_id,
         serving_kind=serving_kind,  # type: ignore[arg-type]
-        public_source_id=f'gmail:{ordinal}',
-        public_source_type='gmail',
+        public_source_id=public_source_id,
+        public_source_type=public_source_type,
         support_mode=support_mode,  # type: ignore[arg-type]
         model_content=model_content,
         title=f'title {ordinal}',
@@ -223,6 +230,9 @@ class _Resolver:
         self.seen.append(identity.serving_document_id)
         return self.rows.get(identity.serving_document_id)
 
+    def resolve_projection_candidate_strict(self, *, db, identity, scope):
+        return self.resolve_projection_candidate(db=db, identity=identity, scope=scope)
+
 
 def _candidate(row: CanonicalServingProjection, score: float) -> RetrievalCandidate:
     return RetrievalCandidate(
@@ -243,6 +253,52 @@ def _fence(*, hidden_hmac: str) -> ProjectionFence:
         prepared_hidden_membership_hmac=hidden_hmac,
         current_hidden_membership_hmac=hidden_hmac,
     )
+
+
+def _hidden(*, actual: int = 0, members: tuple[str, ...] = ()) -> HiddenMembershipSnapshot:
+    return derive_hidden_membership(
+        actual_hidden_count=actual,
+        ordered_retained_member_identity_hmacs=members,
+        top_candidate_window_hmac='b' * 64,
+        settings=_settings(),
+    )
+
+
+def build_hidden_membership_hmac(
+    *,
+    denied_known_member_identity_hmacs: tuple[str, ...],
+    public_hidden_count: int,
+    capped: bool,
+    top_candidate_window_hmac: str,
+    settings: Settings,
+) -> str:
+    actual = 21 if capped else public_hidden_count
+    snapshot = derive_hidden_membership(
+        actual_hidden_count=actual,
+        ordered_retained_member_identity_hmacs=denied_known_member_identity_hmacs,
+        top_candidate_window_hmac=top_candidate_window_hmac,
+        settings=settings,
+    )
+    assert snapshot.public_hidden_count == public_hidden_count
+    assert snapshot.capped is capped
+    return snapshot.membership_hmac
+
+
+def _prepare_rows(
+    rows: tuple[CanonicalServingProjection, ...],
+    *,
+    rendered_input_hmac: str,
+) -> tuple[CanonicalEvidenceProjector, PreparedModelInfluenceSet]:
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(), settings=_settings(),
+        resolver=_Resolver({row.evidence.serving_document_id: row for row in rows}),
+    )
+    prepared = projector.prepare_model_influence(
+        rank_evidence_slots(tuple(_candidate(row, 0.9) for row in rows)),
+        scope=_scope(), prepared_corpus_generation=1, prepared_index_generation=None,
+        prepared_readiness_hmac=None, rendered_input_hmac=rendered_input_hmac,
+    )
+    return projector, prepared
 
 
 def test_slotting_is_trusted_first_bounded_contiguous_and_whole_tail_dropped() -> None:
@@ -345,6 +401,7 @@ def test_prepare_has_no_role_and_finalization_keeps_every_provider_visible_slot(
         scope=_scope(),
         prepared_corpus_generation=7,
         prepared_index_generation=4,
+        prepared_readiness_hmac='a' * 64,
         rendered_input_hmac='c' * 64,
     )
     dependencies = projector.finalize_model_influence_dependencies(
@@ -468,13 +525,8 @@ def test_hmac_domains_bind_order_bits_nullable_keys_empty_and_role() -> None:
         top_candidate_window_hmac='a' * 64,
         settings=settings,
     )
-    prepared = build_prepared_model_influence_observation_hmac(
-        entries=((row.identity, 'E1', 'source_observation', None, None),),
-        prepared_corpus_generation=1,
-        prepared_index_generation=None,
-        rendered_input_hmac='b' * 64,
-        settings=settings,
-    )
+    projector, prepared_set = _prepare_rows((row,), rendered_input_hmac='b' * 64)
+    prepared = prepared_set.aggregate_observation_hmac
     selected_dep = build_model_influence_dependency_hmac(
         row=row,
         slot_id='E1',
@@ -489,10 +541,16 @@ def test_hmac_domains_bind_order_bits_nullable_keys_empty_and_role() -> None:
         dependency_role='unselected_model_influence',
         settings=settings,
     )
+    dependencies = projector.finalize_model_influence_dependencies(
+        prepared_set, selected_slot_ids=('E1',), scope=_scope(),
+        fence=replace(
+            ProjectionFence.generations_only(1, None),
+            prepared_hidden_membership_hmac=_hidden().membership_hmac,
+            current_hidden_membership_hmac=_hidden().membership_hmac,
+        ),
+    )
     influence_set = build_model_influence_set_hmac(
-        dependency_hmacs=(selected_dep,),
-        strictest_permission='internal',
-        settings=settings,
+        dependencies=dependencies, settings=settings,
     )
 
     values = {
@@ -527,10 +585,10 @@ def test_hmac_domains_bind_order_bits_nullable_keys_empty_and_role() -> None:
         '790b585220f3c9147d20e593dab74cadf75d16424b3b0850eb313e99a77a5d36',
         '4f08fe7bb2aa66b637ee74824cf3ab5cb0802f96baac70bb3331b074236bf70b',
         '106c275260bfbb72e8b0b3a2fbfa86b4507401c71f186a5307bd8eacc74d5539',
-        '940b88c5ea09bc54dc30b7dfacaf6c5ce96a8d6cd10dac823e3e4fadd6c5a696',
-        '885d56f3d313746c850614c65c92fd38a9e5e29a3d4d6bacda927a0599a702d3',
-        '8f0c0ccc7dc401027a4ead4bdab6b01a16c8e35b134ad980e14637f26092124e',
-        'be6fb2774a2f85c7e82b6341890e9c8e2c3f6c7aed54910756e458c6c1d30566',
+        'dd9a269e31b72099f0ef9294b48cfe278cf59ec4eec1422aa139d3caca08bf9c',
+        '11fa414024896800554cb9c267ace86075fe82f2b081b16cceed0d63273b1a36',
+        'b00a621382c0f5020bfdc82c4d116bbb09e756fd4e53d8a957280bf266293156',
+        'c77e5e82d672ece0d4265298dd32e81468ccc3e997fd3adeaf2a39f38d8975c7',
     )
 
 
@@ -580,17 +638,19 @@ def test_hmac_domains_change_on_order_nullable_presence_slot_and_strictest_permi
         top_candidate_window_hmac='c' * 64,
         settings=settings,
     )
-    prepared_null = build_prepared_model_influence_observation_hmac(
-        entries=((first.identity, 'E1', 'source_observation', None, None),),
-        prepared_corpus_generation=1,
-        prepared_index_generation=None,
-        rendered_input_hmac='d' * 64,
-        settings=settings,
+    projector, prepared_set = _prepare_rows(
+        (first, second), rendered_input_hmac='d' * 64
+    )
+    prepared_null = prepared_set.aggregate_observation_hmac
+    present_observations = (
+        replace(prepared_set.observations[0], approval_provenance_hmac='e' * 64),
+        prepared_set.observations[1],
     )
     prepared_present = build_prepared_model_influence_observation_hmac(
-        entries=((first.identity, 'E1', 'source_observation', 'e' * 64, None),),
+        observations=present_observations,
         prepared_corpus_generation=1,
         prepared_index_generation=None,
+        prepared_readiness_hmac=None,
         rendered_input_hmac='d' * 64,
         settings=settings,
     )
@@ -608,20 +668,16 @@ def test_hmac_domains_change_on_order_nullable_presence_slot_and_strictest_permi
         dependency_role='selected_citation',
         settings=settings,
     )
+    dependencies = projector.finalize_model_influence_dependencies(
+        prepared_set, selected_slot_ids=('E1',), scope=_scope(),
+        fence=replace(
+            ProjectionFence.generations_only(1, None),
+            prepared_hidden_membership_hmac=_hidden().membership_hmac,
+            current_hidden_membership_hmac=_hidden().membership_hmac,
+        ),
+    )
     set_internal = build_model_influence_set_hmac(
-        dependency_hmacs=(dep_e1, dep_e2),
-        strictest_permission='internal',
-        settings=settings,
-    )
-    set_reversed = build_model_influence_set_hmac(
-        dependency_hmacs=(dep_e2, dep_e1),
-        strictest_permission='internal',
-        settings=settings,
-    )
-    set_restricted = build_model_influence_set_hmac(
-        dependency_hmacs=(dep_e1, dep_e2),
-        strictest_permission='restricted',
-        settings=settings,
+        dependencies=dependencies, settings=settings
     )
 
     assert selected_forward != selected_reverse
@@ -629,7 +685,31 @@ def test_hmac_domains_change_on_order_nullable_presence_slot_and_strictest_permi
     assert hidden_forward != hidden_reverse
     assert prepared_null != prepared_present
     assert dep_e1 != dep_e2
-    assert len({set_internal, set_reversed, set_restricted}) == 3
+    assert len(set_internal) == 64
+    with pytest.raises(ValueError):
+        build_model_influence_set_hmac(
+            dependencies=tuple(reversed(dependencies)), settings=settings
+        )
+    with pytest.raises(ValueError):
+        build_model_influence_set_hmac(
+            dependencies=(
+                replace(
+                    dependencies[0],
+                    fresh_lookup_identity=replace(
+                        dependencies[0].fresh_lookup_identity,
+                        serving_document_id='forged:identity',
+                    ),
+                ),
+                *dependencies[1:],
+            ),
+            settings=settings,
+        )
+    with pytest.raises(TypeError):
+        build_model_influence_set_hmac(  # type: ignore[call-arg]
+            dependencies=dependencies,
+            strictest_permission='public',
+            settings=settings,
+        )
 
 
 @pytest.mark.parametrize(
@@ -691,13 +771,10 @@ def test_projector_requires_active_transaction_and_never_exposes_denied_ids() ->
     projector = CanonicalEvidenceProjector(
         db=transaction, settings=_settings(), resolver=_Resolver({})
     )
-    hidden = build_hidden_membership_hmac(
-        denied_known_member_identity_hmacs=('f' * 64,),
-        public_hidden_count=1,
-        capped=True,
-        top_candidate_window_hmac='a' * 64,
-        settings=_settings(),
-    )
+    hidden = _hidden(
+        actual=21,
+        members=tuple(f'{value:x}'.zfill(64) for value in range(20)),
+    ).membership_hmac
 
     with pytest.raises(RuntimeError, match='active transaction'):
         projector.project_search((), scope=_scope(), fence=_fence(hidden_hmac=hidden))
@@ -819,3 +896,232 @@ def test_default_resolver_projects_fresh_raw_and_legacy_trusted_rows(
         'https://knowledge.example.test/review/1',
         'https://mail.example.test/messages/task8',
     ]
+
+
+@pytest.mark.parametrize(
+    'mutation',
+    [
+        'drop', 'only_e2', 'reorder', 'renumber', 'child_hmac', 'aggregate',
+        'rendered', 'generation', 'support', 'raw_to_trusted',
+    ],
+)
+def test_finalizer_authenticates_the_complete_prepared_influence_set(mutation: str) -> None:
+    rows = tuple(_projection(value) for value in range(1, 4))
+    resolver = _Resolver({row.evidence.serving_document_id: row for row in rows})
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(), settings=_settings(), resolver=resolver
+    )
+    prepared = projector.prepare_model_influence(
+        rank_evidence_slots(tuple(_candidate(row, 0.9) for row in rows)),
+        scope=_scope(), prepared_corpus_generation=7, prepared_index_generation=4,
+        prepared_readiness_hmac='a' * 64, rendered_input_hmac='c' * 64,
+    )
+    assert type(prepared) is PreparedModelInfluenceSet
+    if mutation == 'drop':
+        prepared = replace(prepared, observations=prepared.observations[:-1])
+    elif mutation == 'only_e2':
+        prepared = replace(prepared, observations=(prepared.observations[1],))
+    elif mutation == 'reorder':
+        prepared = replace(prepared, observations=(prepared.observations[1], prepared.observations[0], prepared.observations[2]))
+    elif mutation == 'renumber':
+        prepared = replace(prepared, observations=(replace(prepared.observations[0], slot_id='E2'), *prepared.observations[1:]))
+    elif mutation == 'child_hmac':
+        prepared = replace(prepared, observations=(replace(prepared.observations[0], observation_hmac='f' * 64), *prepared.observations[1:]))
+    elif mutation == 'aggregate':
+        prepared = replace(prepared, aggregate_observation_hmac='f' * 64)
+    elif mutation == 'rendered':
+        prepared = replace(prepared, rendered_input_hmac='f' * 64)
+    elif mutation == 'generation':
+        prepared = replace(prepared, prepared_corpus_generation=8)
+    elif mutation == 'support':
+        prepared = replace(prepared, observations=(replace(prepared.observations[0], support_mode='trusted_fact'), *prepared.observations[1:]))
+    else:
+        forged_identity = replace(
+            prepared.observations[0].lookup_identity,
+            serving_kind='trusted_knowledge',
+        )
+        prepared = replace(
+            prepared,
+            observations=(
+                replace(prepared.observations[0], lookup_identity=forged_identity),
+                *prepared.observations[1:],
+            ),
+        )
+
+    resolution_count = len(resolver.seen)
+    dependencies = projector.finalize_model_influence_dependencies(
+        prepared, selected_slot_ids=('E2',), scope=_scope(),
+        fence=_fence(hidden_hmac=_hidden().membership_hmac),
+    )
+
+    assert dependencies == ()
+    assert len(resolver.seen) == resolution_count
+
+
+def test_projection_dtos_are_recursively_immutable_and_copy_does_not_open_alias() -> None:
+    row = _projection(1)
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(), settings=_settings(),
+        resolver=_Resolver({row.evidence.serving_document_id: row}),
+    )
+    projection = projector.project_search(
+        rank_evidence_slots((_candidate(row, 0.9),)), scope=_scope(),
+        fence=replace(
+            ProjectionFence.generations_only(1, None),
+            prepared_hidden_membership_hmac=_hidden().membership_hmac,
+            current_hidden_membership_hmac=_hidden().membership_hmac,
+        ),
+    )
+    result = projection.search_results[0]
+    assert type(result) is FrozenDict
+    assert type(result['citation']) is FrozenDict
+    assert type(result['matched_terms']) is tuple
+    original_hmac = projection.projection_hmac
+    for operation in (
+        lambda: result.__setitem__('source_id', 'forged'),
+        lambda: result.update({'source_id': 'forged'}),
+        lambda: result.setdefault('x', 1),
+        lambda: result.pop('source_id'),
+        lambda: result.clear(),
+        lambda: result.__ior__({'source_id': 'forged'}),
+        lambda: dict.__setitem__(result, 'source_id', 'forged'),
+        lambda: setattr(result, '_items', (('source_id', 'forged'),)),
+        lambda: delattr(result, '_items'),
+        lambda: operator.setitem(result['matched_terms'], 0, 'forged'),
+        lambda: result.copy().update({'source_id': 'forged'}),
+    ):
+        with pytest.raises(TypeError):
+            operation()
+    assert projection.projection_hmac == original_hmac
+    assert result['source_id'] == row.evidence.public_source_id
+
+
+def test_finalizer_revalidates_exact_fresh_branch_provenance() -> None:
+    row = _projection(1)
+    current = {row.evidence.serving_document_id: row}
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(), settings=_settings(), resolver=_Resolver(current)
+    )
+    prepared = projector.prepare_model_influence(
+        rank_evidence_slots((_candidate(row, 0.9),)),
+        scope=_scope(), prepared_corpus_generation=7, prepared_index_generation=4,
+        prepared_readiness_hmac='a' * 64, rendered_input_hmac='c' * 64,
+    )
+    current[row.evidence.serving_document_id] = replace(
+        row,
+        evidence=replace(
+            row.evidence,
+            provenance=_projection(2, trusted=True).evidence.provenance,
+        ),
+    )
+
+    assert projector.finalize_model_influence_dependencies(
+        prepared, selected_slot_ids=('E1',), scope=_scope(),
+        fence=_fence(hidden_hmac=_hidden().membership_hmac),
+    ) == ()
+
+
+def test_real_ordered_search_result_projection_has_exact_golden_hmac() -> None:
+    rows = (_projection(1), _projection(2))
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(), settings=_settings(),
+        resolver=_Resolver({row.evidence.serving_document_id: row for row in rows}),
+    )
+    projection = projector.project_search(
+        rank_evidence_slots(
+            (_candidate(rows[0], 0.91), _candidate(rows[1], 0.73))
+        ),
+        scope=_scope(),
+        fence=replace(
+            ProjectionFence.generations_only(1, None),
+            prepared_hidden_membership_hmac=_hidden().membership_hmac,
+            current_hidden_membership_hmac=_hidden().membership_hmac,
+        ),
+    )
+
+    assert len(projection.search_results) == 2
+    assert projection.projection_hmac == (
+        '1ee1340576bbe8a328103cd505f17dab5fc6fb3eb4afb2f4487005663e75ee0c'
+    )
+
+
+def test_hidden_membership_is_derived_from_actual_count_and_exact_retained_prefix() -> None:
+    uncapped = _hidden(actual=2, members=('a' * 64, 'b' * 64))
+    capped = _hidden(actual=21, members=tuple(f'{value:x}'.zfill(64) for value in range(20)))
+
+    assert (uncapped.public_hidden_count, uncapped.capped) == (2, False)
+    assert (capped.public_hidden_count, capped.capped) == (20, True)
+    assert not hasattr(capped, 'denied_ids')
+    for actual, members in ((1, ()), (19, tuple('a' * 64 for _ in range(18))), (21, tuple('a' * 64 for _ in range(19))), (0, ('a' * 64,))):
+        with pytest.raises(ValueError):
+            _hidden(actual=actual, members=members)
+
+
+class _InfrastructureFailingResolver(_Resolver):
+    def resolve_projection_candidate_strict(self, *, db, identity, scope):
+        raise OSError('database connection lost')
+
+
+def test_strict_projection_read_failure_is_typed_and_never_returns_redacted_dto() -> None:
+    row = _projection(1)
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(), settings=_settings(), resolver=_InfrastructureFailingResolver({})
+    )
+    with pytest.raises(CanonicalProjectionInfrastructureError):
+        projector.project_search(
+            rank_evidence_slots((_candidate(row, 0.9),)), scope=_scope(),
+            fence=replace(
+                ProjectionFence.generations_only(1, None),
+                prepared_hidden_membership_hmac=_hidden().membership_hmac,
+                current_hidden_membership_hmac=_hidden().membership_hmac,
+            ),
+        )
+
+
+def test_search_rejects_six_visible_slots_instead_of_projecting_eight() -> None:
+    rows = tuple(_projection(value) for value in range(1, 7))
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(), settings=_settings(),
+        resolver=_Resolver({row.evidence.serving_document_id: row for row in rows}),
+    )
+    result = projector.project_search(
+        rank_evidence_slots(tuple(_candidate(row, 0.9) for row in rows)),
+        scope=_scope(),
+        fence=replace(
+            ProjectionFence.generations_only(1, None),
+            prepared_hidden_membership_hmac=_hidden().membership_hmac,
+            current_hidden_membership_hmac=_hidden().membership_hmac,
+        ),
+    )
+    assert result.search_results == ()
+
+
+@pytest.mark.parametrize('mutation', ['raw_support', 'raw_type', 'raw_provenance', 'trusted_support', 'trusted_id', 'trusted_type'])
+def test_exact_raw_and_trusted_branch_mappings_fail_closed(mutation: str) -> None:
+    row = _projection(2, trusted=mutation.startswith('trusted'))
+    evidence = row.evidence
+    if mutation in {'raw_support', 'trusted_support'}:
+        evidence = replace(evidence, support_mode='trusted_fact' if mutation == 'raw_support' else 'source_observation')
+    elif mutation == 'raw_type':
+        evidence = replace(evidence, public_source_type='slack')
+    elif mutation == 'raw_provenance':
+        evidence = replace(evidence, provenance=_projection(2, trusted=True).evidence.provenance)
+    elif mutation == 'trusted_id':
+        evidence = replace(evidence, public_source_id='forged')
+    else:
+        evidence = replace(evidence, public_source_type='todo')
+    current = replace(row, evidence=evidence)
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(), settings=_settings(),
+        resolver=_Resolver({row.evidence.serving_document_id: current}),
+    )
+    result = projector.project_selected(
+        rank_evidence_slots((_candidate(row, 0.9),)), selected_slot_ids=('E1',),
+        scope=_scope(),
+        fence=replace(
+            ProjectionFence.generations_only(1, None),
+            prepared_hidden_membership_hmac=_hidden().membership_hmac,
+            current_hidden_membership_hmac=_hidden().membership_hmac,
+        ),
+    )
+    assert result.citations == ()

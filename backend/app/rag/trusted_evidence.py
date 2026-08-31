@@ -132,6 +132,19 @@ class TrustedServingEnvelopeResolver:
             scope=scope,
         )
 
+    def resolve_for_scope_strict(
+        self,
+        knowledge_type: str,
+        knowledge_id: int,
+        *,
+        scope: SecurityScope,
+    ) -> TrustedServingEnvelope | None:
+        return self._resolve_exact(
+            knowledge_type=knowledge_type,
+            knowledge_id=knowledge_id,
+            scope=scope,
+        )
+
     def _resolve(
         self,
         *,
@@ -844,27 +857,42 @@ class ServingEvidenceResolver:
         identity: ServingEvidenceIdentity,
         scope: SecurityScope,
     ) -> CanonicalServingProjection | None:
-        """Resolve fresh public bytes without consulting vector/model metadata."""
-        evidence = self.resolve_candidate(db=db, identity=identity, scope=scope)
-        if evidence is None:
+        try:
+            return self.resolve_projection_candidate_strict(
+                db=db, identity=identity, scope=scope
+            )
+        except (SQLAlchemyError, TypeError, UnicodeError, ValueError):
             return None
-        if evidence.serving_kind == 'raw_chunk':
-            envelope = evidence.version_envelope
-            if not isinstance(envelope, RawServingVersionEnvelope):
+
+    def resolve_projection_candidate_strict(
+        self,
+        *,
+        db: Session,
+        identity: ServingEvidenceIdentity,
+        scope: SecurityScope,
+    ) -> CanonicalServingProjection | None:
+        """Strict final projection read; infrastructure failures propagate."""
+        if type(identity) is not ServingEvidenceIdentity:
+            raise ValueError('serving identity type is invalid')
+        if identity.serving_kind == 'raw_chunk':
+            envelope = identity.version_envelope
+            if type(envelope) is not RawServingVersionEnvelope:
                 return None
             projection = CanonicalSourceObservationResolver(
                 db=db, settings=self._settings
-            ).resolve_projection_for_scope(envelope.document_chunk_id, scope=scope)
+            ).resolve_projection_for_scope_strict(
+                envelope.document_chunk_id, scope=scope
+            )
             if projection is None or projection.identity != identity:
                 return None
             return projection
         else:
-            envelope = evidence.version_envelope
-            if not isinstance(envelope, TrustedServingVersionEnvelope):
+            envelope = identity.version_envelope
+            if type(envelope) is not TrustedServingVersionEnvelope:
                 return None
             fresh = TrustedServingEnvelopeResolver(
                 db=db, settings=self._settings
-            ).resolve_for_scope(
+            ).resolve_for_scope_strict(
                 envelope.knowledge_type,
                 envelope.knowledge_id,
                 scope=scope,
@@ -872,12 +900,12 @@ class ServingEvidenceResolver:
             if fresh is None or fresh.identity != identity:
                 return None
             provenance = fresh.trusted_version.provenance
-            if isinstance(provenance, ExplicitApprovalProvenance):
+            if type(provenance) is ExplicitApprovalProvenance:
                 review_item_id = provenance.review_item_id
                 ordinal = (
                     provenance.selected_citation_child.review_item_source_pair_ordinal
                 )
-            elif isinstance(provenance, LegacyHumanProvenance):
+            elif type(provenance) is LegacyHumanProvenance:
                 review_item_id = provenance.legacy_source_review_item_id
                 ordinal = 0
             else:

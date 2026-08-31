@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import math
 import struct
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.app.agent_runtime.fingerprints import (
     fingerprint_secret_bytes,
@@ -22,9 +25,11 @@ from backend.app.rag.serving_contracts import (
     LegacyHumanProvenance,
     PermissionLevel,
     RawChunkProvenance,
+    RawServingVersionEnvelope,
     ServingEvidence,
     ServingEvidenceIdentity,
     SupportMode,
+    TrustedServingVersionEnvelope,
     build_canonical_citation_projection_hmac,
     build_model_content_hmac,
     build_serving_identity_hmac,
@@ -34,31 +39,94 @@ from backend.app.rag.serving_contracts import (
     require_lower_hex_64,
     require_nonnegative_int,
     require_positive_int,
+    strictest_permission,
 )
 from backend.app.rag.trusted_evidence import ServingEvidenceResolver
 
 DependencyRole = Literal['selected_citation', 'unselected_model_influence']
 _SLOT_IDS: tuple[EvidenceSlotId, ...] = ('E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8')
+_RAW_PUBLIC_SOURCE_TYPES = {'gmail', 'gmail_attachment', 'drive', 'calendar'}
 
 
 class CanonicalProjectionResolverPort(Protocol):
-    def resolve_projection_candidate(
+    def resolve_projection_candidate_strict(
         self, *, db: object, identity: ServingEvidenceIdentity, scope: SecurityScope
     ) -> CanonicalServingProjection | None: ...
 
 
+class CanonicalProjectionInfrastructureError(RuntimeError):
+    """Canonical projection could not establish a trustworthy read."""
+
+
+class FrozenDict(Mapping[str, object]):
+    """Dict-compatible immutable transport record without a mutable base class."""
+
+    __slots__ = ('_items',)
+
+    def __init__(self, values: Mapping[str, object]) -> None:
+        object.__setattr__(self, '_items', tuple(values.items()))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        del name, value
+        raise TypeError('frozen projection record cannot be mutated')
+
+    def __delattr__(self, name: str) -> None:
+        del name
+        raise TypeError('frozen projection record cannot be mutated')
+
+    def __getitem__(self, key: str) -> object:
+        for current_key, value in self._items:
+            if current_key == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return (key for key, _ in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    @staticmethod
+    def _blocked(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise TypeError('frozen projection record cannot be mutated')
+
+    __setitem__ = _blocked
+    __delitem__ = _blocked
+    clear = _blocked
+    pop = _blocked
+    popitem = _blocked
+    setdefault = _blocked
+    update = _blocked
+    __ior__ = _blocked
+
+    def copy(self) -> FrozenDict:
+        return self
+
+    def __or__(self, other: object) -> FrozenDict:
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        return FrozenDict(dict(self) | other)
+
+    def __ror__(self, other: object) -> FrozenDict:
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        return FrozenDict(dict(other) | dict(self))
+
+
 @dataclass(frozen=True, slots=True)
 class V1EvidenceProjection:
-    citations: tuple[dict[str, object], ...]
+    citations: tuple[FrozenDict, ...]
     source_ids: tuple[str, ...]
     source_links: tuple[str, ...]
     source_snippets: tuple[str, ...]
-    search_results: tuple[dict[str, object], ...]
+    search_results: tuple[FrozenDict, ...]
     projection_hmac: str
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedModelInfluenceObservation:
+    ordinal: int
     slot_id: EvidenceSlotId
     support_mode: SupportMode
     lookup_identity: ServingEvidenceIdentity
@@ -70,6 +138,25 @@ class PreparedModelInfluenceObservation:
     approval_provenance_hmac: str | None
     evidence_link_set_hmac: str | None
     observation_hmac: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedModelInfluenceSet:
+    observations: tuple[PreparedModelInfluenceObservation, ...]
+    prepared_corpus_generation: int
+    prepared_index_generation: int | None
+    prepared_readiness_hmac: str | None
+    rendered_input_hmac: str
+    aggregate_observation_hmac: str
+
+    def __iter__(self):
+        return iter(self.observations)
+
+    def __len__(self) -> int:
+        return len(self.observations)
+
+    def __getitem__(self, index: int) -> PreparedModelInfluenceObservation:
+        return self.observations[index]
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +223,14 @@ class ProjectionFence:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class HiddenMembershipSnapshot:
+    actual_hidden_count: int
+    public_hidden_count: int
+    capped: bool
+    membership_hmac: str
+
+
 class CanonicalEvidenceProjector:
     """Assemble immutable public projection bytes inside one active transaction."""
 
@@ -158,17 +253,17 @@ class CanonicalEvidenceProjector:
         fence: ProjectionFence,
     ) -> V1EvidenceProjection:
         self._require_transaction()
-        if not fence.valid(require_hidden=True):
+        if len(slots) > 5 or not fence.valid(require_hidden=True):
             return _empty_search_projection(self._settings)
         try:
             fresh = self._resolve_slots(slots, scope=scope)
             if fresh is None:
                 return _empty_search_projection(self._settings)
-            results: list[dict[str, object]] = []
+            results: list[FrozenDict] = []
             result_hmacs: list[str] = []
             for slot, row in zip(slots, fresh, strict=True):
                 citation, citation_hmac = _citation(slot, row, settings=self._settings)
-                result = {
+                result = _deep_freeze({
                     'id': row.public_result_id,
                     'source_id': row.evidence.public_source_id,
                     'text': row.evidence.model_content,
@@ -177,12 +272,13 @@ class CanonicalEvidenceProjector:
                     'source_type': row.evidence.public_source_type,
                     'permission_level': row.evidence.effective_permission,
                     'relevance_score': slot.relevance_score,
-                    'matched_terms': list(slot.matched_terms),
+                    'matched_terms': slot.matched_terms,
                     'citation': citation,
                     'parser_status': row.parser_status,
                     'parser_status_reason': row.parser_status_reason,
                     'revision_id': row.revision_id,
-                }
+                })
+                assert type(result) is FrozenDict
                 result_hmacs.append(
                     _search_result_hmac(
                         row=row,
@@ -223,7 +319,7 @@ class CanonicalEvidenceProjector:
                 if slot.slot_id in selected
             ]
             projected.sort(key=lambda value: selected_slot_ids.index(value[0].slot_id))
-            citations: list[dict[str, object]] = []
+            citations: list[FrozenDict] = []
             citation_hmacs: list[str] = []
             for slot, row in projected:
                 citation, citation_hmac = _citation(slot, row, settings=self._settings)
@@ -257,34 +353,19 @@ class CanonicalEvidenceProjector:
         scope: SecurityScope,
         prepared_corpus_generation: int,
         prepared_index_generation: int | None,
+        prepared_readiness_hmac: str | None,
         rendered_input_hmac: str,
-    ) -> tuple[PreparedModelInfluenceObservation, ...]:
+    ) -> PreparedModelInfluenceSet:
         self._require_transaction()
         try:
             fresh = self._resolve_slots(slots, scope=scope)
         except (TypeError, UnicodeError, ValueError):
-            return ()
+            return _empty_prepared_influence_set()
         if fresh is None:
-            return ()
-        entries = tuple(
-            (
-                row.identity,
-                slot.slot_id,
-                slot.support_mode,
-                row.approval_provenance_hmac,
-                row.evidence_link_set_hmac,
-            )
-            for slot, row in zip(slots, fresh, strict=True)
-        )
-        observation_hmac = build_prepared_model_influence_observation_hmac(
-            entries=entries,
-            prepared_corpus_generation=prepared_corpus_generation,
-            prepared_index_generation=prepared_index_generation,
-            rendered_input_hmac=rendered_input_hmac,
-            settings=self._settings,
-        )
-        return tuple(
+            return _empty_prepared_influence_set()
+        observations = tuple(
             PreparedModelInfluenceObservation(
+                ordinal=ordinal,
                 slot_id=slot.slot_id,
                 support_mode=slot.support_mode,
                 lookup_identity=row.identity,
@@ -297,33 +378,88 @@ class CanonicalEvidenceProjector:
                 ),
                 approval_provenance_hmac=row.approval_provenance_hmac,
                 evidence_link_set_hmac=row.evidence_link_set_hmac,
-                observation_hmac=observation_hmac,
+                observation_hmac=_prepared_observation_child_hmac(
+                    ordinal=ordinal,
+                    slot_id=slot.slot_id,
+                    support_mode=slot.support_mode,
+                    row=row,
+                    settings=self._settings,
+                ),
             )
-            for slot, row in zip(slots, fresh, strict=True)
+            for ordinal, (slot, row) in enumerate(zip(slots, fresh, strict=True))
+        )
+        aggregate = build_prepared_model_influence_observation_hmac(
+            observations=observations,
+            prepared_corpus_generation=prepared_corpus_generation,
+            prepared_index_generation=prepared_index_generation,
+            prepared_readiness_hmac=prepared_readiness_hmac,
+            rendered_input_hmac=rendered_input_hmac,
+            settings=self._settings,
+        )
+        return PreparedModelInfluenceSet(
+            observations=observations,
+            prepared_corpus_generation=prepared_corpus_generation,
+            prepared_index_generation=prepared_index_generation,
+            prepared_readiness_hmac=prepared_readiness_hmac,
+            rendered_input_hmac=rendered_input_hmac,
+            aggregate_observation_hmac=aggregate,
         )
 
     def finalize_model_influence_dependencies(
         self,
-        observations: tuple[PreparedModelInfluenceObservation, ...],
+        prepared: PreparedModelInfluenceSet,
         selected_slot_ids: tuple[EvidenceSlotId, ...],
         *,
         scope: SecurityScope,
         fence: ProjectionFence,
     ) -> tuple[ModelInfluenceDependencySnapshot, ...]:
         self._require_transaction()
-        if not fence.valid(require_hidden=True) or not _selected_observation_subset(
-            observations, selected_slot_ids
+        if type(prepared) is not PreparedModelInfluenceSet or not fence.valid(
+            require_hidden=True
         ):
             return ()
-        selected = set(selected_slot_ids)
+        observations = prepared.observations
+        if not _valid_prepared_influence_set(
+            prepared, fence=fence, settings=self._settings
+        ):
+            return ()
         dependencies: list[ModelInfluenceDependencySnapshot] = []
+        fresh_rows: list[CanonicalServingProjection] = []
         try:
             for observation in observations:
-                row = self._resolver.resolve_projection_candidate(
+                row = self._strict_resolve(
                     db=self._db, identity=observation.lookup_identity, scope=scope
                 )
-                if row is None or not _observation_matches(observation, row):
+                if row is not None:
+                    _validate_row(
+                        EvidenceSlot(
+                            slot_id=observation.slot_id,
+                            support_mode=observation.support_mode,
+                            evidence=row.evidence,
+                            relevance_score=0.0,
+                            matched_terms=(),
+                        ),
+                        row,
+                        settings=self._settings,
+                    )
+                if (
+                    row is None
+                    or not _observation_matches(observation, row)
+                    or observation.observation_hmac
+                    != _prepared_observation_child_hmac(
+                        ordinal=observation.ordinal,
+                        slot_id=observation.slot_id,
+                        support_mode=observation.support_mode,
+                        row=row,
+                        settings=self._settings,
+                    )
+                ):
                     return ()
+                fresh_rows.append(row)
+            if not _selected_observation_subset(observations, selected_slot_ids):
+                return ()
+            selected = set(selected_slot_ids)
+            for observation, row in zip(observations, fresh_rows, strict=True):
                 role: DependencyRole = (
                     'selected_citation'
                     if observation.slot_id in selected
@@ -355,7 +491,7 @@ class CanonicalEvidenceProjector:
         rows: list[CanonicalServingProjection] = []
         for slot in slots:
             identity = _identity_from_evidence(slot.evidence)
-            row = self._resolver.resolve_projection_candidate(
+            row = self._strict_resolve(
                 db=self._db, identity=identity, scope=scope
             )
             if row is None or row.identity != identity:
@@ -363,6 +499,22 @@ class CanonicalEvidenceProjector:
             _validate_row(slot, row, settings=self._settings)
             rows.append(row)
         return tuple(rows)
+
+    def _strict_resolve(
+        self,
+        *,
+        db: object,
+        identity: ServingEvidenceIdentity,
+        scope: SecurityScope,
+    ) -> CanonicalServingProjection | None:
+        try:
+            return self._resolver.resolve_projection_candidate_strict(
+                db=db, identity=identity, scope=scope
+            )
+        except (ConnectionError, OSError, SQLAlchemyError) as exc:
+            raise CanonicalProjectionInfrastructureError(
+                'canonical projection read failed'
+            ) from exc
 
     def _require_transaction(self) -> None:
         in_transaction = getattr(self._db, 'in_transaction', None)
@@ -454,34 +606,30 @@ def build_v1_search_result_set_projection_hmac(
     )
 
 
-def build_hidden_membership_hmac(
+def derive_hidden_membership(
     *,
-    denied_known_member_identity_hmacs: tuple[str, ...],
-    public_hidden_count: int,
-    capped: bool,
+    actual_hidden_count: int,
+    ordered_retained_member_identity_hmacs: tuple[str, ...],
     top_candidate_window_hmac: str,
     settings: Settings,
-) -> str:
-    if (
-        type(capped) is not bool
-        or type(public_hidden_count) is not int
-        or not 0 <= public_hidden_count <= 20
-    ):
+) -> HiddenMembershipSnapshot:
+    if type(actual_hidden_count) is not int or actual_hidden_count < 0:
         raise ValueError('hidden membership count is invalid')
-    if public_hidden_count != len(denied_known_member_identity_hmacs) and not (
-        capped
-        and public_hidden_count == 20
-        and len(denied_known_member_identity_hmacs) == 20
+    public_hidden_count = min(actual_hidden_count, 20)
+    capped = actual_hidden_count > 20
+    if (
+        type(ordered_retained_member_identity_hmacs) is not tuple
+        or len(ordered_retained_member_identity_hmacs) != public_hidden_count
     ):
         raise ValueError('hidden membership does not match public count')
     require_lower_hex_64(top_candidate_window_hmac)
-    for value in denied_known_member_identity_hmacs:
+    for value in ordered_retained_member_identity_hmacs:
         require_lower_hex_64(value)
-    return _fp(
+    membership_hmac = _fp(
         {
             'capped': capped,
             'denied_known_member_identity_hmacs': list(
-                denied_known_member_identity_hmacs
+                ordered_retained_member_identity_hmacs
             ),
             'public_hidden_count': public_hidden_count,
             'top_candidate_window_hmac': top_candidate_window_hmac,
@@ -490,56 +638,69 @@ def build_hidden_membership_hmac(
         policy='rag-retrieval-bounds:v1',
         settings=settings,
     )
+    return HiddenMembershipSnapshot(
+        actual_hidden_count=actual_hidden_count,
+        public_hidden_count=public_hidden_count,
+        capped=capped,
+        membership_hmac=membership_hmac,
+    )
 
 
 def build_prepared_model_influence_observation_hmac(
     *,
-    entries: tuple[
-        tuple[
-            ServingEvidenceIdentity, EvidenceSlotId, SupportMode, str | None, str | None
-        ],
-        ...,
-    ],
+    observations: tuple[PreparedModelInfluenceObservation, ...],
     prepared_corpus_generation: int,
     prepared_index_generation: int | None,
+    prepared_readiness_hmac: str | None,
     rendered_input_hmac: str,
     settings: Settings,
 ) -> str:
     require_nonnegative_int(prepared_corpus_generation)
     if prepared_index_generation is not None:
         require_nonnegative_int(prepared_index_generation)
+        require_lower_hex_64(prepared_readiness_hmac)
+    elif prepared_readiness_hmac is not None:
+        require_lower_hex_64(prepared_readiness_hmac)
     require_lower_hex_64(rendered_input_hmac)
     payload_entries = []
-    for ordinal, (
-        identity,
-        slot_id,
-        support_mode,
-        approval_hmac,
-        link_hmac,
-    ) in enumerate(entries):
-        _validate_slot_id(slot_id)
-        _validate_support_mode(support_mode)
-        for value in (approval_hmac, link_hmac):
+    for ordinal, observation in enumerate(observations):
+        if type(observation) is not PreparedModelInfluenceObservation:
+            raise ValueError('prepared influence observation type is invalid')
+        if observation.ordinal != ordinal:
+            raise ValueError('prepared influence ordinal is invalid')
+        _validate_slot_id(observation.slot_id)
+        _validate_support_mode(observation.support_mode)
+        for value in (
+            observation.approval_provenance_hmac,
+            observation.evidence_link_set_hmac,
+        ):
             if value is not None:
                 require_lower_hex_64(value)
         payload_entries.append(
             {
-                'approval_provenance_hmac': approval_hmac,
+                'approval_provenance_hmac': observation.approval_provenance_hmac,
                 'canonical_citation_projection_hmac': require_lower_hex_64(
-                    identity.canonical_citation_projection_hmac
+                    observation.canonical_citation_projection_hmac
                 ),
-                'effective_permission': _permission(identity.effective_permission),
-                'evidence_link_set_hmac': link_hmac,
-                'model_content_hmac': require_lower_hex_64(identity.model_content_hmac),
+                'effective_permission': _permission(
+                    observation.effective_permission
+                ),
+                'evidence_link_set_hmac': observation.evidence_link_set_hmac,
+                'model_content_hmac': require_lower_hex_64(
+                    observation.model_content_hmac
+                ),
+                'observation_hmac': require_lower_hex_64(
+                    observation.observation_hmac
+                ),
                 'ordinal': ordinal,
-                'serving_identity_hmac': _serving_identity_hmac(
-                    identity, settings=settings
+                'serving_identity_hmac': require_lower_hex_64(
+                    observation.serving_identity_hmac
                 ),
                 'serving_version_fingerprint': require_lower_hex_64(
-                    identity.serving_version_fingerprint
+                    observation.serving_version_fingerprint
                 ),
-                'slot_id': slot_id,
-                'support_mode': support_mode,
+                'slot_id': observation.slot_id,
+                'support_mode': observation.support_mode,
             }
         )
     return _fp(
@@ -547,6 +708,7 @@ def build_prepared_model_influence_observation_hmac(
             'entries': payload_entries,
             'prepared_corpus_generation': prepared_corpus_generation,
             'prepared_index_generation': prepared_index_generation,
+            'prepared_readiness_hmac': prepared_readiness_hmac,
             'rendered_input_hmac': rendered_input_hmac,
         },
         schema='rag-prepared-model-influence-observation:v1',
@@ -563,52 +725,66 @@ def build_model_influence_dependency_hmac(
     dependency_role: DependencyRole,
     settings: Settings,
 ) -> str:
-    _validate_slot_id(slot_id)
-    _validate_support_mode(support_mode)
-    if dependency_role not in {'selected_citation', 'unselected_model_influence'}:
-        raise ValueError('model influence role is invalid')
-    return _fp(
-        {
-            'approval_provenance_hmac': row.approval_provenance_hmac,
-            'canonical_citation_projection_hmac': require_lower_hex_64(
-                row.evidence.canonical_citation_projection_hmac
-            ),
-            'dependency_role': dependency_role,
-            'effective_permission': _permission(row.evidence.effective_permission),
-            'evidence_link_set_hmac': row.evidence_link_set_hmac,
-            'model_content_hmac': require_lower_hex_64(row.evidence.model_content_hmac),
-            'serving_identity_hmac': require_lower_hex_64(
-                row.evidence.serving_identity_hmac
-            ),
-            'serving_version_fingerprint': require_lower_hex_64(
-                row.evidence.serving_version_fingerprint
-            ),
-            'slot_id': slot_id,
-            'support_mode': support_mode,
-        },
-        schema='rag-model-influence-dependency:v1',
-        policy='rag-serving-evidence:v1',
-        settings=settings,
+    observation = PreparedModelInfluenceObservation(
+        ordinal=_SLOT_IDS.index(slot_id),
+        slot_id=slot_id,
+        support_mode=support_mode,
+        lookup_identity=row.identity,
+        effective_permission=row.evidence.effective_permission,
+        serving_identity_hmac=row.evidence.serving_identity_hmac,
+        serving_version_fingerprint=row.evidence.serving_version_fingerprint,
+        model_content_hmac=row.evidence.model_content_hmac,
+        canonical_citation_projection_hmac=(
+            row.evidence.canonical_citation_projection_hmac
+        ),
+        approval_provenance_hmac=row.approval_provenance_hmac,
+        evidence_link_set_hmac=row.evidence_link_set_hmac,
+        observation_hmac='0' * 64,
+    )
+    return _model_influence_dependency_hmac_from_observation(
+        observation, dependency_role=dependency_role, settings=settings
     )
 
 
 def build_model_influence_set_hmac(
     *,
-    dependency_hmacs: tuple[str, ...],
-    strictest_permission: PermissionLevel,
+    dependencies: tuple[ModelInfluenceDependencySnapshot, ...],
     settings: Settings,
 ) -> str:
-    if not 1 <= len(dependency_hmacs) <= 8:
+    if type(dependencies) is not tuple or not 1 <= len(dependencies) <= 8:
         raise ValueError('model influence set must contain one to eight entries')
-    for value in dependency_hmacs:
-        require_lower_hex_64(value)
+    dependency_hmacs: list[str] = []
+    permissions: list[PermissionLevel] = []
+    for ordinal, dependency in enumerate(dependencies):
+        if (
+            type(dependency) is not ModelInfluenceDependencySnapshot
+            or dependency.observation.ordinal != ordinal
+            or dependency.observation.slot_id != _SLOT_IDS[ordinal]
+        ):
+            raise ValueError('model influence dependency order is invalid')
+        dependency_hmacs.append(require_lower_hex_64(dependency.dependency_hmac))
+        if dependency.dependency_hmac != _model_influence_dependency_hmac_from_observation(
+            dependency.observation,
+            dependency_role=dependency.dependency_role,
+            settings=settings,
+        ):
+            raise ValueError('model influence dependency HMAC is invalid')
+        if (
+            type(dependency.fresh_lookup_identity) is not ServingEvidenceIdentity
+            or dependency.fresh_lookup_identity != dependency.observation.lookup_identity
+        ):
+            raise ValueError('model influence fresh identity is invalid')
+        permissions.append(_permission(dependency.observation.effective_permission))
+    computed_strictest = strictest_permission(tuple(permissions))
+    if computed_strictest is None:
+        raise ValueError('model influence permission is invalid')
     return _fp(
         {
             'dependencies': [
                 {'dependency_hmac': value, 'ordinal': ordinal}
                 for ordinal, value in enumerate(dependency_hmacs)
             ],
-            'strictest_permission': _permission(strictest_permission),
+            'strictest_permission': computed_strictest,
         },
         schema='rag-model-influence-set:v1',
         policy='rag-serving-evidence:v1',
@@ -636,7 +812,44 @@ def _validate_row(
     evidence = row.evidence
     identity = row.identity
     if (
-        evidence.support_mode != slot.support_mode
+        type(row) is not CanonicalServingProjection
+        or type(evidence) is not ServingEvidence
+        or type(identity) is not ServingEvidenceIdentity
+    ):
+        raise ValueError('canonical projection type is invalid')
+    if evidence.serving_kind == 'raw_chunk':
+        branch_valid = bool(
+            evidence.support_mode == 'source_observation'
+            and evidence.public_source_type in _RAW_PUBLIC_SOURCE_TYPES
+            and type(evidence.version_envelope) is RawServingVersionEnvelope
+            and type(evidence.provenance) is RawChunkProvenance
+            and evidence.provenance.raw_version is evidence.version_envelope
+            and row.approval_provenance_hmac is None
+            and row.evidence_link_set_hmac is None
+        )
+    elif evidence.serving_kind == 'trusted_knowledge':
+        envelope = evidence.version_envelope
+        branch_valid = bool(
+            evidence.support_mode == 'trusted_fact'
+            and type(envelope) is TrustedServingVersionEnvelope
+            and evidence.public_source_id == evidence.serving_document_id
+            and evidence.public_source_type == envelope.knowledge_type
+            and type(evidence.provenance)
+            in {ExplicitApprovalProvenance, LegacyHumanProvenance}
+            and evidence.provenance is envelope.provenance
+            and row.approval_provenance_hmac is not None
+            and (
+                type(evidence.provenance) is ExplicitApprovalProvenance
+                and row.evidence_link_set_hmac is not None
+                or type(evidence.provenance) is LegacyHumanProvenance
+                and row.evidence_link_set_hmac is None
+            )
+        )
+    else:
+        branch_valid = False
+    if (
+        not branch_valid
+        or evidence.support_mode != slot.support_mode
         or _identity_from_evidence(evidence) != identity
         or evidence.serving_identity_hmac
         != build_serving_identity_hmac(
@@ -653,27 +866,6 @@ def _validate_row(
         or evidence.serving_version_fingerprint
         != build_serving_version_fingerprint(
             evidence.version_envelope, settings=settings
-        )
-        or (
-            isinstance(evidence.provenance, RawChunkProvenance)
-            and (
-                row.approval_provenance_hmac is not None
-                or row.evidence_link_set_hmac is not None
-            )
-        )
-        or (
-            isinstance(evidence.provenance, ExplicitApprovalProvenance)
-            and (
-                row.approval_provenance_hmac is None
-                or row.evidence_link_set_hmac is None
-            )
-        )
-        or (
-            isinstance(evidence.provenance, LegacyHumanProvenance)
-            and (
-                row.approval_provenance_hmac is None
-                or row.evidence_link_set_hmac is not None
-            )
         )
     ):
         raise ValueError('canonical support mode drifted')
@@ -713,16 +905,17 @@ def _validate_public_fields(row: CanonicalServingProjection) -> None:
 
 def _citation(
     slot: EvidenceSlot, row: CanonicalServingProjection, *, settings: Settings
-) -> tuple[dict[str, object], str]:
-    citation = {
+) -> tuple[FrozenDict, str]:
+    citation = _deep_freeze({
         'source_id': row.evidence.public_source_id,
         'source_url': row.source_url,
         'source_type': row.evidence.public_source_type,
         'permission_level': row.evidence.effective_permission,
         'source_snippet': row.source_snippet,
         'relevance_score': slot.relevance_score,
-        'matched_terms': list(slot.matched_terms),
-    }
+        'matched_terms': slot.matched_terms,
+    })
+    assert type(citation) is FrozenDict
     return citation, build_v1_citation_projection_hmac(
         row=row,
         relevance_score=slot.relevance_score,
@@ -734,7 +927,7 @@ def _citation(
 def _search_result_hmac(
     *,
     row: CanonicalServingProjection,
-    result: dict[str, object],
+    result: FrozenDict,
     citation_hmac: str,
     settings: Settings,
 ) -> str:
@@ -755,7 +948,7 @@ def _search_result_hmac(
                 result['relevance_score']
             ),
             'matched_terms_bytes': _matched_terms_bytes(
-                tuple(cast(list[str], result['matched_terms']))
+                cast(tuple[str, ...], result['matched_terms'])
             ),
             'citation_projection_hmac': require_lower_hex_64(citation_hmac),
             'parser_status_bytes': _optional_bytes(row.parser_status),
@@ -796,7 +989,12 @@ def _selected_observation_subset(
     observations: tuple[PreparedModelInfluenceObservation, ...],
     selected: tuple[EvidenceSlotId, ...],
 ) -> bool:
-    if type(observations) is not tuple or not observations:
+    if (
+        type(observations) is not tuple
+        or type(selected) is not tuple
+        or not observations
+        or not all(type(value) is PreparedModelInfluenceObservation for value in observations)
+    ):
         return False
     slots = tuple(value.slot_id for value in observations)
     return (
@@ -822,6 +1020,228 @@ def _observation_matches(
         and observation.approval_provenance_hmac == row.approval_provenance_hmac
         and observation.evidence_link_set_hmac == row.evidence_link_set_hmac
     )
+
+
+def _prepared_observation_child_hmac(
+    *,
+    ordinal: int,
+    slot_id: EvidenceSlotId,
+    support_mode: SupportMode,
+    row: CanonicalServingProjection,
+    settings: Settings,
+) -> str:
+    return _prepared_observation_child_hmac_from_values(
+        ordinal=ordinal,
+        slot_id=slot_id,
+        support_mode=support_mode,
+        lookup_identity=row.identity,
+        effective_permission=row.evidence.effective_permission,
+        serving_identity_hmac=row.evidence.serving_identity_hmac,
+        serving_version_fingerprint=row.evidence.serving_version_fingerprint,
+        model_content_hmac=row.evidence.model_content_hmac,
+        canonical_citation_projection_hmac=(
+            row.evidence.canonical_citation_projection_hmac
+        ),
+        approval_provenance_hmac=row.approval_provenance_hmac,
+        evidence_link_set_hmac=row.evidence_link_set_hmac,
+        settings=settings,
+    )
+
+
+def _prepared_observation_child_hmac_from_values(
+    *,
+    ordinal: int,
+    slot_id: EvidenceSlotId,
+    support_mode: SupportMode,
+    lookup_identity: ServingEvidenceIdentity,
+    effective_permission: PermissionLevel,
+    serving_identity_hmac: str,
+    serving_version_fingerprint: str,
+    model_content_hmac: str,
+    canonical_citation_projection_hmac: str,
+    approval_provenance_hmac: str | None,
+    evidence_link_set_hmac: str | None,
+    settings: Settings,
+) -> str:
+    require_nonnegative_int(ordinal)
+    _validate_slot_id(slot_id)
+    _validate_support_mode(support_mode)
+    return _fp(
+        {
+            'approval_provenance_hmac': approval_provenance_hmac,
+            'canonical_citation_projection_hmac': require_lower_hex_64(
+                canonical_citation_projection_hmac
+            ),
+            'effective_permission': _permission(effective_permission),
+            'evidence_link_set_hmac': evidence_link_set_hmac,
+            'lookup_identity_hmac': _prepared_lookup_identity_hmac(
+                lookup_identity, settings=settings
+            ),
+            'model_content_hmac': require_lower_hex_64(model_content_hmac),
+            'ordinal': ordinal,
+            'serving_identity_hmac': require_lower_hex_64(serving_identity_hmac),
+            'serving_version_fingerprint': require_lower_hex_64(
+                serving_version_fingerprint
+            ),
+            'slot_id': slot_id,
+            'support_mode': support_mode,
+        },
+        schema='rag-prepared-model-influence-observation:child:v1',
+        policy='rag-answer:v2',
+        settings=settings,
+    )
+
+
+def _model_influence_dependency_hmac_from_observation(
+    observation: PreparedModelInfluenceObservation,
+    *,
+    dependency_role: DependencyRole,
+    settings: Settings,
+) -> str:
+    if type(observation) is not PreparedModelInfluenceObservation:
+        raise ValueError('model influence observation type is invalid')
+    _validate_slot_id(observation.slot_id)
+    _validate_support_mode(observation.support_mode)
+    if dependency_role not in {'selected_citation', 'unselected_model_influence'}:
+        raise ValueError('model influence role is invalid')
+    for value in (
+        observation.approval_provenance_hmac,
+        observation.evidence_link_set_hmac,
+    ):
+        if value is not None:
+            require_lower_hex_64(value)
+    return _fp(
+        {
+            'approval_provenance_hmac': observation.approval_provenance_hmac,
+            'canonical_citation_projection_hmac': require_lower_hex_64(
+                observation.canonical_citation_projection_hmac
+            ),
+            'dependency_role': dependency_role,
+            'effective_permission': _permission(observation.effective_permission),
+            'evidence_link_set_hmac': observation.evidence_link_set_hmac,
+            'lookup_identity_hmac': _prepared_lookup_identity_hmac(
+                observation.lookup_identity, settings=settings
+            ),
+            'model_content_hmac': require_lower_hex_64(
+                observation.model_content_hmac
+            ),
+            'serving_identity_hmac': require_lower_hex_64(
+                observation.serving_identity_hmac
+            ),
+            'serving_version_fingerprint': require_lower_hex_64(
+                observation.serving_version_fingerprint
+            ),
+            'slot_id': observation.slot_id,
+            'support_mode': observation.support_mode,
+        },
+        schema='rag-model-influence-dependency:v1',
+        policy='rag-serving-evidence:v1',
+        settings=settings,
+    )
+
+
+def _valid_prepared_influence_set(
+    prepared: PreparedModelInfluenceSet,
+    *,
+    fence: ProjectionFence,
+    settings: Settings,
+) -> bool:
+    try:
+        observations = prepared.observations
+        if (
+            type(observations) is not tuple
+            or not 1 <= len(observations) <= 8
+            or prepared.prepared_corpus_generation != fence.prepared_corpus_generation
+            or prepared.prepared_index_generation != fence.prepared_index_generation
+            or prepared.prepared_readiness_hmac != fence.prepared_readiness_hmac
+            or type(prepared.rendered_input_hmac) is not str
+        ):
+            return False
+        for ordinal, observation in enumerate(observations):
+            if (
+                type(observation) is not PreparedModelInfluenceObservation
+                or observation.ordinal != ordinal
+                or observation.slot_id != _SLOT_IDS[ordinal]
+                or type(observation.lookup_identity) is not ServingEvidenceIdentity
+            ):
+                return False
+            if observation.observation_hmac != _prepared_observation_child_hmac_from_values(
+                ordinal=ordinal,
+                slot_id=observation.slot_id,
+                support_mode=observation.support_mode,
+                lookup_identity=observation.lookup_identity,
+                effective_permission=observation.effective_permission,
+                serving_identity_hmac=observation.serving_identity_hmac,
+                serving_version_fingerprint=observation.serving_version_fingerprint,
+                model_content_hmac=observation.model_content_hmac,
+                canonical_citation_projection_hmac=(
+                    observation.canonical_citation_projection_hmac
+                ),
+                approval_provenance_hmac=observation.approval_provenance_hmac,
+                evidence_link_set_hmac=observation.evidence_link_set_hmac,
+                settings=settings,
+            ):
+                return False
+        expected_aggregate = build_prepared_model_influence_observation_hmac(
+            observations=observations,
+            prepared_corpus_generation=prepared.prepared_corpus_generation,
+            prepared_index_generation=prepared.prepared_index_generation,
+            prepared_readiness_hmac=prepared.prepared_readiness_hmac,
+            rendered_input_hmac=prepared.rendered_input_hmac,
+            settings=settings,
+        )
+        return prepared.aggregate_observation_hmac == expected_aggregate
+    except (TypeError, UnicodeError, ValueError):
+        return False
+
+
+def _empty_prepared_influence_set() -> PreparedModelInfluenceSet:
+    return PreparedModelInfluenceSet((), 0, None, None, '', '')
+
+
+def _prepared_lookup_identity_hmac(
+    identity: ServingEvidenceIdentity, *, settings: Settings
+) -> str:
+    if type(identity) is not ServingEvidenceIdentity:
+        raise ValueError('prepared lookup identity type is invalid')
+    return _fp(
+        {
+            'canonical_citation_projection_hmac': require_lower_hex_64(
+                identity.canonical_citation_projection_hmac
+            ),
+            'effective_permission': _permission(identity.effective_permission),
+            'model_content_hmac': require_lower_hex_64(identity.model_content_hmac),
+            'public_source_id_bytes': exact_utf8_bytes(
+                require_exact_nonblank(identity.public_source_id)
+            ),
+            'public_source_type_bytes': _optional_bytes(identity.public_source_type),
+            'serving_document_id_bytes': exact_utf8_bytes(
+                require_exact_nonblank(identity.serving_document_id)
+            ),
+            'serving_identity_hmac': build_serving_identity_hmac(
+                serving_document_id=identity.serving_document_id,
+                serving_kind=identity.serving_kind,
+                settings=settings,
+            ),
+            'serving_version_fingerprint': require_lower_hex_64(
+                identity.serving_version_fingerprint
+            ),
+            'version_envelope_fingerprint': build_serving_version_fingerprint(
+                identity.version_envelope, settings=settings
+            ),
+        },
+        schema='rag-prepared-model-influence-lookup-identity:v1',
+        policy='rag-answer:v2',
+        settings=settings,
+    )
+
+
+def _deep_freeze(value: object) -> object:
+    if isinstance(value, dict):
+        return FrozenDict({str(key): _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
 
 
 def _empty_selected_projection(settings: Settings) -> V1EvidenceProjection:
