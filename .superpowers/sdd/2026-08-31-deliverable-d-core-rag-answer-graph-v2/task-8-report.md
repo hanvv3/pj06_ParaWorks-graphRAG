@@ -119,3 +119,73 @@
   process-scoped SQLite and passed 22/22.
 - Two unrelated quality-suite assertions remain tied to the intentionally absent
   Slack data source and are deferred under the approved Slack-last decision.
+
+## Review Fix Round 2/5
+
+### Result
+
+- Status: COMPLETE
+- Review base: `777a067073044559a4cdf4d37bf4e5b73ffb6cba`
+- Live/provider/network/Docker/PostgreSQL calls: 0
+- Paid calls/cost: 0 / USD 0
+
+### TDD evidence
+
+- First RED: the adversarial suite failed collection because the requested typed
+  `CanonicalProjectionTransactionError` contract did not exist.
+- Second RED: explicit DTO-to-transport conversion failed collection because
+  `projection_record_to_transport` did not exist.
+- Intermediate focused run exposed three discriminating failures: changed v2
+  goldens, the former caller-authoritative hidden helper, and nested `FrozenDict`
+  becoming a tuple through base-class dispatch. Each was corrected before the
+  final run.
+- Final focused projection suite: `54 passed in 0.95s`.
+
+### Corrections
+
+- Replaced attribute-backed `FrozenDict` with an attribute-free `tuple` subclass
+  and exact `Mapping` interface (`__slots__ = ()`). Normal mutation APIs,
+  `object.__setattr__`, dict/tuple base operations, copy/deepcopy, nested aliases,
+  and pickle round trips cannot mutate committed projection state.
+- Added `projection_record_to_transport` as the explicit post-DTO mutable copy
+  boundary. Mutating the transport copy leaves the transaction DTO and its HMAC
+  bytes unchanged.
+- Restored the approved `rag-prepared-model-influence-observation:v1` payload and
+  golden `940b88c5...a696`, and the approved
+  `rag-model-influence-dependency:v1` payload and selected-role golden
+  `885d56f3...02d3`.
+- Moved complete prepared-set/readiness/rendered-input authority to
+  `rag-prepared-model-influence-set:v2` (golden `c4ba54ec...b3f1`) with child
+  observations under an explicit `child:v2` domain. Fresh-lookup set authority is
+  now under `rag-model-influence-set:v2` (golden `6021d66c...5f4b`).
+- Strengthened raw/trusted cross-field authority: exact branch/envelope/provenance
+  types, raw envelope-to-evidence identity/permission/content/citation equality,
+  trusted canonical serving ID/type/result equality, and recomputed version,
+  approval-provenance, selected-child, and evidence-link-set HMACs.
+- Carried ordered canonical evidence-link child HMACs internally on trusted
+  resolver DTOs so the projector can recompute the explicit link set rather than
+  trusting a caller-supplied aggregate.
+- Selected IDs now require exact built-in literal strings, preparation requires
+  exactly 1..8 observations, and set/finalizer DTO types remain exact with no
+  drop/reorder/renumber/relabel path.
+- Hidden membership now accepts only the full transient ordered hidden-member
+  HMAC tuple (maximum 50), derives actual/public/capped values and the first 20
+  internally, and returns/persists no denied IDs.
+- Transaction fencing now captures the exact active SQLAlchemy transaction object
+  on entry and rechecks it before/after resolver reads, after validation phases,
+  and immediately before every public return. Commit/rollback/close or replacement
+  with a new transaction raises the typed transaction failure without returning a
+  DTO or product HMAC.
+
+### Final verification
+
+- Focused Task 8: `54 passed in 0.95s`.
+- Task 4-8 RAG V2/source/trusted: `325 passed, 2 skipped, 10 warnings in 6.70s`.
+  The two skips remain PostgreSQL-only migration gates.
+- Adjacent search/permission/pgvector with process-scoped SQLite:
+  `22 passed in 1.40s`.
+- Secret hygiene: `3 passed in 4.96s`.
+- Ruff exact Task 8 paths with `--no-fix`: `All checks passed!`.
+- Compileall, direct imports, and `git diff --check`: PASS.
+- Existing Slack-data quality failures were not rerun and remain deferred under
+  the approved Slack-last decision.

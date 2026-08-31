@@ -552,6 +552,9 @@ class TrustedServingEnvelopeResolver:
             provenance=provenance,
             approval_provenance_hmac=approval_provenance_hmac,
             evidence_link_set_hmac=evidence_link_set_hmac,
+            evidence_link_hmacs=tuple(
+                citation.evidence_link_hmac for citation in selected.citations
+            ),
             settings=self._settings,
         )
 
@@ -634,6 +637,7 @@ class TrustedServingEnvelopeResolver:
             provenance=provenance,
             approval_provenance_hmac=approval_provenance_hmac,
             evidence_link_set_hmac=None,
+            evidence_link_hmacs=(),
             settings=self._settings,
         )
 
@@ -919,6 +923,7 @@ class ServingEvidenceResolver:
             result_id = envelope.knowledge_id
             approval_hmac = fresh.approval_provenance_hmac
             link_set_hmac = fresh.evidence_link_set_hmac
+            evidence_link_hmacs = fresh.evidence_link_hmacs
             parser_status = None
             parser_status_reason = None
             revision_id = None
@@ -943,6 +948,7 @@ class ServingEvidenceResolver:
             revision_id=revision_id,
             approval_provenance_hmac=approval_hmac,
             evidence_link_set_hmac=link_set_hmac,
+            evidence_link_hmacs=evidence_link_hmacs,
         )
 
 
@@ -959,6 +965,7 @@ def _build_trusted_envelope(
     provenance: ExplicitApprovalProvenance | LegacyHumanProvenance,
     approval_provenance_hmac: str,
     evidence_link_set_hmac: str | None,
+    evidence_link_hmacs: tuple[str, ...],
     settings: Settings,
 ) -> TrustedServingEnvelope:
     trusted_version = TrustedServingVersionEnvelope(
@@ -1011,6 +1018,7 @@ def _build_trusted_envelope(
         trusted_version=trusted_version,
         approval_provenance_hmac=approval_provenance_hmac,
         evidence_link_set_hmac=evidence_link_set_hmac,
+        evidence_link_hmacs=evidence_link_hmacs,
     )
 
 

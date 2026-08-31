@@ -162,6 +162,7 @@ class TrustedServingEnvelope:
     trusted_version: TrustedServingVersionEnvelope
     approval_provenance_hmac: str
     evidence_link_set_hmac: str | None
+    evidence_link_hmacs: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +183,7 @@ class CanonicalServingProjection:
     revision_id: str | None
     approval_provenance_hmac: str | None
     evidence_link_set_hmac: str | None
+    evidence_link_hmacs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
