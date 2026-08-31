@@ -585,6 +585,72 @@ def test_trusted_authorizer_classifies_project_source_and_permission_independent
     assert outside.resource_scope == 'out_of_scope'
 
 
+def test_resource_only_classification_preserves_exact_scope_without_permission_widening(
+    db_session: Session,
+) -> None:
+    source, chunk = _seed_source(db_session, ordinal=71, permission='restricted')
+    target = _seed_target(db_session, permission='internal')
+    item = _seed_item(
+        db_session,
+        source=source,
+        chunk=chunk,
+        resolution_source='human',
+        permission='restricted',
+    )
+    _seed_link(
+        db_session,
+        target=target,
+        item=item,
+        source=source,
+        resolution_source='human',
+        permission='restricted',
+    )
+    db_session.commit()
+    envelope = TrustedServingEnvelopeResolver(
+        db=db_session,
+        settings=_settings(),
+    ).resolve_for_index('history_event', target.id)
+    assert envelope is not None
+    authorizer = TrustedEvidenceAuthorizer(
+        db=db_session,
+        settings=_settings(),
+    )
+    exact_public_scope = _scope(
+        source_ids=(source.id,),
+        project_keys=('project-a',),
+        permissions=('public',),
+    )
+
+    matching = authorizer.classify_resource_access(exact_public_scope, envelope)
+    wrong_workspace = authorizer.classify_resource_access(
+        replace(exact_public_scope, workspace_scope_id='workspace-b'),
+        envelope,
+    )
+    wrong_project = authorizer.classify_resource_access(
+        replace(exact_public_scope, project_constraints=('project_key:other',)),
+        envelope,
+    )
+    wrong_source = authorizer.classify_resource_access(
+        replace(
+            exact_public_scope,
+            source_constraints=(f'source_pk:{source.id + 1}',),
+        ),
+        envelope,
+    )
+
+    assert exact_public_scope.allowed_permission_levels == ('public',)
+    assert matching.global_eligibility == 'eligible'
+    assert matching.resource_scope == 'in_scope'
+    assert wrong_workspace.resource_scope == 'out_of_scope'
+    assert wrong_project.resource_scope == 'out_of_scope'
+    assert wrong_source.resource_scope == 'out_of_scope'
+    sanitized = repr((matching, wrong_workspace, wrong_project, wrong_source))
+    assert source.source_url not in sanitized
+    assert source.source_id not in sanitized
+    assert not hasattr(matching, 'evidence')
+    assert not hasattr(matching, 'source_ids')
+
+
 def test_authorizer_recomputes_actor_scope_before_selecting_lower_priority_link(
     db_session: Session,
 ) -> None:

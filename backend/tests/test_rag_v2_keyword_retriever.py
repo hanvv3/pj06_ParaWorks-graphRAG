@@ -59,7 +59,11 @@ from backend.app.rag.serving_generation import (
     RAG_LEXICAL_COMPAT_VERSION,
 )
 from backend.app.rag.source_observations import CanonicalSourceObservationResolver
-from backend.app.rag.trusted_evidence import TrustedServingEnvelopeResolver
+from backend.app.rag.trusted_evidence import (
+    ServingEvidenceResolver,
+    TrustedEvidenceAuthorizer,
+    TrustedServingEnvelopeResolver,
+)
 
 
 class _FakeStore:
@@ -627,12 +631,36 @@ def test_sqlite_oracle_uses_canonical_projection_and_permission_second_stage(
 
 def test_trusted_denied_permission_stays_in_scope_and_counts_hidden(
     db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_sqlite_raw_projection(db_session)
     _seed_sqlite_trusted_projection(db_session)
     settings = _settings()
     store = SqlAlchemyKeywordSearchStore(db=db_session, settings=settings)
     denied_scope = _scope(allowed_permission_levels=('public',))
+    observed_scopes: list[SecurityScope] = []
+    original_classify_resource = (
+        TrustedEvidenceAuthorizer.classify_resource_access
+    )
+
+    def record_exact_scope(self, scope, envelope):
+        observed_scopes.append(scope)
+        return original_classify_resource(self, scope, envelope)
+
+    def forbidden_projection(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError('denied trusted evidence must not project citation bytes')
+
+    monkeypatch.setattr(
+        TrustedEvidenceAuthorizer,
+        'classify_resource_access',
+        record_exact_scope,
+    )
+    monkeypatch.setattr(
+        ServingEvidenceResolver,
+        'resolve_candidate',
+        forbidden_projection,
+    )
 
     result = KeywordEvidenceRetriever(store=store, settings=settings).invoke(
         _request(query='TrustedNeedle', scope=denied_scope)
@@ -641,6 +669,9 @@ def test_trusted_denied_permission_stays_in_scope_and_counts_hidden(
     assert result.visible == ()
     assert result.hidden_match_count == 1
     assert result.trace.candidate_window_count == 1
+    assert observed_scopes
+    assert all(scope is denied_scope for scope in observed_scopes)
+    assert denied_scope.allowed_permission_levels == ('public',)
 
 
 def test_sqlite_oracle_applies_exact_source_scope_before_candidate_window(

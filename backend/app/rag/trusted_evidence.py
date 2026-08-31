@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -87,6 +88,14 @@ class _ResolvedExplicitLink:
     item: ReviewItem
     identities: tuple[TrustedEvidenceLinkIdentity, ...]
     citations: tuple[_ResolvedCitationChild, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedResourceAccessClassification:
+    """Resource-only stage-one result with no citation or source projection."""
+
+    global_eligibility: Literal['eligible', 'ineligible']
+    resource_scope: Literal['in_scope', 'out_of_scope', 'invalid_scope']
 
 
 class TrustedServingEnvelopeResolver:
@@ -670,6 +679,69 @@ class TrustedEvidenceAuthorizer:
             permission_visibility=visibility,
         )
 
+    def classify_resource_access(
+        self,
+        scope: SecurityScope,
+        evidence: TrustedServingEnvelope,
+    ) -> TrustedResourceAccessClassification:
+        """Classify exact resource membership without widening actor permissions."""
+        fresh = None
+        if _trusted_envelope_is_consistent(evidence):
+            fresh = self._resolver.resolve_for_index(
+                evidence.trusted_version.knowledge_type,
+                evidence.trusted_version.knowledge_id,
+            )
+        if fresh is None or not _same_trusted_authority(evidence, fresh):
+            return TrustedResourceAccessClassification(
+                global_eligibility='ineligible',
+                resource_scope='invalid_scope',
+            )
+        knowledge_type = fresh.trusted_version.knowledge_type
+        knowledge_id = fresh.trusted_version.knowledge_id
+        model = knowledge_model_for_type(knowledge_type)
+        project_key = self._db.scalar(
+            select(model.project_key).where(model.id == knowledge_id)
+        )
+        link_snapshot = _trusted_resource_link_snapshot(
+            self._db,
+            knowledge_type=knowledge_type,
+            knowledge_id=knowledge_id,
+        )
+        resource_scope = _classify_trusted_resource_snapshot(
+            scope=scope,
+            project_key=project_key,
+            provenance=fresh.trusted_version.provenance,
+            link_snapshot=link_snapshot,
+        )
+        final_fresh = self._resolver.resolve_for_index(
+            knowledge_type,
+            knowledge_id,
+        )
+        final_project_key = self._db.scalar(
+            select(model.project_key)
+            .where(model.id == knowledge_id)
+            .execution_options(populate_existing=True)
+        )
+        final_link_snapshot = _trusted_resource_link_snapshot(
+            self._db,
+            knowledge_type=knowledge_type,
+            knowledge_id=knowledge_id,
+        )
+        if (
+            final_fresh is None
+            or not _same_trusted_authority(fresh, final_fresh)
+            or final_project_key != project_key
+            or final_link_snapshot != link_snapshot
+        ):
+            return TrustedResourceAccessClassification(
+                global_eligibility='ineligible',
+                resource_scope='invalid_scope',
+            )
+        return TrustedResourceAccessClassification(
+            global_eligibility='eligible',
+            resource_scope=resource_scope,
+        )
+
 
 class ServingEvidenceResolver:
     """Fresh visible-only resolver shared by every future D serving consumer."""
@@ -953,6 +1025,75 @@ def _trusted_resource_scope(
     ):
         return 'out_of_scope'
     return 'in_scope'
+
+
+def _trusted_resource_link_snapshot(
+    db: Session,
+    *,
+    knowledge_type: str,
+    knowledge_id: int,
+) -> tuple[tuple[int, str, str, tuple[str, ...]], ...]:
+    links = tuple(
+        db.scalars(
+            select(TrustedKnowledgeApprovalLink)
+            .where(
+                TrustedKnowledgeApprovalLink.knowledge_type.in_(
+                    knowledge_type_storage_aliases(knowledge_type)
+                ),
+                TrustedKnowledgeApprovalLink.knowledge_id == knowledge_id,
+                TrustedKnowledgeApprovalLink.active.is_(True),
+            )
+            .order_by(TrustedKnowledgeApprovalLink.id)
+        ).all()
+    )
+    snapshot: list[tuple[int, str, str, tuple[str, ...]]] = []
+    for link in links:
+        child_ids = tuple(
+            db.scalars(
+                select(TrustedKnowledgeEvidenceLink.canonical_source_id)
+                .where(TrustedKnowledgeEvidenceLink.approval_link_id == link.id)
+                .order_by(TrustedKnowledgeEvidenceLink.id)
+            ).all()
+        )
+        snapshot.append(
+            (
+                link.id,
+                link.security_scope_id,
+                link.resolution_source,
+                child_ids,
+            )
+        )
+    return tuple(snapshot)
+
+
+def _classify_trusted_resource_snapshot(
+    *,
+    scope: SecurityScope,
+    project_key: object,
+    provenance: ExplicitApprovalProvenance | LegacyHumanProvenance,
+    link_snapshot: tuple[tuple[int, str, str, tuple[str, ...]], ...],
+) -> Literal['in_scope', 'out_of_scope']:
+    if scope.project_constraints and (
+        type(project_key) is not str
+        or f'project_key:{project_key}' not in scope.project_constraints
+    ):
+        return 'out_of_scope'
+    if isinstance(provenance, LegacyHumanProvenance):
+        return 'out_of_scope' if scope.source_constraints else 'in_scope'
+    for _, security_scope_id, resolution_source, child_ids in link_snapshot:
+        if (
+            security_scope_id != scope.workspace_scope_id
+            or resolution_source not in _RESOLUTION_PRIORITY
+            or not child_ids
+        ):
+            continue
+        if scope.source_constraints and any(
+            f'source_pk:{source_id}' not in scope.source_constraints
+            for source_id in child_ids
+        ):
+            continue
+        return 'in_scope'
+    return 'out_of_scope'
 
 
 def _trusted_envelope_is_consistent(envelope: TrustedServingEnvelope) -> bool:

@@ -1,5 +1,4 @@
 from collections.abc import Mapping
-from dataclasses import replace
 
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
@@ -485,11 +484,7 @@ def _classify_trusted_stage_one_access(
     scope: SecurityScope,
     envelope: TrustedServingEnvelope,
 ) -> EvidenceAccessClassification:
-    resource_scope = replace(
-        scope,
-        allowed_permission_levels=('public', 'internal', 'restricted'),
-    )
-    resource_classification = authorizer.classify_access(resource_scope, envelope)
+    resource_classification = authorizer.classify_resource_access(scope, envelope)
     permission = known_permission(envelope.identity.effective_permission)
     if permission is None:
         visibility = 'unknown_permission'
