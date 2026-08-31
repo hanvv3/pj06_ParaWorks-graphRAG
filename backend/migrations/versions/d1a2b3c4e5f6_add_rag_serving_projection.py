@@ -160,7 +160,7 @@ def _install_postgresql_scorers() -> None:
               END IF;
               biased_exponent := floor(unsigned_bits / 4503599627370496);
               IF biased_exponent = 2047 THEN
-                RAISE EXCEPTION 'non-finite lexical score';
+                RETURN value;
               END IF;
               significand := mod(unsigned_bits, 4503599627370496);
               IF biased_exponent = 0 THEN
