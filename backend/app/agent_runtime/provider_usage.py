@@ -75,6 +75,14 @@ RagCannedMessageIdentity = Literal[
 class StrictChatUsageParser:
     def parse_message(self, message: object) -> StrictProviderUsage:
         try:
+            return self._parse_message(message)
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError('chat provider usage is invalid') from None
+
+    def _parse_message(self, message: object) -> StrictProviderUsage:
+        try:
             primary_value = getattr(message, 'usage_metadata', None)
             response_value = getattr(message, 'response_metadata', {})
         except Exception:
@@ -145,6 +153,14 @@ class StrictChatUsageParser:
 
 class StrictEmbeddingUsageParser:
     def parse_usage(self, usage: object) -> StrictProviderUsage:
+        try:
+            return self._parse_usage(usage)
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError('embedding provider usage is invalid') from None
+
+    def _parse_usage(self, usage: object) -> StrictProviderUsage:
         metadata = _mapping_snapshot(usage, context='embedding usage')
         if set(metadata).intersection(_USAGE_WRAPPER_NAMES):
             raise ValueError('embedding provider usage wrapper is misplaced')

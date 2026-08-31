@@ -107,6 +107,32 @@ class _BadKeyMapping(Mapping[object, object]):
         return ((self._key, self._value),)
 
 
+class _ExplodingClassValue:
+    @property
+    def __class__(self):
+        raise RuntimeError('custom value class must be sanitized')
+
+
+class _ExplodingItemsMapping(Mapping[str, object]):
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+    def items(self):
+        raise TypeError('custom items failure must be sanitized')
+
+
+class _ExplodingUsageMessage:
+    @property
+    def usage_metadata(self):
+        raise RuntimeError('custom message property must be sanitized')
+
+
 def _message(
     primary: object | None = None,
     *,
@@ -242,6 +268,72 @@ def test_usage_parser_sanitizes_custom_key_comparison_failures(
             }))
         else:
             StrictEmbeddingUsageParser().parse_usage(bad_mapping)
+
+
+@pytest.mark.parametrize(
+    'position',
+    ('chat_primary', 'chat_response', 'embedding'),
+)
+def test_usage_parser_sanitizes_custom_detail_type_failures(
+    position: str,
+) -> None:
+    detail = _ExplodingClassValue()
+
+    with pytest.raises(ValueError, match='usage'):
+        if position == 'chat_primary':
+            StrictChatUsageParser().parse_message(_message(primary={
+                'input_tokens': 12,
+                'output_tokens': 3,
+                'total_tokens': 15,
+                'provider_detail': detail,
+            }))
+        elif position == 'chat_response':
+            StrictChatUsageParser().parse_message(_message(response={
+                'provider_detail': detail,
+            }))
+        else:
+            StrictEmbeddingUsageParser().parse_usage({
+                'prompt_tokens': 4,
+                'total_tokens': 4,
+                'provider_detail': detail,
+            })
+
+
+@pytest.mark.parametrize(
+    'case',
+    ('message_property', 'chat_items', 'embedding_items'),
+)
+def test_public_usage_parser_boundary_returns_only_value_error(case: str) -> None:
+    try:
+        if case == 'message_property':
+            StrictChatUsageParser().parse_message(_ExplodingUsageMessage())
+        elif case == 'chat_items':
+            StrictChatUsageParser().parse_message(
+                _message(primary=_ExplodingItemsMapping())
+            )
+        else:
+            StrictEmbeddingUsageParser().parse_usage(_ExplodingItemsMapping())
+    except Exception as exc:
+        assert type(exc) is ValueError
+        assert exc.__cause__ is None
+    else:
+        pytest.fail('malformed provider usage must be refused')
+
+
+def test_safe_custom_non_authoritative_mapping_detail_remains_allowed() -> None:
+    detail = _Mapping({'cached': _Mapping({'count': 2})})
+
+    chat = StrictChatUsageParser().parse_message(_message(response={
+        'provider_detail': detail,
+    }))
+    embedding = StrictEmbeddingUsageParser().parse_usage({
+        'prompt_tokens': 4,
+        'total_tokens': 4,
+        'provider_detail': detail,
+    })
+
+    assert chat == StrictProviderUsage(12, 3, 15)
+    assert embedding == StrictProviderUsage(4, 0, 4)
 
 
 @pytest.mark.parametrize(

@@ -171,6 +171,12 @@ class _RecordingCache(BaseCache):
         self.events.append('clear')
 
 
+class _ExplodingProviderDetail:
+    @property
+    def __class__(self):
+        raise RuntimeError('provider detail must not escape parser boundary')
+
+
 def _raw(parsed=None, *, input_tokens=120, output_tokens=40, parsing_error=None):
     raw = AIMessage(
         content='',
@@ -591,6 +597,22 @@ def test_one_batch_cannot_start_more_than_one_provider_attempt() -> None:
     ),
 )
 def test_provider_parse_and_usage_errors_are_sanitized(response) -> None:
+    validator, _, usage = _validator(response=response)
+    invocation = validator.prepare_many((_request(),))
+
+    with pytest.raises(AutoReviewValidationError) as exc_info:
+        validator.invoke_prepared(invocation, grant=object())
+
+    assert str(exc_info.value) == 'auto-review validation is unavailable'
+    assert exc_info.value.__cause__ is None
+    assert usage == []
+
+
+def test_malicious_provider_detail_is_translated_to_validator_error() -> None:
+    response = _raw()
+    response['raw'].response_metadata['provider_detail'] = (
+        _ExplodingProviderDetail()
+    )
     validator, _, usage = _validator(response=response)
     invocation = validator.prepare_many((_request(),))
 
