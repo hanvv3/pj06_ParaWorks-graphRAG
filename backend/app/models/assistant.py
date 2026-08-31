@@ -49,6 +49,66 @@ class AssistantMessage(Base):
             'serving_dependency_count IS NULL OR serving_dependency_count >= 0',
             name='ck_assistant_messages_serving_dependency_count',
         ),
+        CheckConstraint(
+            "dependency_set_hmac_schema_version IS NULL OR "
+            "dependency_set_hmac_schema_version = 'assistant-dependency-set-hmac:v2'",
+            name='ck_assistant_messages_dependency_set_schema',
+        ),
+        CheckConstraint(
+            "content_write_mode IS NULL OR content_write_mode IN "
+            "('legacy_trimmed', 'rag_v2_exact')",
+            name='ck_assistant_messages_content_write_mode',
+        ),
+        CheckConstraint(
+            "content_origin IS NULL OR content_origin IN "
+            "('rag_assembled', 'rag_canned', 'legacy_evidence')",
+            name='ck_assistant_messages_content_origin',
+        ),
+        CheckConstraint(
+            'CASE WHEN content_write_mode IS NULL THEN '
+            '(content_hmac_schema_version IS NULL AND '
+            'assistant_message_content_hmac IS NULL AND '
+            'content_hmac_key_version IS NULL AND '
+            'content_hmac_key_material_verifier IS NULL AND content_origin IS NULL AND '
+            'content_origin_hmac IS NULL AND rag_result_hmac IS NULL AND '
+            'linked_agent_run_id IS NULL AND dependency_set_hmac_schema_version IS NULL AND '
+            'dependency_set_hmac IS NULL AND '
+            'parent_selected_evidence_projection_hmac IS NULL AND '
+            'model_influence_set_hmac IS NULL) ELSE '
+            "(content_hmac_schema_version IS NOT NULL AND "
+            "content_hmac_schema_version = 'assistant-message-content-hmac:v1' AND "
+            'assistant_message_content_hmac IS NOT NULL AND '
+            'length(assistant_message_content_hmac) = 64 AND '
+            'content_hmac_key_version IS NOT NULL AND '
+            'content_hmac_key_material_verifier IS NOT NULL AND '
+            'length(content_hmac_key_material_verifier) = 64 AND '
+            'content_origin IS NOT NULL AND content_origin_hmac IS NOT NULL AND '
+            'length(content_origin_hmac) = 64 AND '
+            "((content_write_mode = 'rag_v2_exact' AND "
+            "content_origin IN ('rag_assembled', 'rag_canned') AND "
+            'rag_result_hmac IS NOT NULL AND length(rag_result_hmac) = 64 AND '
+            'linked_agent_run_id IS NOT NULL) OR '
+            "(content_write_mode = 'legacy_trimmed' AND "
+            "content_origin = 'legacy_evidence'))) END",
+            name='ck_assistant_messages_content_integrity',
+        ),
+        CheckConstraint(
+            "content_write_mode IS NULL OR ((content_origin = 'rag_canned' AND "
+            "evidence_contract_version = 'none-v1' AND serving_dependency_count = 0 AND "
+            'dependency_set_hmac_schema_version IS NULL AND dependency_set_hmac IS NULL AND '
+            'parent_selected_evidence_projection_hmac IS NULL AND '
+            'model_influence_set_hmac IS NULL) OR '
+            "(content_origin IN ('rag_assembled', 'legacy_evidence') AND "
+            "evidence_contract_version = 'assistant-evidence:v1' AND "
+            'serving_dependency_count > 0 AND dependency_set_hmac_schema_version = '
+            "'assistant-dependency-set-hmac:v2' AND length(dependency_set_hmac) = 64 AND "
+            'length(parent_selected_evidence_projection_hmac) = 64 AND '
+            "((content_origin = 'rag_assembled' AND "
+            'length(model_influence_set_hmac) = 64) OR '
+            "(content_origin = 'legacy_evidence' AND "
+            'model_influence_set_hmac IS NULL))))',
+            name='ck_assistant_messages_content_origin_xor',
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -65,6 +125,35 @@ class AssistantMessage(Base):
     agent_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     evidence_contract_version: Mapped[str | None] = mapped_column(String(32))
     serving_dependency_count: Mapped[int | None] = mapped_column(Integer)
+    content_write_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    content_hmac_schema_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    assistant_message_content_hmac: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    content_hmac_key_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    content_hmac_key_material_verifier: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    content_origin: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    content_origin_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rag_result_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    linked_agent_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey('agent_runs.id', ondelete='RESTRICT'), nullable=True, index=True
+    )
+    dependency_set_hmac_schema_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    dependency_set_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parent_selected_evidence_projection_hmac: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    model_influence_set_hmac: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     metadata_: Mapped[dict] = mapped_column('metadata', MutableDict.as_mutable(JSON), default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -771,7 +771,7 @@ class AssistantMessageEvidenceDependency(Base):
             name='fk_assistant_message_dependency_approval_target',
         ),
         CheckConstraint(
-            "dependency_kind IN ('raw_chunk', 'trusted_knowledge')",
+            "dependency_kind IN ('raw_chunk', 'trusted_knowledge', 'legacy_unbound')",
             name='ck_assistant_message_dependency_kind',
         ),
         CheckConstraint(
@@ -795,8 +795,60 @@ class AssistantMessageEvidenceDependency(Base):
             'server_content_signature IS NULL AND knowledge_type IS NOT NULL AND '
             'knowledge_id IS NOT NULL AND ((approval_link_id IS NOT NULL AND '
             'legacy_human_base = false) OR (approval_link_id IS NULL AND '
-            'legacy_human_base = true)))',
+            'legacy_human_base = true))) OR '
+            "(dependency_kind = 'legacy_unbound' AND document_chunk_id IS NULL AND "
+            'document_version_id IS NULL AND source_id IS NULL AND parser_run_id IS NULL AND '
+            'server_content_signature_schema IS NULL AND server_content_signature IS NULL AND '
+            'knowledge_type IS NULL AND knowledge_id IS NULL AND approval_link_id IS NULL)',
             name='ck_assistant_message_dependency_exact_kind',
+        ),
+        CheckConstraint(
+            'CASE WHEN dependency_serving_scope IS NULL THEN '
+            '(dependency_role IS NULL AND dependency_child_hmac IS NULL AND '
+            'approval_provenance_hmac IS NULL AND evidence_link_set_hmac IS NULL AND '
+            'legacy_dependency_identity_hmac IS NULL AND model_content_hmac IS NULL AND '
+            'canonical_citation_projection_hmac IS NULL AND '
+            'selected_v1_citation_projection_hmac IS NULL AND '
+            'serving_identity_hmac IS NULL AND serving_version_fingerprint IS NULL AND '
+            'support_mode IS NULL) ELSE '
+            "((dependency_serving_scope = 'rag_v2' AND dependency_role IN "
+            "('selected_citation', 'unselected_model_influence') AND "
+            "dependency_kind IN ('raw_chunk', 'trusted_knowledge')) OR "
+            "(dependency_serving_scope = 'legacy_v1_only' AND "
+            "dependency_role = 'selected_citation' AND "
+            "dependency_kind = 'legacy_unbound')) END",
+            name='ck_assistant_message_dependency_v2_scope_role',
+        ),
+        CheckConstraint(
+            'dependency_serving_scope IS NULL OR '
+            '(length(dependency_set_hmac) = 64 AND length(dependency_child_hmac) = 64 AND '
+            'length(fingerprint_key_material_verifier) = 64 AND '
+            'length(model_content_hmac) = 64 AND '
+            'length(canonical_citation_projection_hmac) = 64 AND '
+            '(approval_provenance_hmac IS NULL OR '
+            'length(approval_provenance_hmac) = 64) AND '
+            '(evidence_link_set_hmac IS NULL OR length(evidence_link_set_hmac) = 64) AND '
+            '(legacy_dependency_identity_hmac IS NULL OR '
+            'length(legacy_dependency_identity_hmac) = 64) AND '
+            '(selected_v1_citation_projection_hmac IS NULL OR '
+            'length(selected_v1_citation_projection_hmac) = 64) AND '
+            '(serving_identity_hmac IS NULL OR length(serving_identity_hmac) = 64) AND '
+            '(serving_version_fingerprint IS NULL OR '
+            'length(serving_version_fingerprint) = 64))',
+            name='ck_assistant_message_dependency_v2_hmacs',
+        ),
+        CheckConstraint(
+            'dependency_serving_scope IS NULL OR '
+            "((dependency_kind = 'raw_chunk' AND support_mode = 'source_observation' AND "
+            'serving_identity_hmac IS NOT NULL AND serving_version_fingerprint IS NOT NULL AND '
+            'legacy_dependency_identity_hmac IS NULL) OR '
+            "(dependency_kind = 'trusted_knowledge' AND support_mode = 'trusted_fact' AND "
+            'serving_identity_hmac IS NOT NULL AND serving_version_fingerprint IS NOT NULL AND '
+            'legacy_dependency_identity_hmac IS NULL) OR '
+            "(dependency_kind = 'legacy_unbound' AND support_mode IS NULL AND "
+            'serving_identity_hmac IS NULL AND serving_version_fingerprint IS NULL AND '
+            'legacy_dependency_identity_hmac IS NOT NULL))',
+            name='ck_assistant_message_dependency_v2_support',
         ),
     )
 
@@ -829,6 +881,36 @@ class AssistantMessageEvidenceDependency(Base):
     legacy_source_review_item_id: Mapped[int | None] = mapped_column(
         ForeignKey('review_items.id', ondelete='RESTRICT')
     )
+    dependency_serving_scope: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    dependency_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dependency_child_hmac: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    approval_provenance_hmac: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    evidence_link_set_hmac: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    legacy_dependency_identity_hmac: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    model_content_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    canonical_citation_projection_hmac: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    selected_v1_citation_projection_hmac: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    serving_identity_hmac: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    serving_version_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    support_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now
     )

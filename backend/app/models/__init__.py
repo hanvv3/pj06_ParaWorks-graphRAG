@@ -40,6 +40,13 @@ from backend.app.models.knowledge import (
     Todo,
 )
 from backend.app.models.messages import Message, MessageChannel
+from backend.app.models.rag_runtime import (
+    AgentRunCostComponent,
+    RagAdvisoryLockKey,
+    RagProviderReadiness,
+    RagProviderSafetyAuthority,
+    RagProviderSafetyTransition,
+)
 from backend.app.models.rag_serving import (
     RagLexicalServingProjection,
     RagServingCorpusGeneration,
@@ -57,6 +64,7 @@ from backend.app.models.vector_index import VectorIndexState
 __all__ = [
     'SyncJob',
     'AgentRun',
+    'AgentRunCostComponent',
     'AgentRuntimeSchemaVersion',
     'AgentWorkflowEvidenceRef',
     'AgentWorkflowRequest',
@@ -89,6 +97,10 @@ __all__ = [
     'Message',
     'MessageChannel',
     'RagLexicalServingProjection',
+    'RagAdvisoryLockKey',
+    'RagProviderReadiness',
+    'RagProviderSafetyAuthority',
+    'RagProviderSafetyTransition',
     'RagServingCorpusGeneration',
     'ReviewItem',
     'ReviewItemEvidenceRef',
