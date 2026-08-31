@@ -555,20 +555,67 @@ def _evaluate_keyword_comparison(
     bind_values: Mapping[str, object],
     relation_context: Mapping[str, PostgresKeywordRelationRow],
 ) -> KeywordSqlTruth:
-    left = _evaluate_keyword_expression(
-        predicate.left,
-        candidate=candidate,
-        bind_values=bind_values,
-        relation_context=relation_context,
-    )
-    if predicate.operator is KeywordComparisonOperator.IS_TRUE:
-        return KeywordSqlTruth.TRUE if left is True else KeywordSqlTruth.FALSE
-    if predicate.operator is KeywordComparisonOperator.IS_NOT_NULL:
+    if predicate.operator in {
+        KeywordComparisonOperator.IS_TRUE,
+        KeywordComparisonOperator.IS_NOT_NULL,
+    }:
+        left = _evaluate_keyword_expression(
+            predicate.left,
+            candidate=candidate,
+            bind_values=bind_values,
+            relation_context=relation_context,
+        )
+        if predicate.operator is KeywordComparisonOperator.IS_TRUE:
+            return KeywordSqlTruth.TRUE if left is True else KeywordSqlTruth.FALSE
         return KeywordSqlTruth.TRUE if left is not None else KeywordSqlTruth.FALSE
     if predicate.right is None:
         raise ValueError(f'{predicate.operator.value} requires a right operand')
     right = _evaluate_keyword_expression(
         predicate.right,
+        candidate=candidate,
+        bind_values=bind_values,
+        relation_context=relation_context,
+    )
+    if predicate.operator in {
+        KeywordComparisonOperator.EQUAL_ANY,
+        KeywordComparisonOperator.NOT_EQUAL_ALL,
+    }:
+        if right is None:
+            return KeywordSqlTruth.UNKNOWN
+        if not isinstance(right, (list, tuple)):
+            raise TypeError(f'{predicate.operator.value} requires an array operand')
+        items = tuple(right)
+        if not items:
+            return (
+                KeywordSqlTruth.FALSE
+                if predicate.operator is KeywordComparisonOperator.EQUAL_ANY
+                else KeywordSqlTruth.TRUE
+            )
+        left = _evaluate_keyword_expression(
+            predicate.left,
+            candidate=candidate,
+            bind_values=bind_values,
+            relation_context=relation_context,
+        )
+        comparisons = tuple(
+            KeywordSqlTruth.UNKNOWN
+            if left is None or item is None
+            else (
+                KeywordSqlTruth.TRUE
+                if (
+                    left == item
+                    if predicate.operator is KeywordComparisonOperator.EQUAL_ANY
+                    else left != item
+                )
+                else KeywordSqlTruth.FALSE
+            )
+            for item in items
+        )
+        if predicate.operator is KeywordComparisonOperator.EQUAL_ANY:
+            return _keyword_sql_or(comparisons)
+        return _keyword_sql_and(comparisons)
+    left = _evaluate_keyword_expression(
+        predicate.left,
         candidate=candidate,
         bind_values=bind_values,
         relation_context=relation_context,
@@ -579,23 +626,13 @@ def _evaluate_keyword_comparison(
         result = left == right
     elif predicate.operator is KeywordComparisonOperator.NE:
         result = left != right
-    elif predicate.operator in {
-        KeywordComparisonOperator.IN,
-        KeywordComparisonOperator.EQUAL_ANY,
-    }:
+    elif predicate.operator is KeywordComparisonOperator.IN:
         items = tuple(right)  # type: ignore[arg-type]
         if any(item is not None and left == item for item in items):
             return KeywordSqlTruth.TRUE
         if any(item is None for item in items):
             return KeywordSqlTruth.UNKNOWN
         result = False
-    elif predicate.operator is KeywordComparisonOperator.NOT_EQUAL_ALL:
-        items = tuple(right)  # type: ignore[arg-type]
-        if any(item is not None and left == item for item in items):
-            return KeywordSqlTruth.FALSE
-        if any(item is None for item in items):
-            return KeywordSqlTruth.UNKNOWN
-        result = True
     else:
         raise ValueError(f'unsupported keyword comparison: {predicate.operator}')
     return KeywordSqlTruth.TRUE if result else KeywordSqlTruth.FALSE

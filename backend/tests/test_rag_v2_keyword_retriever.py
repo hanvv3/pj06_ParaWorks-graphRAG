@@ -1284,6 +1284,85 @@ def test_generic_evaluator_uses_sql_three_valued_logic_and_where_true_only() -> 
     )
 
 
+@pytest.mark.parametrize(
+    ('left', 'right', 'any_expected', 'all_expected'),
+    (
+        (None, None, KeywordSqlTruth.UNKNOWN, KeywordSqlTruth.UNKNOWN),
+        (None, (), KeywordSqlTruth.FALSE, KeywordSqlTruth.TRUE),
+        (None, (1, 2), KeywordSqlTruth.UNKNOWN, KeywordSqlTruth.UNKNOWN),
+        (None, (2, 3), KeywordSqlTruth.UNKNOWN, KeywordSqlTruth.UNKNOWN),
+        (None, (1, None), KeywordSqlTruth.UNKNOWN, KeywordSqlTruth.UNKNOWN),
+        (None, (2, None), KeywordSqlTruth.UNKNOWN, KeywordSqlTruth.UNKNOWN),
+        (None, (None,), KeywordSqlTruth.UNKNOWN, KeywordSqlTruth.UNKNOWN),
+        (1, None, KeywordSqlTruth.UNKNOWN, KeywordSqlTruth.UNKNOWN),
+        (1, (), KeywordSqlTruth.FALSE, KeywordSqlTruth.TRUE),
+        (1, (1, 2), KeywordSqlTruth.TRUE, KeywordSqlTruth.FALSE),
+        (1, (2, 3), KeywordSqlTruth.FALSE, KeywordSqlTruth.TRUE),
+        (1, (1, None), KeywordSqlTruth.TRUE, KeywordSqlTruth.FALSE),
+        (1, (2, None), KeywordSqlTruth.UNKNOWN, KeywordSqlTruth.UNKNOWN),
+        (1, (None,), KeywordSqlTruth.UNKNOWN, KeywordSqlTruth.UNKNOWN),
+    ),
+    ids=(
+        'null-left-null-array',
+        'null-left-empty-array',
+        'null-left-no-null-match-values',
+        'null-left-no-null-miss-values',
+        'null-left-match-plus-null',
+        'null-left-miss-plus-null',
+        'null-left-all-null-elements',
+        'value-left-null-array',
+        'value-left-empty-array',
+        'value-left-no-null-match',
+        'value-left-no-null-miss',
+        'value-left-match-plus-null',
+        'value-left-miss-plus-null',
+        'value-left-all-null-elements',
+    ),
+)
+def test_quantified_comparisons_match_postgresql_vacuous_three_valued_truth_table(
+    left,
+    right,
+    any_expected: KeywordSqlTruth,
+    all_expected: KeywordSqlTruth,
+) -> None:
+    candidate = PostgresKeywordResourceCandidate(
+        serving_document_id='history_event:1',
+        serving_kind='trusted_knowledge',
+        score=1.0,
+        relation_rows=(_relation_row('single_row', id=1),),
+    )
+    for operator, expected in (
+        (KeywordComparisonOperator.EQUAL_ANY, any_expected),
+        (KeywordComparisonOperator.NOT_EQUAL_ALL, all_expected),
+    ):
+        comparison = KeywordComparisonPredicate(
+            KeywordLiteral(left),
+            operator,
+            KeywordParameter('right_array'),
+        )
+        direct = evaluate_postgres_keyword_predicate(
+            comparison,
+            candidate=candidate,
+            bind_values={'right_array': right},
+        )
+        where_membership = evaluate_postgres_keyword_predicate(
+            KeywordExistsPredicate(
+                relation=KeywordRelation('single_row', 'row'),
+                polarity=KeywordExistence.EXISTS,
+                where=comparison,
+            ),
+            candidate=candidate,
+            bind_values={'right_array': right},
+        )
+
+        assert direct is expected
+        assert where_membership is (
+            KeywordSqlTruth.TRUE
+            if expected is KeywordSqlTruth.TRUE
+            else KeywordSqlTruth.FALSE
+        )
+
+
 def test_sqlite_oracle_uses_canonical_projection_and_permission_second_stage(
     db_session: Session,
 ) -> None:
