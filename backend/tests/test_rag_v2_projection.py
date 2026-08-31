@@ -418,6 +418,24 @@ def _prepare_rows(
     return projector, prepared
 
 
+def test_answer_model_influence_verifier_authenticates_each_child_hmac() -> None:
+    from backend.app.rag import evidence_projection
+
+    row = _projection(1)
+    slots = rank_evidence_slots((_candidate(row, 0.9),))
+    _, prepared = _prepare_rows((row,), rendered_input_hmac='d' * 64)
+    verifier = evidence_projection.verify_answer_model_influence
+
+    verifier(slots, prepared.observations, settings=_settings())
+    forged = (
+        replace(prepared.observations[0], observation_hmac='0' * 64),
+    )
+    with pytest.raises(ValueError, match='invalid') as exc_info:
+        verifier(slots, forged, settings=_settings())
+
+    assert exc_info.value.__cause__ is None
+
+
 def test_slotting_is_trusted_first_bounded_contiguous_and_whole_tail_dropped() -> None:
     raw = [_projection(value) for value in range(1, 8)]
     trusted = [_projection(value, trusted=True) for value in range(8, 11)]

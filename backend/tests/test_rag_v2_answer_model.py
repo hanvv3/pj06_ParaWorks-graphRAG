@@ -81,11 +81,19 @@ class _CostPolicy:
         self.charged.append((component, usage))
         return Decimal('0.000010')
 
+    def verify_answer_model_influence(self, slots, observations) -> None:
+        assert len(slots) == len(observations)
+        for ordinal, observation in enumerate(observations):
+            if observation.observation_hmac != f'{ordinal + 81:x}'.zfill(64):
+                raise ValueError('invalid test observation authority')
+
     def sign_answer_artifact(self, kind, payload):
         from backend.app.agent_runtime.fingerprints import keyed_fingerprint
 
         domains = {
             'rendered_input': ('rag-rendered-model-input-bytes:v1', 'rag-answer:v2'),
+            'prepared_input': ('rag-prepared-answer-input:v1', 'rag-answer:v2'),
+            'prepared_invocation': ('rag-prepared-answer-invocation:v1', 'rag-answer:v2'),
             'block_text': ('rag-answer-block-text-bytes:v1', 'rag-answer:v2'),
             'block_result': ('rag-answer-block-result:v1', 'rag-answer-block-confidence:v1'),
             'audit_set': ('rag-answer-block-audit-set:v1', 'rag-answer-block-confidence:v1'),
@@ -517,6 +525,51 @@ def test_forged_prepared_invocation_never_reaches_dispatch(mutate) -> None:
     assert provider.calls == 0
 
 
+def test_forged_observation_hmac_never_reaches_dispatch() -> None:
+    answer_model, provider, _ = _answer_model(_valid_result())
+    valid = answer_model.prepare(
+        question='질문', slots=_single_slot(),
+        model_influence=_single_influence(),
+        answer_question_hmac='d' * 64, retrieval_query_hmac='e' * 64,
+    )
+    forged = replace(
+        valid,
+        model_influence=(
+            replace(valid.model_influence[0], observation_hmac='0' * 64),
+        ),
+    )
+    permit = _Permit()
+
+    with pytest.raises(RagAnswerModelBoundaryError, match='unavailable'):
+        answer_model.invoke_once(forged, permit)
+
+    assert permit.calls == 0
+    assert provider.calls == 0
+
+
+@pytest.mark.parametrize(
+    'field',
+    ('answer_question_hmac', 'retrieval_query_hmac'),
+)
+def test_prepared_question_and_retrieval_hmac_mutation_never_dispatches(
+    field: str,
+) -> None:
+    answer_model, provider, _ = _answer_model(_valid_result())
+    valid = answer_model.prepare(
+        question='질문', slots=_single_slot(),
+        model_influence=_single_influence(),
+        answer_question_hmac='d' * 64, retrieval_query_hmac='e' * 64,
+    )
+    forged = replace(valid, **{field: 'f' * 64})
+    permit = _Permit()
+
+    with pytest.raises(RagAnswerModelBoundaryError, match='unavailable'):
+        answer_model.invoke_once(forged, permit)
+
+    assert permit.calls == 0
+    assert provider.calls == 0
+
+
 def test_usage_overrun_precedes_returned_identity_and_keeps_unclamped_actual() -> None:
     answer_model, _, cost = _answer_model(_valid_result(model='wrong', output=513))
     prepared = answer_model.prepare(
@@ -624,7 +677,12 @@ def test_prepare_input_filters_only_credential_evidence_then_binds_fresh_authori
     assert prepared_input.evidence_slots[0].evidence.model_content == 'safe evidence'
     assert not hasattr(prepared_input, 'model_influence')
 
-    fresh = replace(safe[1], ordinal=0, slot_id='E1')
+    fresh = replace(
+        safe[1],
+        ordinal=0,
+        slot_id='E1',
+        observation_hmac=f'{81:x}'.zfill(64),
+    )
     invocation = answer_model.bind_influence(
         prepared_input,
         model_influence=(fresh,),

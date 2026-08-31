@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import math
 import struct
 from collections.abc import Iterator, Mapping
@@ -793,6 +794,102 @@ def build_prepared_model_influence_observation_hmac(
         policy='rag-answer:v2',
         settings=settings,
     )
+
+
+def verify_answer_model_influence(
+    slots: object,
+    observations: object,
+    *,
+    settings: Settings,
+) -> None:
+    """Authenticate exact Task 8 child authority against final answer slots."""
+    try:
+        if (
+            type(slots) is not tuple
+            or type(observations) is not tuple
+            or not 1 <= len(slots) <= 8
+            or len(observations) != len(slots)
+        ):
+            raise ValueError
+        fingerprint_secret_bytes(settings)
+        for ordinal, (slot, observation) in enumerate(
+            zip(slots, observations, strict=True)
+        ):
+            if (
+                type(slot) is not EvidenceSlot
+                or type(slot.evidence) is not ServingEvidence
+                or type(observation) is not PreparedModelInfluenceObservation
+                or type(observation.ordinal) is not int
+                or observation.ordinal != ordinal
+                or type(slot.slot_id) is not str
+                or slot.slot_id != _SLOT_IDS[ordinal]
+                or type(observation.slot_id) is not str
+                or observation.slot_id != slot.slot_id
+                or type(slot.support_mode) is not str
+                or type(observation.support_mode) is not str
+                or observation.support_mode != slot.support_mode
+                or slot.evidence.support_mode != slot.support_mode
+                or type(observation.lookup_identity) is not ServingEvidenceIdentity
+            ):
+                raise ValueError
+            evidence = slot.evidence
+            identity = observation.lookup_identity
+            _validate_identity_authority(identity, settings=settings)
+            evidence_identity = _identity_from_evidence(evidence)
+            _validate_identity_authority(evidence_identity, settings=settings)
+            if (
+                type(observation.effective_permission) is not str
+                or observation.effective_permission != evidence.effective_permission
+                or identity.serving_document_id != evidence.serving_document_id
+                or identity.serving_kind != evidence.serving_kind
+                or identity.public_source_id != evidence.public_source_id
+                or identity.public_source_type != evidence.public_source_type
+                or identity.effective_permission != evidence.effective_permission
+                or identity.model_content_hmac != evidence.model_content_hmac
+                or identity.canonical_citation_projection_hmac
+                != evidence.canonical_citation_projection_hmac
+                or identity.serving_version_fingerprint
+                != evidence.serving_version_fingerprint
+                or observation.serving_identity_hmac
+                != evidence.serving_identity_hmac
+                or observation.serving_version_fingerprint
+                != evidence.serving_version_fingerprint
+                or observation.model_content_hmac != evidence.model_content_hmac
+                or observation.canonical_citation_projection_hmac
+                != evidence.canonical_citation_projection_hmac
+            ):
+                raise ValueError
+            for optional in (
+                observation.approval_provenance_hmac,
+                observation.evidence_link_set_hmac,
+            ):
+                if optional is not None:
+                    require_lower_hex_64(optional)
+            expected = _prepared_observation_child_hmac_from_values(
+                ordinal=ordinal,
+                slot_id=observation.slot_id,
+                support_mode=observation.support_mode,
+                lookup_identity=identity,
+                effective_permission=observation.effective_permission,
+                serving_identity_hmac=observation.serving_identity_hmac,
+                serving_version_fingerprint=(
+                    observation.serving_version_fingerprint
+                ),
+                model_content_hmac=observation.model_content_hmac,
+                canonical_citation_projection_hmac=(
+                    observation.canonical_citation_projection_hmac
+                ),
+                approval_provenance_hmac=(
+                    observation.approval_provenance_hmac
+                ),
+                evidence_link_set_hmac=observation.evidence_link_set_hmac,
+                settings=settings,
+            )
+            observed = require_lower_hex_64(observation.observation_hmac)
+            if not hmac.compare_digest(observed, expected):
+                raise ValueError
+    except Exception:
+        raise ValueError('RAG answer model influence is invalid') from None
 
 
 def _build_prepared_model_influence_set_hmac_v2(

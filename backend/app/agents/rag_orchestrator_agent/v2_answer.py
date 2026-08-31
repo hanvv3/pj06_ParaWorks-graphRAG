@@ -56,6 +56,8 @@ class PreparedAnswerInvocation:
     reserved_cost_usd: Decimal
     model_config_snapshot_hmac: str
     provider_policy_snapshot_hmac: str
+    prepared_input_hmac: str
+    prepared_invocation_hmac: str
     budget: PreparedPaidCallBudget
 
 
@@ -72,6 +74,7 @@ class PreparedAnswerInput:
     reserved_cost_usd: Decimal
     model_config_snapshot_hmac: str
     provider_policy_snapshot_hmac: str
+    prepared_input_hmac: str
     budget: PreparedPaidCallBudget
 
 
@@ -212,7 +215,7 @@ class StructuredRagAnswerModel:
                     working_slots = working_slots[:-1]
                     continue
                 rendered_hmac = self._rendered_input_hmac(messages)
-                return PreparedAnswerInput(
+                draft = PreparedAnswerInput(
                     messages=messages,
                     evidence_slots=prepared_slots,
                     answer_question_hmac=answer_question_hmac,
@@ -229,7 +232,15 @@ class StructuredRagAnswerModel:
                         self._route.model_config_snapshot_hmac
                     ),
                     provider_policy_snapshot_hmac=self._policy_hmac,
+                    prepared_input_hmac='0' * 64,
                     budget=budget,
+                )
+                return replace(
+                    draft,
+                    prepared_input_hmac=self._cost_policy.sign_answer_artifact(
+                        'prepared_input',
+                        _prepared_input_authority_payload(draft),
+                    ),
                 )
             raise RagBudgetExceededError
         except RagBudgetExceededError:
@@ -251,7 +262,11 @@ class StructuredRagAnswerModel:
                 prepared_input.evidence_slots,
                 model_influence,
             )
-            return PreparedAnswerInvocation(
+            self._cost_policy.verify_answer_model_influence(
+                prepared_input.evidence_slots,
+                model_influence,
+            )
+            draft = PreparedAnswerInvocation(
                 messages=prepared_input.messages,
                 evidence_slots=prepared_input.evidence_slots,
                 model_influence=model_influence,
@@ -270,7 +285,16 @@ class StructuredRagAnswerModel:
                 provider_policy_snapshot_hmac=(
                     prepared_input.provider_policy_snapshot_hmac
                 ),
+                prepared_input_hmac=prepared_input.prepared_input_hmac,
+                prepared_invocation_hmac='0' * 64,
                 budget=prepared_input.budget,
+            )
+            return replace(
+                draft,
+                prepared_invocation_hmac=self._cost_policy.sign_answer_artifact(
+                    'prepared_invocation',
+                    _prepared_invocation_authority_payload(draft),
+                ),
             )
         except RagAnswerModelBoundaryError:
             raise
@@ -491,6 +515,7 @@ class StructuredRagAnswerModel:
             != self._route.model_config_snapshot_hmac
             or not is_lower_hex_64(value.provider_policy_snapshot_hmac)
             or value.provider_policy_snapshot_hmac != self._policy_hmac
+            or not is_lower_hex_64(value.prepared_input_hmac)
             or self._cost_policy.authorized_policy_snapshot_hmac(
                 'answer_generation'
             )
@@ -520,6 +545,11 @@ class StructuredRagAnswerModel:
             != recomputed.estimated_input_tokens - _ANSWER_FRAME_TOKEN_OVERHEAD
             or value.framed_input_tokens != recomputed.estimated_input_tokens
             or value.reserved_cost_usd != recomputed.reserved_cost_usd
+            or value.prepared_input_hmac
+            != self._cost_policy.sign_answer_artifact(
+                'prepared_input',
+                _prepared_input_authority_payload(value),
+            )
         ):
             raise ValueError
 
@@ -540,9 +570,23 @@ class StructuredRagAnswerModel:
             reserved_cost_usd=value.reserved_cost_usd,
             model_config_snapshot_hmac=value.model_config_snapshot_hmac,
             provider_policy_snapshot_hmac=value.provider_policy_snapshot_hmac,
+            prepared_input_hmac=value.prepared_input_hmac,
             budget=value.budget,
         ))
         _validate_influence_alignment(value.evidence_slots, value.model_influence)
+        self._cost_policy.verify_answer_model_influence(
+            value.evidence_slots,
+            value.model_influence,
+        )
+        if (
+            not is_lower_hex_64(value.prepared_invocation_hmac)
+            or value.prepared_invocation_hmac
+            != self._cost_policy.sign_answer_artifact(
+                'prepared_invocation',
+                _prepared_invocation_authority_payload(value),
+            )
+        ):
+            raise ValueError
 
 
 def _compact_json(value: object) -> str:
@@ -563,6 +607,62 @@ def _canonical_json_bytes(value: object) -> bytes:
         sort_keys=True,
         separators=(',', ':'),
     ).encode('utf-8', errors='strict')
+
+
+def _prepared_input_authority_payload(
+    value: PreparedAnswerInput | PreparedAnswerInvocation,
+) -> dict[str, object]:
+    return {
+        'answer_question_hmac': value.answer_question_hmac,
+        'encoded_input_tokens': value.encoded_input_tokens,
+        'evidence_slots': [
+            {
+                'canonical_citation_projection_hmac': (
+                    slot.evidence.canonical_citation_projection_hmac
+                ),
+                'effective_permission': slot.evidence.effective_permission,
+                'model_content_hmac': slot.evidence.model_content_hmac,
+                'public_source_id': slot.evidence.public_source_id,
+                'public_source_type': slot.evidence.public_source_type,
+                'serving_document_id': slot.evidence.serving_document_id,
+                'serving_identity_hmac': slot.evidence.serving_identity_hmac,
+                'serving_kind': slot.evidence.serving_kind,
+                'serving_version_fingerprint': (
+                    slot.evidence.serving_version_fingerprint
+                ),
+                'slot_id': slot.slot_id,
+                'support_mode': slot.support_mode,
+            }
+            for slot in value.evidence_slots
+        ],
+        'framed_input_tokens': value.framed_input_tokens,
+        'generation_estimator_input_hmac': (
+            value.generation_estimator_input_hmac
+        ),
+        'maximum_output_tokens': value.budget.maximum_output_tokens,
+        'model_config_snapshot_hmac': value.model_config_snapshot_hmac,
+        'provider_policy_snapshot_hmac': value.provider_policy_snapshot_hmac,
+        'rendered_input_hmac': value.rendered_input_hmac,
+        'reserved_cost_usd': format(value.reserved_cost_usd, 'f'),
+        'retrieval_query_hmac': value.retrieval_query_hmac,
+    }
+
+
+def _prepared_invocation_authority_payload(
+    value: PreparedAnswerInvocation,
+) -> dict[str, object]:
+    return {
+        **_prepared_input_authority_payload(value),
+        'model_influence': [
+            {
+                'observation_hmac': observation.observation_hmac,
+                'ordinal': observation.ordinal,
+                'slot_id': observation.slot_id,
+            }
+            for observation in value.model_influence
+        ],
+        'prepared_input_hmac': value.prepared_input_hmac,
+    }
 
 
 def _renumber_slots(slots: tuple[EvidenceSlot, ...]) -> tuple[EvidenceSlot, ...]:

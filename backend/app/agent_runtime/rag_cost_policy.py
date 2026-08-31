@@ -25,6 +25,7 @@ from backend.app.agent_runtime.model_router import (
 )
 from backend.app.agent_runtime.rag_v2_identity import exact_utf8_bytes
 from backend.app.core.config import Settings
+from backend.app.rag.evidence_projection import verify_answer_model_influence
 from backend.app.rag.retrieval import (
     QUERY_EMBEDDING_MODEL_CONFIG_VERSION,
     QUERY_EMBEDDING_PAYLOAD_VALIDATOR_VERSION,
@@ -158,11 +159,17 @@ def _create_rag_cost_policy_type(
         core: _tiktoken.CoreBPE
         definition_fingerprint: str
 
+    class InfluenceFingerprintSettings(NamedTuple):
+        agent_runtime_fingerprint_secret: str
+        agent_runtime_fingerprint_key_version: str
+        paraworks_env: str
+
     class State:
         __slots__ = (
             'answer_config_hmac',
             'answer_artifact_signer',
             'answer_estimator_signer',
+            'answer_influence_verifier',
             'answer_policy_hmac',
             'answer_tokenizer',
             'authority',
@@ -322,10 +329,38 @@ def _create_rag_cost_policy_type(
                     policy_version=authority.answer_estimator_version,
                 )
 
+            influence_settings = InfluenceFingerprintSettings(
+                agent_runtime_fingerprint_secret=(
+                    settings.agent_runtime_fingerprint_secret
+                ),
+                agent_runtime_fingerprint_key_version=(
+                    settings.agent_runtime_fingerprint_key_version
+                ),
+                paraworks_env=settings.paraworks_env,
+            )
+
+            def answer_influence_verifier(
+                slots: object,
+                observations: object,
+            ) -> None:
+                verify_answer_model_influence(
+                    slots,
+                    observations,
+                    settings=influence_settings,
+                )
+
             def answer_artifact_signer(kind: str, payload: object) -> str:
                 domains = {
                     'rendered_input': (
                         'rag-rendered-model-input-bytes:v1',
+                        'rag-answer:v2',
+                    ),
+                    'prepared_input': (
+                        'rag-prepared-answer-input:v1',
+                        'rag-answer:v2',
+                    ),
+                    'prepared_invocation': (
+                        'rag-prepared-answer-invocation:v1',
                         'rag-answer:v2',
                     ),
                     'block_text': (
@@ -360,6 +395,7 @@ def _create_rag_cost_policy_type(
                 schema_verifier=schema_verifier,
                 query_estimator_signer=query_estimator_signer,
                 answer_estimator_signer=answer_estimator_signer,
+                answer_influence_verifier=answer_influence_verifier,
                 answer_artifact_signer=answer_artifact_signer,
                 query_config_hmac=query_config_hmac,
                 answer_config_hmac=answer_config_hmac,
@@ -638,6 +674,17 @@ def _create_rag_cost_policy_type(
             result = state.answer_artifact_signer(kind, payload)
             require_same_state(self, state, code)
             return result
+
+        def verify_answer_model_influence(
+            self,
+            slots: object,
+            observations: object,
+        ) -> None:
+            code = 'model_unavailable'
+            state = get_state(self, code)
+            state.answer_influence_verifier(slots, observations)
+            invoke_hook('answer_influence_after_verify', self)
+            require_same_state(self, state, code)
 
     Policy.__name__ = 'RagCostPolicy'
     Policy.__qualname__ = 'RagCostPolicy'

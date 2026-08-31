@@ -11,6 +11,7 @@ import pytest
 import tiktoken
 
 from backend.app.agent_runtime import model_router, rag_cost_policy
+from backend.app.agent_runtime.fingerprints import keyed_fingerprint
 from backend.app.agent_runtime.model_router import (
     build_rag_answer_model_config_snapshot_hmac,
 )
@@ -157,6 +158,71 @@ def _answer_input(policy: RagCostPolicy, *, content: str = '질문  두 칸') ->
         exact_response_schema_json=_schema_bytes(),
         model_config_snapshot_hmac=policy.answer_model_config_snapshot_hmac,
     )
+
+
+def test_cost_policy_exposes_only_fail_closed_answer_influence_verification() -> None:
+    policy = _policy()
+
+    with pytest.raises(ValueError):
+        policy.verify_answer_model_influence((), ())
+
+
+def test_answer_influence_verifier_retains_no_unrelated_provider_secrets(
+    monkeypatch,
+) -> None:
+    captured: list[Settings] = []
+
+    def capture_settings(slots, observations, *, settings) -> None:
+        captured.append(settings)
+
+    monkeypatch.setattr(
+        rag_cost_policy,
+        'verify_answer_model_influence',
+        capture_settings,
+    )
+    provider_secret = 'provider-key-material-must-not-be-retained'
+    policy = _policy(_settings(
+        openai_api_key=provider_secret,
+        google_oauth_state_secret='google-secret-must-not-be-retained',
+    ))
+
+    policy.verify_answer_model_influence((), ())
+
+    assert len(captured) == 1
+    verifier_settings = captured[0]
+    assert getattr(verifier_settings, 'openai_api_key', None) is None
+    assert getattr(verifier_settings, 'google_oauth_state_secret', None) is None
+    assert provider_secret not in repr(policy)
+    with pytest.raises(TypeError):
+        copy.copy(policy)
+    with pytest.raises(TypeError):
+        copy.deepcopy(policy)
+    with pytest.raises(TypeError):
+        pickle.dumps(policy)
+
+
+@pytest.mark.parametrize(
+    ('kind', 'schema'),
+    (
+        ('prepared_input', 'rag-prepared-answer-input:v1'),
+        ('prepared_invocation', 'rag-prepared-answer-invocation:v1'),
+    ),
+)
+def test_prepared_answer_authority_uses_exact_narrow_domain(
+    kind: str,
+    schema: str,
+) -> None:
+    settings = _settings()
+    policy = _policy(settings)
+    payload = {'authority': 'exact'}
+    expected = keyed_fingerprint(
+        payload,
+        secret=settings.agent_runtime_fingerprint_secret.encode(),
+        schema_version=schema,
+        policy_version='rag-answer:v2',
+    )
+
+    assert policy.sign_answer_artifact(kind, payload) == expected
 
 
 @pytest.mark.parametrize('token_count', (7999, 8000))
