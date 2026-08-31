@@ -29,10 +29,12 @@ from backend.app.models import (
     TrustedKnowledgeEvidenceLink,
 )
 from backend.app.rag.serving_contracts import (
+    CanonicalServingProjection,
     EvidenceAccessClassification,
     ExplicitApprovalProvenance,
     LegacyHumanProvenance,
     PermissionLevel,
+    RawServingVersionEnvelope,
     SelectedCitationChild,
     ServingEvidence,
     ServingEvidenceIdentity,
@@ -166,9 +168,7 @@ class TrustedServingEnvelopeResolver:
             canonical_type,
             knowledge_id,
         )
-        effective_permission = known_permission(
-            eligibility.effective_permission
-        )
+        effective_permission = known_permission(eligibility.effective_permission)
         if target is None or not eligibility.eligible or effective_permission is None:
             return None
         if scope is not None and not _target_is_visible_before_link_selection(
@@ -327,11 +327,9 @@ class TrustedServingEnvelopeResolver:
                 key=_identity_order,
             )
         )
-        if (
-            len(set(identities)) != len(identities)
-            or len({value.trusted_knowledge_evidence_link_id for value in identities})
-            != len(identities)
-        ):
+        if len(set(identities)) != len(identities) or len(
+            {value.trusted_knowledge_evidence_link_id for value in identities}
+        ) != len(identities):
             return None
         citations: list[_ResolvedCitationChild] = []
         used_pair_ordinals: set[int] = set()
@@ -417,9 +415,7 @@ class TrustedServingEnvelopeResolver:
             ),
             source_row_id=source.id,
             canonical_source_type=source.source_type,
-            canonical_version_or_signature=(
-                identity.canonical_version_or_signature
-            ),
+            canonical_version_or_signature=(identity.canonical_version_or_signature),
             review_item_source_pair_ordinal=pair_ordinal,
         )
         citation_hmac = build_canonical_citation_projection_hmac(
@@ -433,9 +429,7 @@ class TrustedServingEnvelopeResolver:
         signature_hmac = build_source_signature_hmac(
             canonical_source_id=identity.canonical_source_id,
             canonical_source_kind=identity.canonical_source_kind,
-            canonical_version_or_signature=(
-                identity.canonical_version_or_signature
-            ),
+            canonical_version_or_signature=(identity.canonical_version_or_signature),
             settings=self._settings,
         )
         version_hmac = build_source_version_identity_hmac(
@@ -452,9 +446,7 @@ class TrustedServingEnvelopeResolver:
             source_permission=source_permission,
             citation_projection_hmac=citation_hmac,
             evidence_link_hmac=build_approval_evidence_link_hmac(
-                approval_evidence_link_id=(
-                    identity.trusted_knowledge_evidence_link_id
-                ),
+                approval_evidence_link_id=(identity.trusted_knowledge_evidence_link_id),
                 canonical_citation_projection_hmac=citation_hmac,
                 source_id=source.id,
                 source_permission=source_permission,
@@ -517,7 +509,7 @@ class TrustedServingEnvelopeResolver:
             selected_citation.selected_child,
             settings=self._settings,
         )
-        build_approval_provenance_hmac(
+        approval_provenance_hmac = build_approval_provenance_hmac(
             branch='explicit_approval',
             approval_fingerprint_key_material_verifier=(
                 link.fingerprint_key_material_verifier
@@ -545,6 +537,8 @@ class TrustedServingEnvelopeResolver:
             citation_hmac=citation_hmac,
             effective_permission=effective_permission,
             provenance=provenance,
+            approval_provenance_hmac=approval_provenance_hmac,
+            evidence_link_set_hmac=evidence_link_set_hmac,
             settings=self._settings,
         )
 
@@ -572,10 +566,9 @@ class TrustedServingEnvelopeResolver:
         target_links = getattr(target, 'source_links', None)
         target_snippets = getattr(target, 'source_snippets', None)
         item_pairs = _validated_review_pairs(item)
-        if (
-            target_links != [pair[0] for pair in item_pairs]
-            or target_snippets != [pair[1] for pair in item_pairs]
-        ):
+        if target_links != [pair[0] for pair in item_pairs] or target_snippets != [
+            pair[1] for pair in item_pairs
+        ]:
             return None
         legacy_hmac = build_legacy_evidence_pairs_hmac(
             knowledge_type=canonical_type,
@@ -600,7 +593,7 @@ class TrustedServingEnvelopeResolver:
             legacy_review_item_permission_level=item.permission_level,
             legacy_source_review_item_id=item.id,
         )
-        build_approval_provenance_hmac(
+        approval_provenance_hmac = build_approval_provenance_hmac(
             branch='legacy_human_base',
             approval_fingerprint_key_material_verifier=None,
             approval_fingerprint_key_version=None,
@@ -626,6 +619,8 @@ class TrustedServingEnvelopeResolver:
             citation_hmac=citation_hmac,
             effective_permission=effective_permission,
             provenance=provenance,
+            approval_provenance_hmac=approval_provenance_hmac,
+            evidence_link_set_hmac=None,
             settings=self._settings,
         )
 
@@ -657,9 +652,7 @@ class TrustedEvidenceAuthorizer:
                 global_eligibility='ineligible',
                 resource_scope='invalid_scope',
                 permission_visibility=(
-                    'unknown_permission'
-                    if permission is None
-                    else 'denied_known'
+                    'unknown_permission' if permission is None else 'denied_known'
                 ),
             )
         if permission is None:
@@ -769,9 +762,11 @@ class ServingEvidenceResolver:
             ).resolve_for_index(chunk_id)
             if observation is None or observation.identity != identity:
                 return None
-            classification = CanonicalSourceObservationEligibilityService().classify_access(
-                scope,
-                observation,
+            classification = (
+                CanonicalSourceObservationEligibilityService().classify_access(
+                    scope,
+                    observation,
+                )
             )
             if not _is_visible(classification):
                 return None
@@ -842,6 +837,86 @@ class ServingEvidenceResolver:
         )
         return scoped.evidence if scoped is not None else None
 
+    def resolve_projection_candidate(
+        self,
+        *,
+        db: Session,
+        identity: ServingEvidenceIdentity,
+        scope: SecurityScope,
+    ) -> CanonicalServingProjection | None:
+        """Resolve fresh public bytes without consulting vector/model metadata."""
+        evidence = self.resolve_candidate(db=db, identity=identity, scope=scope)
+        if evidence is None:
+            return None
+        if evidence.serving_kind == 'raw_chunk':
+            envelope = evidence.version_envelope
+            if not isinstance(envelope, RawServingVersionEnvelope):
+                return None
+            projection = CanonicalSourceObservationResolver(
+                db=db, settings=self._settings
+            ).resolve_projection_for_scope(envelope.document_chunk_id, scope=scope)
+            if projection is None or projection.identity != identity:
+                return None
+            return projection
+        else:
+            envelope = evidence.version_envelope
+            if not isinstance(envelope, TrustedServingVersionEnvelope):
+                return None
+            fresh = TrustedServingEnvelopeResolver(
+                db=db, settings=self._settings
+            ).resolve_for_scope(
+                envelope.knowledge_type,
+                envelope.knowledge_id,
+                scope=scope,
+            )
+            if fresh is None or fresh.identity != identity:
+                return None
+            provenance = fresh.trusted_version.provenance
+            if isinstance(provenance, ExplicitApprovalProvenance):
+                review_item_id = provenance.review_item_id
+                ordinal = (
+                    provenance.selected_citation_child.review_item_source_pair_ordinal
+                )
+            elif isinstance(provenance, LegacyHumanProvenance):
+                review_item_id = provenance.legacy_source_review_item_id
+                ordinal = 0
+            else:
+                return None
+            item = db.get(ReviewItem, review_item_id)
+            pairs = _validated_review_pairs(item)
+            if ordinal < 0 or ordinal >= len(pairs):
+                return None
+            source_url, source_snippet = pairs[ordinal]
+            evidence = fresh.evidence
+            result_id = envelope.knowledge_id
+            approval_hmac = fresh.approval_provenance_hmac
+            link_set_hmac = fresh.evidence_link_set_hmac
+            parser_status = None
+            parser_status_reason = None
+            revision_id = None
+        expected_citation_hmac = build_canonical_citation_projection_hmac(
+            public_source_id=evidence.public_source_id,
+            public_source_type=evidence.public_source_type,
+            source_url=source_url,
+            source_snippet=source_snippet,
+            effective_permission=evidence.effective_permission,
+            settings=self._settings,
+        )
+        if expected_citation_hmac != evidence.canonical_citation_projection_hmac:
+            return None
+        return CanonicalServingProjection(
+            identity=identity,
+            evidence=evidence,
+            public_result_id=result_id,
+            source_url=source_url,
+            source_snippet=source_snippet,
+            parser_status=parser_status,
+            parser_status_reason=parser_status_reason,
+            revision_id=revision_id,
+            approval_provenance_hmac=approval_hmac,
+            evidence_link_set_hmac=link_set_hmac,
+        )
+
 
 def _build_trusted_envelope(
     *,
@@ -854,6 +929,8 @@ def _build_trusted_envelope(
     citation_hmac: str,
     effective_permission: PermissionLevel,
     provenance: ExplicitApprovalProvenance | LegacyHumanProvenance,
+    approval_provenance_hmac: str,
+    evidence_link_set_hmac: str | None,
     settings: Settings,
 ) -> TrustedServingEnvelope:
     trusted_version = TrustedServingVersionEnvelope(
@@ -904,6 +981,8 @@ def _build_trusted_envelope(
         identity=identity,
         evidence=evidence,
         trusted_version=trusted_version,
+        approval_provenance_hmac=approval_provenance_hmac,
+        evidence_link_set_hmac=evidence_link_set_hmac,
     )
 
 
@@ -919,9 +998,7 @@ def _identity_from_row(
             row.canonical_version_or_signature
         ),
         evidence_hash=require_lower_hex_64(row.evidence_hash),
-        fingerprint_key_version=require_exact_nonblank(
-            row.fingerprint_key_version
-        ),
+        fingerprint_key_version=require_exact_nonblank(row.fingerprint_key_version),
         fingerprint_key_material_verifier=require_lower_hex_64(
             row.fingerprint_key_material_verifier
         ),
@@ -1107,20 +1184,23 @@ def _trusted_envelope_is_consistent(envelope: TrustedServingEnvelope) -> bool:
         and identity.version_envelope is trusted_version
         and evidence.version_envelope is trusted_version
         and evidence.provenance is trusted_version.provenance
-        and identity.serving_document_id == evidence.serving_document_id
+        and identity.serving_document_id
+        == evidence.serving_document_id
         == trusted_version.serving_document_id
         and identity.public_source_id == evidence.public_source_id
-        and identity.public_source_type == evidence.public_source_type
+        and identity.public_source_type
+        == evidence.public_source_type
         == trusted_version.knowledge_type
-        and identity.effective_permission == evidence.effective_permission
+        and identity.effective_permission
+        == evidence.effective_permission
         == trusted_version.effective_permission
-        and identity.model_content_hmac == evidence.model_content_hmac
+        and identity.model_content_hmac
+        == evidence.model_content_hmac
         == trusted_version.model_content_hmac
         and identity.canonical_citation_projection_hmac
         == evidence.canonical_citation_projection_hmac
         == trusted_version.canonical_citation_projection_hmac
-        and identity.serving_version_fingerprint
-        == evidence.serving_version_fingerprint
+        and identity.serving_version_fingerprint == evidence.serving_version_fingerprint
     )
 
 

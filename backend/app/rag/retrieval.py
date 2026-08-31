@@ -4,7 +4,7 @@ import math
 import re
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, cast
 
 from langchain_core.runnables import Runnable
 
@@ -24,6 +24,7 @@ from backend.app.rag.embeddings import (
 from backend.app.rag.serving_contracts import (
     EvidenceAccessClassification,
     ServingEvidence,
+    SupportMode,
 )
 
 RagPaidComponent = Literal['query_embedding', 'answer_generation']
@@ -135,6 +136,77 @@ class RetrievalCandidate:
             raise ValueError('retrieval candidate is invalid')
 
 
+EvidenceSlotId: TypeAlias = Literal['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8']
+_EVIDENCE_SLOT_IDS: tuple[EvidenceSlotId, ...] = (
+    'E1',
+    'E2',
+    'E3',
+    'E4',
+    'E5',
+    'E6',
+    'E7',
+    'E8',
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceSlot:
+    slot_id: EvidenceSlotId
+    support_mode: SupportMode
+    evidence: ServingEvidence
+    relevance_score: float
+    matched_terms: tuple[str, ...]
+
+
+def rank_evidence_slots(
+    candidates: tuple[RetrievalCandidate, ...],
+    *,
+    max_serialized_content_chars: int | None = None,
+) -> tuple[EvidenceSlot, ...]:
+    """Stable-partition approved candidates and remove only whole tail rows."""
+    if type(candidates) is not tuple:
+        raise ValueError('retrieval candidates must be an immutable tuple')
+    if max_serialized_content_chars is not None and (
+        type(max_serialized_content_chars) is not int
+        or max_serialized_content_chars < 0
+    ):
+        raise ValueError('evidence content budget is invalid')
+    validated: list[RetrievalCandidate] = []
+    for candidate in candidates:
+        if type(candidate) is not RetrievalCandidate:
+            raise ValueError('retrieval candidate is invalid')
+        validated.append(candidate)
+    ordered = [
+        *(
+            candidate
+            for candidate in validated
+            if candidate.evidence.serving_kind == 'trusted_knowledge'
+        ),
+        *(
+            candidate
+            for candidate in validated
+            if candidate.evidence.serving_kind == 'raw_chunk'
+        ),
+    ][:8]
+    if max_serialized_content_chars is not None:
+        while (
+            ordered
+            and sum(len(value.evidence.model_content) for value in ordered)
+            > max_serialized_content_chars
+        ):
+            ordered.pop()
+    return tuple(
+        EvidenceSlot(
+            slot_id=_EVIDENCE_SLOT_IDS[index],
+            support_mode=cast(SupportMode, candidate.evidence.support_mode),
+            evidence=candidate.evidence,
+            relevance_score=candidate.relevance_score,
+            matched_terms=candidate.matched_terms,
+        )
+        for index, candidate in enumerate(ordered)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class QueryEmbeddingReceipt:
     attempted: bool
@@ -203,8 +275,7 @@ def validate_query_embedding_call_result(
             or type(receipt.outcome) is not str
             or receipt.outcome != 'component_succeeded'
             or not is_lower_hex_64(receipt.model_config_snapshot_hmac)
-            or receipt.model_config_snapshot_hmac
-            != prepared.model_config_snapshot_hmac
+            or receipt.model_config_snapshot_hmac != prepared.model_config_snapshot_hmac
             or not is_lower_hex_64(receipt.provider_policy_snapshot_hmac)
             or receipt.provider_policy_snapshot_hmac
             != prepared.provider_policy_snapshot_hmac
@@ -269,11 +340,9 @@ def validate_prepared_query_embedding(
             raise ValueError
         budget = value.budget
         validate_query_embedding_budget(budget)
-        expected_model_hmac = build_query_embedding_model_config_snapshot_hmac(
+        expected_model_hmac = build_query_embedding_model_config_snapshot_hmac(settings)
+        expected_provider_hmac = build_query_embedding_provider_policy_snapshot_hmac(
             settings
-        )
-        expected_provider_hmac = (
-            build_query_embedding_provider_policy_snapshot_hmac(settings)
         )
         expected_fence = build_query_embedding_attempt_fence_hmac(
             retrieval_query_hmac=value.retrieval_query_hmac,
@@ -380,9 +449,7 @@ def build_query_embedding_retrieval_query_hmac_from_utf8(
     if type(query_utf8) is not bytes:
         raise ValueError('query embedding query bytes are invalid')
     try:
-        query_identity = exact_utf8_bytes(
-            query_utf8.decode('utf-8', errors='strict')
-        )
+        query_identity = exact_utf8_bytes(query_utf8.decode('utf-8', errors='strict'))
     except (UnicodeDecodeError, ValueError):
         raise ValueError('query embedding query bytes are invalid') from None
     return _build_query_embedding_retrieval_query_hmac(

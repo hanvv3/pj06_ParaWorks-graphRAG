@@ -145,9 +145,7 @@ class ServingEvidence:
     model_content_hmac: str
     canonical_citation_projection_hmac: str
     version_envelope: ServingVersionEnvelope
-    provenance: (
-        RawChunkProvenance | ExplicitApprovalProvenance | LegacyHumanProvenance
-    )
+    provenance: RawChunkProvenance | ExplicitApprovalProvenance | LegacyHumanProvenance
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +160,28 @@ class TrustedServingEnvelope:
     identity: ServingEvidenceIdentity
     evidence: ServingEvidence
     trusted_version: TrustedServingVersionEnvelope
+    approval_provenance_hmac: str
+    evidence_link_set_hmac: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalServingProjection:
+    """Fresh resolver-owned public bytes plus internal serving authority.
+
+    This DTO may only be assembled from canonical rows.  Vector metadata and
+    model output are deliberately unable to construct public citation bytes.
+    """
+
+    identity: ServingEvidenceIdentity
+    evidence: ServingEvidence
+    public_result_id: int
+    source_url: str
+    source_snippet: str
+    parser_status: str | None
+    parser_status_reason: str | None
+    revision_id: str | None
+    approval_provenance_hmac: str | None
+    evidence_link_set_hmac: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,13 +342,9 @@ def serving_version_payload(envelope: ServingVersionEnvelope) -> dict[str, objec
             'server_content_signature': exact_utf8_bytes(
                 envelope.server_content_signature
             ),
-            'parser_policy_version': exact_utf8_bytes(
-                envelope.parser_policy_version
-            ),
+            'parser_policy_version': exact_utf8_bytes(envelope.parser_policy_version),
             'parser_version': exact_utf8_bytes(envelope.parser_version),
-            'chunk_policy_version': exact_utf8_bytes(
-                envelope.chunk_policy_version
-            ),
+            'chunk_policy_version': exact_utf8_bytes(envelope.chunk_policy_version),
             'model_content_hash': envelope.model_content_hmac,
             'canonical_citation_projection_hash': (
                 envelope.canonical_citation_projection_hmac
@@ -386,9 +402,7 @@ def build_source_version_identity_hmac(
     require_positive_int(source_row_id)
     return _fingerprint(
         {
-            'canonical_source_id_bytes': exact_utf8_bytes(
-                identity.canonical_source_id
-            ),
+            'canonical_source_id_bytes': exact_utf8_bytes(identity.canonical_source_id),
             'canonical_source_kind_bytes': exact_utf8_bytes(
                 identity.canonical_source_kind
             ),
@@ -423,9 +437,7 @@ def build_selected_citation_child_hmac(
             'canonical_version_or_signature_bytes': exact_utf8_bytes(
                 child.canonical_version_or_signature
             ),
-            'review_item_source_pair_ordinal': (
-                child.review_item_source_pair_ordinal
-            ),
+            'review_item_source_pair_ordinal': (child.review_item_source_pair_ordinal),
             'source_row_id': child.source_row_id,
             'trusted_knowledge_evidence_link_id': (
                 child.trusted_knowledge_evidence_link_id
@@ -458,9 +470,7 @@ def build_approval_evidence_link_hmac(
     return _fingerprint(
         {
             'approval_evidence_link_id': approval_evidence_link_id,
-            'canonical_citation_projection_hmac': (
-                canonical_citation_projection_hmac
-            ),
+            'canonical_citation_projection_hmac': (canonical_citation_projection_hmac),
             'source_id': source_id,
             'source_permission': source_permission,
             'source_signature_hmac': source_signature_hmac,
@@ -551,9 +561,7 @@ def build_legacy_evidence_pairs_hmac(
     return _fingerprint(
         {
             'knowledge_permission': knowledge_permission,
-            'knowledge_review_status_bytes': exact_utf8_bytes(
-                knowledge_review_status
-            ),
+            'knowledge_review_status_bytes': exact_utf8_bytes(knowledge_review_status),
             'knowledge_target_id': knowledge_id,
             'knowledge_type_bytes': exact_utf8_bytes(knowledge_type),
             'pairs': pairs,
@@ -624,7 +632,10 @@ def build_approval_provenance_hmac(
             security_scope_id,
             selected_citation_child_hmac,
         )
-        if any(value is None for value in required) or legacy_evidence_pairs_hmac is not None:
+        if (
+            any(value is None for value in required)
+            or legacy_evidence_pairs_hmac is not None
+        ):
             raise ValueError('explicit approval provenance is incomplete')
     elif (
         any(
@@ -658,9 +669,7 @@ def build_approval_provenance_hmac(
             'claim_fingerprint': claim_fingerprint,
             'evidence_link_set_hmac': evidence_link_set_hmac,
             'legacy_evidence_pairs_hmac': legacy_evidence_pairs_hmac,
-            'promotion_effect_kind_bytes': _optional_exact_bytes(
-                promotion_effect_kind
-            ),
+            'promotion_effect_kind_bytes': _optional_exact_bytes(promotion_effect_kind),
             'resolution_source_bytes': _optional_exact_bytes(resolution_source),
             'review_item_id': review_item_id,
             'security_scope_id_bytes': _optional_exact_bytes(security_scope_id),
@@ -755,9 +764,7 @@ def _provenance_payload(
             'approval_link_id': provenance.approval_link_id,
             'review_item_id': provenance.review_item_id,
             'security_scope_id': exact_utf8_bytes(provenance.security_scope_id),
-            'promotion_effect_kind': exact_utf8_bytes(
-                provenance.promotion_effect_kind
-            ),
+            'promotion_effect_kind': exact_utf8_bytes(provenance.promotion_effect_kind),
             'resolution_source': provenance.resolution_source,
             'claim_fingerprint': provenance.claim_fingerprint,
             'approval_permission_level': provenance.approval_permission_level,
@@ -780,7 +787,10 @@ def _provenance_payload(
     require_lower_hex_64(provenance.legacy_evidence_pairs_hmac)
     _require_permission(provenance.legacy_review_item_permission_level)
     require_positive_int(provenance.legacy_source_review_item_id)
-    if provenance.branch != 'legacy_human_base' or provenance.legacy_binding != 'review_item':
+    if (
+        provenance.branch != 'legacy_human_base'
+        or provenance.legacy_binding != 'review_item'
+    ):
         raise ValueError('legacy provenance branch is invalid')
     return {
         'branch': provenance.branch,
@@ -868,9 +878,7 @@ def _evidence_link_identity_payload(
             identity.canonical_version_or_signature
         ),
         'evidence_hash': identity.evidence_hash,
-        'fingerprint_key_version': exact_utf8_bytes(
-            identity.fingerprint_key_version
-        ),
+        'fingerprint_key_version': exact_utf8_bytes(identity.fingerprint_key_version),
         'fingerprint_key_material_verifier': (
             identity.fingerprint_key_material_verifier
         ),
@@ -888,7 +896,5 @@ def _selected_child_payload(child: SelectedCitationChild) -> dict[str, object]:
         'canonical_version_or_signature': exact_utf8_bytes(
             child.canonical_version_or_signature
         ),
-        'review_item_source_pair_ordinal': (
-            child.review_item_source_pair_ordinal
-        ),
+        'review_item_source_pair_ordinal': (child.review_item_source_pair_ordinal),
     }

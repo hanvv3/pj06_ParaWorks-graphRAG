@@ -16,6 +16,7 @@ from backend.app.ingestion.source_authority import (
 from backend.app.ingestion.source_versions import source_version_ref
 from backend.app.models import DocumentChunk, Source, VectorServingTombstone
 from backend.app.rag.serving_contracts import (
+    CanonicalServingProjection,
     EvidenceAccessClassification,
     IndexableSourceObservation,
     RawChunkProvenance,
@@ -47,6 +48,54 @@ class CanonicalSourceObservationResolver:
             return self._resolve_for_index(chunk_id)
         except (SQLAlchemyError, TypeError, UnicodeError, ValueError):
             return None
+
+    def resolve_projection_for_scope(
+        self,
+        chunk_id: int,
+        *,
+        scope: SecurityScope,
+    ) -> CanonicalServingProjection | None:
+        """Return public raw bytes only after a fresh scoped canonical read."""
+        observation = self.resolve_for_index(chunk_id)
+        if observation is None:
+            return None
+        access = CanonicalSourceObservationEligibilityService().classify_access(
+            scope, observation
+        )
+        if (
+            access.global_eligibility != 'eligible'
+            or access.resource_scope != 'in_scope'
+            or access.permission_visibility != 'visible'
+        ):
+            return None
+        source = self._db.get(Source, observation.raw_version.source_row_id)
+        chunk = self._db.get(DocumentChunk, observation.raw_version.document_chunk_id)
+        authority = (
+            resolve_exact_source_authority(self._db, source=source)
+            if source is not None
+            else None
+        )
+        if (
+            source is None
+            or chunk is None
+            or authority is None
+            or authority.parser_run.id != observation.raw_version.parser_run_id
+        ):
+            return None
+        source_url = RagPublicCitationUrlValidator().validate(source.source_url)
+        source_snippet = require_exact_nonblank(chunk.source_snippet)
+        return CanonicalServingProjection(
+            identity=observation.identity,
+            evidence=observation.evidence,
+            public_result_id=chunk.id,
+            source_url=source_url,
+            source_snippet=source_snippet,
+            parser_status=authority.parser_run.parser_status,
+            parser_status_reason=authority.parser_run.parser_status_reason,
+            revision_id=authority.parser_run.revision_id or None,
+            approval_provenance_hmac=None,
+            evidence_link_set_hmac=None,
+        )
 
     def _resolve_for_index(self, chunk_id: int) -> IndexableSourceObservation | None:
         if type(chunk_id) is not int or chunk_id <= 0:
@@ -90,21 +139,15 @@ class CanonicalSourceObservationResolver:
         server_signature_schema = require_exact_nonblank(
             parser_run.server_content_signature_schema
         )
-        server_signature = require_exact_nonblank(
-            parser_run.server_content_signature
-        )
+        server_signature = require_exact_nonblank(parser_run.server_content_signature)
         if (
             server_signature_schema != source.server_content_signature_schema
             or server_signature != source.server_content_signature
         ):
             return None
-        parser_policy_version = require_exact_nonblank(
-            parser_run.parser_policy_version
-        )
+        parser_policy_version = require_exact_nonblank(parser_run.parser_policy_version)
         parser_version = require_exact_nonblank(parser_run.parser_version)
-        chunk_policy_version = require_exact_nonblank(
-            parser_run.chunk_policy_version
-        )
+        chunk_policy_version = require_exact_nonblank(parser_run.chunk_policy_version)
         external_revision = parser_run.revision_id or None
         if external_revision is not None:
             require_exact_nonblank(external_revision)
@@ -213,9 +256,7 @@ class CanonicalSourceObservationEligibilityService:
                 global_eligibility='ineligible',
                 resource_scope='invalid_scope',
                 permission_visibility=(
-                    'unknown_permission'
-                    if permission is None
-                    else 'denied_known'
+                    'unknown_permission' if permission is None else 'denied_known'
                 ),
             )
         if scope.project_constraints:
@@ -253,17 +294,20 @@ def _observation_is_consistent(observation: IndexableSourceObservation) -> bool:
         and evidence.version_envelope is raw_version
         and isinstance(evidence.provenance, RawChunkProvenance)
         and evidence.provenance.raw_version is raw_version
-        and identity.serving_document_id == evidence.serving_document_id
+        and identity.serving_document_id
+        == evidence.serving_document_id
         == raw_version.serving_document_id
-        and identity.public_source_id == evidence.public_source_id
+        and identity.public_source_id
+        == evidence.public_source_id
         == raw_version.public_source_id
-        and identity.effective_permission == evidence.effective_permission
+        and identity.effective_permission
+        == evidence.effective_permission
         == raw_version.effective_permission
-        and identity.model_content_hmac == evidence.model_content_hmac
+        and identity.model_content_hmac
+        == evidence.model_content_hmac
         == raw_version.model_content_hmac
         and identity.canonical_citation_projection_hmac
         == evidence.canonical_citation_projection_hmac
         == raw_version.canonical_citation_projection_hmac
-        and identity.serving_version_fingerprint
-        == evidence.serving_version_fingerprint
+        and identity.serving_version_fingerprint == evidence.serving_version_fingerprint
     )
