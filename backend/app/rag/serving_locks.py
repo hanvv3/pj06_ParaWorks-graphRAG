@@ -37,6 +37,7 @@ from backend.app.models import (
     VectorServingTombstone,
 )
 from backend.app.rag.serving_generation import (
+    RagServingGenerationLockedContext,
     arm_corpus_generation_refresh,
     lock_rag_serving_generation,
 )
@@ -227,6 +228,13 @@ class ServingMutationLockCoordinator:
         self._db = db
         self._settings = settings
         self._manager = VectorServingLockManager(db=db, settings=settings)
+        self._generation_context: RagServingGenerationLockedContext | None = None
+
+    @property
+    def generation_context(self) -> RagServingGenerationLockedContext:
+        if self._generation_context is None:
+            raise TypeError('Serving mutation generation context is unavailable')
+        return self._generation_context
 
     def acquire(
         self,
@@ -305,6 +313,7 @@ class ServingMutationLockCoordinator:
             settings=self._settings,
             context=generation_context,
         )
+        self._generation_context = generation_context
         return locked
 
     def _lock_rows(

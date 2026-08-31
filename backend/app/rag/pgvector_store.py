@@ -128,6 +128,36 @@ class PgVectorStore:
         )
         return max(int(getattr(result, 'rowcount', 0) or 0), 0)
 
+    def load_embedding(
+        self,
+        document_id: str,
+        *,
+        locked_context: VectorServingLockedContext | None = None,
+    ) -> list[float] | None:
+        self._validate_mutation_context(locked_context, [document_id])
+        rows = (
+            self.session.execute(
+                text(
+                    f'SELECT embedding::text AS embedding_text '
+                    f'FROM {self.config.table_name} '
+                    'WHERE document_id = :document_id FOR UPDATE'
+                ),
+                {'document_id': document_id},
+            )
+            .mappings()
+            .all()
+        )
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise RuntimeError('pgvector document identity is not unique')
+        parsed = _parse_embedding_literal(str(rows[0]['embedding_text']))
+        canonical = CosineIndexableVectorValidator().validate(
+            parsed,
+            expected_dimensions=self.config.embedding_dimensions,
+        )
+        return list(canonical)
+
     def narrow_permissions(
         self,
         document_ids: Sequence[str],
@@ -590,7 +620,16 @@ class PgVectorStore:
 
 
 def _embedding_literal(embedding: Sequence[float]) -> str:
-    return '[' + ','.join(str(float(value)).rstrip('0').rstrip('.') for value in embedding) + ']'
+    return '[' + ','.join(repr(float(value)) for value in embedding) + ']'
+
+
+def _parse_embedding_literal(value: str) -> tuple[float, ...]:
+    if not value.startswith('[') or not value.endswith(']'):
+        raise ValueError('pgvector embedding representation is invalid')
+    body = value[1:-1]
+    if not body:
+        return ()
+    return tuple(float(part) for part in body.split(','))
 
 
 def _allowed_permissions_for_user(user: DemoUser) -> list[str]:

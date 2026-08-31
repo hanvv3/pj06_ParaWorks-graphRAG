@@ -273,6 +273,8 @@ def _ensure_generation_listener(db: Session) -> None:
         armed = session.info.get(_ARMED_CORPUS_MUTATION_INFO_KEY)
         if not isinstance(armed, _ArmedCorpusMutation):
             return
+        if session.in_nested_transaction():
+            return
         _validate_generation_context(session, armed.context)
         tombstone_created = any(
             isinstance(row, VectorServingTombstone) for row in session.new

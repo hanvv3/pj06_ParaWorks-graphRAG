@@ -1,3 +1,4 @@
+import struct
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,46 @@ def test_pgvector_upsert_writes_document_with_embedding_literal() -> None:
         '[0.10000000149011612,0.20000000298023224,0.30000001192092896]'
     )
     assert params['metadata_json'] == '{"source_type": "decision_record"}'
+
+
+def test_pgvector_embedding_literal_round_trips_exact_float32_exponents() -> None:
+    session = RecordingSession()
+    store = PgVectorStore(
+        session=session,
+        config=PgVectorConfig(embedding_dimensions=6),
+    )
+    coordinates = [
+        1.0e-10,
+        -1.0e-10,
+        1.0e10,
+        -0.0,
+        1.17549435e-38,
+        3.4028235e38,
+    ]
+
+    store.upsert_with_embedding(
+        VectorDocument(
+            document_id='chunk:float32-boundaries',
+            text='Exact float32 pgvector payload.',
+            source_url='https://example.test/float32-boundaries',
+            source_snippet='Exact float32 pgvector payload.',
+            permission_level='internal',
+            metadata={},
+        ),
+        embedding=coordinates,
+    )
+
+    literal = session.calls[0][1]['embedding']
+    parsed = [float(value) for value in literal[1:-1].split(',')]
+    expected = [
+        struct.unpack('>f', struct.pack('>f', value))[0]
+        for value in coordinates
+    ]
+    assert [struct.pack('>f', value) for value in parsed] == [
+        struct.pack('>f', value) for value in expected
+    ]
+    assert 'e-10' in literal
+    assert '-1.000000013351432e-10' in literal
 
 
 @pytest.mark.parametrize(

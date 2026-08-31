@@ -17,6 +17,7 @@ from backend.app.agent_runtime.keyed_mutation_guard import (
 )
 from backend.app.connectors.base import SourceEvent
 from backend.app.core.config import Settings
+from backend.app.core.demo_auth import USERS
 from backend.app.ingestion.service import ingest_events_with_result
 from backend.app.ingestion.source_content_signature import (
     SERVER_CHUNK_POLICY_VERSION,
@@ -40,7 +41,9 @@ from backend.app.models import (
     VectorServingTombstone,
 )
 from backend.app.rag.embeddings import EmbeddingBatchResult
+from backend.app.rag.index_readiness import RagV2ServingIndexReadinessService
 from backend.app.rag.indexing import (
+    _capture_rag_v2_pre_provider_snapshot,
     _persist_locked_pgvector_batch,
     build_rag_index_documents,
     build_rag_v2_index_documents,
@@ -58,6 +61,7 @@ from backend.app.rag.lexical_projection import (
 from backend.app.rag.serving_generation import (
     RagIndexMutationResult,
     advance_corpus_generation,
+    arm_corpus_generation_refresh,
     assert_corpus_generation_refresh_armed,
     increment_vector_index_generation,
     lock_rag_serving_generation,
@@ -68,12 +72,14 @@ from backend.app.rag.serving_locks import (
 )
 from backend.app.rag.vector_store import VectorDocument
 from backend.app.rag.vector_validation import CosineIndexableVectorValidator
+from backend.app.review.actors import human_review_actor
 from backend.app.review.auto_review_quality_revoke import (
     AutoReviewQualityRevokeService,
 )
 from backend.app.review.auto_review_source_reconciliation import (
     AutoReviewSourceReconciliationService,
 )
+from backend.app.review.transitions import ReviewTransitionService
 
 
 def _settings() -> Settings:
@@ -350,6 +356,15 @@ class _RecordingWriter:
 
 
 class _LockedRecordingWriter(_RecordingWriter):
+    def __init__(
+        self,
+        *,
+        live_embeddings: dict[str, list[float]] | None = None,
+    ) -> None:
+        super().__init__()
+        self.live_embeddings = live_embeddings or {}
+        self.embedding_reads: list[str] = []
+
     def upsert_with_embedding(
         self,
         document: VectorDocument,
@@ -359,6 +374,16 @@ class _LockedRecordingWriter(_RecordingWriter):
     ) -> None:
         del locked_context
         super().upsert_with_embedding(document, embedding)
+
+    def load_embedding(
+        self,
+        document_id: str,
+        *,
+        locked_context: object,
+    ) -> list[float] | None:
+        del locked_context
+        self.embedding_reads.append(document_id)
+        return self.live_embeddings.get(document_id)
 
 
 def _seed_corpus_generation(db: Session, *, settings: Settings) -> None:
@@ -762,6 +787,61 @@ def test_ingestion_advances_corpus_and_lexical_only_for_canonical_change(
     )
 
 
+def test_bulk_review_savepoints_advance_corpus_only_at_outer_commit(
+    db_session: Session,
+) -> None:
+    settings = _settings()
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    items = [
+        ReviewItem(
+            item_type='decision_record',
+            payload={
+                'title': f'Bulk generation decision {ordinal}',
+                'decision_summary': f'Canonical bulk summary {ordinal}.',
+            },
+            source_links=[f'https://example.test/bulk-generation/{ordinal}'],
+            source_snippets=[f'Exact bulk evidence {ordinal}.'],
+            confidence_score=0.99,
+            permission_level='internal',
+            status='pending_review',
+        )
+        for ordinal in (1, 2)
+    ]
+    db_session.add_all(
+        [
+            AutoReviewRuntimeKeyState(
+                component='auto_review_trust_promotion',
+                fingerprint_key_version=(
+                    settings.agent_runtime_fingerprint_key_version
+                ),
+                fingerprint_key_material_verifier=verifier,
+                generation=1,
+                ready=True,
+            ),
+            *items,
+        ]
+    )
+    db_session.commit()
+
+    result = ReviewTransitionService(settings=settings).transition_many(
+        db=db_session,
+        item_ids=[item.id for item in items],
+        action='approve',
+        actor=human_review_actor(USERS['admin']),
+    )
+
+    generation = db_session.get(RagServingCorpusGeneration, 1)
+    assert len(result.results) == 2
+    assert generation is not None
+    assert generation.corpus_generation == 0
+    db_session.commit()
+    db_session.refresh(generation)
+    assert generation.corpus_generation == 1
+    assert generation.vector_index_generation == 0
+
+
 def test_locked_trusted_permission_and_revoke_auto_refresh_corpus_generation(
     db_session: Session,
 ) -> None:
@@ -971,6 +1051,7 @@ def test_d_vector_state_identity_binds_exact_float32_payload_and_generation() ->
         embedding_model='fake-embedding:v1',
         embedding_dimensions=2,
         content_hash='a' * 64,
+        canonical_document_sha256='b' * 64,
         canonical_float32_vector_sha256=digest,
         index_state='indexed',
         vector_index_generation=3,
@@ -981,6 +1062,7 @@ def test_d_vector_state_identity_binds_exact_float32_payload_and_generation() ->
         embedding_model='fake-embedding:v1',
         embedding_dimensions=2,
         content_hash='a' * 64,
+        canonical_document_sha256='b' * 64,
         canonical_float32_vector_sha256=digest,
         index_state='indexed',
         vector_index_generation=4,
@@ -999,22 +1081,49 @@ def test_d_vector_state_write_binds_canonical_document_and_exact_generation(
     _seed_canonical_raw_chunk(db_session)
     document = build_rag_v2_index_documents(db_session, settings=settings)[0]
     _seed_corpus_generation(db_session, settings=settings)
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    db_session.commit()
     canonical = CosineIndexableVectorValidator().validate(
         [0.25, 0.75],
         expected_dimensions=2,
     )
 
-    state = upsert_rag_v2_vector_index_state(
-        db=db_session,
-        state=None,
-        document=document,
-        embedding_model_name='fake-embedding:v1',
-        embedding=canonical,
-        content_hash=compute_rag_v2_document_hash(document),
-        vector_index_generation=1,
-        settings=settings,
-    )
-    db_session.flush()
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        generation_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+        )
+        acquire_projection(db_session, key_context)
+        arm_corpus_generation_refresh(
+            db_session,
+            settings=settings,
+            context=generation_context,
+        )
+        state = upsert_rag_v2_vector_index_state(
+            db=db_session,
+            state=None,
+            document=document,
+            embedding_model_name='fake-embedding:v1',
+            embedding=canonical,
+            content_hash=compute_rag_v2_document_hash(document),
+            vector_index_generation=1,
+            settings=settings,
+            generation_context=generation_context,
+        )
+        db_session.commit()
 
     assert state.serving_kind == 'raw_chunk'
     assert state.support_mode == 'source_observation'
@@ -1048,8 +1157,60 @@ def test_d_vector_state_write_rejects_wrong_configured_dimension(
     settings = _settings()
     _seed_canonical_raw_chunk(db_session)
     document = build_rag_v2_index_documents(db_session, settings=settings)[0]
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    db_session.commit()
 
-    with pytest.raises(ValueError, match='cosine-indexable float32'):
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        generation_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+        )
+        acquire_projection(db_session, key_context)
+        arm_corpus_generation_refresh(
+            db_session,
+            settings=settings,
+            context=generation_context,
+        )
+        with pytest.raises(ValueError, match='cosine-indexable float32'):
+            upsert_rag_v2_vector_index_state(
+                db=db_session,
+                state=None,
+                document=document,
+                embedding_model_name=settings.openai_embedding_model,
+                embedding=[1.0],
+                content_hash=compute_rag_v2_document_hash(document),
+                vector_index_generation=1,
+                settings=settings,
+                generation_context=generation_context,
+            )
+        db_session.rollback()
+
+    assert db_session.scalars(select(VectorIndexState)).all() == []
+
+
+def test_direct_d_vector_state_write_refuses_before_validation_without_guard(
+    db_session: Session,
+) -> None:
+    settings = _settings()
+    _seed_canonical_raw_chunk(db_session)
+    document = build_rag_v2_index_documents(db_session, settings=settings)[0]
+    _seed_corpus_generation(db_session, settings=settings)
+    db_session.commit()
+
+    with pytest.raises(TypeError, match='locked RAG generation context'):
         upsert_rag_v2_vector_index_state(
             db=db_session,
             state=None,
@@ -1062,6 +1223,59 @@ def test_d_vector_state_write_rejects_wrong_configured_dimension(
         )
 
     assert db_session.scalars(select(VectorIndexState)).all() == []
+
+
+def test_direct_d_vector_state_write_marks_one_locked_vector_generation(
+    db_session: Session,
+) -> None:
+    settings = _settings()
+    _seed_canonical_raw_chunk(db_session)
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    db_session.commit()
+    document = build_rag_v2_index_documents(db_session, settings=settings)[0]
+    db_session.rollback()
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        generation_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+        )
+        acquire_projection(db_session, key_context)
+        arm_corpus_generation_refresh(
+            db_session,
+            settings=settings,
+            context=generation_context,
+        )
+        state = upsert_rag_v2_vector_index_state(
+            db=db_session,
+            state=None,
+            document=document,
+            embedding_model_name=settings.openai_embedding_model,
+            embedding=[0.25, 0.75],
+            content_hash=compute_rag_v2_document_hash(document),
+            vector_index_generation=1,
+            settings=settings,
+            generation_context=generation_context,
+        )
+        db_session.commit()
+
+    generation = db_session.get(RagServingCorpusGeneration, 1)
+    assert state.vector_index_generation == 1
+    assert generation is not None
+    assert generation.vector_index_generation == 1
 
 
 def test_locked_d_vector_write_updates_state_and_generation_atomically(
@@ -1081,9 +1295,15 @@ def test_locked_d_vector_write_updates_state_and_generation_atomically(
             ready=True,
         )
     )
+    _seed_corpus_generation(db_session, settings=settings)
     db_session.commit()
     document = build_rag_v2_index_documents(db_session, settings=settings)[0]
     content_hash = compute_rag_v2_document_hash(document)
+    snapshot = _capture_rag_v2_pre_provider_snapshot(
+        db=db_session,
+        settings=settings,
+        documents=[document],
+    )
     writer = _LockedRecordingWriter()
 
     result = _persist_locked_pgvector_batch(
@@ -1102,6 +1322,7 @@ def test_locked_d_vector_write_updates_state_and_generation_atomically(
         ),
         budget_decision={},
         rag_v2=True,
+        pre_provider_snapshot=snapshot,
     )
 
     assert result.indexed_count == 1
@@ -1119,6 +1340,175 @@ def test_locked_d_vector_write_updates_state_and_generation_atomically(
     assert state.serving_kind == 'raw_chunk'
     assert state.vector_index_generation == 1
     assert len(state.vector_index_state_hmac) == 64
+
+
+@pytest.mark.parametrize(
+    'drift_kind',
+    (
+        'corpus_generation',
+        'vector_generation',
+        'content',
+        'permission',
+        'provenance',
+    ),
+)
+def test_d_post_provider_snapshot_discards_every_dependency_drift(
+    db_session: Session,
+    drift_kind: str,
+) -> None:
+    settings = _settings()
+    source, chunk = _seed_canonical_raw_chunk(db_session)
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    _seed_corpus_generation(db_session, settings=settings)
+    db_session.commit()
+    document = build_rag_v2_index_documents(db_session, settings=settings)[0]
+    content_hash = compute_rag_v2_document_hash(document)
+    snapshot = _capture_rag_v2_pre_provider_snapshot(
+        db=db_session,
+        settings=settings,
+        documents=[document],
+    )
+    db_session.rollback()
+
+    generation = db_session.get(RagServingCorpusGeneration, 1)
+    assert generation is not None
+    if drift_kind == 'corpus_generation':
+        generation.corpus_generation += 1
+    elif drift_kind == 'vector_generation':
+        generation.vector_index_generation += 1
+    elif drift_kind == 'content':
+        db_session.get(DocumentChunk, chunk.id).text = 'Changed after provider.'
+    elif drift_kind == 'permission':
+        db_session.get(Source, source.id).permission_level = 'restricted'
+    else:
+        parser_run = db_session.get(DocumentParserRun, chunk.parser_run_id)
+        parser_run.revision_id = 'revision-after-provider'
+    db_session.commit()
+    writer = _LockedRecordingWriter()
+
+    result = _persist_locked_pgvector_batch(
+        db=db_session,
+        writer=writer,
+        settings=settings,
+        changed_documents=[(document, content_hash, None)],
+        embeddings=[[0.25, 0.75]],
+        skipped_document_ids=[],
+        embedding_model_name=settings.openai_embedding_model,
+        embedding_dimensions=settings.openai_embedding_dimensions,
+        persist_state=True,
+        batch=EmbeddingBatchResult(
+            embeddings=[[0.25, 0.75]],
+            request_count=1,
+        ),
+        budget_decision={},
+        rag_v2=True,
+        pre_provider_snapshot=snapshot,
+    )
+
+    assert writer.upserts == []
+    assert result.indexed_count == 0
+    assert result.saved_serving_writes == 1
+    assert result.embedding_request_count == 1
+
+
+@pytest.mark.parametrize('drift_kind', ('reaffirm', 'version', 'key'))
+def test_stable_d_vector_refreshes_exact_metadata_without_generation_advance(
+    db_session: Session,
+    drift_kind: str,
+) -> None:
+    settings = _settings()
+    _seed_canonical_raw_chunk(db_session)
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    _seed_corpus_generation(db_session, settings=settings)
+    db_session.commit()
+    document = build_rag_v2_index_documents(db_session, settings=settings)[0]
+    content_hash = compute_rag_v2_document_hash(document)
+    state = _seed_d_index_state(
+        db_session,
+        document=document,
+        settings=settings,
+    )
+    state.vector_index_state_hmac = '0' * 64
+    if drift_kind == 'reaffirm':
+        state.serving_identity_hmac = '1' * 64
+    elif drift_kind == 'version':
+        state.serving_version_fingerprint = '2' * 64
+    else:
+        state.fingerprint_key_version = 'stale-key'
+        state.fingerprint_key_material_verifier = '3' * 64
+    db_session.commit()
+    snapshot = _capture_rag_v2_pre_provider_snapshot(
+        db=db_session,
+        settings=settings,
+        documents=[document],
+    )
+    vector = [0.25, 0.75]
+    writer = _LockedRecordingWriter(
+        live_embeddings={document.document_id: vector}
+    )
+
+    result = _persist_locked_pgvector_batch(
+        db=db_session,
+        writer=writer,
+        settings=settings,
+        changed_documents=[],
+        metadata_refresh_documents=[(document, content_hash, state)],
+        embeddings=[],
+        skipped_document_ids=[document.document_id],
+        embedding_model_name=settings.openai_embedding_model,
+        embedding_dimensions=settings.openai_embedding_dimensions,
+        persist_state=True,
+        batch=EmbeddingBatchResult(embeddings=[], request_count=0),
+        budget_decision={},
+        rag_v2=True,
+        pre_provider_snapshot=snapshot,
+    )
+
+    generation = db_session.get(RagServingCorpusGeneration, 1)
+    db_session.refresh(state)
+    readiness = RagV2ServingIndexReadinessService(
+        settings=settings,
+        live_vector_inspector=lambda _db, _ids: {
+            document.document_id: vector
+        },
+    ).inspect(db=db_session)
+    assert writer.upserts == []
+    assert writer.embedding_reads == [document.document_id]
+    assert result.indexed_count == 0
+    assert result.embedding_request_count == 0
+    assert result.saved_embedding_calls == 1
+    assert generation is not None
+    assert generation.vector_index_generation == 0
+    assert state.serving_identity_hmac == document.metadata['serving_identity_hmac']
+    assert state.serving_version_fingerprint == document.metadata[
+        'serving_version_fingerprint'
+    ]
+    assert state.fingerprint_key_version == (
+        settings.agent_runtime_fingerprint_key_version
+    )
+    assert readiness.ready is True
 
 
 def test_quality_authority_mutation_enters_generation_guard_before_locked_rows(
@@ -1210,18 +1600,9 @@ def test_ingestion_d_vector_delete_advances_only_vector_generation(
     )
     ingest_events_with_result(db_session, [event], settings=settings)
     document = build_rag_v2_index_documents(db_session, settings=settings)[0]
-    vector = CosineIndexableVectorValidator().validate(
-        [0.25, 0.75],
-        expected_dimensions=2,
-    )
-    upsert_rag_v2_vector_index_state(
-        db=db_session,
-        state=None,
+    _seed_d_index_state(
+        db_session,
         document=document,
-        embedding_model_name=settings.openai_embedding_model,
-        embedding=vector,
-        content_hash=compute_rag_v2_document_hash(document),
-        vector_index_generation=0,
         settings=settings,
     )
     db_session.commit()

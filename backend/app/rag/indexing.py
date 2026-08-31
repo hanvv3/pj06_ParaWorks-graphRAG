@@ -54,10 +54,13 @@ from backend.app.rag.serving_generation import (
     RAG_COSINE_POLICY_VERSION,
     RAG_INDEX_POLICY_VERSION,
     RagIndexMutationResult,
+    RagServingGenerationLockedContext,
+    assert_rag_serving_generation_context,
     mark_rag_vector_index_mutation,
 )
 from backend.app.rag.serving_locks import (
     ServingMutationLockCoordinator,
+    ServingMutationLockPlan,
     build_serving_lock_plan,
 )
 from backend.app.rag.source_observations import CanonicalSourceObservationResolver
@@ -85,6 +88,46 @@ class EmbeddingBudgetExceededError(ValueError):
         super().__init__('embedding budget exceeded')
 
 
+@dataclass(frozen=True, slots=True)
+class _RagV2PreProviderSnapshot:
+    corpus_generation: int
+    vector_index_generation: int
+    canonical_document_hashes: tuple[tuple[str, str], ...]
+    lock_plan: ServingMutationLockPlan
+
+
+def _capture_rag_v2_pre_provider_snapshot(
+    *,
+    db: Session,
+    settings: Settings,
+    documents: Sequence[VectorDocument],
+) -> _RagV2PreProviderSnapshot:
+    document_ids = tuple(sorted(document.document_id for document in documents))
+    generation = db.scalar(
+        select(RagServingCorpusGeneration)
+        .where(RagServingCorpusGeneration.id == 1)
+        .execution_options(populate_existing=True)
+    )
+    if generation is None:
+        raise RuntimeError('RAG serving generation singleton is unavailable')
+    canonical_documents = {
+        document.document_id: document
+        for document in build_rag_v2_index_documents(db, settings=settings)
+        if document.document_id in document_ids
+    }
+    if set(canonical_documents) != set(document_ids):
+        raise ValueError('RAG V2 pre-provider canonical snapshot is incomplete')
+    return _RagV2PreProviderSnapshot(
+        corpus_generation=generation.corpus_generation,
+        vector_index_generation=generation.vector_index_generation,
+        canonical_document_hashes=tuple(
+            (document_id, compute_vector_document_hash(canonical_documents[document_id]))
+            for document_id in document_ids
+        ),
+        lock_plan=build_serving_lock_plan(db, document_ids),
+    )
+
+
 def canonical_float32_vector_sha256(vector: Sequence[float]) -> str:
     payload = b'paraworks:pgvector-float32:v1\x00' + b''.join(
         struct.pack('>f', coordinate) for coordinate in vector
@@ -98,6 +141,7 @@ def build_rag_v2_vector_index_state_hmac(
     embedding_model: str,
     embedding_dimensions: int,
     content_hash: str,
+    canonical_document_sha256: str,
     canonical_float32_vector_sha256: str,
     index_state: str,
     vector_index_generation: int,
@@ -106,6 +150,9 @@ def build_rag_v2_vector_index_state_hmac(
     secret, _ = fingerprint_secret_bytes(settings)
     return keyed_fingerprint(
         {
+            'canonical_document_sha256_bytes': exact_utf8_bytes(
+                canonical_document_sha256
+            ),
             'canonical_float32_vector_sha256': (
                 canonical_float32_vector_sha256
             ),
@@ -133,14 +180,111 @@ def upsert_rag_v2_vector_index_state(
     content_hash: str,
     vector_index_generation: int,
     settings: Settings,
+    generation_context: RagServingGenerationLockedContext | None = None,
 ) -> VectorIndexState:
+    assert_rag_serving_generation_context(db, generation_context)
     canonical = CosineIndexableVectorValidator().validate(
         embedding,
         expected_dimensions=settings.openai_embedding_dimensions,
     )
-    metadata = document.metadata
+    required_metadata = _required_rag_v2_state_metadata(document)
+    if (
+        embedding_model_name != settings.openai_embedding_model
+        or content_hash != compute_rag_v2_document_hash(document)
+        or (
+            state is not None
+            and (
+                state.document_id != document.document_id
+                or state.embedding_model != embedding_model_name
+            )
+        )
+    ):
+        raise ValueError('RAG V2 vector state identity is not canonical')
+    generation = db.get(RagServingCorpusGeneration, 1)
+    if generation is None:
+        raise RuntimeError('RAG serving generation singleton is unavailable')
+    if vector_index_generation != generation.vector_index_generation + 1:
+        raise ValueError('RAG V2 vector generation is not the locked next generation')
+    mark_rag_vector_index_mutation(db)
+    now = datetime.now(UTC)
+    if state is None:
+        state = VectorIndexState(
+            document_id=document.document_id,
+            embedding_model=embedding_model_name,
+            embedding_dimensions=len(canonical),
+            content_hash=content_hash,
+            status='indexed',
+            indexed_at=now,
+        )
+        db.add(state)
+    return _apply_rag_v2_state_metadata(
+        state=state,
+        document=document,
+        embedding_model_name=embedding_model_name,
+        canonical_embedding=canonical,
+        content_hash=content_hash,
+        vector_index_generation=vector_index_generation,
+        settings=settings,
+        required_metadata=required_metadata,
+        indexed_at=now,
+    )
+
+
+def refresh_rag_v2_vector_index_state_metadata(
+    *,
+    db: Session,
+    state: VectorIndexState,
+    document: VectorDocument,
+    embedding_model_name: str,
+    embedding: Sequence[float],
+    content_hash: str,
+    settings: Settings,
+    generation_context: RagServingGenerationLockedContext | None = None,
+) -> VectorIndexState:
+    assert_rag_serving_generation_context(db, generation_context)
+    canonical = CosineIndexableVectorValidator().validate(
+        embedding,
+        expected_dimensions=settings.openai_embedding_dimensions,
+    )
+    required_metadata = _required_rag_v2_state_metadata(document)
+    if (
+        embedding_model_name != settings.openai_embedding_model
+        or content_hash != compute_rag_v2_document_hash(document)
+    ):
+        raise ValueError('RAG V2 vector state identity is not canonical')
+    generation = db.get(RagServingCorpusGeneration, 1)
+    if generation is None:
+        raise RuntimeError('RAG serving generation singleton is unavailable')
+    if (
+        state.document_id != document.document_id
+        or state.embedding_model != embedding_model_name
+        or state.embedding_dimensions != len(canonical)
+        or state.content_hash != content_hash
+        or state.status != 'indexed'
+        or state.cosine_indexable is not True
+        or type(state.vector_index_generation) is not int
+        or state.vector_index_generation < 0
+        or state.vector_index_generation > generation.vector_index_generation
+    ):
+        raise ValueError('RAG V2 metadata refresh requires a stable indexed vector')
+    return _apply_rag_v2_state_metadata(
+        state=state,
+        document=document,
+        embedding_model_name=embedding_model_name,
+        canonical_embedding=canonical,
+        content_hash=content_hash,
+        vector_index_generation=state.vector_index_generation,
+        settings=settings,
+        required_metadata=required_metadata,
+        indexed_at=None,
+    )
+
+
+def _required_rag_v2_state_metadata(
+    document: VectorDocument,
+) -> dict[str, str]:
     required_metadata = {
-        key: metadata.get(key)
+        key: document.metadata.get(key)
         for key in (
             'serving_kind',
             'support_mode',
@@ -155,13 +299,30 @@ def upsert_rag_v2_vector_index_state(
         for value in required_metadata.values()
     ):
         raise ValueError('RAG V2 vector state metadata is incomplete')
-    vector_digest = canonical_float32_vector_sha256(canonical)
+    return {key: str(value) for key, value in required_metadata.items()}
+
+
+def _apply_rag_v2_state_metadata(
+    *,
+    state: VectorIndexState,
+    document: VectorDocument,
+    embedding_model_name: str,
+    canonical_embedding: Sequence[float],
+    content_hash: str,
+    vector_index_generation: int,
+    settings: Settings,
+    required_metadata: dict[str, str],
+    indexed_at: datetime | None,
+) -> VectorIndexState:
     state_hmac = build_rag_v2_vector_index_state_hmac(
         document_id=document.document_id,
         embedding_model=embedding_model_name,
-        embedding_dimensions=len(canonical),
+        embedding_dimensions=len(canonical_embedding),
         content_hash=content_hash,
-        canonical_float32_vector_sha256=vector_digest,
+        canonical_document_sha256=compute_vector_document_hash(document),
+        canonical_float32_vector_sha256=(
+            canonical_float32_vector_sha256(canonical_embedding)
+        ),
         index_state='indexed',
         vector_index_generation=vector_index_generation,
         settings=settings,
@@ -169,23 +330,13 @@ def upsert_rag_v2_vector_index_state(
     verifier = fingerprint_key_material_verifier(
         settings.agent_runtime_fingerprint_secret
     )
-    now = datetime.now(UTC)
-    if state is None:
-        state = VectorIndexState(
-            document_id=document.document_id,
-            embedding_model=embedding_model_name,
-            embedding_dimensions=len(canonical),
-            content_hash=content_hash,
-            status='indexed',
-            indexed_at=now,
-        )
-        db.add(state)
-    state.embedding_dimensions = len(canonical)
+    state.embedding_dimensions = len(canonical_embedding)
     state.embedding_model = embedding_model_name
     state.content_hash = content_hash
     state.status = 'indexed'
     state.last_error = None
-    state.indexed_at = now
+    if indexed_at is not None:
+        state.indexed_at = indexed_at
     state.corpus_generation_id = 1
     state.serving_kind = str(required_metadata['serving_kind'])
     state.support_mode = str(required_metadata['support_mode'])
@@ -286,6 +437,9 @@ def index_changed_vector_documents(
     operator_authorized: bool = False,
 ) -> VectorIndexResult:
     changed_documents: list[tuple[VectorDocument, str, VectorIndexState | None]] = []
+    metadata_refresh_documents: list[
+        tuple[VectorDocument, str, VectorIndexState]
+    ] = []
     skipped_document_ids: list[str] = []
     embedding_dimensions = _model_dimensions(embedding_model)
     production_pgvector = (
@@ -335,8 +489,13 @@ def index_changed_vector_documents(
             canonical = canonical_live_documents.get(document.document_id)
             if (
                 canonical is None
-                or _content_hash(canonical, rag_v2=rag_v2)
-                != _content_hash(document, rag_v2=rag_v2)
+                or (
+                    compute_vector_document_hash(canonical)
+                    != compute_vector_document_hash(document)
+                    if rag_v2
+                    else _content_hash(canonical, rag_v2=False)
+                    != _content_hash(document, rag_v2=False)
+                )
             ):
                 skipped_document_ids.append(document.document_id)
                 continue
@@ -364,11 +523,32 @@ def index_changed_vector_documents(
         )
         if state_is_skippable:
             skipped_document_ids.append(document.document_id)
+            if rag_v2 and production_pgvector and persist_state and state is not None:
+                metadata_refresh_documents.append(
+                    (document, content_hash, state)
+                )
             continue
 
         changed_documents.append((document, content_hash, state))
 
     changed_texts = [document.text for document, _, _ in changed_documents]
+    pre_provider_snapshot = (
+        _capture_rag_v2_pre_provider_snapshot(
+            db=db,
+            settings=settings,
+            documents=[
+                document
+                for document, _, _ in (
+                    [*changed_documents, *metadata_refresh_documents]
+                )
+            ],
+        )
+        if production_pgvector
+        and rag_v2
+        and settings is not None
+        and (changed_documents or metadata_refresh_documents)
+        else None
+    )
     budget_decision = estimate_embedding_budget(
         texts=changed_texts,
         embedding_model_name=embedding_model_name,
@@ -402,6 +582,7 @@ def index_changed_vector_documents(
             writer=writer,
             settings=settings,
             changed_documents=changed_documents,
+            metadata_refresh_documents=metadata_refresh_documents,
             embeddings=batch.embeddings,
             skipped_document_ids=skipped_document_ids,
             tombstoned_count=encountered_tombstoned_count,
@@ -411,6 +592,7 @@ def index_changed_vector_documents(
             batch=batch,
             budget_decision=budget_decision,
             rag_v2=rag_v2,
+            pre_provider_snapshot=pre_provider_snapshot,
         )
 
     indexed_document_ids: list[str] = []
@@ -452,6 +634,9 @@ def _persist_locked_pgvector_batch(
     writer: VectorIndexWriter,
     settings: Settings,
     changed_documents: list[tuple[VectorDocument, str, VectorIndexState | None]],
+    metadata_refresh_documents: list[
+        tuple[VectorDocument, str, VectorIndexState]
+    ] | None = None,
     embeddings: list[list[float]],
     skipped_document_ids: list[str],
     tombstoned_count: int = 0,
@@ -461,12 +646,21 @@ def _persist_locked_pgvector_batch(
     batch: EmbeddingBatchResult,
     budget_decision: dict[str, float | int | str | None],
     rag_v2: bool,
+    pre_provider_snapshot: _RagV2PreProviderSnapshot | None = None,
 ) -> VectorIndexResult:
+    metadata_refresh_documents = metadata_refresh_documents or []
     indexed: list[str] = []
     pre_provider_skip_count = len(skipped_document_ids)
     post_provider_skip_count = 0
     stale_skips = list(skipped_document_ids)
-    document_ids = [document.document_id for document, _, _ in changed_documents]
+    document_ids = sorted(
+        {
+            document.document_id
+            for document, _, _ in (
+                [*changed_documents, *metadata_refresh_documents]
+            )
+        }
+    )
     if not document_ids:
         return VectorIndexResult(
             indexed_count=0,
@@ -481,35 +675,62 @@ def _persist_locked_pgvector_batch(
             embedding_total_tokens=batch.total_tokens,
             embedding_budget=budget_decision,
         )
-    plan = build_serving_lock_plan(db, document_ids)
+    if rag_v2 and pre_provider_snapshot is None:
+        raise TypeError('RAG V2 persistence requires a pre-provider snapshot')
+    if (
+        pre_provider_snapshot is not None
+        and tuple(sorted(document_ids))
+        != tuple(
+            document_id
+            for document_id, _ in pre_provider_snapshot.canonical_document_hashes
+        )
+    ):
+        raise ValueError('RAG V2 pre-provider snapshot does not match the batch')
+    plan = (
+        pre_provider_snapshot.lock_plan
+        if pre_provider_snapshot is not None
+        else build_serving_lock_plan(db, document_ids)
+    )
+
+    def discard_locked_batch() -> VectorIndexResult:
+        nonlocal post_provider_skip_count
+        db.rollback()
+        stale_skips.extend(
+            document_id
+            for document_id in document_ids
+            if document_id not in stale_skips
+        )
+        post_provider_skip_count += len(document_ids)
+        return VectorIndexResult(
+            indexed_count=0,
+            document_ids=[],
+            embedding_dimensions=embedding_dimensions,
+            skipped_count=len(stale_skips),
+            skipped_document_ids=stale_skips,
+            tombstoned_count=tombstoned_count,
+            saved_embedding_calls=pre_provider_skip_count,
+            saved_serving_writes=post_provider_skip_count,
+            embedding_request_count=batch.request_count,
+            embedding_prompt_tokens=batch.prompt_tokens,
+            embedding_total_tokens=batch.total_tokens,
+            embedding_budget=budget_decision,
+        )
+
     with KeyedMutationGuard.generation_barrier(db):
         key_context = lock_runtime_state(db)
         if key_context is None:
             raise ValueError('PostgreSQL indexing key runtime unavailable')
+        coordinator = ServingMutationLockCoordinator(
+            db=db, settings=settings
+        )
         try:
-            locked = ServingMutationLockCoordinator(
-                db=db, settings=settings
-            ).acquire(key_context=key_context, plan=plan)
+            locked = coordinator.acquire(
+                key_context=key_context, plan=plan
+            )
         except RuntimeError as exc:
             if str(exc) != 'Serving mutation dependency plan changed':
                 raise
-            db.rollback()
-            stale_skips.extend(document_ids)
-            post_provider_skip_count += len(document_ids)
-            return VectorIndexResult(
-                indexed_count=0,
-                document_ids=[],
-                embedding_dimensions=embedding_dimensions,
-                skipped_count=len(stale_skips),
-                skipped_document_ids=stale_skips,
-                tombstoned_count=tombstoned_count,
-                saved_embedding_calls=pre_provider_skip_count,
-                saved_serving_writes=post_provider_skip_count,
-                embedding_request_count=batch.request_count,
-                embedding_prompt_tokens=batch.prompt_tokens,
-                embedding_total_tokens=batch.total_tokens,
-                embedding_budget=budget_decision,
-            )
+            return discard_locked_batch()
         eligibility = TrustedServingEligibilityService(db)
         canonical_documents = {
             current.document_id: current
@@ -523,7 +744,75 @@ def _persist_locked_pgvector_batch(
         generation = db.get(RagServingCorpusGeneration, 1)
         if generation is None:
             raise RuntimeError('RAG serving generation singleton is unavailable')
+        if pre_provider_snapshot is not None:
+            exact_hashes = dict(
+                pre_provider_snapshot.canonical_document_hashes
+            )
+            generation_changed = (
+                generation.corpus_generation
+                != pre_provider_snapshot.corpus_generation
+                or generation.vector_index_generation
+                != pre_provider_snapshot.vector_index_generation
+            )
+            canonical_changed = any(
+                canonical is None
+                or compute_vector_document_hash(canonical)
+                != exact_hashes.get(document_id)
+                for document_id, canonical in (
+                    (document_id, canonical_documents.get(document_id))
+                    for document_id in document_ids
+                )
+            )
+            tombstone_changed = db.scalar(
+                select(VectorServingTombstone.id).where(
+                    VectorServingTombstone.document_id.in_(document_ids)
+                )
+            ) is not None
+            if generation_changed or canonical_changed or tombstone_changed:
+                return discard_locked_batch()
         next_vector_generation = generation.vector_index_generation + 1
+        refresh_vectors: list[
+            tuple[VectorIndexState, VectorDocument, str, Sequence[float]]
+        ] = []
+        for document, content_hash, _ in metadata_refresh_documents:
+            state = _get_index_state(
+                db=db,
+                document_id=document.document_id,
+                embedding_model_name=embedding_model_name,
+            )
+            canonical = canonical_documents.get(document.document_id)
+            if (
+                state is None
+                or canonical is None
+                or state.status != 'indexed'
+                or state.content_hash != content_hash
+                or state.embedding_dimensions != embedding_dimensions
+                or state.cosine_indexable is not True
+                or db.scalar(
+                    select(VectorServingTombstone.id).where(
+                        VectorServingTombstone.document_id
+                        == document.document_id
+                    )
+                )
+                is not None
+            ):
+                return discard_locked_batch()
+            try:
+                live_embedding = writer.load_embedding(  # type: ignore[attr-defined]
+                    document.document_id,
+                    locked_context=locked,
+                )
+                canonical_live_embedding = (
+                    CosineIndexableVectorValidator().validate(
+                        live_embedding or (),
+                        expected_dimensions=embedding_dimensions,
+                    )
+                )
+            except (TypeError, ValueError):
+                return discard_locked_batch()
+            refresh_vectors.append(
+                (state, canonical, content_hash, canonical_live_embedding)
+            )
         for (document, content_hash, _), embedding in zip(
             changed_documents, embeddings, strict=True
         ):
@@ -546,9 +835,12 @@ def _persist_locked_pgvector_batch(
                 continue
             canonical_hash = _content_hash(canonical, rag_v2=rag_v2)
             exact_snapshot = canonical == document and canonical_hash == content_hash
-            permission_only_narrowing = _permission_only_narrowing(
-                embedded=document,
-                canonical=canonical,
+            permission_only_narrowing = bool(
+                not rag_v2
+                and _permission_only_narrowing(
+                    embedded=document,
+                    canonical=canonical,
+                )
             )
             if not exact_snapshot and not permission_only_narrowing:
                 stale_skips.append(document.document_id)
@@ -575,6 +867,7 @@ def _persist_locked_pgvector_batch(
                         content_hash=canonical_hash,
                         vector_index_generation=next_vector_generation,
                         settings=settings,
+                        generation_context=coordinator.generation_context,
                     )
                 else:
                     _upsert_index_state(
@@ -585,8 +878,18 @@ def _persist_locked_pgvector_batch(
                         embedding_dimensions=embedding_dimensions,
                         content_hash=canonical_hash,
                     )
-        if rag_v2 and indexed:
-            mark_rag_vector_index_mutation(db)
+        if persist_state:
+            for state, canonical, content_hash, live_embedding in refresh_vectors:
+                refresh_rag_v2_vector_index_state_metadata(
+                    db=db,
+                    state=state,
+                    document=canonical,
+                    embedding_model_name=embedding_model_name,
+                    embedding=live_embedding,
+                    content_hash=content_hash,
+                    settings=settings,
+                    generation_context=coordinator.generation_context,
+                )
         db.commit()
     return VectorIndexResult(
         indexed_count=len(indexed),

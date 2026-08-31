@@ -26,9 +26,12 @@ from backend.app.rag.index_readiness import (
 )
 from backend.app.rag.indexing import (
     build_rag_v2_index_documents,
+    build_rag_v2_vector_index_state_hmac,
+    canonical_float32_vector_sha256,
     compute_rag_v2_document_hash,
-    upsert_rag_v2_vector_index_state,
+    compute_vector_document_hash,
 )
+from backend.app.rag.vector_store import VectorDocument
 from backend.app.rag.vector_validation import CosineIndexableVectorValidator
 
 
@@ -134,6 +137,59 @@ def _seed_raw_chunk(db: Session, *, ordinal: int) -> DocumentChunk:
     return chunk
 
 
+def _seed_exact_d_state(
+    db: Session,
+    *,
+    document: VectorDocument,
+    vector: tuple[float, ...],
+    settings: Settings,
+    content_hash: str | None = None,
+) -> VectorIndexState:
+    metadata = document.metadata
+    document_id = document.document_id
+    exact_content_hash = content_hash or compute_rag_v2_document_hash(document)
+    state = VectorIndexState(
+        document_id=document_id,
+        embedding_model=settings.openai_embedding_model,
+        embedding_dimensions=settings.openai_embedding_dimensions,
+        content_hash=exact_content_hash,
+        status='indexed',
+        corpus_generation_id=1,
+        serving_kind=metadata['serving_kind'],
+        support_mode=metadata['support_mode'],
+        effective_permission=document.permission_level,
+        serving_identity_hmac=metadata['serving_identity_hmac'],
+        serving_version_fingerprint=metadata['serving_version_fingerprint'],
+        model_content_hmac=metadata['model_content_hmac'],
+        canonical_citation_projection_hmac=metadata[
+            'canonical_citation_projection_hmac'
+        ],
+        index_policy_version='rag-v2-serving-index:v1',
+        pgvector_cosine_policy_version='pgvector-cosine-indexable:v1',
+        cosine_indexable=True,
+        vector_index_generation=1,
+        vector_index_state_hmac=build_rag_v2_vector_index_state_hmac(
+            document_id=document_id,
+            embedding_model=settings.openai_embedding_model,
+            embedding_dimensions=settings.openai_embedding_dimensions,
+            content_hash=exact_content_hash,
+            canonical_document_sha256=compute_vector_document_hash(document),
+            canonical_float32_vector_sha256=(
+                canonical_float32_vector_sha256(vector)
+            ),
+            index_state='indexed',
+            vector_index_generation=1,
+            settings=settings,
+        ),
+        fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+        fingerprint_key_material_verifier=fingerprint_key_material_verifier(
+            settings.agent_runtime_fingerprint_secret
+        ),
+    )
+    db.add(state)
+    return state
+
+
 def test_empty_exact_readiness_is_actor_independent_and_provider_free(
     db_session: Session,
 ) -> None:
@@ -154,6 +210,38 @@ def test_empty_exact_readiness_is_actor_independent_and_provider_free(
     assert first.tombstone_count == 0
     assert first.mismatch_count_capped_at_20 == 0
     assert len(first.readiness_snapshot_hmac) == 64
+
+
+def test_readiness_refuses_generation_change_during_live_inspection(
+    db_session: Session,
+) -> None:
+    settings = _settings()
+    _seed_generation(
+        db_session,
+        settings=settings,
+        corpus_generation=0,
+        vector_index_generation=0,
+    )
+    db_session.commit()
+
+    def mutate_generation(db: Session, _ids: tuple[str, ...]) -> dict[str, object]:
+        generation = db.get(RagServingCorpusGeneration, 1)
+        assert generation is not None
+        generation.corpus_generation += 1
+        db.flush([generation])
+        return {}
+
+    result = RagV2ServingIndexReadinessService(
+        settings=settings,
+        live_vector_inspector=mutate_generation,
+    ).inspect(db=db_session)
+
+    assert result.ready is False
+    assert result.corpus_generation == 0
+    assert result.vector_index_generation == 0
+    assert result.mismatch_count_capped_at_20 == 1
+    assert 'chunk:' not in repr(result)
+    assert 'drive:' not in repr(result)
 
 
 def test_readiness_reports_committed_tombstones_without_retagging_them_expected(
@@ -207,14 +295,10 @@ def test_exact_d_state_and_live_vector_are_ready_while_legacy_state_is_ignored(
         [0.25, 0.75],
         expected_dimensions=2,
     )
-    upsert_rag_v2_vector_index_state(
-        db=db_session,
-        state=None,
+    _seed_exact_d_state(
+        db_session,
         document=document,
-        embedding_model_name=settings.openai_embedding_model,
-        embedding=vector,
-        content_hash=compute_rag_v2_document_hash(document),
-        vector_index_generation=1,
+        vector=vector,
         settings=settings,
     )
     db_session.add(
@@ -255,14 +339,11 @@ def test_missing_wrong_hash_and_invalid_live_vector_fail_closed(
         [0.25, 0.75],
         expected_dimensions=2,
     )
-    state = upsert_rag_v2_vector_index_state(
-        db=db_session,
-        state=None,
+    state = _seed_exact_d_state(
+        db_session,
         document=document,
-        embedding_model_name=settings.openai_embedding_model,
-        embedding=vector,
+        vector=vector,
         content_hash='f' * 64,
-        vector_index_generation=1,
         settings=settings,
     )
     db_session.commit()

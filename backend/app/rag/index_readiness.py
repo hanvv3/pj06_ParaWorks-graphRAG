@@ -24,6 +24,7 @@ from backend.app.rag.indexing import (
     build_rag_v2_vector_index_state_hmac,
     canonical_float32_vector_sha256,
     compute_rag_v2_document_hash,
+    compute_vector_document_hash,
 )
 from backend.app.rag.serving_generation import (
     RAG_COSINE_POLICY_VERSION,
@@ -73,15 +74,16 @@ class RagV2ServingIndexReadinessService:
 
     def inspect(self, *, db: Session) -> RagServingIndexReadiness:
         settings = self._settings
-        expected_documents = {
-            document.document_id: document
-            for document in build_rag_v2_index_documents(db, settings=settings)
-        }
         generation = db.get(RagServingCorpusGeneration, 1)
+        generation_barrier = _generation_barrier_snapshot(generation)
         corpus_generation = generation.corpus_generation if generation else 0
         vector_index_generation = (
             generation.vector_index_generation if generation else 0
         )
+        expected_documents = {
+            document.document_id: document
+            for document in build_rag_v2_index_documents(db, settings=settings)
+        }
         verifier = fingerprint_key_material_verifier(
             settings.agent_runtime_fingerprint_secret
         )
@@ -188,6 +190,15 @@ class RagV2ServingIndexReadinessService:
             if document_id not in states_by_document:
                 mismatches.add(document_id)
 
+        final_generation = db.scalar(
+            select(RagServingCorpusGeneration)
+            .where(RagServingCorpusGeneration.id == 1)
+            .execution_options(populate_existing=True)
+        )
+        if _generation_barrier_snapshot(final_generation) != generation_barrier:
+            generation_identity_matches = False
+            mismatches.add('generation_changed_during_inspection')
+
         ready = generation_identity_matches and not mismatches
         mismatch_count = min(len(mismatches), 20)
         expected_identity_hmacs = sorted(
@@ -266,6 +277,7 @@ class RagV2ServingIndexReadinessService:
             embedding_model=state.embedding_model,
             embedding_dimensions=state.embedding_dimensions,
             content_hash=state.content_hash,
+            canonical_document_sha256=compute_vector_document_hash(document),
             canonical_float32_vector_sha256=(
                 live.canonical_float32_vector_sha256
             ),
@@ -400,6 +412,25 @@ class RagV2ServingIndexReadinessService:
             schema_version='rag-serving-index-readiness:v1',
             policy_version=RAG_INDEX_POLICY_VERSION,
         )
+
+
+def _generation_barrier_snapshot(
+    generation: RagServingCorpusGeneration | None,
+) -> tuple[object, ...] | None:
+    if generation is None:
+        return None
+    return (
+        generation.id,
+        generation.corpus_generation,
+        generation.vector_index_generation,
+        generation.embedding_model,
+        generation.embedding_dimensions,
+        generation.index_policy_version,
+        generation.pgvector_cosine_policy_version,
+        generation.fingerprint_key_version,
+        generation.fingerprint_key_material_verifier,
+        generation.updated_at,
+    )
 
 
 def _parse_pgvector_text(value: str) -> tuple[float, ...]:
