@@ -11,6 +11,10 @@ from backend.app.agent_runtime.auto_review_cost_policy import (
     AUTO_REVIEW_VALIDATOR_OUTPUT_USD_PER_1M,
     is_server_owned_fenced_send_hook,
 )
+from backend.app.agent_runtime.fingerprints import (
+    fingerprint_secret_bytes,
+    keyed_fingerprint,
+)
 from backend.app.agents.mail_document_agent import (
     DeterministicMailDocumentAgentModel,
     MailDocumentLlmProviderError,
@@ -18,10 +22,16 @@ from backend.app.agents.mail_document_agent import (
     build_langchain_mail_document_agent_model,
 )
 from backend.app.core.config import Settings
+from backend.app.rag.retrieval import is_lower_hex_64
 from backend.app.schemas.auto_review import AUTO_REVIEW_VALIDATOR_PROMPT_VERSION
 
 MODEL_ROUTE_VERSION = 'review-model-route:v1'
 OPENAI_COMPATIBLE_PROVIDERS = frozenset({'openai', 'azure_openai'})
+RAG_ANSWER_MODEL = 'gpt-5.4-mini-2026-03-17'
+RAG_ANSWER_MODEL_CONFIG_VERSION = 'rag-answer-model-config:v1'
+RAG_OPENAI_API_BASE_URL = 'https://api.openai.com/v1'
+RAG_ANSWER_ENDPOINT_IDENTITY = 'openai-direct-standard-global:v1'
+RAG_ANSWER_SERVICE_TIER = 'default'
 
 
 class ReviewModelUnavailableError(RuntimeError):
@@ -34,6 +44,68 @@ class RoutedReviewModel:
     model_name: str
     route_version: str
     deterministic: bool
+
+
+def rag_answer_model_config_snapshot(
+    *,
+    output_schema_hmac: str,
+    prompt_renderer_hmac: str,
+) -> dict[str, object]:
+    if not is_lower_hex_64(output_schema_hmac) or not is_lower_hex_64(
+        prompt_renderer_hmac
+    ):
+        raise ValueError('RAG answer model identity is invalid')
+    return {
+        'api_base_url': RAG_OPENAI_API_BASE_URL,
+        'answer_block_joiner_version': 'rag-answer-block-joiner:v1',
+        'cache_enabled': False,
+        'callbacks_enabled': False,
+        'endpoint_identity': RAG_ANSWER_ENDPOINT_IDENTITY,
+        'max_output_tokens': 512,
+        'max_provider_attempts': 1,
+        'max_retries': 0,
+        'model': RAG_ANSWER_MODEL,
+        'output_schema_hmac': output_schema_hmac,
+        'output_schema_name': 'rag_answer_blocks_v1',
+        'prompt_renderer_hmac': prompt_renderer_hmac,
+        'prompt_renderer_version': 'rag-answer-renderer:v1',
+        'provider': 'openai',
+        'provider_fallback': 'none',
+        'provider_send_start_window_seconds': 5,
+        'reasoning_effort': 'none',
+        'regional_processing': False,
+        'seed_state': 'omitted',
+        'service_tier': RAG_ANSWER_SERVICE_TIER,
+        'store': False,
+        'streaming': False,
+        'structured_output_identity': (
+            'langchain-json-schema-strict-include-raw:v1'
+        ),
+        'temperature_state': 'omitted',
+        'timeout_seconds': 30,
+        'tool_binding': 'none',
+        'top_p_state': 'omitted',
+        'tracing_enabled': False,
+        'use_responses_api': True,
+    }
+
+
+def build_rag_answer_model_config_snapshot_hmac(
+    settings: Settings,
+    *,
+    output_schema_hmac: str,
+    prompt_renderer_hmac: str,
+) -> str:
+    secret, _ = fingerprint_secret_bytes(settings)
+    return keyed_fingerprint(
+        rag_answer_model_config_snapshot(
+            output_schema_hmac=output_schema_hmac,
+            prompt_renderer_hmac=prompt_renderer_hmac,
+        ),
+        secret=secret,
+        schema_version='rag-answer-model-config-snapshot:v1',
+        policy_version=RAG_ANSWER_MODEL_CONFIG_VERSION,
+    )
 
 
 def build_mail_document_model_route(

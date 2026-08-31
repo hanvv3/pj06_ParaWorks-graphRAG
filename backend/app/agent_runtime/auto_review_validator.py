@@ -31,6 +31,7 @@ from backend.app.agent_runtime.canonical_sources import build_keyed_fingerprint
 from backend.app.agent_runtime.model_router import (
     build_auto_review_validator_model_route,
 )
+from backend.app.agent_runtime.provider_usage import StrictChatUsageParser
 from backend.app.core.config import Settings
 from backend.app.schemas.auto_review import (
     AUTO_REVIEW_MAX_CLAIM_CHARS,
@@ -452,31 +453,19 @@ def _parse_provider_result(
             'auto-review validation is unavailable'
         ) from None
     _validate_result_integrity(parsed, invocation=invocation)
-    metadata = raw.usage_metadata
-    if not isinstance(metadata, Mapping):
-        raise AutoReviewValidationError('auto-review validation is unavailable')
-    input_tokens = metadata.get('input_tokens')
-    output_tokens = metadata.get('output_tokens')
-    total_tokens = metadata.get('total_tokens')
+    try:
+        strict_usage = StrictChatUsageParser().parse_message(raw)
+    except ValueError:
+        raise AutoReviewValidationError(
+            'auto-review validation is unavailable'
+        ) from None
+    input_tokens = strict_usage.input_tokens
+    output_tokens = strict_usage.output_tokens
     if (
-        not isinstance(input_tokens, int)
-        or isinstance(input_tokens, bool)
-        or not isinstance(output_tokens, int)
-        or isinstance(output_tokens, bool)
-        or input_tokens < 0
-        or output_tokens < 0
-        or input_tokens > AUTO_REVIEW_MAX_INPUT_TOKENS
+        input_tokens > AUTO_REVIEW_MAX_INPUT_TOKENS
         or output_tokens > AUTO_REVIEW_MAX_OUTPUT_TOKENS
-        or not isinstance(total_tokens, int)
-        or isinstance(total_tokens, bool)
-        or total_tokens != input_tokens + output_tokens
     ):
         raise AutoReviewValidationError('auto-review validation is unavailable')
-    _validate_response_usage_metadata(
-        raw.response_metadata,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-    )
     cost = (
         (
             Decimal(input_tokens) * AUTO_REVIEW_VALIDATOR_INPUT_USD_PER_1M
@@ -493,35 +482,22 @@ def _validate_response_usage_metadata(
     input_tokens: int,
     output_tokens: int,
 ) -> None:
-    for key in ('token_usage', 'usage'):
-        if key not in response_metadata:
-            continue
-        provider_usage = response_metadata[key]
-        if not isinstance(provider_usage, Mapping):
-            raise AutoReviewValidationError(
-                'auto-review validation is unavailable'
-            )
-        provider_input = provider_usage.get(
-            'input_tokens', provider_usage.get('prompt_tokens')
-        )
-        provider_output = provider_usage.get(
-            'output_tokens', provider_usage.get('completion_tokens')
-        )
-        provider_total = provider_usage.get('total_tokens')
-        if (
-            not isinstance(provider_input, int)
-            or isinstance(provider_input, bool)
-            or not isinstance(provider_output, int)
-            or isinstance(provider_output, bool)
-            or not isinstance(provider_total, int)
-            or isinstance(provider_total, bool)
-            or provider_total != provider_input + provider_output
-            or provider_input != input_tokens
-            or provider_output != output_tokens
-        ):
-            raise AutoReviewValidationError(
-                'auto-review validation is unavailable'
-            )
+    class _UsageEnvelope:
+        usage_metadata = {
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'total_tokens': input_tokens + output_tokens,
+        }
+
+        def __init__(self, metadata: Mapping[str, Any]) -> None:
+            self.response_metadata = metadata
+
+    try:
+        StrictChatUsageParser().parse_message(_UsageEnvelope(response_metadata))
+    except ValueError:
+        raise AutoReviewValidationError(
+            'auto-review validation is unavailable'
+        ) from None
 
 
 def _structured_schema_from_framing(value: str) -> dict[str, object]:

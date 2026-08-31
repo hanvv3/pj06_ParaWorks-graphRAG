@@ -8,6 +8,8 @@ from backend.app.agent_runtime.auto_review_cost_policy import (
 from backend.app.agent_runtime.model_router import (
     ReviewModelUnavailableError,
     build_auto_review_validator_model_route,
+    build_rag_answer_model_config_snapshot_hmac,
+    rag_answer_model_config_snapshot,
 )
 from backend.app.core.config import Settings
 
@@ -111,3 +113,53 @@ def test_route_sanitizes_constructor_failure() -> None:
 
     assert str(exc_info.value) == 'review model is unavailable'
     assert exc_info.value.__cause__ is None
+
+
+def test_rag_answer_model_config_snapshot_is_exact_direct_standard_identity() -> None:
+    snapshot = rag_answer_model_config_snapshot(
+        output_schema_hmac='a' * 64,
+        prompt_renderer_hmac='b' * 64,
+    )
+
+    assert snapshot == {
+        'api_base_url': 'https://api.openai.com/v1',
+        'answer_block_joiner_version': 'rag-answer-block-joiner:v1',
+        'cache_enabled': False,
+        'callbacks_enabled': False,
+        'endpoint_identity': 'openai-direct-standard-global:v1',
+        'max_output_tokens': 512,
+        'max_provider_attempts': 1,
+        'max_retries': 0,
+        'model': 'gpt-5.4-mini-2026-03-17',
+        'output_schema_hmac': 'a' * 64,
+        'output_schema_name': 'rag_answer_blocks_v1',
+        'prompt_renderer_hmac': 'b' * 64,
+        'prompt_renderer_version': 'rag-answer-renderer:v1',
+        'provider': 'openai',
+        'provider_fallback': 'none',
+        'provider_send_start_window_seconds': 5,
+        'reasoning_effort': 'none',
+        'regional_processing': False,
+        'seed_state': 'omitted',
+        'service_tier': 'default',
+        'store': False,
+        'streaming': False,
+        'structured_output_identity': 'langchain-json-schema-strict-include-raw:v1',
+        'temperature_state': 'omitted',
+        'timeout_seconds': 30,
+        'tool_binding': 'none',
+        'top_p_state': 'omitted',
+        'tracing_enabled': False,
+        'use_responses_api': True,
+    }
+    first = build_rag_answer_model_config_snapshot_hmac(
+        _settings(),
+        output_schema_hmac='a' * 64,
+        prompt_renderer_hmac='b' * 64,
+    )
+    second = build_rag_answer_model_config_snapshot_hmac(
+        _settings(),
+        output_schema_hmac='c' * 64,
+        prompt_renderer_hmac='b' * 64,
+    )
+    assert first != second

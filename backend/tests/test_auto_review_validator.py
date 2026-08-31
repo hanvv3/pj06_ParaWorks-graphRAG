@@ -691,6 +691,24 @@ def test_conflicting_simultaneous_provider_usage_aliases_are_rejected() -> None:
     assert usage == []
 
 
+def test_conflicting_synonyms_within_one_provider_usage_alias_are_rejected() -> None:
+    response = _raw()
+    response['raw'].response_metadata['token_usage'] = {
+        'input_tokens': 120,
+        'prompt_tokens': 119,
+        'output_tokens': 40,
+        'completion_tokens': 40,
+        'total_tokens': 160,
+    }
+    validator, _, usage = _validator(response=response)
+    invocation = validator.prepare_many((_request(),))
+
+    with pytest.raises(AutoReviewValidationError, match='unavailable'):
+        validator.invoke_prepared(invocation, grant=object())
+
+    assert usage == []
+
+
 @pytest.mark.parametrize(
     'mutate',
     (
