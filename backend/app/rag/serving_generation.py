@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import NoReturn
 
@@ -40,6 +40,7 @@ class RagServingGenerationLockedContext:
     session_identity: int
     transaction_identity: int
     transaction_handle: object
+    mutation_authorized: bool
     key_version: str
     key_material_verifier: str
 
@@ -62,6 +63,8 @@ class _ArmedCorpusMutation:
     settings: Settings
     before_snapshot: tuple[tuple[str, ...], ...]
     vector_mutation: bool = False
+    savepoint_vector_mutations: set[int] = field(default_factory=set)
+    pending_savepoint_commits: list[object] = field(default_factory=list)
 
 
 def lock_rag_serving_generation(
@@ -113,6 +116,7 @@ def lock_rag_serving_generation(
     object.__setattr__(context, 'session_identity', id(db))
     object.__setattr__(context, 'transaction_identity', id(transaction))
     object.__setattr__(context, 'transaction_handle', transaction)
+    object.__setattr__(context, 'mutation_authorized', for_update)
     object.__setattr__(
         context,
         'key_version',
@@ -128,7 +132,7 @@ def increment_vector_index_generation(
     *,
     context: RagServingGenerationLockedContext,
 ) -> int:
-    _validate_generation_context(db, context)
+    _validate_generation_mutation_context(db, context)
     row = db.get(RagServingCorpusGeneration, 1)
     if row is None:
         raise RuntimeError('RAG serving generation singleton is unavailable')
@@ -146,13 +150,22 @@ def assert_rag_serving_generation_context(
     _validate_generation_context(db, context)
 
 
+def assert_rag_serving_generation_mutation_context(
+    db: Session,
+    context: RagServingGenerationLockedContext | None,
+) -> None:
+    if context is None:
+        raise TypeError('A locked RAG generation context is required')
+    _validate_generation_mutation_context(db, context)
+
+
 def arm_corpus_generation_refresh(
     db: Session,
     *,
     settings: Settings,
     context: RagServingGenerationLockedContext,
 ) -> None:
-    _validate_generation_context(db, context)
+    _validate_generation_mutation_context(db, context)
     current = db.info.get(_ARMED_CORPUS_MUTATION_INFO_KEY)
     if isinstance(current, _ArmedCorpusMutation):
         if current.context.transaction_handle is not context.transaction_handle:
@@ -172,15 +185,26 @@ def mark_rag_vector_index_mutation(db: Session) -> None:
     armed = db.info.get(_ARMED_CORPUS_MUTATION_INFO_KEY)
     if not isinstance(armed, _ArmedCorpusMutation):
         raise TypeError('RAG vector mutation requires an armed generation guard')
-    _validate_generation_context(db, armed.context)
-    armed.vector_mutation = True
+    _validate_generation_mutation_context(db, armed.context)
+    _mark_vector_mutation_contribution(db, armed)
+
+
+def _mark_vector_mutation_contribution(
+    db: Session,
+    armed: _ArmedCorpusMutation,
+) -> None:
+    savepoint = db.get_nested_transaction()
+    if savepoint is None:
+        armed.vector_mutation = True
+        return
+    armed.savepoint_vector_mutations.add(id(savepoint))
 
 
 def assert_corpus_generation_refresh_armed(db: Session) -> None:
     armed = db.info.get(_ARMED_CORPUS_MUTATION_INFO_KEY)
     if not isinstance(armed, _ArmedCorpusMutation):
         raise TypeError('Canonical mutation requires the RAG generation guard')
-    _validate_generation_context(db, armed.context)
+    _validate_generation_mutation_context(db, armed.context)
 
 
 def advance_corpus_generation(
@@ -190,7 +214,7 @@ def advance_corpus_generation(
     context: RagServingGenerationLockedContext,
 ) -> int:
     """Advance the corpus and refresh its lexical projection atomically."""
-    _validate_generation_context(db, context)
+    _validate_generation_mutation_context(db, context)
     row = db.get(RagServingCorpusGeneration, 1)
     if row is None:
         raise RuntimeError('RAG serving generation singleton is unavailable')
@@ -224,6 +248,15 @@ def _validate_generation_context(
     issued = db.info.get(_GENERATION_CONTEXTS_INFO_KEY, {}).get(id(context))
     if issued is not context:
         raise TypeError('RAG generation context was not issued for this session')
+
+
+def _validate_generation_mutation_context(
+    db: Session,
+    context: RagServingGenerationLockedContext,
+) -> None:
+    _validate_generation_context(db, context)
+    if not context.mutation_authorized:
+        raise TypeError('A mutation-authorized RAG generation context is required')
 
 
 def _validate_generation_identity(
@@ -266,16 +299,19 @@ def _ensure_generation_listener(db: Session) -> None:
         if not isinstance(armed, _ArmedCorpusMutation):
             return
         if any(isinstance(row, VectorServingTombstone) for row in session.new):
-            _validate_generation_context(session, armed.context)
-            armed.vector_mutation = True
+            _validate_generation_mutation_context(session, armed.context)
+            _mark_vector_mutation_contribution(session, armed)
 
     def before_commit(session: Session) -> None:
         armed = session.info.get(_ARMED_CORPUS_MUTATION_INFO_KEY)
         if not isinstance(armed, _ArmedCorpusMutation):
             return
         if session.in_nested_transaction():
+            savepoint = session.get_nested_transaction()
+            if savepoint is not None:
+                armed.pending_savepoint_commits.append(savepoint)
             return
-        _validate_generation_context(session, armed.context)
+        _validate_generation_mutation_context(session, armed.context)
         tombstone_created = any(
             isinstance(row, VectorServingTombstone) for row in session.new
         )
@@ -294,11 +330,46 @@ def _ensure_generation_listener(db: Session) -> None:
         if armed.vector_mutation or tombstone_created:
             increment_vector_index_generation(session, context=armed.context)
 
+    def after_commit(session: Session) -> None:
+        armed = session.info.get(_ARMED_CORPUS_MUTATION_INFO_KEY)
+        if (
+            not isinstance(armed, _ArmedCorpusMutation)
+            or not armed.pending_savepoint_commits
+        ):
+            return
+        savepoint = armed.pending_savepoint_commits.pop()
+        if id(savepoint) not in armed.savepoint_vector_mutations:
+            return
+        armed.savepoint_vector_mutations.remove(id(savepoint))
+        parent = getattr(savepoint, 'parent', None)
+        while parent is not None and not getattr(parent, 'nested', False):
+            parent = getattr(parent, 'parent', None)
+        if parent is None:
+            armed.vector_mutation = True
+        else:
+            armed.savepoint_vector_mutations.add(id(parent))
+
+    def after_soft_rollback(
+        session: Session,
+        previous_transaction: object,
+    ) -> None:
+        armed = session.info.get(_ARMED_CORPUS_MUTATION_INFO_KEY)
+        if not isinstance(armed, _ArmedCorpusMutation):
+            return
+        armed.savepoint_vector_mutations.discard(id(previous_transaction))
+        armed.pending_savepoint_commits[:] = [
+            transaction
+            for transaction in armed.pending_savepoint_commits
+            if transaction is not previous_transaction
+        ]
+
     def after_transaction_end(session: Session, transaction: object) -> None:
         if getattr(transaction, 'parent', None) is None:
             session.info.pop(_ARMED_CORPUS_MUTATION_INFO_KEY, None)
 
     event.listen(db, 'before_flush', before_flush)
     event.listen(db, 'before_commit', before_commit)
+    event.listen(db, 'after_commit', after_commit)
+    event.listen(db, 'after_soft_rollback', after_soft_rollback)
     event.listen(db, 'after_transaction_end', after_transaction_end)
     db.info[_GENERATION_LISTENER_INFO_KEY] = True

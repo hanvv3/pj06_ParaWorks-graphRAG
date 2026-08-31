@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import math
 import struct
+from collections.abc import Callable
 from datetime import UTC, datetime
 from hashlib import sha256
 
 import pytest
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
+import backend.app.rag.indexing as rag_indexing
 from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
 from backend.app.agent_runtime.keyed_mutation_guard import (
     KeyedMutationGuard,
@@ -51,6 +53,7 @@ from backend.app.rag.indexing import (
     canonical_float32_vector_sha256,
     compute_rag_v2_document_hash,
     index_rag_v2_serving_documents,
+    refresh_rag_v2_vector_index_state_metadata,
     upsert_rag_v2_vector_index_state,
 )
 from backend.app.rag.lexical_projection import (
@@ -65,6 +68,7 @@ from backend.app.rag.serving_generation import (
     assert_corpus_generation_refresh_armed,
     increment_vector_index_generation,
     lock_rag_serving_generation,
+    mark_rag_vector_index_mutation,
 )
 from backend.app.rag.serving_locks import (
     ServingMutationLockCoordinator,
@@ -330,6 +334,25 @@ class _FakeBatchEmbeddingModel:
         )
 
 
+class _DriftingBatchEmbeddingModel:
+    dimensions = 2
+
+    def __init__(self, *, drift: Callable[[], None]) -> None:
+        self._drift = drift
+        self.calls: list[tuple[str, ...]] = []
+
+    def embed(self, text: str) -> list[float]:
+        raise AssertionError('D indexing must use embed_many')
+
+    def embed_many(self, texts: list[str]) -> EmbeddingBatchResult:
+        self.calls.append(tuple(texts))
+        self._drift()
+        return EmbeddingBatchResult(
+            embeddings=[[0.25, 0.75] for _ in texts],
+            request_count=1,
+        )
+
+
 class _RecordingWriter:
     def __init__(self) -> None:
         self.upserts: list[tuple[VectorDocument, list[float]]] = []
@@ -571,6 +594,137 @@ def test_d_sqlite_persistent_write_refuses_before_provider_work(
         )
 
     assert provider.calls == []
+
+
+def test_public_d_indexing_rejects_two_document_drift_before_provider_dispatch(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    source, _ = _seed_canonical_raw_chunk(db_session)
+    _seed_trusted_and_legacy_unbound(db_session)
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    _seed_corpus_generation(db_session, settings=settings)
+    db_session.commit()
+    documents = build_rag_v2_index_documents(db_session, settings=settings)
+    original_builder = rag_indexing.build_rag_v2_index_documents
+    builder_calls = 0
+
+    def drifting_builder(db: Session, *, settings: Settings) -> list[VectorDocument]:
+        nonlocal builder_calls
+        builder_calls += 1
+        if builder_calls == 2:
+            generation = db.get(RagServingCorpusGeneration, 1)
+            canonical_source = db.get(Source, source.id)
+            assert generation is not None
+            assert canonical_source is not None
+            canonical_source.permission_level = 'restricted'
+            generation.corpus_generation += 1
+            db.commit()
+        return original_builder(db, settings=settings)
+
+    monkeypatch.setattr(
+        rag_indexing,
+        '_is_production_pgvector_writer',
+        lambda **_kwargs: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        rag_indexing,
+        'build_rag_v2_index_documents',
+        drifting_builder,
+    )
+    provider = _FakeBatchEmbeddingModel(
+        [[[0.25, 0.75], [0.5, 0.5]]]
+    )
+    writer = _LockedRecordingWriter()
+
+    result = index_rag_v2_serving_documents(
+        db=db_session,
+        documents=documents,
+        writer=writer,
+        embedding_model=provider,
+        embedding_model_name=settings.openai_embedding_model,
+        settings=settings,
+        persist_state=True,
+        operator_authorized=True,
+    )
+
+    assert len(documents) == 2
+    assert provider.calls == []
+    assert writer.upserts == []
+    assert result.indexed_count == 0
+    assert result.skipped_count == 2
+
+
+def test_public_d_indexing_discards_whole_batch_after_one_in_dispatch_drift(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    _, chunk = _seed_canonical_raw_chunk(db_session)
+    _seed_trusted_and_legacy_unbound(db_session)
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    _seed_corpus_generation(db_session, settings=settings)
+    db_session.commit()
+    documents = build_rag_v2_index_documents(db_session, settings=settings)
+
+    def drift_during_dispatch() -> None:
+        generation = db_session.get(RagServingCorpusGeneration, 1)
+        canonical_chunk = db_session.get(DocumentChunk, chunk.id)
+        assert generation is not None
+        assert canonical_chunk is not None
+        canonical_chunk.text = 'Changed while the provider call was in flight.'
+        generation.corpus_generation += 1
+        db_session.commit()
+
+    monkeypatch.setattr(
+        rag_indexing,
+        '_is_production_pgvector_writer',
+        lambda **_kwargs: True,
+        raising=False,
+    )
+    provider = _DriftingBatchEmbeddingModel(drift=drift_during_dispatch)
+    writer = _LockedRecordingWriter()
+
+    result = index_rag_v2_serving_documents(
+        db=db_session,
+        documents=documents,
+        writer=writer,
+        embedding_model=provider,
+        embedding_model_name=settings.openai_embedding_model,
+        settings=settings,
+        persist_state=True,
+        operator_authorized=True,
+    )
+
+    assert len(documents) == 2
+    assert provider.calls == [tuple(document.text for document in documents)]
+    assert writer.upserts == []
+    assert result.indexed_count == 0
+    assert result.skipped_count == 2
 
 
 def test_generation_lock_follows_key_runtime_and_precedes_projection(
@@ -1034,6 +1188,152 @@ def test_d_tombstone_increments_only_vector_index_generation(
     assert generation.vector_index_generation == 1
 
 
+def test_rolled_back_savepoint_direct_vector_mark_does_not_reach_root_commit(
+    db_session: Session,
+) -> None:
+    settings = _settings()
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    _seed_corpus_generation(db_session, settings=settings)
+    db_session.commit()
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        generation_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+        )
+        acquire_projection(db_session, key_context)
+        arm_corpus_generation_refresh(
+            db_session,
+            settings=settings,
+            context=generation_context,
+        )
+        savepoint = db_session.begin_nested()
+        mark_rag_vector_index_mutation(db_session)
+        savepoint.rollback()
+        db_session.commit()
+
+    generation = db_session.get(RagServingCorpusGeneration, 1)
+    assert generation is not None
+    assert generation.vector_index_generation == 0
+
+
+def test_rolled_back_savepoint_flushed_tombstone_does_not_reach_root_commit(
+    db_session: Session,
+) -> None:
+    settings = _settings()
+    bound, _ = _seed_trusted_and_legacy_unbound(db_session)
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    _seed_corpus_generation(db_session, settings=settings)
+    db_session.commit()
+    document_id = f'decision_record:{bound.id}'
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        generation_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+        )
+        acquire_projection(db_session, key_context)
+        arm_corpus_generation_refresh(
+            db_session,
+            settings=settings,
+            context=generation_context,
+        )
+        savepoint = db_session.begin_nested()
+        db_session.add(
+            VectorServingTombstone(
+                document_id=document_id,
+                source_review_item_id=bound.source_review_item_id,
+                reason_code='source_invalidated',
+            )
+        )
+        db_session.flush()
+        savepoint.rollback()
+        db_session.commit()
+
+    generation = db_session.get(RagServingCorpusGeneration, 1)
+    assert generation is not None
+    assert generation.vector_index_generation == 0
+    assert db_session.scalar(select(VectorServingTombstone.id)) is None
+
+
+def test_successful_savepoint_tombstone_merges_one_vector_root_contribution(
+    db_session: Session,
+) -> None:
+    settings = _settings()
+    bound, _ = _seed_trusted_and_legacy_unbound(db_session)
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    _seed_corpus_generation(db_session, settings=settings)
+    db_session.commit()
+    document_id = f'decision_record:{bound.id}'
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        generation_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+        )
+        acquire_projection(db_session, key_context)
+        arm_corpus_generation_refresh(
+            db_session,
+            settings=settings,
+            context=generation_context,
+        )
+        with db_session.begin_nested():
+            db_session.add(
+                VectorServingTombstone(
+                    document_id=document_id,
+                    source_review_item_id=bound.source_review_item_id,
+                    reason_code='source_invalidated',
+                )
+            )
+            db_session.flush()
+        generation = db_session.get(RagServingCorpusGeneration, 1)
+        assert generation is not None
+        assert generation.vector_index_generation == 0
+        db_session.commit()
+
+    db_session.refresh(generation)
+    assert generation.vector_index_generation == 1
+
+
 def test_d_vector_state_identity_binds_exact_float32_payload_and_generation() -> None:
     settings = _settings()
     canonical = CosineIndexableVectorValidator().validate(
@@ -1222,6 +1522,204 @@ def test_direct_d_vector_state_write_refuses_before_validation_without_guard(
             settings=settings,
         )
 
+    assert db_session.scalars(select(VectorIndexState)).all() == []
+
+
+def test_share_generation_context_refuses_all_vector_state_mutators_before_data_validation(
+    db_session: Session,
+) -> None:
+    settings = _settings()
+    _seed_canonical_raw_chunk(db_session)
+    document = build_rag_v2_index_documents(db_session, settings=settings)[0]
+    _seed_corpus_generation(db_session, settings=settings)
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    db_session.commit()
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        share_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+            for_update=False,
+        )
+        acquire_projection(db_session, key_context)
+        with pytest.raises(TypeError, match='mutation-authorized'):
+            increment_vector_index_generation(
+                db_session,
+                context=share_context,
+            )
+        with pytest.raises(TypeError, match='mutation-authorized'):
+            arm_corpus_generation_refresh(
+                db_session,
+                settings=settings,
+                context=share_context,
+            )
+        with pytest.raises(TypeError, match='mutation-authorized'):
+            advance_corpus_generation(
+                db_session,
+                settings=settings,
+                context=share_context,
+            )
+        with pytest.raises(TypeError, match='mutation-authorized'):
+            upsert_rag_v2_vector_index_state(
+                db=db_session,
+                state=None,
+                document=document,
+                embedding_model_name=settings.openai_embedding_model,
+                embedding=[1.0],
+                content_hash=compute_rag_v2_document_hash(document),
+                vector_index_generation=1,
+                settings=settings,
+                generation_context=share_context,
+            )
+        with pytest.raises(TypeError, match='mutation-authorized'):
+            refresh_rag_v2_vector_index_state_metadata(
+                db=db_session,
+                state=None,  # type: ignore[arg-type]
+                document=document,
+                embedding_model_name=settings.openai_embedding_model,
+                embedding=[1.0],
+                content_hash=compute_rag_v2_document_hash(document),
+                settings=settings,
+                generation_context=share_context,
+            )
+        generation = db_session.get(RagServingCorpusGeneration, 1)
+        assert generation is not None
+        assert generation.corpus_generation == 0
+        assert generation.vector_index_generation == 0
+        assert list(db_session.new) == []
+        assert list(db_session.dirty) == []
+        assert db_session.scalars(select(VectorIndexState)).all() == []
+        db_session.rollback()
+
+    generation = db_session.get(RagServingCorpusGeneration, 1)
+    assert generation is not None
+    assert generation.corpus_generation == 0
+    assert generation.vector_index_generation == 0
+    assert db_session.scalars(select(VectorIndexState)).all() == []
+
+
+def test_foreign_session_generation_context_refuses_direct_d_state_mutation(
+    db_session: Session,
+) -> None:
+    settings = _settings()
+    _seed_canonical_raw_chunk(db_session)
+    document = build_rag_v2_index_documents(db_session, settings=settings)[0]
+    _seed_corpus_generation(db_session, settings=settings)
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    db_session.commit()
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        generation_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+        )
+        acquire_projection(db_session, key_context)
+        foreign_session = sessionmaker(bind=db_session.get_bind())()
+        try:
+            with pytest.raises(TypeError, match='another session'):
+                upsert_rag_v2_vector_index_state(
+                    db=foreign_session,
+                    state=None,
+                    document=document,
+                    embedding_model_name=settings.openai_embedding_model,
+                    embedding=[1.0],
+                    content_hash=compute_rag_v2_document_hash(document),
+                    vector_index_generation=1,
+                    settings=settings,
+                    generation_context=generation_context,
+                )
+            foreign_generation = foreign_session.get(
+                RagServingCorpusGeneration,
+                1,
+            )
+            assert foreign_generation is not None
+            assert foreign_generation.corpus_generation == 0
+            assert foreign_generation.vector_index_generation == 0
+            assert list(foreign_session.new) == []
+            assert list(foreign_session.dirty) == []
+            assert foreign_session.scalars(select(VectorIndexState)).all() == []
+        finally:
+            foreign_session.close()
+        db_session.rollback()
+
+    assert db_session.scalars(select(VectorIndexState)).all() == []
+
+
+@pytest.mark.parametrize('close_root', ['rollback', 'commit'])
+def test_closed_root_generation_context_refuses_direct_d_state_mutation(
+    db_session: Session,
+    close_root: str,
+) -> None:
+    settings = _settings()
+    _seed_canonical_raw_chunk(db_session)
+    document = build_rag_v2_index_documents(db_session, settings=settings)[0]
+    _seed_corpus_generation(db_session, settings=settings)
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    db_session.add(
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+            fingerprint_key_material_verifier=verifier,
+            generation=1,
+            ready=True,
+        )
+    )
+    db_session.commit()
+
+    with KeyedMutationGuard.generation_barrier(db_session):
+        key_context = lock_runtime_state(db_session)
+        generation_context = lock_rag_serving_generation(
+            db_session,
+            settings=settings,
+            key_context=key_context,
+        )
+        acquire_projection(db_session, key_context)
+        getattr(db_session, close_root)()
+        with pytest.raises(TypeError, match='transaction'):
+            upsert_rag_v2_vector_index_state(
+                db=db_session,
+                state=None,
+                document=document,
+                embedding_model_name=settings.openai_embedding_model,
+                embedding=[1.0],
+                content_hash=compute_rag_v2_document_hash(document),
+                vector_index_generation=1,
+                settings=settings,
+                generation_context=generation_context,
+            )
+
+    generation = db_session.get(RagServingCorpusGeneration, 1)
+    assert generation is not None
+    assert generation.corpus_generation == 0
+    assert generation.vector_index_generation == 0
     assert db_session.scalars(select(VectorIndexState)).all() == []
 
 

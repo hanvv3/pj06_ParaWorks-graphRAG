@@ -55,7 +55,7 @@ from backend.app.rag.serving_generation import (
     RAG_INDEX_POLICY_VERSION,
     RagIndexMutationResult,
     RagServingGenerationLockedContext,
-    assert_rag_serving_generation_context,
+    assert_rag_serving_generation_mutation_context,
     mark_rag_vector_index_mutation,
 )
 from backend.app.rag.serving_locks import (
@@ -88,12 +88,28 @@ class EmbeddingBudgetExceededError(ValueError):
         super().__init__('embedding budget exceeded')
 
 
+def _is_production_pgvector_writer(
+    *,
+    db: Session,
+    writer: VectorIndexWriter,
+) -> bool:
+    return (
+        writer.__class__.__name__ == 'PgVectorStore'
+        and db.get_bind().dialect.name == 'postgresql'
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _RagV2PreProviderSnapshot:
     corpus_generation: int
     vector_index_generation: int
+    generation_updated_at: datetime | None
     canonical_document_hashes: tuple[tuple[str, str], ...]
     lock_plan: ServingMutationLockPlan
+
+
+class _RagV2PreProviderDriftError(ValueError):
+    pass
 
 
 def _capture_rag_v2_pre_provider_snapshot(
@@ -102,29 +118,65 @@ def _capture_rag_v2_pre_provider_snapshot(
     settings: Settings,
     documents: Sequence[VectorDocument],
 ) -> _RagV2PreProviderSnapshot:
-    document_ids = tuple(sorted(document.document_id for document in documents))
-    generation = db.scalar(
+    provider_input_hashes = {
+        document.document_id: compute_vector_document_hash(document)
+        for document in documents
+    }
+    if len(provider_input_hashes) != len(documents):
+        raise _RagV2PreProviderDriftError(
+            'RAG V2 provider input contains duplicate document identities'
+        )
+    document_ids = tuple(sorted(provider_input_hashes))
+    initial_generation = db.scalar(
         select(RagServingCorpusGeneration)
         .where(RagServingCorpusGeneration.id == 1)
         .execution_options(populate_existing=True)
     )
-    if generation is None:
+    if initial_generation is None:
         raise RuntimeError('RAG serving generation singleton is unavailable')
+    initial_generation_snapshot = _rag_v2_generation_snapshot(initial_generation)
+    initial_plan = build_serving_lock_plan(db, document_ids)
     canonical_documents = {
         document.document_id: document
         for document in build_rag_v2_index_documents(db, settings=settings)
         if document.document_id in document_ids
     }
-    if set(canonical_documents) != set(document_ids):
-        raise ValueError('RAG V2 pre-provider canonical snapshot is incomplete')
+    canonical_hashes = {
+        document_id: compute_vector_document_hash(document)
+        for document_id, document in canonical_documents.items()
+    }
+    final_plan = build_serving_lock_plan(db, document_ids)
+    final_generation = db.scalar(
+        select(RagServingCorpusGeneration)
+        .where(RagServingCorpusGeneration.id == 1)
+        .execution_options(populate_existing=True)
+    )
+    if (
+        final_generation is None
+        or _rag_v2_generation_snapshot(final_generation)
+        != initial_generation_snapshot
+        or final_plan != initial_plan
+        or canonical_hashes != provider_input_hashes
+    ):
+        raise _RagV2PreProviderDriftError(
+            'RAG V2 pre-provider snapshot drifted before dispatch'
+        )
     return _RagV2PreProviderSnapshot(
-        corpus_generation=generation.corpus_generation,
-        vector_index_generation=generation.vector_index_generation,
-        canonical_document_hashes=tuple(
-            (document_id, compute_vector_document_hash(canonical_documents[document_id]))
-            for document_id in document_ids
-        ),
-        lock_plan=build_serving_lock_plan(db, document_ids),
+        corpus_generation=initial_generation_snapshot[0],
+        vector_index_generation=initial_generation_snapshot[1],
+        generation_updated_at=initial_generation_snapshot[2],
+        canonical_document_hashes=tuple(sorted(provider_input_hashes.items())),
+        lock_plan=initial_plan,
+    )
+
+
+def _rag_v2_generation_snapshot(
+    generation: RagServingCorpusGeneration,
+) -> tuple[int, int, datetime | None]:
+    return (
+        generation.corpus_generation,
+        generation.vector_index_generation,
+        generation.updated_at,
     )
 
 
@@ -182,7 +234,7 @@ def upsert_rag_v2_vector_index_state(
     settings: Settings,
     generation_context: RagServingGenerationLockedContext | None = None,
 ) -> VectorIndexState:
-    assert_rag_serving_generation_context(db, generation_context)
+    assert_rag_serving_generation_mutation_context(db, generation_context)
     canonical = CosineIndexableVectorValidator().validate(
         embedding,
         expected_dimensions=settings.openai_embedding_dimensions,
@@ -241,7 +293,7 @@ def refresh_rag_v2_vector_index_state_metadata(
     settings: Settings,
     generation_context: RagServingGenerationLockedContext | None = None,
 ) -> VectorIndexState:
-    assert_rag_serving_generation_context(db, generation_context)
+    assert_rag_serving_generation_mutation_context(db, generation_context)
     canonical = CosineIndexableVectorValidator().validate(
         embedding,
         expected_dimensions=settings.openai_embedding_dimensions,
@@ -442,9 +494,9 @@ def index_changed_vector_documents(
     ] = []
     skipped_document_ids: list[str] = []
     embedding_dimensions = _model_dimensions(embedding_model)
-    production_pgvector = (
-        writer.__class__.__name__ == 'PgVectorStore'
-        and db.get_bind().dialect.name == 'postgresql'
+    production_pgvector = _is_production_pgvector_writer(
+        db=db,
+        writer=writer,
     )
     if rag_v2 and persist_state and not production_pgvector:
         raise ValueError(
@@ -532,23 +584,12 @@ def index_changed_vector_documents(
         changed_documents.append((document, content_hash, state))
 
     changed_texts = [document.text for document, _, _ in changed_documents]
-    pre_provider_snapshot = (
-        _capture_rag_v2_pre_provider_snapshot(
-            db=db,
-            settings=settings,
-            documents=[
-                document
-                for document, _, _ in (
-                    [*changed_documents, *metadata_refresh_documents]
-                )
-            ],
+    planned_documents = [
+        document
+        for document, _, _ in (
+            [*changed_documents, *metadata_refresh_documents]
         )
-        if production_pgvector
-        and rag_v2
-        and settings is not None
-        and (changed_documents or metadata_refresh_documents)
-        else None
-    )
+    ]
     budget_decision = estimate_embedding_budget(
         texts=changed_texts,
         embedding_model_name=embedding_model_name,
@@ -557,6 +598,37 @@ def index_changed_vector_documents(
     )
     if enforce_embedding_budget and budget_decision['action'] == 'block':
         raise EmbeddingBudgetExceededError(budget_decision)
+    pre_provider_snapshot = None
+    if (
+        production_pgvector
+        and rag_v2
+        and settings is not None
+        and planned_documents
+    ):
+        try:
+            pre_provider_snapshot = _capture_rag_v2_pre_provider_snapshot(
+                db=db,
+                settings=settings,
+                documents=planned_documents,
+            )
+        except _RagV2PreProviderDriftError:
+            db.rollback()
+            rejected_ids = sorted(
+                set(skipped_document_ids)
+                | {document.document_id for document in planned_documents}
+            )
+            return VectorIndexResult(
+                indexed_count=0,
+                document_ids=[],
+                embedding_dimensions=embedding_dimensions,
+                skipped_count=len(rejected_ids),
+                skipped_document_ids=rejected_ids,
+                tombstoned_count=encountered_tombstoned_count,
+                saved_embedding_calls=len(rejected_ids),
+                saved_serving_writes=len(planned_documents),
+                embedding_request_count=0,
+                embedding_budget=budget_decision,
+            )
 
     if production_pgvector:
         # Provider work must not hold an application transaction or advisory lock.
@@ -753,6 +825,8 @@ def _persist_locked_pgvector_batch(
                 != pre_provider_snapshot.corpus_generation
                 or generation.vector_index_generation
                 != pre_provider_snapshot.vector_index_generation
+                or generation.updated_at
+                != pre_provider_snapshot.generation_updated_at
             )
             canonical_changed = any(
                 canonical is None

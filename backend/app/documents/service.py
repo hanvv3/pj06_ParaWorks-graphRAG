@@ -16,7 +16,7 @@ from backend.app.models import (
 )
 from backend.app.rag.serving_generation import (
     RagServingGenerationLockedContext,
-    assert_rag_serving_generation_context,
+    assert_rag_serving_generation_mutation_context,
 )
 
 DEFAULT_CHUNK_MAX_CHARS = 1_200
@@ -115,7 +115,7 @@ def persist_parsed_document(
     if (server_signature is None) != (parser_policy is None):
         raise ValueError('server signature and parser policy must be supplied together')
     if server_signature is not None:
-        assert_rag_serving_generation_context(db, rag_generation_context)
+        assert_rag_serving_generation_mutation_context(db, rag_generation_context)
     document = db.scalar(select(Document).where(Document.source_id == source.id))
     if document is None:
         document = Document(
