@@ -114,6 +114,11 @@ def validate_review_item_for_approval(item: ReviewItem) -> None:
 
 
 def promote_review_item(db: Session, item: ReviewItem) -> dict:
+    from backend.app.rag.serving_generation import (
+        assert_corpus_generation_refresh_armed,
+    )
+
+    assert_corpus_generation_refresh_armed(db)
     validate_review_item_for_approval(item)
     normalized = _normalized_payload_for_item(item)
     base_fields = {

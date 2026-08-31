@@ -64,6 +64,11 @@ from backend.app.rag.indexing import (
     compute_vector_document_hash,
 )
 from backend.app.rag.pgvector_store import PgVectorConfig, PgVectorStore
+from backend.app.rag.serving_generation import (
+    arm_corpus_generation_refresh,
+    lock_rag_serving_generation,
+    mark_rag_vector_index_mutation,
+)
 from backend.app.rag.serving_locks import (
     ServingMutationLockCoordinator,
     build_serving_lock_plan,
@@ -352,6 +357,11 @@ class AutoReviewSourceReconciliationService:
             if key_context is None:
                 self._db.rollback()
                 return 'unresolved'
+            generation_context = lock_rag_serving_generation(
+                self._db,
+                settings=self._settings,
+                key_context=key_context,
+            )
             acquire_projection(self._db, key_context)
             source_statement = select(Source).where(Source.id == source_id)
             document_statement = select(Document).where(Document.id == document_id)
@@ -378,6 +388,11 @@ class AutoReviewSourceReconciliationService:
             if outcome != 'repairable' or selected_version_id is None:
                 self._db.rollback()
                 return outcome
+            arm_corpus_generation_refresh(
+                self._db,
+                settings=self._settings,
+                context=generation_context,
+            )
             document.current_document_version_id = selected_version_id
             self._db.commit()
             return 'repaired'
@@ -628,15 +643,32 @@ class AutoReviewSourceReconciliationService:
             changed = any(
                 (target_changed, link_changed, item_changed, fingerprint_changed)
             )
+            d_vector_tracked = (
+                self._db.scalar(
+                    select(VectorIndexState.id).where(
+                        VectorIndexState.document_id == document_id,
+                        VectorIndexState.serving_kind.is_not(None),
+                        VectorIndexState.index_policy_version
+                        == 'rag-v2-serving-index:v1',
+                        VectorIndexState.status == 'indexed',
+                    )
+                )
+                is not None
+            )
+            vector_mutation_count = 0
             if changed and self._vector_writer is not None:
                 if self._vector_writer.__class__.__name__ == 'PgVectorStore':
-                    self._vector_writer.narrow_permissions(
+                    vector_mutation_count = self._vector_writer.narrow_permissions(
                         [document_id],
                         strictest,
                         locked_context=locked_context,  # type: ignore[call-arg]
                     )
                 else:
-                    self._vector_writer.narrow_permissions([document_id], strictest)
+                    vector_mutation_count = self._vector_writer.narrow_permissions(
+                        [document_id], strictest
+                    )
+            if d_vector_tracked and vector_mutation_count > 0:
+                mark_rag_vector_index_mutation(self._db)
             if changed:
                 self._refresh_index_state_hash(
                     document_id,
@@ -737,6 +769,8 @@ class AutoReviewSourceReconciliationService:
             ).all()
         )
         for state in states:
+            if state.serving_kind is not None:
+                continue
             if state.content_hash == previous_content_hash:
                 state.content_hash = content_hash
 

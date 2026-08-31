@@ -23,6 +23,7 @@ PROJECTION_LOCK_SQL = text('SELECT pg_advisory_xact_lock(:lock_id)')
 AUTO_REVIEW_GLOBAL_LOCK_ORDER = (
     'generation_barrier',
     'runtime_key_state',
+    'rag_serving_corpus_generation',
     'provider_safety_states',
     'fingerprint_projection',
     'rollout_states',
@@ -138,13 +139,41 @@ def acquire_projection(
     _record_next(
         db,
         'projection',
-        allowed_previous=('runtime_share', 'runtime_update'),
+        allowed_previous=(
+            'runtime_share',
+            'runtime_update',
+            'rag_corpus_share',
+            'rag_corpus_update',
+        ),
     )
     if db.get_bind().dialect.name == 'postgresql':
         db.execute(
             PROJECTION_LOCK_SQL,
             {'lock_id': TRUSTED_FINGERPRINT_PROJECTION_LOCK_ID},
         )
+
+
+def record_rag_corpus_lock(
+    db: Session,
+    context: KeyGenerationLockedContext | None,
+    *,
+    for_update: bool,
+) -> None:
+    issued = db.info.get(_LATEST_CONTEXT_INFO_KEY)
+    if context is None:
+        if issued is not _RUNTIME_ABSENT:
+            raise TypeError('A locked runtime identity context is required')
+    elif (
+        context.session_identity != id(db)
+        or db.info.get(_CONTEXTS_INFO_KEY, {}).get(id(context)) is not context
+        or issued is not context
+    ):
+        raise TypeError('Key-generation context was not issued for this session')
+    _record_next(
+        db,
+        'rag_corpus_update' if for_update else 'rag_corpus_share',
+        allowed_previous=('runtime_share', 'runtime_update'),
+    )
 
 
 def build_runtime_key_state_lock(*, for_update: bool) -> Select:

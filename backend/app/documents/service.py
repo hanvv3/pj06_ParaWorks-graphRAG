@@ -14,6 +14,10 @@ from backend.app.models import (
     DocumentVersion,
     Source,
 )
+from backend.app.rag.serving_generation import (
+    RagServingGenerationLockedContext,
+    assert_rag_serving_generation_context,
+)
 
 DEFAULT_CHUNK_MAX_CHARS = 1_200
 SOURCE_SNIPPET_MAX_CHARS = 240
@@ -106,9 +110,12 @@ def persist_parsed_document(
     metadata: dict,
     server_signature: CanonicalSourceContentSignature | None = None,
     parser_policy: ServerParserPolicy | None = None,
+    rag_generation_context: RagServingGenerationLockedContext | None = None,
 ) -> list[DocumentChunk]:
     if (server_signature is None) != (parser_policy is None):
         raise ValueError('server signature and parser policy must be supplied together')
+    if server_signature is not None:
+        assert_rag_serving_generation_context(db, rag_generation_context)
     document = db.scalar(select(Document).where(Document.source_id == source.id))
     if document is None:
         document = Document(

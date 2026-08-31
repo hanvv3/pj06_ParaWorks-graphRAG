@@ -209,6 +209,11 @@ class ReviewTransitionService:
             approval_directive=approval_directive,
         )
         if action == 'approve':
+            from backend.app.rag.serving_generation import (
+                arm_corpus_generation_refresh,
+                lock_rag_serving_generation,
+            )
+
             auto_locator = (
                 self._discover_auto_approval_locator(db, preview=preview, actor=actor)
                 if actor.actor_type == 'auto_policy'
@@ -216,6 +221,11 @@ class ReviewTransitionService:
             )
             with KeyedMutationGuard.generation_barrier(db):
                 context = lock_runtime_state(db, mode='share')
+                generation_context = lock_rag_serving_generation(
+                    db,
+                    settings=self._settings,
+                    key_context=context,
+                )
                 safety = (
                     self._lock_and_require_provider_safety(db, locator=auto_locator)
                     if auto_locator is not None
@@ -277,6 +287,11 @@ class ReviewTransitionService:
                         locator=auto_locator,
                         rollout=locked_rollout,
                     )
+                arm_corpus_generation_refresh(
+                    db,
+                    settings=self._settings,
+                    context=generation_context,
+                )
                 result = self._transition_item(
                     db=db,
                     item=item,

@@ -55,7 +55,10 @@ def test_pgvector_schema_sql_creates_extension_table_and_indexes() -> None:
 
 def test_pgvector_upsert_writes_document_with_embedding_literal() -> None:
     session = RecordingSession()
-    store = PgVectorStore(session=session)
+    store = PgVectorStore(
+        session=session,
+        config=PgVectorConfig(embedding_dimensions=3),
+    )
 
     store.upsert_with_embedding(
         VectorDocument(
@@ -73,8 +76,44 @@ def test_pgvector_upsert_writes_document_with_embedding_literal() -> None:
     assert 'INSERT INTO rag_vector_documents' in statement
     assert 'ON CONFLICT (document_id) DO UPDATE' in statement
     assert params['document_id'] == 'knowledge:decision:1'
-    assert params['embedding'] == '[0.1,0.2,0.3]'
+    assert params['embedding'] == (
+        '[0.10000000149011612,0.20000000298023224,0.30000001192092896]'
+    )
     assert params['metadata_json'] == '{"source_type": "decision_record"}'
+
+
+@pytest.mark.parametrize(
+    'embedding',
+    (
+        [1.0, 2.0],
+        [0.0, 0.0, 0.0],
+        [1.0, float('nan'), 2.0],
+        [True, 1.0, 2.0],
+    ),
+)
+def test_pgvector_direct_writer_rejects_non_cosine_indexable_vectors(
+    embedding: list[object],
+) -> None:
+    session = RecordingSession()
+    store = PgVectorStore(
+        session=session,
+        config=PgVectorConfig(embedding_dimensions=3),
+    )
+
+    with pytest.raises(ValueError, match='cosine-indexable float32'):
+        store.upsert_with_embedding(
+            VectorDocument(
+                document_id='chunk:1',
+                text='Exact D vector payload',
+                source_url='https://example.test/source',
+                source_snippet='Exact D vector payload',
+                permission_level='internal',
+                metadata={},
+            ),
+            embedding=embedding,  # type: ignore[arg-type]
+        )
+
+    assert session.calls == []
 
 
 def test_pgvector_search_filters_by_user_permission_and_tracks_hidden_matches() -> None:
@@ -161,6 +200,24 @@ def test_pgvector_conditional_upsert_cannot_cross_a_tombstone() -> None:
     assert 'NOT EXISTS' in statement
     assert 'vector_serving_tombstones' in statement
     assert 'document_id = candidate.document_id' in statement
+
+
+def test_pgvector_d_raw_write_is_actorless_without_widening_legacy_search() -> None:
+    store = PgVectorStore(session=RecordingSession())
+
+    upsert = store._upsert_sql()
+    search = store._search_sql()
+    normalized_upsert = ' '.join(upsert.split())
+
+    assert "metadata_json->>'index_policy_version'" in normalized_upsert
+    assert "'rag-v2-serving-index:v1'" in normalized_upsert
+    assert "metadata_json->>'serving_kind' = 'raw_chunk'" in normalized_upsert
+    assert "metadata_json->>'support_mode' = 'source_observation'" in normalized_upsert
+    assert (
+        "sources.source_type IN ( 'gmail', 'gmail_attachment', 'drive', 'calendar' )"
+        in normalized_upsert
+    )
+    assert "metadata_json->>'index_policy_version'" not in search
 
 
 def test_pgvector_search_excludes_stale_tombstoned_row_before_hidden_count() -> None:

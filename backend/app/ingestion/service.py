@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from backend.app.agent_runtime.keyed_mutation_guard import (
     KeyedMutationGuard,
     KeyGenerationLockedContext,
+    acquire_projection,
     lock_runtime_state,
 )
 from backend.app.connectors.base import SourceEvent
@@ -41,6 +42,12 @@ from backend.app.models import (
     VectorIndexState,
 )
 from backend.app.rag.indexing import VectorIndexWriter, compute_vector_document_hash
+from backend.app.rag.serving_generation import (
+    RagServingGenerationLockedContext,
+    advance_corpus_generation,
+    increment_vector_index_generation,
+    lock_rag_serving_generation,
+)
 from backend.app.rag.serving_locks import VectorServingLockManager
 from backend.app.rag.vector_store import VectorDocument
 from backend.app.review.auto_review_source_reconciliation import (
@@ -131,24 +138,36 @@ def ingest_events_with_result(
         and vector_writer.__class__.__name__ == 'PgVectorStore'
         and db.get_bind().dialect.name == 'postgresql'
     )
+    canonical_mutation = any(event.source_type in _C5_SOURCE_TYPES for event in events)
     barrier = (
         KeyedMutationGuard.generation_barrier(db)
-        if production_vector_mutation
+        if production_vector_mutation or canonical_mutation
         else nullcontext()
     )
     try:
         with barrier:
             key_context = (
-                lock_runtime_state(db) if production_vector_mutation else None
+                lock_runtime_state(db)
+                if production_vector_mutation or canonical_mutation
+                else None
             )
             if production_vector_mutation and key_context is None:
                 raise RuntimeError('C.5 source mutation key runtime unavailable')
+            generation_context = None
+            if canonical_mutation:
+                generation_context = lock_rag_serving_generation(
+                    db,
+                    settings=resolved_settings,
+                    key_context=key_context,
+                )
+                acquire_projection(db, key_context)
             return _ingest_events_transaction(
                 db,
                 events,
                 vector_writer=vector_writer,
                 settings=resolved_settings,
                 key_context=key_context,
+                rag_generation_context=generation_context,
                 authenticated_source_metadata_by_id=(
                     authenticated_source_metadata_by_id or {}
                 ),
@@ -165,6 +184,7 @@ def _ingest_events_transaction(
     vector_writer: VectorIndexWriter | None,
     settings: Settings,
     key_context: KeyGenerationLockedContext | None,
+    rag_generation_context: RagServingGenerationLockedContext | None,
     authenticated_source_metadata_by_id: Mapping[
         str, Mapping[str, object]
     ],
@@ -273,18 +293,34 @@ def _ingest_events_transaction(
                 },
                 server_signature=computed_signature,
                 parser_policy=parser_policy,
+                rag_generation_context=rag_generation_context,
             )
             mutations.delete_ids.update(old_chunk_ids)
         db.flush()
         changed_state_rows.append((source, classification))
 
-    _apply_vector_mutations(
+    d_vector_mutated = _apply_vector_mutations(
         db,
         mutations=mutations,
         vector_writer=vector_writer,
         settings=settings,
         key_context=key_context,
     )
+    if d_vector_mutated:
+        if rag_generation_context is None:
+            raise TypeError('D vector mutation requires a RAG generation context')
+        increment_vector_index_generation(
+            db,
+            context=rag_generation_context,
+        )
+    if changed_state_rows:
+        if rag_generation_context is None:
+            raise TypeError('Canonical ingestion requires a RAG generation context')
+        advance_corpus_generation(
+            db,
+            settings=settings,
+            context=rag_generation_context,
+        )
     db.commit()
     db.expire_all()
     changed_sources = (
@@ -694,6 +730,8 @@ def _refresh_chunk_index_state_hash(
         )
     )
     for state in states:
+        if state.serving_kind is not None:
+            continue
         state.content_hash = content_hash
 
 
@@ -704,7 +742,7 @@ def _apply_vector_mutations(
     vector_writer: VectorIndexWriter | None,
     settings: Settings,
     key_context: KeyGenerationLockedContext | None,
-) -> None:
+) -> bool:
     all_document_ids = sorted(
         mutations.delete_ids.union(
             document_id
@@ -713,7 +751,19 @@ def _apply_vector_mutations(
         )
     )
     if not all_document_ids:
-        return
+        return False
+    d_tracked_document_ids = set(
+        db.scalars(
+            select(VectorIndexState.document_id).where(
+                VectorIndexState.document_id.in_(all_document_ids),
+                VectorIndexState.serving_kind.is_not(None),
+                VectorIndexState.index_policy_version
+                == 'rag-v2-serving-index:v1',
+                VectorIndexState.status == 'indexed',
+            )
+        ).all()
+    )
+    d_vector_mutated = False
     locked_context = None
     production_pgvector = bool(
         vector_writer is not None
@@ -742,14 +792,25 @@ def _apply_vector_mutations(
         )
         if vector_writer is not None:
             if production_pgvector:
-                vector_writer.delete_many(
+                deleted_count = vector_writer.delete_many(
                     sorted(mutations.delete_ids),
                     locked_context=locked_context,  # type: ignore[call-arg]
                 )
             else:
-                vector_writer.delete_many(sorted(mutations.delete_ids))
+                deleted_count = vector_writer.delete_many(
+                    sorted(mutations.delete_ids)
+                )
+            d_vector_mutated = bool(
+                d_vector_mutated
+                or (
+                    deleted_count > 0
+                    and d_tracked_document_ids.intersection(
+                        mutations.delete_ids
+                    )
+                )
+            )
     if vector_writer is None:
-        return
+        return False
     for permission_level in sorted(
         mutations.narrowings,
         key=lambda value: _PERMISSION_RANK.get(value, len(_PERMISSION_RANK)),
@@ -760,13 +821,23 @@ def _apply_vector_mutations(
         if not document_ids:
             continue
         if production_pgvector:
-            vector_writer.narrow_permissions(
+            narrowed_count = vector_writer.narrow_permissions(
                 document_ids,
                 permission_level,
                 locked_context=locked_context,  # type: ignore[call-arg]
             )
         else:
-            vector_writer.narrow_permissions(document_ids, permission_level)
+            narrowed_count = vector_writer.narrow_permissions(
+                document_ids, permission_level
+            )
+        d_vector_mutated = bool(
+            d_vector_mutated
+            or (
+                narrowed_count > 0
+                and d_tracked_document_ids.intersection(document_ids)
+            )
+        )
+    return d_vector_mutated
 
 
 def _legacy_slack_event_is_unchanged(

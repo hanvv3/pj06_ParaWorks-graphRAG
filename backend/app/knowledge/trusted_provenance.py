@@ -151,6 +151,11 @@ def record_or_verify_explicit_provenance(
 ) -> None:
     if item.candidate_contract_version != 'c5-v1':
         return
+    from backend.app.rag.serving_generation import (
+        assert_corpus_generation_refresh_armed,
+    )
+
+    assert_corpus_generation_refresh_armed(db)
     if item.workflow_thread_id is None:
         raise TrustedProvenanceMismatch('C.5 promotion requires a workflow identity')
     bindings = tuple(

@@ -1,5 +1,6 @@
 import math
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -30,7 +31,12 @@ from backend.app.rag.indexing import (
     index_changed_vector_documents,
     index_vector_documents,
 )
+from backend.app.rag.reindexing import (
+    ReindexConfigurationError,
+    run_rag_v2_reindex,
+)
 from backend.app.rag.vector_store import VectorDocument
+from backend.app.tasks.rag_indexing import execute_rag_v2_reindex_job
 
 
 class RecordingVectorWriter:
@@ -1198,3 +1204,106 @@ def test_rag_indexing_summary_requires_admin_role(client: TestClient) -> None:
 
     assert response.status_code == 403
     assert response.json()['detail'] == 'Admin permission required.'
+
+
+def test_rag_v2_reindex_dry_run_uses_canonical_raw_without_legacy_approval(
+    db_session: Session,
+) -> None:
+    chunk_id = seed_chunk(
+        db_session,
+        'Canonical raw observation is independently indexable.',
+        'gmail:v2-dry-run',
+        approve_for_rag=False,
+    )
+    settings = Settings(
+        database_url='sqlite://',
+        agent_runtime_fingerprint_secret=(
+            'task-5-reindex-secret-with-at-least-32-bytes'
+        ),
+        agent_runtime_fingerprint_key_version='task5-reindex-v1',
+    )
+
+    result = run_rag_v2_reindex(
+        db=db_session,
+        settings=settings,
+        dry_run=True,
+        operator_authorized=False,
+    )
+
+    assert build_rag_index_documents(db_session) == []
+    assert result['dry_run'] is True
+    assert result['serving_lane'] == 'rag_v2'
+    assert result['storage_backend'] == 'preview'
+    assert result['indexed_count'] == 1
+    assert result['skipped_count'] == 0
+    assert result['tombstoned_count'] == 0
+    assert result['document_ids'] == [f'chunk:{chunk_id}']
+    assert result['corpus_generation'] == 0
+    assert result['vector_index_generation'] == 0
+
+
+def test_rag_v2_live_reindex_requires_separate_operator_authorization_first(
+    db_session: Session,
+) -> None:
+    settings = Settings(database_url='sqlite://')
+
+    with pytest.raises(ReindexConfigurationError, match='operator authorization'):
+        run_rag_v2_reindex(
+            db=db_session,
+            settings=settings,
+            dry_run=False,
+            operator_authorized=False,
+        )
+
+    with pytest.raises(ReindexConfigurationError, match='PostgreSQL'):
+        run_rag_v2_reindex(
+            db=db_session,
+            settings=settings,
+            dry_run=False,
+            operator_authorized=True,
+        )
+
+
+def test_rag_v2_job_reports_incremental_generations_and_tombstones(
+    db_session: Session,
+) -> None:
+    seed_chunk(
+        db_session,
+        'Canonical raw observation in the D indexing job.',
+        'gmail:v2-job',
+        approve_for_rag=False,
+    )
+    job = SyncJob(
+        job_id='rag-v2-task-5',
+        connector_type='rag-index-v2',
+        status='queued',
+        message='queued',
+        progress_pct=0,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    result = execute_rag_v2_reindex_job(
+        db=db_session,
+        settings=Settings(
+            database_url='sqlite://',
+            agent_runtime_fingerprint_secret=(
+                'task-5-job-secret-with-at-least-32-bytes'
+            ),
+            agent_runtime_fingerprint_key_version='task5-job-v1',
+        ),
+        job_id=job.job_id,
+        dry_run=True,
+        operator_authorized=False,
+    )
+
+    assert result['status'] == 'complete'
+    assert result['serving_lane'] == 'rag_v2'
+    assert result['indexed_count'] == 1
+    assert result['tombstoned_count'] == 0
+    assert result['corpus_generation'] == 0
+    assert result['vector_index_generation'] == 0
+    assert job.message == (
+        'indexed=1 skipped=0 tombstoned=0 saved_embedding_calls=0 '
+        'corpus_generation=0 vector_index_generation=0'
+    )

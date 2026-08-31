@@ -36,6 +36,10 @@ from backend.app.models import (
     VectorIndexState,
     VectorServingTombstone,
 )
+from backend.app.rag.serving_generation import (
+    arm_corpus_generation_refresh,
+    lock_rag_serving_generation,
+)
 
 _LATEST_KEY_CONTEXT_INFO_KEY = 'paraworks_c5_latest_keyed_context'
 _BOUND_SHARED_KEY_CONTEXTS_INFO_KEY = (
@@ -221,6 +225,7 @@ class ServingMutationLockCoordinator:
 
     def __init__(self, *, db: Session, settings: Settings) -> None:
         self._db = db
+        self._settings = settings
         self._manager = VectorServingLockManager(db=db, settings=settings)
 
     def acquire(
@@ -233,6 +238,11 @@ class ServingMutationLockCoordinator:
             acquire_projection,
         )
 
+        generation_context = lock_rag_serving_generation(
+            self._db,
+            settings=self._settings,
+            key_context=key_context,
+        )
         acquire_projection(self._db, key_context)
         self._lock_rows(
             AutoReviewRolloutState,
@@ -289,6 +299,11 @@ class ServingMutationLockCoordinator:
             VectorIndexState,
             VectorIndexState.document_id,
             plan.document_ids,
+        )
+        arm_corpus_generation_refresh(
+            self._db,
+            settings=self._settings,
+            context=generation_context,
         )
         return locked
 

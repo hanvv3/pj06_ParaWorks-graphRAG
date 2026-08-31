@@ -1,4 +1,5 @@
 import json
+import struct
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -9,10 +10,16 @@ from typing import Protocol
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
+from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
+from backend.app.agent_runtime.fingerprints import (
+    fingerprint_secret_bytes,
+    keyed_fingerprint,
+)
 from backend.app.agent_runtime.keyed_mutation_guard import (
     KeyedMutationGuard,
     lock_runtime_state,
 )
+from backend.app.agent_runtime.rag_v2_identity import exact_utf8_bytes
 from backend.app.core.config import Settings
 from backend.app.ingestion.source_authority import (
     exact_authority_contains_chunk,
@@ -29,6 +36,7 @@ from backend.app.models import (
     DocumentParserRun,
     DocumentVersion,
     HistoryEvent,
+    RagServingCorpusGeneration,
     ReviewItem,
     Source,
     TimelineEvent,
@@ -37,11 +45,25 @@ from backend.app.models import (
     VectorServingTombstone,
 )
 from backend.app.rag.embeddings import EmbeddingBatchResult, EmbeddingModel
+from backend.app.rag.serving_contracts import (
+    ExplicitApprovalProvenance,
+    LegacyHumanProvenance,
+    ServingEvidence,
+)
+from backend.app.rag.serving_generation import (
+    RAG_COSINE_POLICY_VERSION,
+    RAG_INDEX_POLICY_VERSION,
+    RagIndexMutationResult,
+    mark_rag_vector_index_mutation,
+)
 from backend.app.rag.serving_locks import (
     ServingMutationLockCoordinator,
     build_serving_lock_plan,
 )
+from backend.app.rag.source_observations import CanonicalSourceObservationResolver
+from backend.app.rag.trusted_evidence import TrustedServingEnvelopeResolver
 from backend.app.rag.vector_store import VectorDocument
+from backend.app.rag.vector_validation import CosineIndexableVectorValidator
 
 
 class VectorIndexWriter(Protocol):
@@ -63,6 +85,131 @@ class EmbeddingBudgetExceededError(ValueError):
         super().__init__('embedding budget exceeded')
 
 
+def canonical_float32_vector_sha256(vector: Sequence[float]) -> str:
+    payload = b'paraworks:pgvector-float32:v1\x00' + b''.join(
+        struct.pack('>f', coordinate) for coordinate in vector
+    )
+    return sha256(payload).hexdigest()
+
+
+def build_rag_v2_vector_index_state_hmac(
+    *,
+    document_id: str,
+    embedding_model: str,
+    embedding_dimensions: int,
+    content_hash: str,
+    canonical_float32_vector_sha256: str,
+    index_state: str,
+    vector_index_generation: int,
+    settings: Settings,
+) -> str:
+    secret, _ = fingerprint_secret_bytes(settings)
+    return keyed_fingerprint(
+        {
+            'canonical_float32_vector_sha256': (
+                canonical_float32_vector_sha256
+            ),
+            'content_hash_bytes': exact_utf8_bytes(content_hash),
+            'cosine_indexable': index_state == 'indexed',
+            'document_id_bytes': exact_utf8_bytes(document_id),
+            'embedding_dimensions': embedding_dimensions,
+            'embedding_model_bytes': exact_utf8_bytes(embedding_model),
+            'index_state': index_state,
+            'vector_index_generation': vector_index_generation,
+        },
+        secret=secret,
+        schema_version='rag-vector-index-state:v1',
+        policy_version=RAG_COSINE_POLICY_VERSION,
+    )
+
+
+def upsert_rag_v2_vector_index_state(
+    *,
+    db: Session,
+    state: VectorIndexState | None,
+    document: VectorDocument,
+    embedding_model_name: str,
+    embedding: Sequence[float],
+    content_hash: str,
+    vector_index_generation: int,
+    settings: Settings,
+) -> VectorIndexState:
+    canonical = CosineIndexableVectorValidator().validate(
+        embedding,
+        expected_dimensions=settings.openai_embedding_dimensions,
+    )
+    metadata = document.metadata
+    required_metadata = {
+        key: metadata.get(key)
+        for key in (
+            'serving_kind',
+            'support_mode',
+            'serving_identity_hmac',
+            'serving_version_fingerprint',
+            'model_content_hmac',
+            'canonical_citation_projection_hmac',
+        )
+    }
+    if any(
+        type(value) is not str or not value
+        for value in required_metadata.values()
+    ):
+        raise ValueError('RAG V2 vector state metadata is incomplete')
+    vector_digest = canonical_float32_vector_sha256(canonical)
+    state_hmac = build_rag_v2_vector_index_state_hmac(
+        document_id=document.document_id,
+        embedding_model=embedding_model_name,
+        embedding_dimensions=len(canonical),
+        content_hash=content_hash,
+        canonical_float32_vector_sha256=vector_digest,
+        index_state='indexed',
+        vector_index_generation=vector_index_generation,
+        settings=settings,
+    )
+    verifier = fingerprint_key_material_verifier(
+        settings.agent_runtime_fingerprint_secret
+    )
+    now = datetime.now(UTC)
+    if state is None:
+        state = VectorIndexState(
+            document_id=document.document_id,
+            embedding_model=embedding_model_name,
+            embedding_dimensions=len(canonical),
+            content_hash=content_hash,
+            status='indexed',
+            indexed_at=now,
+        )
+        db.add(state)
+    state.embedding_dimensions = len(canonical)
+    state.embedding_model = embedding_model_name
+    state.content_hash = content_hash
+    state.status = 'indexed'
+    state.last_error = None
+    state.indexed_at = now
+    state.corpus_generation_id = 1
+    state.serving_kind = str(required_metadata['serving_kind'])
+    state.support_mode = str(required_metadata['support_mode'])
+    state.effective_permission = document.permission_level
+    state.serving_identity_hmac = str(required_metadata['serving_identity_hmac'])
+    state.serving_version_fingerprint = str(
+        required_metadata['serving_version_fingerprint']
+    )
+    state.model_content_hmac = str(required_metadata['model_content_hmac'])
+    state.canonical_citation_projection_hmac = str(
+        required_metadata['canonical_citation_projection_hmac']
+    )
+    state.index_policy_version = RAG_INDEX_POLICY_VERSION
+    state.pgvector_cosine_policy_version = RAG_COSINE_POLICY_VERSION
+    state.cosine_indexable = True
+    state.vector_index_generation = vector_index_generation
+    state.vector_index_state_hmac = state_hmac
+    state.fingerprint_key_version = (
+        settings.agent_runtime_fingerprint_key_version
+    )
+    state.fingerprint_key_material_verifier = verifier
+    return state
+
+
 @dataclass(frozen=True)
 class VectorIndexResult:
     indexed_count: int
@@ -70,6 +217,7 @@ class VectorIndexResult:
     embedding_dimensions: int
     skipped_count: int = 0
     skipped_document_ids: list[str] | None = None
+    tombstoned_count: int = 0
     saved_embedding_calls: int = 0
     saved_serving_writes: int = 0
     embedding_request_count: int = 0
@@ -134,6 +282,8 @@ def index_changed_vector_documents(
     max_embedding_cost_usd: float | None = None,
     enforce_embedding_budget: bool = True,
     settings: Settings | None = None,
+    rag_v2: bool = False,
+    operator_authorized: bool = False,
 ) -> VectorIndexResult:
     changed_documents: list[tuple[VectorDocument, str, VectorIndexState | None]] = []
     skipped_document_ids: list[str] = []
@@ -142,12 +292,22 @@ def index_changed_vector_documents(
         writer.__class__.__name__ == 'PgVectorStore'
         and db.get_bind().dialect.name == 'postgresql'
     )
+    if rag_v2 and persist_state and not production_pgvector:
+        raise ValueError(
+            'RAG V2 persistent writes require PostgreSQL with pgvector'
+        )
+    if rag_v2 and production_pgvector and not operator_authorized:
+        raise ValueError('RAG V2 live reindex requires operator authorization')
     if production_pgvector and settings is None:
         raise ValueError('PostgreSQL indexing requires serving-lock settings')
     canonical_live_documents = (
         {
             document.document_id: document
-            for document in build_rag_index_documents(db)
+            for document in (
+                build_rag_v2_index_documents(db, settings=settings)
+                if rag_v2 and settings is not None
+                else build_rag_index_documents(db)
+            )
         }
         if production_pgvector
         else {}
@@ -162,6 +322,10 @@ def index_changed_vector_documents(
             )
         ).all()
     )
+    encountered_tombstoned_count = sum(
+        document.document_id in tombstoned_document_ids
+        for document in documents
+    )
 
     for document in documents:
         if document.document_id in tombstoned_document_ids:
@@ -171,18 +335,34 @@ def index_changed_vector_documents(
             canonical = canonical_live_documents.get(document.document_id)
             if (
                 canonical is None
-                or compute_vector_document_hash(canonical)
-                != compute_vector_document_hash(document)
+                or _content_hash(canonical, rag_v2=rag_v2)
+                != _content_hash(document, rag_v2=rag_v2)
             ):
                 skipped_document_ids.append(document.document_id)
                 continue
-        content_hash = compute_vector_document_hash(document)
+        content_hash = _content_hash(document, rag_v2=rag_v2)
         state = _get_index_state(
             db=db,
             document_id=document.document_id,
             embedding_model_name=embedding_model_name,
         )
-        if state and state.status == 'indexed' and state.content_hash == content_hash:
+        state_is_skippable = bool(
+            state
+            and state.status == 'indexed'
+            and state.content_hash == content_hash
+            and (
+                not rag_v2
+                or (
+                    state.serving_kind is not None
+                    and state.embedding_dimensions == embedding_dimensions
+                    and state.index_policy_version == RAG_INDEX_POLICY_VERSION
+                    and state.pgvector_cosine_policy_version
+                    == RAG_COSINE_POLICY_VERSION
+                    and state.cosine_indexable is True
+                )
+            )
+        )
+        if state_is_skippable:
             skipped_document_ids.append(document.document_id)
             continue
 
@@ -206,6 +386,16 @@ def index_changed_vector_documents(
         if changed_texts
         else EmbeddingBatchResult(embeddings=[], request_count=0)
     )
+    if len(batch.embeddings) != len(changed_documents):
+        raise ValueError('embedding batch is not a cosine-indexable float32 batch')
+    canonical_embeddings = CosineIndexableVectorValidator().validate_batch(
+        batch.embeddings,
+        expected_dimensions=embedding_dimensions,
+    )
+    batch = replace(
+        batch,
+        embeddings=[list(vector) for vector in canonical_embeddings],
+    )
     if production_pgvector:
         return _persist_locked_pgvector_batch(
             db=db,
@@ -214,11 +404,13 @@ def index_changed_vector_documents(
             changed_documents=changed_documents,
             embeddings=batch.embeddings,
             skipped_document_ids=skipped_document_ids,
+            tombstoned_count=encountered_tombstoned_count,
             embedding_model_name=embedding_model_name,
             embedding_dimensions=embedding_dimensions,
             persist_state=persist_state,
             batch=batch,
             budget_decision=budget_decision,
+            rag_v2=rag_v2,
         )
 
     indexed_document_ids: list[str] = []
@@ -245,6 +437,7 @@ def index_changed_vector_documents(
         embedding_dimensions=embedding_dimensions,
         skipped_count=len(skipped_document_ids),
         skipped_document_ids=skipped_document_ids,
+        tombstoned_count=encountered_tombstoned_count,
         saved_embedding_calls=len(skipped_document_ids),
         embedding_request_count=batch.request_count,
         embedding_prompt_tokens=batch.prompt_tokens,
@@ -261,11 +454,13 @@ def _persist_locked_pgvector_batch(
     changed_documents: list[tuple[VectorDocument, str, VectorIndexState | None]],
     embeddings: list[list[float]],
     skipped_document_ids: list[str],
+    tombstoned_count: int = 0,
     embedding_model_name: str,
     embedding_dimensions: int,
     persist_state: bool,
     batch: EmbeddingBatchResult,
     budget_decision: dict[str, float | int | str | None],
+    rag_v2: bool,
 ) -> VectorIndexResult:
     indexed: list[str] = []
     pre_provider_skip_count = len(skipped_document_ids)
@@ -279,6 +474,7 @@ def _persist_locked_pgvector_batch(
             embedding_dimensions=embedding_dimensions,
             skipped_count=len(stale_skips),
             skipped_document_ids=stale_skips,
+            tombstoned_count=tombstoned_count,
             saved_embedding_calls=pre_provider_skip_count,
             embedding_request_count=batch.request_count,
             embedding_prompt_tokens=batch.prompt_tokens,
@@ -306,6 +502,7 @@ def _persist_locked_pgvector_batch(
                 embedding_dimensions=embedding_dimensions,
                 skipped_count=len(stale_skips),
                 skipped_document_ids=stale_skips,
+                tombstoned_count=tombstoned_count,
                 saved_embedding_calls=pre_provider_skip_count,
                 saved_serving_writes=post_provider_skip_count,
                 embedding_request_count=batch.request_count,
@@ -316,17 +513,25 @@ def _persist_locked_pgvector_batch(
         eligibility = TrustedServingEligibilityService(db)
         canonical_documents = {
             current.document_id: current
-            for current in build_rag_index_documents(db)
+            for current in (
+                build_rag_v2_index_documents(db, settings=settings)
+                if rag_v2
+                else build_rag_index_documents(db)
+            )
             if current.document_id in document_ids
         }
+        generation = db.get(RagServingCorpusGeneration, 1)
+        if generation is None:
+            raise RuntimeError('RAG serving generation singleton is unavailable')
+        next_vector_generation = generation.vector_index_generation + 1
         for (document, content_hash, _), embedding in zip(
             changed_documents, embeddings, strict=True
         ):
             live = eligibility.for_document(document.document_id)
             canonical = canonical_documents.get(document.document_id)
             if (
-                not live.eligible
-                or live.effective_permission is None
+                (not rag_v2 and not live.eligible)
+                or (not rag_v2 and live.effective_permission is None)
                 or canonical is None
                 or db.scalar(
                     select(VectorServingTombstone.id).where(
@@ -339,7 +544,7 @@ def _persist_locked_pgvector_batch(
                 stale_skips.append(document.document_id)
                 post_provider_skip_count += 1
                 continue
-            canonical_hash = compute_vector_document_hash(canonical)
+            canonical_hash = _content_hash(canonical, rag_v2=rag_v2)
             exact_snapshot = canonical == document and canonical_hash == content_hash
             permission_only_narrowing = _permission_only_narrowing(
                 embedded=document,
@@ -360,14 +565,28 @@ def _persist_locked_pgvector_batch(
                     document_id=document.document_id,
                     embedding_model_name=embedding_model_name,
                 )
-                _upsert_index_state(
-                    db=db,
-                    state=state,
-                    document=canonical,
-                    embedding_model_name=embedding_model_name,
-                    embedding_dimensions=embedding_dimensions,
-                    content_hash=canonical_hash,
-                )
+                if rag_v2:
+                    upsert_rag_v2_vector_index_state(
+                        db=db,
+                        state=state,
+                        document=canonical,
+                        embedding_model_name=embedding_model_name,
+                        embedding=embedding,
+                        content_hash=canonical_hash,
+                        vector_index_generation=next_vector_generation,
+                        settings=settings,
+                    )
+                else:
+                    _upsert_index_state(
+                        db=db,
+                        state=state,
+                        document=canonical,
+                        embedding_model_name=embedding_model_name,
+                        embedding_dimensions=embedding_dimensions,
+                        content_hash=canonical_hash,
+                    )
+        if rag_v2 and indexed:
+            mark_rag_vector_index_mutation(db)
         db.commit()
     return VectorIndexResult(
         indexed_count=len(indexed),
@@ -375,6 +594,7 @@ def _persist_locked_pgvector_batch(
         embedding_dimensions=embedding_dimensions,
         skipped_count=len(stale_skips),
         skipped_document_ids=stale_skips,
+        tombstoned_count=tombstoned_count,
         saved_embedding_calls=pre_provider_skip_count,
         saved_serving_writes=post_provider_skip_count,
         embedding_request_count=batch.request_count,
@@ -411,6 +631,81 @@ def compute_vector_document_hash(document: VectorDocument) -> str:
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8')
     return sha256(encoded).hexdigest()
+
+
+def compute_rag_v2_document_hash(document: VectorDocument) -> str:
+    """Hash the exact serving bytes that require a new stored vector payload."""
+    metadata = {
+        key: value
+        for key, value in document.metadata.items()
+        if key
+        not in {
+            'canonical_citation_projection_hmac',
+            'model_content_hmac',
+            'provenance_branch',
+            'serving_identity_hmac',
+            'serving_version_fingerprint',
+        }
+    }
+    payload = {
+        'document_id': document.document_id,
+        'text': document.text,
+        'source_url': document.source_url,
+        'source_snippet': document.source_snippet,
+        'permission_level': document.permission_level,
+        'metadata': metadata,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+        default=str,
+    ).encode('utf-8')
+    return sha256(encoded).hexdigest()
+
+
+def _content_hash(document: VectorDocument, *, rag_v2: bool) -> str:
+    return (
+        compute_rag_v2_document_hash(document)
+        if rag_v2
+        else compute_vector_document_hash(document)
+    )
+
+
+def index_rag_v2_serving_documents(
+    *,
+    db: Session,
+    documents: list[VectorDocument],
+    writer: VectorIndexWriter,
+    embedding_model: EmbeddingModel,
+    embedding_model_name: str,
+    settings: Settings,
+    persist_state: bool,
+    operator_authorized: bool = False,
+) -> RagIndexMutationResult:
+    result = index_changed_vector_documents(
+        db=db,
+        documents=documents,
+        writer=writer,
+        embedding_model=embedding_model,
+        embedding_model_name=embedding_model_name,
+        persist_state=persist_state,
+        settings=settings,
+        rag_v2=True,
+        operator_authorized=operator_authorized,
+    )
+    generation = db.get(RagServingCorpusGeneration, 1)
+    return RagIndexMutationResult(
+        indexed_count=result.indexed_count,
+        skipped_count=result.skipped_count,
+        tombstoned_count=result.tombstoned_count,
+        saved_embedding_calls=result.saved_embedding_calls,
+        corpus_generation=(generation.corpus_generation if generation else 0),
+        vector_index_generation=(
+            generation.vector_index_generation if generation else 0
+        ),
+    )
 
 
 def estimate_embedding_budget(
@@ -471,6 +766,126 @@ def build_rag_index_documents(db: Session) -> list[VectorDocument]:
     documents.extend(_timeline_documents(db, eligibility))
     documents.extend(_todo_documents(db, eligibility))
     return documents
+
+
+def build_rag_v2_index_documents(
+    db: Session,
+    *,
+    settings: Settings,
+) -> list[VectorDocument]:
+    """Build the actor-independent D serving corpus without changing V1."""
+    documents: list[VectorDocument] = []
+    raw_resolver = CanonicalSourceObservationResolver(db=db, settings=settings)
+    chunk_ids = tuple(db.scalars(select(DocumentChunk.id).order_by(DocumentChunk.id)))
+    for chunk_id in chunk_ids:
+        observation = raw_resolver.resolve_for_index(chunk_id)
+        if observation is None:
+            continue
+        source = db.get(Source, observation.raw_version.source_row_id)
+        chunk = db.get(DocumentChunk, observation.raw_version.document_chunk_id)
+        if source is None or chunk is None:
+            continue
+        documents.append(
+            _rag_v2_vector_document(
+                evidence=observation.evidence,
+                source_url=source.source_url,
+                source_snippet=chunk.source_snippet,
+                typed_row_id=chunk.id,
+                source_pk=source.id,
+            )
+        )
+
+    trusted_resolver = TrustedServingEnvelopeResolver(db=db, settings=settings)
+    for knowledge_type, model in (
+        ('decision_record', DecisionRecord),
+        ('history_event', HistoryEvent),
+        ('timeline_event', TimelineEvent),
+        ('todo', Todo),
+    ):
+        knowledge_ids = tuple(db.scalars(select(model.id).order_by(model.id)))
+        for knowledge_id in knowledge_ids:
+            envelope = trusted_resolver.resolve_for_index(
+                knowledge_type,
+                knowledge_id,
+            )
+            if envelope is None:
+                continue
+            citation = _trusted_citation_bytes(db, evidence=envelope.evidence)
+            if citation is None:
+                continue
+            documents.append(
+                _rag_v2_vector_document(
+                    evidence=envelope.evidence,
+                    source_url=citation[0],
+                    source_snippet=citation[1],
+                    typed_row_id=knowledge_id,
+                )
+            )
+    return documents
+
+
+def _rag_v2_vector_document(
+    *,
+    evidence: ServingEvidence,
+    source_url: str,
+    source_snippet: str,
+    typed_row_id: int,
+    source_pk: int | None = None,
+) -> VectorDocument:
+    metadata: dict[str, object] = {
+        'canonical_citation_projection_hmac': (
+            evidence.canonical_citation_projection_hmac
+        ),
+        'index_policy_version': RAG_INDEX_POLICY_VERSION,
+        'model_content_hmac': evidence.model_content_hmac,
+        'provenance_branch': evidence.provenance.branch,
+        'public_source_id': evidence.public_source_id,
+        'public_source_type': evidence.public_source_type,
+        'serving_identity_hmac': evidence.serving_identity_hmac,
+        'serving_kind': evidence.serving_kind,
+        'serving_version_fingerprint': evidence.serving_version_fingerprint,
+        'support_mode': evidence.support_mode,
+    }
+    if evidence.serving_kind == 'raw_chunk':
+        metadata['chunk_id'] = typed_row_id
+        metadata['source_pk'] = source_pk
+    else:
+        metadata['knowledge_id'] = typed_row_id
+    return VectorDocument(
+        document_id=evidence.serving_document_id,
+        text=evidence.model_content,
+        source_url=source_url,
+        source_snippet=source_snippet,
+        permission_level=evidence.effective_permission,
+        metadata=metadata,
+    )
+
+
+def _trusted_citation_bytes(
+    db: Session,
+    *,
+    evidence: ServingEvidence,
+) -> tuple[str, str] | None:
+    provenance = evidence.provenance
+    if isinstance(provenance, ExplicitApprovalProvenance):
+        review_item_id = provenance.review_item_id
+        ordinal = provenance.selected_citation_child.review_item_source_pair_ordinal
+    elif isinstance(provenance, LegacyHumanProvenance):
+        review_item_id = provenance.legacy_source_review_item_id
+        ordinal = 0
+    else:
+        return None
+    item = db.get(ReviewItem, review_item_id)
+    if (
+        item is None
+        or not isinstance(item.source_links, list)
+        or not isinstance(item.source_snippets, list)
+        or ordinal < 0
+        or ordinal >= len(item.source_links)
+        or ordinal >= len(item.source_snippets)
+    ):
+        return None
+    return item.source_links[ordinal], item.source_snippets[ordinal]
 
 
 def _chunk_documents(db: Session) -> list[VectorDocument]:

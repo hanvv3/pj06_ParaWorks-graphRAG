@@ -20,6 +20,7 @@ from backend.app.rag.serving_locks import (
     VectorServingLockManager,
 )
 from backend.app.rag.vector_store import VectorDocument, VectorMatch, VectorSearchResult
+from backend.app.rag.vector_validation import CosineIndexableVectorValidator
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,10 @@ class PgVectorStore:
         *,
         locked_context: VectorServingLockedContext | None = None,
     ) -> None:
+        canonical_embedding = CosineIndexableVectorValidator().validate(
+            embedding,
+            expected_dimensions=self.config.embedding_dimensions,
+        )
         self._validate_mutation_context(locked_context, [document.document_id])
         self.session.execute(
             text(self._upsert_sql()),
@@ -100,7 +105,7 @@ class PgVectorStore:
                 'source_snippet': document.source_snippet,
                 'permission_level': document.permission_level,
                 'metadata_json': json.dumps(document.metadata),
-                'embedding': _embedding_literal(embedding),
+                'embedding': _embedding_literal(canonical_embedding),
             },
         )
 
@@ -258,7 +263,7 @@ class PgVectorStore:
             FROM vector_serving_tombstones
             WHERE vector_serving_tombstones.document_id = candidate.document_id
         )
-        AND ({self._live_eligibility_sql('candidate')})
+        AND ({self._live_eligibility_sql('candidate', allow_rag_v2_raw_write=True)})
         ON CONFLICT (document_id) DO UPDATE SET
             text = EXCLUDED.text,
             source_url = EXCLUDED.source_url,
@@ -317,7 +322,12 @@ class PgVectorStore:
         ORDER BY visible.distance;
         """
 
-    def _live_eligibility_sql(self, table: str | None = None) -> str:
+    def _live_eligibility_sql(
+        self,
+        table: str | None = None,
+        *,
+        allow_rag_v2_raw_write: bool = False,
+    ) -> str:
         table = table or self.config.table_name
         permission_rank = (
             "CASE {value} WHEN 'public' THEN 0 WHEN 'internal' THEN 1 "
@@ -331,6 +341,43 @@ class PgVectorStore:
             prefix='raw_authority',
             required_chunk_id_sql='document_chunks.id',
         )
+        legacy_raw_authorization = """
+            EXISTS (
+                SELECT 1
+                FROM review_items raw_reviews
+                WHERE raw_reviews.status = 'approved'
+                  AND (
+                      raw_reviews.resolution_source IS NULL
+                      OR raw_reviews.resolution_source = 'human'
+                  )
+                  AND COALESCE(
+                      raw_reviews.payload::jsonb->'source_ids',
+                      '[]'::jsonb
+                  ) ? sources.source_id
+            )
+        """
+        raw_authorization = legacy_raw_authorization
+        if allow_rag_v2_raw_write:
+            raw_authorization = f"""
+                (
+                    (
+                        {table}.metadata_json->>'index_policy_version'
+                        = 'rag-v2-serving-index:v1'
+                        AND {table}.metadata_json->>'serving_kind' = 'raw_chunk'
+                        AND {table}.metadata_json->>'support_mode'
+                            = 'source_observation'
+                        AND sources.source_type IN (
+                            'gmail', 'gmail_attachment', 'drive', 'calendar'
+                        )
+                    )
+                    OR (
+                        COALESCE(
+                            {table}.metadata_json->>'index_policy_version', ''
+                        ) <> 'rag-v2-serving-index:v1'
+                        AND ({legacy_raw_authorization})
+                    )
+                )
+            """
         knowledge_branches = ' OR '.join(
             self._knowledge_target_branch(
                 table=table,
@@ -358,19 +405,7 @@ class PgVectorStore:
                   AND sources.source_type <> 'slack'
                   AND sources.permission_level IN ('public', 'internal', 'restricted')
                   AND document_chunks.permission_level IN ('public', 'internal', 'restricted')
-                  AND EXISTS (
-                      SELECT 1
-                      FROM review_items raw_reviews
-                      WHERE raw_reviews.status = 'approved'
-                        AND (
-                            raw_reviews.resolution_source IS NULL
-                            OR raw_reviews.resolution_source = 'human'
-                        )
-                        AND COALESCE(
-                            raw_reviews.payload::jsonb->'source_ids',
-                            '[]'::jsonb
-                        ) ? sources.source_id
-                  )
+                  AND ({raw_authorization})
                   AND {vector_rank} >= GREATEST({source_rank}, {chunk_rank})
             )
         ) OR ({knowledge_branches})
@@ -554,7 +589,7 @@ class PgVectorStore:
         )
 
 
-def _embedding_literal(embedding: list[float]) -> str:
+def _embedding_literal(embedding: Sequence[float]) -> str:
     return '[' + ','.join(str(float(value)).rstrip('0').rstrip('.') for value in embedding) + ']'
 
 

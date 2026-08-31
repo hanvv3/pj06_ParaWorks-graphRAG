@@ -246,6 +246,92 @@ class AutoReviewQualityRevokeService:
         reason_code: QualityReasonCode,
         reason: str,
     ) -> tuple[QualityRevokeContext, bool]:
+        from backend.app.agent_runtime.keyed_mutation_guard import (
+            KeyedMutationGuard,
+            acquire_projection,
+            lock_runtime_state,
+        )
+        from backend.app.knowledge.trusted_serving_eligibility import (
+            canonical_knowledge_document_id,
+        )
+        from backend.app.models import TrustedKnowledgeApprovalLink
+        from backend.app.rag.serving_generation import (
+            arm_corpus_generation_refresh,
+            lock_rag_serving_generation,
+        )
+        from backend.app.rag.serving_locks import (
+            ServingMutationLockCoordinator,
+            build_serving_lock_plan,
+        )
+
+        links = tuple(
+            self._db.scalars(
+                select(TrustedKnowledgeApprovalLink).where(
+                    TrustedKnowledgeApprovalLink.review_item_id
+                    == review_item_id
+                )
+            ).all()
+        )
+        document_ids = tuple(
+            sorted(
+                {
+                    canonical_knowledge_document_id(
+                        link.knowledge_type,
+                        link.knowledge_id,
+                    )
+                    for link in links
+                }
+            )
+        )
+        if not document_ids:
+            return self._commit_quality_authority_locked(
+                review_item_id=review_item_id,
+                actor=actor,
+                reason_code=reason_code,
+                reason=reason,
+            )
+        plan = build_serving_lock_plan(
+            self._db,
+            document_ids,
+            extra_review_item_ids=(review_item_id,),
+        )
+        self._db.rollback()
+        with KeyedMutationGuard.generation_barrier(self._db):
+            key_context = lock_runtime_state(self._db)
+            if key_context is None:
+                raise QualityRevokeRefused('key_runtime_unavailable')
+            if document_ids:
+                ServingMutationLockCoordinator(
+                    db=self._db,
+                    settings=self._settings,
+                ).acquire(key_context=key_context, plan=plan)
+            else:
+                generation_context = lock_rag_serving_generation(
+                    self._db,
+                    settings=self._settings,
+                    key_context=key_context,
+                )
+                acquire_projection(self._db, key_context)
+                arm_corpus_generation_refresh(
+                    self._db,
+                    settings=self._settings,
+                    context=generation_context,
+                )
+            return self._commit_quality_authority_locked(
+                review_item_id=review_item_id,
+                actor=actor,
+                reason_code=reason_code,
+                reason=reason,
+            )
+
+    def _commit_quality_authority_locked(
+        self,
+        *,
+        review_item_id: int,
+        actor: ReviewResolutionActor,
+        reason_code: QualityReasonCode,
+        reason: str,
+    ) -> tuple[QualityRevokeContext, bool]:
         try:
             item_statement = select(ReviewItem).where(ReviewItem.id == review_item_id)
             if self._db.get_bind().dialect.name == 'postgresql':
