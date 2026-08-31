@@ -73,6 +73,15 @@ from backend.app.agent_runtime.rag_v2_contracts import (
     resolved_rag_mode,
     resolved_rag_stage,
 )
+from backend.app.agent_runtime.rag_v2_identity import (
+    RagPublicCitationUrlValidator,
+    RagSecurityScopeResolver,
+    SecurityScope,
+    ServerRagSecurityScopeResolver,
+    StrictUnicodeScalarValidator,
+    exact_utf8_bytes,
+    security_scope_fingerprint,
+)
 from backend.app.agent_runtime.rag_v2_registry import (
     RagGraphRegistration,
     RagGraphRegistry,
@@ -118,9 +127,14 @@ __all__ = [
     'RagGraphRegistration',
     'RagGraphRegistry',
     'RagMode',
+    'RagPublicCitationUrlValidator',
     'RagRetrievalBackend',
+    'RagSecurityScopeResolver',
     'RagRuntimeVersionUnavailableError',
     'RagSurface',
+    'SecurityScope',
+    'ServerRagSecurityScopeResolver',
+    'StrictUnicodeScalarValidator',
     'LangChainProjectRouterModel',
     'ProjectOption',
     'ProjectRouterModel',
@@ -157,6 +171,7 @@ __all__ = [
     'checkpoint_config',
     'evaluate_agent_cost_budget',
     'estimate_agent_run_cost',
+    'exact_utf8_bytes',
     'keyed_fingerprint',
     'invoke_and_confirm_checkpoint',
     'prune_expired_checkpoints',
@@ -166,6 +181,7 @@ __all__ = [
     'resolved_rag_stage',
     'require_resumable_checkpoint',
     'score_project_aliases',
+    'security_scope_fingerprint',
 ]
 
 _LAZY_EXPORTS = {
