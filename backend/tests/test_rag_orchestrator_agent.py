@@ -10,8 +10,8 @@ from backend.app.agents.rag_orchestrator_agent import (
 
 def test_rag_orchestrator_manifest_declares_shared_contracts() -> None:
     assert RAG_ORCHESTRATOR_AGENT_MANIFEST.name == 'rag_orchestrator_agent'
-    assert RAG_ORCHESTRATOR_AGENT_MANIFEST.input_contract == 'EvidencePacket'
-    assert RAG_ORCHESTRATOR_AGENT_MANIFEST.output_contract == 'RagAnswer'
+    assert RAG_ORCHESTRATOR_AGENT_MANIFEST.input_contract == 'RagGraphInput'
+    assert RAG_ORCHESTRATOR_AGENT_MANIFEST.output_contract == 'RagGraphOutput'
     assert RAG_ORCHESTRATOR_AGENT_PROMPT_VERSION in RAG_ORCHESTRATOR_AGENT_MANIFEST.prompt_versions
     assert 'question_answering' in RAG_ORCHESTRATOR_AGENT_MANIFEST.capabilities
 
