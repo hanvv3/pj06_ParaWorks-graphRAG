@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Literal, TypeAlias
 
 from backend.app.rag.retrieval import StrictProviderUsage
@@ -14,6 +14,8 @@ _TOKEN_FIELD_NAMES = frozenset({
 })
 _USAGE_WRAPPER_NAMES = frozenset({'token_usage', 'usage'})
 _ALL_AUTHORITY_NAMES = _TOKEN_FIELD_NAMES | _USAGE_WRAPPER_NAMES
+_MAX_DETAIL_DEPTH = 32
+_MAX_DETAIL_NODES = 4_096
 
 RagRunProductOutcome = Literal[
     'supported',
@@ -166,10 +168,29 @@ class StrictEmbeddingUsageParser:
 def _mapping_snapshot(value: object, *, context: str) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError(f'{context} must be a mapping')
-    try:
-        items = tuple(value.items())
-    except Exception:
-        raise ValueError(f'{context} must be a stable mapping') from None
+
+    def bounded_items() -> tuple[tuple[object, object], ...]:
+        try:
+            items: list[tuple[object, object]] = []
+            for item in value.items():
+                if type(item) is not tuple or len(item) != 2:
+                    raise ValueError
+                if len(items) >= _MAX_DETAIL_NODES:
+                    raise ValueError
+                items.append(item)
+            return tuple(items)
+        except Exception:
+            raise ValueError(f'{context} must be a stable mapping') from None
+
+    items = bounded_items()
+    if type(value) is not dict:
+        observed_again = bounded_items()
+        if len(items) != len(observed_again) or any(
+            first_key != second_key or first_value is not second_value
+            for (first_key, first_value), (second_key, second_value)
+            in zip(items, observed_again, strict=True)
+        ):
+            raise ValueError(f'{context} must be a stable mapping')
     result: dict[str, object] = {}
     for key, item in items:
         if type(key) is not str or key in result:
@@ -184,10 +205,18 @@ def _validate_non_authoritative_details(
     allowed_authority_names: frozenset[str] | set[str],
     context: str,
 ) -> None:
+    active_containers: set[int] = set()
+    remaining_nodes = [_MAX_DETAIL_NODES]
     for key, value in values.items():
         if key in allowed_authority_names:
             continue
-        _reject_nested_authority(value, context=context, depth=0)
+        _reject_nested_authority(
+            value,
+            context=context,
+            depth=0,
+            active_containers=active_containers,
+            remaining_nodes=remaining_nodes,
+        )
 
 
 def _reject_nested_authority(
@@ -195,27 +224,51 @@ def _reject_nested_authority(
     *,
     context: str,
     depth: int,
+    active_containers: set[int],
+    remaining_nodes: list[int],
 ) -> None:
-    if depth > 32:
+    remaining_nodes[0] -= 1
+    if depth > _MAX_DETAIL_DEPTH or remaining_nodes[0] < 0:
         raise ValueError(f'{context} detail nesting is invalid')
     if isinstance(value, Mapping):
-        nested = _mapping_snapshot(value, context=context)
-        if set(nested).intersection(_ALL_AUTHORITY_NAMES):
-            raise ValueError(f'{context} contains nested usage authority')
-        for item in nested.values():
-            _reject_nested_authority(
-                item,
-                context=context,
-                depth=depth + 1,
-            )
+        identity = id(value)
+        if identity in active_containers:
+            raise ValueError(f'{context} detail nesting is invalid')
+        active_containers.add(identity)
+        try:
+            nested = _mapping_snapshot(value, context=context)
+            if set(nested).intersection(_ALL_AUTHORITY_NAMES):
+                raise ValueError(f'{context} contains nested usage authority')
+            for item in nested.values():
+                _reject_nested_authority(
+                    item,
+                    context=context,
+                    depth=depth + 1,
+                    active_containers=active_containers,
+                    remaining_nodes=remaining_nodes,
+                )
+        finally:
+            active_containers.remove(identity)
         return
     if type(value) in {list, tuple}:
-        for item in value:
-            _reject_nested_authority(
-                item,
-                context=context,
-                depth=depth + 1,
-            )
+        identity = id(value)
+        if identity in active_containers or len(value) > remaining_nodes[0]:
+            raise ValueError(f'{context} detail nesting is invalid')
+        active_containers.add(identity)
+        try:
+            for item in value:
+                _reject_nested_authority(
+                    item,
+                    context=context,
+                    depth=depth + 1,
+                    active_containers=active_containers,
+                    remaining_nodes=remaining_nodes,
+                )
+        finally:
+            active_containers.remove(identity)
+        return
+    if isinstance(value, Sequence) and type(value) not in {str, bytes}:
+        raise ValueError(f'{context} detail container is invalid')
 
 
 def _required_exact_token(values: dict[str, object], key: str) -> int:

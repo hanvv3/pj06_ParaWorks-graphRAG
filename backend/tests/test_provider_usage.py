@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 import pytest
 
@@ -37,6 +37,45 @@ class _Mapping(Mapping[str, object]):
 
     def __len__(self) -> int:
         return len(self._values)
+
+
+class _ListSubclass(list):
+    pass
+
+
+class _TupleSubclass(tuple):
+    pass
+
+
+class _Sequence(Sequence[object]):
+    def __init__(self, values: tuple[object, ...]) -> None:
+        self._values = values
+
+    def __getitem__(self, index):
+        return self._values[index]
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+
+class _UnstableMapping(Mapping[str, object]):
+    def __init__(self) -> None:
+        self._calls = 0
+
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+    def items(self):
+        self._calls += 1
+        if self._calls == 1:
+            return (('safe', 1),)
+        return (('usage', {'input_tokens': 999}),)
 
 
 def _message(
@@ -249,3 +288,76 @@ def test_non_authoritative_nested_provider_detail_remains_allowed() -> None:
 
     assert StrictChatUsageParser().parse_message(message).total_tokens == 15
     assert StrictEmbeddingUsageParser().parse_usage(embedding).total_tokens == 4
+
+
+@pytest.mark.parametrize(
+    'detail',
+    (
+        _ListSubclass([{'usage': {'input_tokens': 999}}]),
+        _TupleSubclass(({'token_usage': {'input_tokens': 999}},)),
+        _Sequence(({'usage': {'input_tokens': 999}},)),
+    ),
+)
+def test_usage_parser_rejects_sequence_subclasses_and_custom_sequences(
+    detail: object,
+) -> None:
+    with pytest.raises(ValueError, match='usage'):
+        StrictChatUsageParser().parse_message(_message(response={
+            'provider_detail': detail,
+        }))
+
+
+def test_usage_parser_rejects_unstable_custom_mapping() -> None:
+    with pytest.raises(ValueError, match='usage'):
+        StrictEmbeddingUsageParser().parse_usage({
+            'prompt_tokens': 4,
+            'total_tokens': 4,
+            'provider_detail': _UnstableMapping(),
+        })
+
+
+def test_usage_parser_rejects_nested_authority_in_stable_custom_mapping() -> None:
+    with pytest.raises(ValueError, match='usage'):
+        StrictChatUsageParser().parse_message(_message(response={
+            'provider_detail': _Mapping({
+                'detail': _Mapping({'usage': {'input_tokens': 999}}),
+            }),
+        }))
+
+
+@pytest.mark.parametrize('container_type', (list, tuple))
+def test_usage_parser_rejects_cyclic_or_excessively_deep_details(
+    container_type,
+) -> None:
+    cyclic_list: list[object] = []
+    cyclic_list.append(cyclic_list)
+    cyclic: object = cyclic_list if container_type is list else (cyclic_list,)
+    deep: object = {'safe': True}
+    for _ in range(40):
+        deep = [deep]
+
+    for detail in (cyclic, deep):
+        with pytest.raises(ValueError, match='usage'):
+            StrictChatUsageParser().parse_message(_message(response={
+                'provider_detail': detail,
+            }))
+
+
+def test_usage_parser_rejects_excessive_detail_size() -> None:
+    with pytest.raises(ValueError, match='usage'):
+        StrictEmbeddingUsageParser().parse_usage({
+            'prompt_tokens': 4,
+            'total_tokens': 4,
+            'provider_detail': [0] * 5_000,
+        })
+
+
+def test_usage_parser_preserves_bounded_exact_sequence_details() -> None:
+    message = _message(response={
+        'provider_detail': [
+            {'cached': (1, 2)},
+            {'request_family': 'direct-standard'},
+        ],
+    })
+
+    assert StrictChatUsageParser().parse_message(message).total_tokens == 15
