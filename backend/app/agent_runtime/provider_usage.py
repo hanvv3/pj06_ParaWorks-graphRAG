@@ -182,21 +182,31 @@ def _mapping_snapshot(value: object, *, context: str) -> dict[str, object]:
         except Exception:
             raise ValueError(f'{context} must be a stable mapping') from None
 
-    items = bounded_items()
+    def validated_items() -> tuple[tuple[str, object], ...]:
+        items = bounded_items()
+        seen: set[str] = set()
+        validated: list[tuple[str, object]] = []
+        for key, item in items:
+            if type(key) is not str or key in seen:
+                raise ValueError(f'{context} contains invalid keys')
+            seen.add(key)
+            validated.append((key, item))
+        return tuple(validated)
+
+    items = validated_items()
     if type(value) is not dict:
-        observed_again = bounded_items()
-        if len(items) != len(observed_again) or any(
-            first_key != second_key or first_value is not second_value
-            for (first_key, first_value), (second_key, second_value)
-            in zip(items, observed_again, strict=True)
-        ):
+        observed_again = validated_items()
+        try:
+            unstable = len(items) != len(observed_again) or any(
+                first_key != second_key or first_value is not second_value
+                for (first_key, first_value), (second_key, second_value)
+                in zip(items, observed_again, strict=True)
+            )
+        except Exception:
+            raise ValueError(f'{context} must be a stable mapping') from None
+        if unstable:
             raise ValueError(f'{context} must be a stable mapping')
-    result: dict[str, object] = {}
-    for key, item in items:
-        if type(key) is not str or key in result:
-            raise ValueError(f'{context} contains invalid keys')
-        result[key] = item
-    return result
+    return dict(items)
 
 
 def _validate_non_authoritative_details(

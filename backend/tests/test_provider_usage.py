@@ -78,6 +78,35 @@ class _UnstableMapping(Mapping[str, object]):
         return (('usage', {'input_tokens': 999}),)
 
 
+class _ExplodingKey:
+    def __eq__(self, other: object) -> bool:
+        raise RuntimeError('custom key equality must not run')
+
+    def __ne__(self, other: object) -> bool:
+        raise RuntimeError('custom key inequality must not run')
+
+    def __hash__(self) -> int:
+        raise RuntimeError('custom key hashing must not run')
+
+
+class _BadKeyMapping(Mapping[object, object]):
+    def __init__(self, value: object) -> None:
+        self._key = _ExplodingKey()
+        self._value = value
+
+    def __getitem__(self, key: object) -> object:
+        raise KeyError
+
+    def __iter__(self):
+        return iter((self._key,))
+
+    def __len__(self) -> int:
+        return 1
+
+    def items(self):
+        return ((self._key, self._value),)
+
+
 def _message(
     primary: object | None = None,
     *,
@@ -191,6 +220,28 @@ def test_embedding_parser_rejects_missing_malformed_conflicting_or_nonzero_outpu
 ) -> None:
     with pytest.raises(ValueError, match='usage'):
         StrictEmbeddingUsageParser().parse_usage(usage)
+
+
+@pytest.mark.parametrize(
+    'position',
+    ('chat_primary', 'chat_response_alias', 'embedding'),
+)
+def test_usage_parser_sanitizes_custom_key_comparison_failures(
+    position: str,
+) -> None:
+    bad_mapping = _BadKeyMapping(1)
+
+    with pytest.raises(ValueError, match='usage'):
+        if position == 'chat_primary':
+            StrictChatUsageParser().parse_message(
+                _message(primary=bad_mapping)
+            )
+        elif position == 'chat_response_alias':
+            StrictChatUsageParser().parse_message(_message(response={
+                'token_usage': bad_mapping,
+            }))
+        else:
+            StrictEmbeddingUsageParser().parse_usage(bad_mapping)
 
 
 @pytest.mark.parametrize(
