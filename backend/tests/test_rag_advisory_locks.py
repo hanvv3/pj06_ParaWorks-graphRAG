@@ -13,6 +13,7 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     AdvisoryLockCollisionError,
     acquire_advisory_lock,
     advisory_int4_pair,
+    load_registered_advisory_capability,
     register_advisory_identity,
     register_advisory_identity_db,
 )
@@ -92,15 +93,41 @@ def test_db_registration_never_commits_or_rolls_back_callers_transaction():
     Base.metadata.create_all(engine)
     with engine.connect() as connection:
         transaction = connection.begin()
-        capability = register_advisory_identity_db(
+        pending = register_advisory_identity_db(
             connection,
             {'lock_name': 'provider_safety_authority', 'scope': 'database'},
             identity_namespace='static',
         )
+        assert pending is None
         assert transaction.is_active
+        with pytest.raises(AdvisoryLockCollisionError, match='committed read'):
+            load_registered_advisory_capability(
+                connection,
+                {'lock_name': 'provider_safety_authority', 'scope': 'database'},
+                identity_namespace='static',
+            )
         transaction.rollback()
         assert (
             connection.scalar(select(func.count()).select_from(RagAdvisoryLockKey)) == 0
         )
         with pytest.raises(TypeError, match='registered advisory capability'):
-            acquire_advisory_lock(connection, capability.key, shared=False)
+            acquire_advisory_lock(connection, (1, 2), shared=False)
+
+
+def test_capability_load_requires_committed_exact_static_identity():
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    identity = {'lock_name': 'provider_safety_authority', 'scope': 'database'}
+    with engine.begin() as connection:
+        register_advisory_identity_db(
+            connection, identity, identity_namespace='static'
+        )
+    with engine.connect() as connection:
+        capability = load_registered_advisory_capability(
+            connection, identity, identity_namespace='static'
+        )
+        assert capability.matches(identity, identity_namespace='static')
+        assert not capability.matches(
+            {'lock_name': 'other', 'scope': 'database'},
+            identity_namespace='static',
+        )

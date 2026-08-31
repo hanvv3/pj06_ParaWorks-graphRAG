@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, func, select
 
 from backend.app.agent_runtime.rag_provider_safety import (
     RagProviderSafetyError,
+    RagProviderSafetyReviewAuthority,
     RagProviderSafetyService,
 )
 from backend.app.db.base import Base
@@ -22,6 +23,7 @@ from backend.app.models.rag_runtime import (
 from backend.tests.test_rag_v2_costs import _snapshot
 
 _PLAN_REFERENCE = '9' * 64
+_REVIEW_SECRET = b'provider-safety-test-secret'
 
 
 def _bootstrap(service, connection, snapshots=None):
@@ -35,6 +37,28 @@ def _bootstrap(service, connection, snapshots=None):
         reviewed_transition_reference_hmac=_PLAN_REFERENCE,
     )
     return selected
+
+
+def _reviewed_command(
+    service,
+    connection,
+    component,
+    operation,
+    *,
+    successor=None,
+    historical_block_acknowledged=False,
+):
+    context = service.review_context(connection, component)
+    return RagProviderSafetyReviewAuthority(
+        identity_secret=_REVIEW_SECRET
+    ).issue(
+        context,
+        operation=operation,
+        successor=successor,
+        actor_subject_hmac='4' * 64,
+        reviewed_gate_reference_hmac='5' * 64,
+        historical_block_acknowledged=historical_block_acknowledged,
+    )
 
 
 def test_exact_two_families_bootstrap_and_external_first_block_persists(tmp_path: Path):
@@ -131,6 +155,7 @@ def test_db_rollback_cannot_clear_external_first_blocker(tmp_path: Path):
         service.block_remediation(
             FailingCommit(),  # type: ignore[arg-type]
             'answer_generation',
+            category='provider_safety_unavailable',
             agent_run_id=18,
             input_tokens=4,
             output_tokens=2,
@@ -187,9 +212,10 @@ def test_sidecar_stays_locked_through_db_commit_and_other_worker_makes_zero_call
 
     def block() -> None:
         try:
-            service.block_remediation(
-                PausingCommit(),  # type: ignore[arg-type]
-                'answer_generation',
+                service.block_remediation(
+                    PausingCommit(),  # type: ignore[arg-type]
+                    'answer_generation',
+                    category='provider_safety_unavailable',
                 agent_run_id=18,
                 input_tokens=4,
                 output_tokens=2,
@@ -326,6 +352,7 @@ def test_bootstrap_refuses_second_init_and_recovers_only_external_generation_zer
     with pytest.raises(RagProviderSafetyError, match='bootstrap failed'):
         _bootstrap(service, FailingCommit())
     assert path.is_file()
+    original_envelope = json.loads(path.read_text(encoding='utf-8'))
     assert (
         first.scalar(select(func.count()).select_from(RagProviderSafetyAuthority)) == 0
     )
@@ -338,10 +365,28 @@ def test_bootstrap_refuses_second_init_and_recovers_only_external_generation_zer
         identity_secret=b'provider-safety-test-secret',
         designated_environment_id='test',
     )
+    bad_body = json.loads(json.dumps(original_envelope['signed_payload']['body']))
+    bad_body['family_records'][0]['state_version'] = 2
+    recovered._authority.write(
+        recovered._wrap(
+            bad_body,
+            key_version=original_envelope['signed_payload'][
+                'fingerprint_key_version'
+            ],
+            key_verifier=original_envelope['signed_payload'][
+                'fingerprint_key_material_verifier'
+            ],
+        )
+    )
+    with pytest.raises(RagProviderSafetyError, match='recovery shape'):
+        recovered.recover_partial_bootstrap(
+            recovery,
+            (_snapshot('query_embedding'), _snapshot('answer_generation')),
+        )
+    recovered._authority.write(original_envelope)
     recovered.recover_partial_bootstrap(
         recovery,
         (_snapshot('query_embedding'), _snapshot('answer_generation')),
-        reviewed_transition_reference_hmac=_PLAN_REFERENCE,
     )
     assert (
         recovered.require_ready(
@@ -367,26 +412,25 @@ def test_rebind_reset_and_supersession_are_cas_bound_and_preserve_history(
     )
     snapshots = _bootstrap(service, connection)
 
-    service.mark_rebind_required(
-        connection,
-        'answer_generation',
-        expected_global_safety_generation=0,
-        expected_state_version=1,
-        reviewed_transition_reference_hmac='1' * 64,
+    mark_command = _reviewed_command(
+        service, connection, 'answer_generation', 'mark_rebind_required'
     )
+    service.mark_rebind_required(connection, mark_command)
+    with pytest.raises(RagProviderSafetyError, match='already consumed'):
+        service.mark_rebind_required(connection, mark_command)
     rebound = replace(
         snapshots[1],
         authorized_model_config_snapshot_hmac='d' * 64,
         authorized_policy_snapshot_hmac='e' * 64,
     )
-    service.reviewed_rebind(
+    rebind_command = _reviewed_command(
+        service,
         connection,
         'answer_generation',
-        rebound,
-        expected_global_safety_generation=1,
-        expected_state_version=2,
-        reviewed_transition_reference_hmac='2' * 64,
+        'rebind',
+        successor=rebound,
     )
+    service.reviewed_rebind(connection, rebind_command, rebound)
     assert (
         service.require_ready(
             connection, 'answer_generation', rebound
@@ -402,14 +446,22 @@ def test_rebind_reset_and_supersession_are_cas_bound_and_preserve_history(
         output_tokens=0,
         cost_usd=Decimal('0.000011'),
     )
-    service.reviewed_reset(
+    reset_command = _reviewed_command(
+        service,
         connection,
         'query_embedding',
-        expected_global_safety_generation=3,
-        expected_state_version=2,
-        reviewed_transition_reference_hmac='3' * 64,
-        actor_subject_hmac='4' * 64,
+        'reset',
+        historical_block_acknowledged=True,
     )
+    service.reviewed_reset(connection, reset_command)
+    reset_row = connection.execute(
+        select(RagProviderReadiness.reset_by, RagProviderReadiness.reset_at).where(
+            RagProviderReadiness.component == 'query_embedding',
+            RagProviderReadiness.active.is_(True),
+        )
+    ).one()
+    assert reset_row.reset_by == '4' * 64
+    assert reset_row.reset_at is not None
     assert (
         service.require_ready(
             connection, 'query_embedding', snapshots[0]
@@ -423,14 +475,15 @@ def test_rebind_reset_and_supersession_are_cas_bound_and_preserve_history(
         reasoning_or_config_identity='reasoning:low',
         authorized_policy_snapshot_hmac='f' * 64,
     )
-    service.reviewed_supersession(
+    supersession_command = _reviewed_command(
+        service,
         connection,
         'answer_generation',
-        successor,
-        expected_global_safety_generation=4,
-        expected_state_version=3,
-        reviewed_transition_reference_hmac='5' * 64,
-        actor_subject_hmac='6' * 64,
+        'supersession',
+        successor=successor,
+    )
+    service.reviewed_supersession(
+        connection, supersession_command, successor
     )
     assert (
         service.require_ready(
@@ -439,14 +492,19 @@ def test_rebind_reset_and_supersession_are_cas_bound_and_preserve_history(
         == 5
     )
     with pytest.raises(RagProviderSafetyError):
-        service.reviewed_reset(
-            connection,
-            'query_embedding',
-            expected_global_safety_generation=4,
-            expected_state_version=2,
-            reviewed_transition_reference_hmac='7' * 64,
-            actor_subject_hmac='8' * 64,
+        stale = RagProviderSafetyReviewAuthority(
+            identity_secret=_REVIEW_SECRET
+        ).issue(
+            service.review_context(connection, 'query_embedding'),
+            operation='reset',
+            successor=None,
+            actor_subject_hmac='7' * 64,
+            reviewed_gate_reference_hmac='8' * 64,
+            historical_block_acknowledged=True,
         )
+        service.reviewed_reset(connection, stale)
+    with pytest.raises(RagProviderSafetyError, match='capability'):
+        service.reviewed_reset(connection, '8' * 64)  # type: ignore[arg-type]
 
     body = json.loads(path.read_text(encoding='utf-8'))['signed_payload']['body']
     assert len(body['family_records']) == 3
@@ -472,3 +530,120 @@ def test_rebind_reset_and_supersession_are_cas_bound_and_preserve_history(
             RagProviderSafetyTransition.global_safety_generation
         )
     ).scalars().all() == [0, 1, 2, 3, 4, 5]
+
+
+def test_bootstrap_plan_reference_is_signed_and_recovery_rejects_wrong_shape(
+    tmp_path: Path,
+):
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    connection = engine.connect()
+    path = tmp_path / 'provider.json'
+    service = RagProviderSafetyService(
+        latch_path=path,
+        identity_secret=_REVIEW_SECRET,
+        designated_environment_id='test',
+    )
+    _bootstrap(service, connection)
+    body = json.loads(path.read_text(encoding='utf-8'))['signed_payload']['body']
+    assert {
+        record['reviewed_transition_reference_hmac']
+        for record in body['family_records']
+    } == {_PLAN_REFERENCE}
+    assert set(
+        connection.execute(
+            select(RagProviderReadiness.reviewed_gate_reference_hmac)
+        ).scalars()
+    ) == {_PLAN_REFERENCE}
+
+
+def test_automatic_block_preserves_review_reference_and_separates_incident(
+    tmp_path: Path,
+):
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    connection = engine.connect()
+    path = tmp_path / 'provider.json'
+    service = RagProviderSafetyService(
+        latch_path=path,
+        identity_secret=_REVIEW_SECRET,
+        designated_environment_id='test',
+    )
+    _bootstrap(service, connection)
+    service.block_remediation(
+        connection,
+        'query_embedding',
+        category='provider_embedding_payload_invalid',
+        agent_run_id=21,
+        input_tokens=1,
+        output_tokens=0,
+        cost_usd=Decimal('0.000001'),
+    )
+    body = json.loads(path.read_text(encoding='utf-8'))['signed_payload']['body']
+    record = next(
+        item for item in body['family_records']
+        if item['component'] == 'query_embedding'
+    )
+    assert record['reviewed_transition_reference_hmac'] == _PLAN_REFERENCE
+    assert record['first_blocker_category'] == 'provider_embedding_payload_invalid'
+    transition = connection.execute(
+        select(RagProviderSafetyTransition)
+        .where(RagProviderSafetyTransition.global_safety_generation == 1)
+    ).mappings().one()
+    assert transition['reviewed_transition_reference_hmac'] == _PLAN_REFERENCE
+    assert transition['actor_subject_hmac'] != _PLAN_REFERENCE
+    with pytest.raises(RagProviderSafetyError, match='category'):
+        service.block_remediation(
+            connection,
+            'answer_generation',
+            category='provider_usage_overrun',  # type: ignore[arg-type]
+            agent_run_id=22,
+            input_tokens=1,
+            output_tokens=0,
+            cost_usd=Decimal('0.000001'),
+        )
+
+
+def test_external_write_failure_commits_distinct_db_only_remediation_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    connection = engine.connect()
+    path = tmp_path / 'provider.json'
+    service = RagProviderSafetyService(
+        latch_path=path,
+        identity_secret=_REVIEW_SECRET,
+        designated_environment_id='test',
+    )
+    snapshots = _bootstrap(service, connection)
+    original = path.read_bytes()
+    monkeypatch.setattr(
+        service._authority,
+        '_replace_unlocked',
+        lambda _value: (_ for _ in ()).throw(OSError('simulated replace failure')),
+    )
+    with pytest.raises(RagProviderSafetyError, match='external transition failed'):
+        service.block_remediation(
+            connection,
+            'answer_generation',
+            category='provider_response_identity_invalid',
+            agent_run_id=23,
+            input_tokens=1,
+            output_tokens=1,
+            cost_usd=Decimal('0.000001'),
+        )
+    authority = connection.execute(
+        select(RagProviderSafetyAuthority)
+    ).mappings().one()
+    transition = connection.execute(
+        select(RagProviderSafetyTransition)
+        .where(RagProviderSafetyTransition.global_safety_generation == 1)
+    ).mappings().one()
+    external_digest = RagProviderSafetyService._file_digest_bytes(original)
+    assert authority['global_safety_generation'] == 1
+    assert authority['envelope_digest'] != external_digest
+    assert transition['envelope_digest'] == authority['envelope_digest']
+    with pytest.raises(RagProviderSafetyError, match='drift'):
+        service.require_ready(connection, 'answer_generation', snapshots[1])

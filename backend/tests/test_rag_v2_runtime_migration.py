@@ -6,6 +6,7 @@ import os
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,9 +20,14 @@ from sqlalchemy.exc import IntegrityError
 
 from backend.app.agent_runtime.rag_advisory_locks import (
     RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+    load_registered_advisory_capability,
     register_advisory_identity_db,
 )
-from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
+from backend.app.agent_runtime.rag_provider_safety import (
+    RagProviderSafetyError,
+    RagProviderSafetyReviewAuthority,
+    RagProviderSafetyService,
+)
 from backend.app.core.config import get_settings
 from backend.tests.test_rag_v2_costs import _snapshot
 
@@ -137,6 +143,15 @@ def test_postgresql_guard_installers_declare_deferred_lifecycle_and_generation_g
     assert 'rag_advisory_lock_registry_append_only' in runtime_source
     assert 'pg_advisory_xact_lock' not in runtime_source
     assert 'authority-wide generation-0 bootstrap' in runtime_source
+    assert 'bootstrap iff generation zero' in runtime_source
+    assert 'first ordinary family mutation must bind bootstrap' in runtime_source
+    assert 'provider supersession requires a new active family' in runtime_source
+    assert 'readiness_count <> 2 + supersession_count' in runtime_source
+    assert (
+        'NEW.family_safety_generation <= OLD.family_safety_generation'
+        in runtime_source
+    )
+    assert 'OLD.active IS TRUE AND NEW.active IS FALSE' in runtime_source
     assert 'targeted family transition state mismatch' in runtime_source
     assert 'untouched bootstrap family drift' in runtime_source
     assert 'new_state_version IS DISTINCT FROM 1' in runtime_source
@@ -359,12 +374,19 @@ def test_postgresql_provider_safety_service_commits_one_whole_set_history_per_ge
     tmp_path: Path,
 ) -> None:
     engine = postgres_runtime_migration
-    with engine.begin() as connection:
-        capability = register_advisory_identity_db(
+    with engine.connect() as connection:
+        assert register_advisory_identity_db(
+            connection,
+            RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+            identity_namespace='static',
+        ) is None
+        connection.commit()
+        capability = load_registered_advisory_capability(
             connection,
             RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
             identity_namespace='static',
         )
+        connection.rollback()
     service = RagProviderSafetyService(
         latch_path=tmp_path / 'provider-safety.json',
         identity_secret=b'task12-postgres-provider-safety-secret',
@@ -378,41 +400,47 @@ def test_postgresql_provider_safety_service_commits_one_whole_set_history_per_ge
             snapshots,
             reviewed_transition_reference_hmac='9' * 64,
         )
-        service.mark_rebind_required(
-            connection,
-            'answer_generation',
-            expected_global_safety_generation=0,
-            expected_state_version=1,
-            reviewed_transition_reference_hmac='1' * 64,
+        review = RagProviderSafetyReviewAuthority(
+            identity_secret=b'task12-postgres-provider-safety-secret'
         )
+        command = review.issue(
+            service.review_context(connection, 'answer_generation'),
+            operation='mark_rebind_required',
+            successor=None,
+            actor_subject_hmac='4' * 64,
+            reviewed_gate_reference_hmac='1' * 64,
+            historical_block_acknowledged=False,
+        )
+        service.mark_rebind_required(connection, command)
         rebound = replace(
             snapshots[1],
             authorized_model_config_snapshot_hmac='d' * 64,
             authorized_policy_snapshot_hmac='e' * 64,
         )
-        service.reviewed_rebind(
-            connection,
-            'answer_generation',
-            rebound,
-            expected_global_safety_generation=1,
-            expected_state_version=2,
-            reviewed_transition_reference_hmac='2' * 64,
+        command = review.issue(
+            service.review_context(connection, 'answer_generation'),
+            operation='rebind',
+            successor=rebound,
+            actor_subject_hmac='4' * 64,
+            reviewed_gate_reference_hmac='2' * 64,
+            historical_block_acknowledged=False,
         )
+        service.reviewed_rebind(connection, command, rebound)
         successor = replace(
             rebound,
             model='gpt-5.6-luna',
             reasoning_or_config_identity='reasoning:low',
             authorized_policy_snapshot_hmac='f' * 64,
         )
-        service.reviewed_supersession(
-            connection,
-            'answer_generation',
-            successor,
-            expected_global_safety_generation=2,
-            expected_state_version=3,
-            reviewed_transition_reference_hmac='3' * 64,
+        command = review.issue(
+            service.review_context(connection, 'answer_generation'),
+            operation='supersession',
+            successor=successor,
             actor_subject_hmac='4' * 64,
+            reviewed_gate_reference_hmac='3' * 64,
+            historical_block_acknowledged=False,
         )
+        service.reviewed_supersession(connection, command, successor)
         assert (
             service.require_ready(
                 connection, 'answer_generation', successor
@@ -425,6 +453,70 @@ def test_postgresql_provider_safety_service_commits_one_whole_set_history_per_ge
                 'rag_provider_safety_transitions ORDER BY global_safety_generation'
             )
         ).scalars().all() == [0, 1, 2, 3]
+
+
+def test_postgresql_external_write_failure_leaves_db_only_fail_stop_generation(
+    postgres_runtime_migration: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = postgres_runtime_migration
+    with engine.connect() as connection:
+        register_advisory_identity_db(
+            connection,
+            RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+            identity_namespace='static',
+        )
+        connection.commit()
+        capability = load_registered_advisory_capability(
+            connection,
+            RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+            identity_namespace='static',
+        )
+        connection.rollback()
+    path = tmp_path / 'provider-safety-remediation.json'
+    service = RagProviderSafetyService(
+        latch_path=path,
+        identity_secret=b'task12-postgres-provider-safety-secret',
+        designated_environment_id='task12-postgres',
+        advisory_capability=capability,
+    )
+    snapshots = (_snapshot('query_embedding'), _snapshot('answer_generation'))
+    with engine.connect() as connection:
+        service.bootstrap(
+            connection,
+            snapshots,
+            reviewed_transition_reference_hmac='9' * 64,
+        )
+        monkeypatch.setattr(
+            service._authority,
+            '_replace_unlocked',
+            lambda _value: (_ for _ in ()).throw(
+                OSError('simulated external write failure')
+            ),
+        )
+        with pytest.raises(RagProviderSafetyError, match='external transition failed'):
+            service.block_remediation(
+                connection,
+                'answer_generation',
+                category='provider_response_identity_invalid',
+                agent_run_id=23,
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=Decimal('0.000001'),
+            )
+        restarted = RagProviderSafetyService(
+            latch_path=path,
+            identity_secret=b'task12-postgres-provider-safety-secret',
+            designated_environment_id='task12-postgres',
+            advisory_capability=capability,
+        )
+        provider_calls: list[str] = []
+        with pytest.raises(RagProviderSafetyError, match='drift'):
+            restarted.require_ready(
+                connection, 'answer_generation', snapshots[1]
+            )
+        assert provider_calls == []
 
 
 def _pg_component(connection, parent_id: int, component: str, state: str) -> int:
@@ -709,14 +801,13 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
             {'digest': 'c' * 64, 'verifier': 'd' * 64},
         )
         readiness_ids: list[int] = []
-        for component, model, config, cost, estimator, review in (
+        for component, model, config, cost, estimator in (
             (
                 'query_embedding',
                 'text-embedding-3-small',
                 'rag-query-embedding-config:v1',
                 'rag-query-embedding-cost:v1',
                 'openai-cl100k-text-embedding-3-small:v1',
-                '1' * 64,
             ),
             (
                 'answer_generation',
@@ -724,7 +815,6 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
                 'rag-answer-model-config:v1',
                 'rag-answer-cost:v1',
                 'openai-o200k-rag-answer:v1',
-                '2' * 64,
             ),
         ):
             readiness_ids.append(
@@ -739,7 +829,7 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
                         'authorized_policy_snapshot_hmac,state,state_version,'
                         'family_safety_generation,reviewed_gate_reference_hmac,created_at,updated_at) '
                         "VALUES (1,:component,'openai',:model,:config,true,:config,:config_hmac,"
-                        ":cost,:estimator,'key',:verifier,:policy,'ready',1,0,NULL,"
+                        ":cost,:estimator,'key',:verifier,:policy,'ready',1,0,:review,"
                         'CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) RETURNING id'
                     ),
                     {
@@ -751,7 +841,7 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
                         'estimator': estimator,
                         'verifier': 'd' * 64,
                         'policy': 'f' * 64,
-                        'review': review,
+                        'review': 'c' * 64,
                     },
                 )
             )
@@ -775,6 +865,35 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
                 'state_version=2,family_safety_generation=1 WHERE id=:id'
             ),
             {'id': readiness_ids[0]},
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            text(
+                'UPDATE rag_provider_safety_authorities SET '
+                "global_safety_generation=1,envelope_digest=:digest WHERE id=1"
+            ),
+            {'digest': 'b' * 64},
+        )
+        connection.execute(
+            text(
+                "UPDATE rag_provider_readiness SET state='rebind_required', "
+                'state_version=2,family_safety_generation=1,'
+                'reviewed_gate_reference_hmac=:review WHERE id=:id'
+            ),
+            {'id': readiness_ids[0], 'review': 'e' * 64},
+        )
+        connection.execute(
+            text(
+                'INSERT INTO rag_provider_safety_transitions '
+                '(authority_id,readiness_id,global_safety_generation,transition_kind,'
+                'prior_state,new_state,prior_state_version,new_state_version,'
+                'prior_family_safety_generation,new_family_safety_generation,'
+                'envelope_digest,reviewed_transition_reference_hmac,created_at) VALUES '
+                "(1,:id,1,'rebind_required',NULL,'rebind_required',NULL,2,NULL,1,"
+                ':digest,:review,CURRENT_TIMESTAMP)'
+            ),
+            {'id': readiness_ids[0], 'digest': 'b' * 64, 'review': 'e' * 64},
         )
 
     with pytest.raises(IntegrityError), engine.begin() as connection:

@@ -41,13 +41,52 @@ class DurableFileAuthority:
     def validate_configured_path(path: str | Path) -> Path:
         if type(path) is not str and not isinstance(path, os.PathLike):
             raise DurableFileAuthorityError('authority path is invalid')
-        candidate = Path(path)
-        text = str(candidate)
+        text = os.fspath(path)
         if not text.strip() or '\x00' in text:
             raise DurableFileAuthorityError('authority path is invalid')
-        if candidate.exists() and candidate.is_symlink():
-            raise DurableFileAuthorityError('authority path cannot be a symlink')
-        return candidate.absolute()
+        normalized_parts = text.replace('\\', '/').split('/')
+        candidate = Path(text)
+        if not candidate.is_absolute() or any(
+            part in {'.', '..'} for part in normalized_parts
+        ):
+            raise DurableFileAuthorityError('authority path must be canonical absolute')
+        if os.name == 'nt' and any(
+            part.endswith(('.', ' ')) for part in candidate.parts[1:]
+        ):
+            raise DurableFileAuthorityError('authority path has a Windows alias')
+        current = candidate
+        existing: list[Path] = []
+        while not current.exists() and current != current.parent:
+            current = current.parent
+        while True:
+            existing.append(current)
+            if current == candidate or len(current.parts) >= len(candidate.parts):
+                break
+            current = Path(*candidate.parts[: len(current.parts) + 1])
+        for item in existing:
+            try:
+                info = item.lstat()
+            except FileNotFoundError:
+                continue
+            reparse = bool(
+                getattr(info, 'st_file_attributes', 0)
+                & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)
+            )
+            if item.is_symlink() or reparse:
+                raise DurableFileAuthorityError(
+                    'authority path cannot traverse a link or reparse point'
+                )
+            if os.name == 'nt' and item != Path(item.anchor):
+                matches = [
+                    child.name
+                    for child in item.parent.iterdir()
+                    if child.name.casefold() == item.name.casefold()
+                ]
+                if matches != [item.name]:
+                    raise DurableFileAuthorityError(
+                        'authority path has a case-fold alias'
+                    )
+        return candidate
 
     def _validate_existing_regular(self, path: Path) -> None:
         try:
@@ -58,6 +97,48 @@ class DurableFileAuthority:
             raise DurableFileAuthorityError('authority file must be regular')
         if info.st_nlink != 1:
             raise DurableFileAuthorityError('authority file cannot be hard-linked')
+        if os.name != 'nt' and stat.S_IMODE(info.st_mode) & 0o077:
+            raise DurableFileAuthorityError('authority file must be user-only')
+
+    @staticmethod
+    def _validate_parent_security(path: Path) -> None:
+        try:
+            info = path.lstat()
+        except FileNotFoundError as exc:
+            raise DurableFileAuthorityError('authority parent is unavailable') from exc
+        if not stat.S_ISDIR(info.st_mode) or path.is_symlink():
+            raise DurableFileAuthorityError('authority parent must be a directory')
+        if os.name != 'nt' and stat.S_IMODE(info.st_mode) & 0o077:
+            raise DurableFileAuthorityError('authority parent must be user-only')
+
+    @staticmethod
+    def _validate_open_identity(path: Path, descriptor: int) -> None:
+        opened = os.fstat(descriptor)
+        named = path.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_dev != named.st_dev
+            or opened.st_ino != named.st_ino
+            or opened.st_nlink != 1
+        ):
+            raise DurableFileAuthorityError('authority file identity changed')
+
+    def _read_bytes_unlocked(self) -> bytes:
+        self._validate_existing_regular(self.path)
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+        flags |= getattr(os, 'O_NOFOLLOW', 0)
+        try:
+            descriptor = os.open(self.path, flags)
+        except OSError as exc:
+            raise DurableFileAuthorityError('authority envelope is unavailable') from exc
+        try:
+            self._validate_open_identity(self.path, descriptor)
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, 64 * 1024):
+                chunks.append(chunk)
+            return b''.join(chunks)
+        finally:
+            os.close(descriptor)
 
     @contextmanager
     def locked(self) -> Iterator[None]:
@@ -74,19 +155,34 @@ class DurableFileAuthority:
             ):
                 raise DurableFileAuthorityError('runtime authority is unavailable')
         else:
+            parent_existed = self.path.parent.exists()
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not parent_existed:
+                os.chmod(self.path.parent, 0o700)
+            self.validate_configured_path(self.path)
+        self._validate_parent_security(self.path.parent)
         self._validate_existing_regular(self.lock_path)
         if self._runtime or self._initialized:
             handle = self.lock_path.open('r+b')
         else:
-            try:
-                handle = self.lock_path.open('x+b')
-            except FileExistsError:
+            data_exists = self.path.exists()
+            lock_exists = self.lock_path.exists()
+            if data_exists and not lock_exists:
+                raise DurableFileAuthorityError(
+                    'authority partial initialization is unsafe'
+                )
+            if data_exists and lock_exists:
                 raise DurableFileAuthorityError(
                     'authority initialization already exists'
-                ) from None
+                )
+            if lock_exists:
+                handle = self.lock_path.open('r+b')
+            else:
+                handle = self.lock_path.open('x+b')
+                os.chmod(self.lock_path, 0o600)
             self._initialized = True
         try:
+            self._validate_open_identity(self.lock_path, handle.fileno())
             if handle.tell() == 0:
                 handle.write(b'\0')
                 handle.flush()
@@ -122,7 +218,7 @@ class DurableFileAuthority:
         with self.locked():
             self._validate_existing_regular(self.path)
             try:
-                raw = self.path.read_bytes()
+                raw = self._read_bytes_unlocked()
                 parsed = json.loads(raw.decode('utf-8'))
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 raise DurableFileAuthorityError('authority envelope is invalid') from exc
@@ -140,7 +236,7 @@ class DurableFileAuthority:
         with self.locked():
             self._validate_existing_regular(self.path)
             try:
-                current = json.loads(self.path.read_text(encoding='utf-8'))
+                current = json.loads(self._read_bytes_unlocked().decode('utf-8'))
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 raise DurableFileAuthorityError('authority envelope is invalid') from exc
             if type(current) is not dict:
@@ -175,15 +271,39 @@ class DurableFileAuthority:
                 handle.write(encoded)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp_name, self.path)
+                os.chmod(handle.name, 0o600)
+            if os.name == 'nt':
+                self._replace_windows_write_through(Path(temp_name), self.path)
+            else:
+                os.replace(temp_name, self.path)
             temp_name = None
-            if os.name != 'nt':
-                directory_fd = os.open(self.path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
+            self._validate_existing_regular(self.path)
+            self._flush_parent_directory()
         finally:
             if temp_name is not None:
                 with suppress(FileNotFoundError):
                     os.unlink(temp_name)
+
+    def _flush_parent_directory(self) -> None:
+        if os.name != 'nt':
+            directory_fd = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            return
+        # Windows directory handles do not support FlushFileBuffers. The rename
+        # itself is issued with MOVEFILE_WRITE_THROUGH below.
+
+    @staticmethod
+    def _replace_windows_write_through(source: Path, target: Path) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        move_file = ctypes.windll.kernel32.MoveFileExW
+        move_file.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD)
+        move_file.restype = wintypes.BOOL
+        if not move_file(str(source), str(target), 0x00000001 | 0x00000008):
+            raise DurableFileAuthorityError(
+                'authority durable replace is unsupported'
+            )

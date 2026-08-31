@@ -383,6 +383,8 @@ def _install_postgresql_runtime_guards() -> None:
           prior_transition rag_provider_safety_transitions%ROWTYPE;
           authority_count integer;
           active_count integer;
+          readiness_count integer;
+          supersession_count integer;
           transition_count bigint;
           min_generation bigint;
           max_generation bigint;
@@ -401,9 +403,13 @@ def _install_postgresql_runtime_guards() -> None:
           END IF;
           SELECT * INTO STRICT authority
             FROM rag_provider_safety_authorities WHERE id = 1;
-          SELECT count(*) INTO active_count FROM rag_provider_readiness
-            WHERE active = true;
+          SELECT count(*), count(*) FILTER (WHERE active = true)
+            INTO readiness_count, active_count FROM rag_provider_readiness;
+          SELECT count(*) INTO supersession_count
+            FROM rag_provider_safety_transitions
+            WHERE transition_kind = 'supersession';
           IF active_count <> 2 OR
+             readiness_count <> 2 + supersession_count OR
              NOT EXISTS (SELECT 1 FROM rag_provider_readiness
                          WHERE active = true AND component = 'query_embedding') OR
              NOT EXISTS (SELECT 1 FROM rag_provider_readiness
@@ -424,11 +430,13 @@ def _install_postgresql_runtime_guards() -> None:
           IF transition.envelope_digest <> authority.envelope_digest THEN
             RAISE EXCEPTION 'provider authority mutation requires exact transition';
           END IF;
-          -- authority-wide generation-0 bootstrap has no family target.
-          IF authority.global_safety_generation = 0 AND
+          -- bootstrap iff generation zero; authority-wide generation-0 bootstrap is targetless.
+          IF (authority.global_safety_generation = 0) <>
+             (transition.transition_kind = 'bootstrap') OR
+             (authority.global_safety_generation = 0 AND
              (transition.transition_kind <> 'bootstrap' OR
               transition.readiness_id IS NOT NULL OR
-              transition.prior_state IS NOT NULL OR transition.new_state IS NOT NULL) THEN
+              transition.prior_state IS NOT NULL OR transition.new_state IS NOT NULL)) THEN
             RAISE EXCEPTION 'provider generation-0 bootstrap is invalid';
           END IF;
           FOR readiness IN SELECT * FROM rag_provider_readiness LOOP
@@ -438,7 +446,10 @@ def _install_postgresql_runtime_guards() -> None:
             IF NOT FOUND THEN
               IF readiness.state <> 'ready' OR readiness.state_version <> 1 OR
                  readiness.family_safety_generation <> 0 OR
-                 readiness.reviewed_gate_reference_hmac IS NOT NULL THEN
+                 readiness.reviewed_gate_reference_hmac IS DISTINCT FROM
+                   (SELECT reviewed_transition_reference_hmac
+                      FROM rag_provider_safety_transitions
+                     WHERE authority_id = 1 AND global_safety_generation = 0) THEN
                 RAISE EXCEPTION 'untouched bootstrap family drift';
               END IF;
               CONTINUE;
@@ -473,10 +484,19 @@ def _install_postgresql_runtime_guards() -> None:
                    prior_transition.new_family_safety_generation THEN
                 RAISE EXCEPTION 'provider transition prior snapshot mismatch';
               END IF;
-            ELSIF transition.prior_state IS NOT NULL OR
-                  transition.prior_state_version IS NOT NULL OR
-                  transition.prior_family_safety_generation IS NOT NULL THEN
-              RAISE EXCEPTION 'provider bootstrap transition must have null prior snapshot';
+            ELSIF transition.transition_kind = 'supersession' THEN
+              IF transition.prior_state IS NOT NULL OR
+                 transition.prior_state_version IS NOT NULL OR
+                 transition.prior_family_safety_generation IS NOT NULL OR
+                 readiness.active IS NOT TRUE OR
+                 transition.new_state IS DISTINCT FROM 'ready' OR
+                 transition.new_state_version IS DISTINCT FROM 1 THEN
+                RAISE EXCEPTION 'provider supersession requires a new active family';
+              END IF;
+            ELSIF transition.prior_state IS DISTINCT FROM 'ready' OR
+                  transition.prior_state_version IS DISTINCT FROM 1 OR
+                  transition.prior_family_safety_generation IS DISTINCT FROM 0 THEN
+              RAISE EXCEPTION 'first ordinary family mutation must bind bootstrap';
             END IF;
           END LOOP;
           RETURN NULL;
@@ -504,8 +524,49 @@ def _install_postgresql_runtime_guards() -> None:
                  NEW.reasoning_or_config_identity THEN
               RAISE EXCEPTION 'provider readiness family identity is immutable';
             END IF;
-            IF NEW.state_version <> OLD.state_version + 1 OR
-               NEW.family_safety_generation <> OLD.family_safety_generation + 1 THEN
+            IF OLD.active IS TRUE AND NEW.active IS FALSE AND
+               NEW.state IS NOT DISTINCT FROM OLD.state AND
+               NEW.state_version IS NOT DISTINCT FROM OLD.state_version AND
+               NEW.family_safety_generation IS NOT DISTINCT FROM
+                 OLD.family_safety_generation AND
+               NEW.authorized_model_config_version IS NOT DISTINCT FROM
+                 OLD.authorized_model_config_version AND
+               NEW.authorized_model_config_snapshot_hmac IS NOT DISTINCT FROM
+                 OLD.authorized_model_config_snapshot_hmac AND
+               NEW.authorized_cost_policy_version IS NOT DISTINCT FROM
+                 OLD.authorized_cost_policy_version AND
+               NEW.authorized_token_estimator_version IS NOT DISTINCT FROM
+                 OLD.authorized_token_estimator_version AND
+               NEW.authorized_fingerprint_key_version IS NOT DISTINCT FROM
+                 OLD.authorized_fingerprint_key_version AND
+               NEW.authorized_fingerprint_key_material_verifier IS NOT DISTINCT FROM
+                 OLD.authorized_fingerprint_key_material_verifier AND
+               NEW.authorized_policy_snapshot_hmac IS NOT DISTINCT FROM
+                 OLD.authorized_policy_snapshot_hmac AND
+               NEW.reviewed_gate_reference_hmac IS NOT DISTINCT FROM
+                 OLD.reviewed_gate_reference_hmac AND
+               NEW.first_blocker_category IS NOT DISTINCT FROM
+                 OLD.first_blocker_category AND
+               NEW.first_blocker_agent_run_hmac IS NOT DISTINCT FROM
+                 OLD.first_blocker_agent_run_hmac AND
+               NEW.first_blocker_observed_at IS NOT DISTINCT FROM
+                 OLD.first_blocker_observed_at AND
+               NEW.overrun_agent_run_id IS NOT DISTINCT FROM
+                 OLD.overrun_agent_run_id AND
+               NEW.overrun_input_tokens IS NOT DISTINCT FROM
+                 OLD.overrun_input_tokens AND
+               NEW.overrun_output_tokens IS NOT DISTINCT FROM
+                 OLD.overrun_output_tokens AND
+               NEW.overrun_cost_usd IS NOT DISTINCT FROM OLD.overrun_cost_usd AND
+               NEW.overrun_observed_at IS NOT DISTINCT FROM
+                 OLD.overrun_observed_at AND
+               NEW.reset_by IS NOT DISTINCT FROM OLD.reset_by AND
+               NEW.reset_at IS NOT DISTINCT FROM OLD.reset_at THEN
+              RETURN NEW;
+            END IF;
+            IF NEW.active IS DISTINCT FROM OLD.active OR
+               NEW.state_version <> OLD.state_version + 1 OR
+               NEW.family_safety_generation <= OLD.family_safety_generation THEN
               RAISE EXCEPTION 'provider readiness update requires audited generation';
             END IF;
           END IF;

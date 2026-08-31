@@ -5,6 +5,7 @@ import hmac
 import json
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -16,6 +17,7 @@ from sqlalchemy import Connection, func, insert, select, update
 from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
 from backend.app.agent_runtime.rag_advisory_locks import (
+    RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
     RegisteredAdvisoryLock,
     acquire_advisory_lock,
     release_advisory_lock,
@@ -100,6 +102,179 @@ class RagProviderSafetyError(RuntimeError):
     pass
 
 
+_REVIEW_CAPABILITY_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True)
+class RagProviderSafetyReviewContext:
+    authority_uuid: str
+    designated_environment_id: str
+    component: RagPaidComponent
+    family_identity: tuple[str, str, str, str]
+    state: str
+    state_version: int
+    global_safety_generation: int
+    has_historical_blocker: bool
+    _seal: object = field(repr=False, compare=False)
+
+
+class ReviewedProviderSafetyCommand:
+    __slots__ = ('_payload', '_hmac', '_seal', '_consumed')
+
+    def __init__(self, *, payload: dict[str, object], command_hmac: str) -> None:
+        self._payload = payload
+        self._hmac = command_hmac
+        self._seal = _REVIEW_CAPABILITY_SEAL
+        self._consumed = False
+
+    def _consume(
+        self,
+        *,
+        secret: bytes,
+        expected_context: RagProviderSafetyReviewContext,
+        expected_operation: str,
+        expected_successor: AuthorizedProviderPolicySnapshot | None,
+    ) -> dict[str, object]:
+        if self._seal is not _REVIEW_CAPABILITY_SEAL:
+            raise RagProviderSafetyError('reviewed command capability is invalid')
+        if self._consumed:
+            raise RagProviderSafetyError('reviewed command was already consumed')
+        self._consumed = True
+        expected_hmac = rag_identity_hmac(
+            self._payload,
+            secret=secret,
+            schema_version='rag-provider-safety-reviewed-command:v1',
+            policy_version='rag-provider-safety:v1',
+        )
+        successor = (
+            None
+            if expected_successor is None
+            else RagProviderSafetyReviewAuthority._successor(expected_successor)
+        )
+        context_payload = RagProviderSafetyReviewAuthority._context(expected_context)
+        if (
+            not hmac.compare_digest(self._hmac, expected_hmac)
+            or self._payload['context'] != context_payload
+            or self._payload['operation'] != expected_operation
+            or self._payload['successor'] != successor
+        ):
+            raise RagProviderSafetyError('reviewed command binding does not match')
+        return dict(self._payload)
+
+    def _bound_component(self) -> RagPaidComponent:
+        if self._seal is not _REVIEW_CAPABILITY_SEAL:
+            raise RagProviderSafetyError('reviewed command capability is invalid')
+        if self._consumed:
+            raise RagProviderSafetyError('reviewed command was already consumed')
+        context = self._payload.get('context')
+        if not isinstance(context, dict) or context.get('component') not in _COMPONENTS:
+            raise RagProviderSafetyError('reviewed command capability is invalid')
+        return context['component']  # type: ignore[return-value]
+
+
+class RagProviderSafetyReviewAuthority:
+    """Separate provider-free review authority that issues one-use commands."""
+
+    def __init__(self, *, identity_secret: bytes) -> None:
+        if type(identity_secret) is not bytes or not identity_secret:
+            raise ValueError('provider safety review signer is required')
+        self._secret = identity_secret
+
+    @staticmethod
+    def _context(context: RagProviderSafetyReviewContext) -> dict[str, object]:
+        if (
+            type(context) is not RagProviderSafetyReviewContext
+            or context._seal is not _REVIEW_CAPABILITY_SEAL
+        ):
+            raise RagProviderSafetyError('provider safety review context is invalid')
+        return {
+            'authority_uuid': context.authority_uuid,
+            'component': context.component,
+            'current_family_identity': list(context.family_identity),
+            'current_state': context.state,
+            'current_state_version': context.state_version,
+            'designated_environment_id': context.designated_environment_id,
+            'global_safety_generation': context.global_safety_generation,
+            'has_historical_blocker': context.has_historical_blocker,
+        }
+
+    @staticmethod
+    def _successor(
+        snapshot: AuthorizedProviderPolicySnapshot,
+    ) -> dict[str, object]:
+        return {
+            'authorized_cost_policy_version': snapshot.authorized_cost_policy_version,
+            'authorized_model_config_snapshot_hmac': (
+                snapshot.authorized_model_config_snapshot_hmac
+            ),
+            'authorized_model_config_version': (
+                snapshot.authorized_model_config_version
+            ),
+            'authorized_policy_snapshot_hmac': (
+                snapshot.authorized_policy_snapshot_hmac
+            ),
+            'authorized_token_estimator_version': (
+                snapshot.authorized_token_estimator_version
+            ),
+            'component': snapshot.component,
+            'fingerprint_key_material_verifier': (
+                snapshot.fingerprint_key_material_verifier
+            ),
+            'fingerprint_key_version': snapshot.fingerprint_key_version,
+            'model': snapshot.model,
+            'provider': snapshot.provider,
+            'reasoning_or_config_identity': snapshot.reasoning_or_config_identity,
+        }
+
+    def issue(
+        self,
+        context: RagProviderSafetyReviewContext,
+        *,
+        operation: Literal[
+            'mark_rebind_required', 'rebind', 'reset', 'supersession'
+        ],
+        successor: AuthorizedProviderPolicySnapshot | None,
+        actor_subject_hmac: str,
+        reviewed_gate_reference_hmac: str,
+        historical_block_acknowledged: bool,
+    ) -> ReviewedProviderSafetyCommand:
+        if operation not in {
+            'mark_rebind_required', 'rebind', 'reset', 'supersession'
+        }:
+            raise RagProviderSafetyError('reviewed command operation is invalid')
+        require_lower_hmac(actor_subject_hmac)
+        require_lower_hmac(reviewed_gate_reference_hmac)
+        if type(historical_block_acknowledged) is not bool:
+            raise RagProviderSafetyError('historical blocker acknowledgement is invalid')
+        if (
+            context.has_historical_blocker
+            and operation in {'reset', 'supersession'}
+            and not historical_block_acknowledged
+        ):
+            raise RagProviderSafetyError('historical blocker acknowledgement is required')
+        if (operation in {'rebind', 'supersession'}) != (successor is not None):
+            raise RagProviderSafetyError('reviewed command successor is invalid')
+        payload = {
+            'actor_subject_hmac': actor_subject_hmac,
+            'context': self._context(context),
+            'historical_block_acknowledged': historical_block_acknowledged,
+            'operation': operation,
+            'reviewed_gate_reference_hmac': reviewed_gate_reference_hmac,
+            'successor': (
+                None if successor is None else self._successor(successor)
+            ),
+        }
+        return ReviewedProviderSafetyCommand(
+            payload=payload,
+            command_hmac=rag_identity_hmac(
+                payload,
+                secret=self._secret,
+                schema_version='rag-provider-safety-reviewed-command:v1',
+                policy_version='rag-provider-safety:v1',
+            ),
+        )
+
+
 def _identity_tuple(value: Mapping[str, object]) -> tuple[str, str, str, str]:
     return (
         str(value['component']),
@@ -132,6 +307,11 @@ class RagProviderSafetyService:
         self._authority = DurableFileAuthority.open_runtime(self._latch_path)
         self._secret = identity_secret
         self._environment = designated_environment_id
+        if advisory_capability is not None and not advisory_capability.matches(
+            RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+            identity_namespace='static',
+        ):
+            raise ValueError('provider safety advisory capability identity is invalid')
         self._advisory_capability = advisory_capability
 
     @staticmethod
@@ -280,7 +460,7 @@ class RagProviderSafetyService:
 
     def _read_unlocked(self) -> dict[str, object]:
         try:
-            raw = self._latch_path.read_bytes()
+            raw = self._authority._read_bytes_unlocked()
             parsed = json.loads(raw.decode('utf-8'))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise RagProviderSafetyError(
@@ -481,7 +661,7 @@ class RagProviderSafetyService:
                     state='ready',
                     state_version=1,
                     family_safety_generation=0,
-                    reviewed_gate_reference_hmac=None,
+                    reviewed_gate_reference_hmac=reviewed_reference,
                 )
             )
         connection.execute(
@@ -529,7 +709,7 @@ class RagProviderSafetyService:
                     self._record(
                         snapshot,
                         family_generation=0,
-                        reviewed_reference=None,
+                        reviewed_reference=reviewed_transition_reference_hmac,
                     )
                     for snapshot in snapshots
                 ]
@@ -577,11 +757,8 @@ class RagProviderSafetyService:
         snapshots: tuple[
             AuthorizedProviderPolicySnapshot, AuthorizedProviderPolicySnapshot
         ],
-        *,
-        reviewed_transition_reference_hmac: str,
     ) -> None:
         self._validate_snapshots(snapshots)
-        require_lower_hmac(reviewed_transition_reference_hmac)
         try:
             with self._authority.locked(), self._registered_advisory(connection):
                 body = self._read_unlocked()
@@ -592,12 +769,35 @@ class RagProviderSafetyService:
                         'provider safety bootstrap recovery is not eligible'
                     )
                 self._match_external_snapshots(body, snapshots)
+                records = list(body['_records_by_identity'].values())
+                references = {
+                    record['reviewed_transition_reference_hmac'] for record in records
+                }
+                if (
+                    len(records) != 2
+                    or len(references) != 1
+                    or None in references
+                    or any(
+                        record['state'] != 'ready'
+                        or record['state_version'] != 1
+                        or record['family_safety_generation'] != 0
+                        or record['first_blocker_agent_run_hmac'] is not None
+                        or record['first_blocker_category'] is not None
+                        or record['first_blocker_observed_at'] is not None
+                        for record in records
+                    )
+                ):
+                    raise RagProviderSafetyError(
+                        'provider safety bootstrap recovery shape is invalid'
+                    )
+                reviewed_reference = references.pop()
+                require_lower_hmac(reviewed_reference)
                 self._insert_bootstrap_rows(
                     connection,
                     body=body,
                     snapshots=snapshots,
                     envelope_digest=body['envelope_digest'],
-                    reviewed_reference=reviewed_transition_reference_hmac,
+                    reviewed_reference=reviewed_reference,
                 )
                 connection.commit()
                 fresh = self._read_unlocked()
@@ -781,6 +981,52 @@ class RagProviderSafetyService:
                 'provider safety authority is unavailable'
             ) from exc
 
+    def review_context(
+        self,
+        connection: Connection,
+        component: RagPaidComponent,
+    ) -> RagProviderSafetyReviewContext:
+        if component not in _COMPONENTS:
+            raise RagProviderSafetyError('provider family component is invalid')
+        try:
+            with self._authority.locked(), self._registered_advisory(connection):
+                body = self._read_unlocked()
+                self._match_db_whole_set(connection, body)
+                record = self._active_record(body, component)
+                return self._review_context_from(body, component, record)
+        except RagProviderSafetyError:
+            raise
+        except Exception as exc:
+            raise RagProviderSafetyError(
+                'provider safety review context is unavailable'
+            ) from exc
+
+    def _review_context_from(
+        self,
+        body: Mapping[str, object],
+        component: RagPaidComponent,
+        record: Mapping[str, object],
+    ) -> RagProviderSafetyReviewContext:
+        return RagProviderSafetyReviewContext(
+            authority_uuid=body['authority_uuid'],  # type: ignore[arg-type]
+            designated_environment_id=self._environment,
+            component=component,
+            family_identity=_identity_tuple(record),
+            state=record['state'],  # type: ignore[arg-type]
+            state_version=record['state_version'],  # type: ignore[arg-type]
+            global_safety_generation=body['global_safety_generation'],  # type: ignore[arg-type]
+            has_historical_blocker=record['first_blocker_category'] is not None,
+            _seal=_REVIEW_CAPABILITY_SEAL,
+        )
+
+    @staticmethod
+    def _command_component(
+        command: ReviewedProviderSafetyCommand,
+    ) -> RagPaidComponent:
+        if type(command) is not ReviewedProviderSafetyCommand:
+            raise RagProviderSafetyError('reviewed command capability is required')
+        return command._bound_component()
+
     def _revalidate(
         self,
         connection: Connection,
@@ -838,11 +1084,13 @@ class RagProviderSafetyService:
         component: RagPaidComponent,
         state: ProviderSafetyState,
         agent_run_id: int,
+        category: str,
     ) -> str:
         return rag_identity_hmac(
             {
                 'agent_run_id': agent_run_id,
                 'component': component,
+                'category': category,
                 'state': state,
             },
             secret=self._secret,
@@ -926,6 +1174,11 @@ class RagProviderSafetyService:
                 'reviewed_gate_reference_hmac': reviewed_reference,
                 'updated_at': datetime.now(UTC),
             }
+            if transition_kind == 'reset':
+                values.update(
+                    reset_by=actor_subject_hmac,
+                    reset_at=datetime.now(UTC),
+                )
             if snapshot is not None:
                 values.update(self._snapshot_values(snapshot))
             if blocker_values is not None and old_row['overrun_agent_run_id'] is None:
@@ -982,7 +1235,7 @@ class RagProviderSafetyService:
         *,
         transition_kind: str,
         new_state: ProviderSafetyState,
-        reviewed_reference: str,
+        reviewed_reference: str | None,
         expected_global_generation: int | None,
         expected_state_version: int | None,
         allowed_prior_states: set[str],
@@ -992,10 +1245,14 @@ class RagProviderSafetyService:
         blocker_values: tuple[int, int, Decimal] | None = None,
         snapshot: AuthorizedProviderPolicySnapshot | None = None,
         supersession: bool = False,
+        reviewed_command: ReviewedProviderSafetyCommand | None = None,
+        reviewed_operation: str | None = None,
+        preserve_reviewed_reference: bool = False,
     ) -> None:
         if component not in _COMPONENTS:
             raise RagProviderSafetyError('provider family component is invalid')
-        require_lower_hmac(reviewed_reference)
+        if reviewed_reference is not None:
+            require_lower_hmac(reviewed_reference)
         if actor_subject_hmac is not None:
             require_lower_hmac(actor_subject_hmac)
         try:
@@ -1003,6 +1260,28 @@ class RagProviderSafetyService:
                 old = self._read_unlocked()
                 self._match_db_whole_set(connection, old, for_update=True)
                 record = self._active_record(old, component)
+                if preserve_reviewed_reference:
+                    reviewed_reference = record[
+                        'reviewed_transition_reference_hmac'
+                    ]  # type: ignore[assignment]
+                if reviewed_command is not None:
+                    if reviewed_operation is None:
+                        raise RagProviderSafetyError('reviewed operation is absent')
+                    context = self._review_context_from(old, component, record)
+                    payload = reviewed_command._consume(
+                        secret=self._secret,
+                        expected_context=context,
+                        expected_operation=reviewed_operation,
+                        expected_successor=snapshot,
+                    )
+                    reviewed_reference = payload[
+                        'reviewed_gate_reference_hmac'
+                    ]  # type: ignore[assignment]
+                    actor_subject_hmac = payload['actor_subject_hmac']  # type: ignore[assignment]
+                    expected_global_generation = context.global_safety_generation
+                    expected_state_version = context.state_version
+                if reviewed_reference is None:
+                    raise RagProviderSafetyError('reviewed transition reference is absent')
                 if (
                     record['state'] not in allowed_prior_states
                     or expected_global_generation is not None
@@ -1090,6 +1369,7 @@ class RagProviderSafetyService:
                             old=old,
                             component=component,
                             reviewed_reference=reviewed_reference,
+                            actor_subject_hmac=actor_subject_hmac,
                             agent_run_id=agent_run_id,
                             blocker_values=blocker_values,
                         )
@@ -1136,6 +1416,7 @@ class RagProviderSafetyService:
         old: Mapping[str, object],
         component: RagPaidComponent,
         reviewed_reference: str,
+        actor_subject_hmac: str | None,
         agent_run_id: int | None,
         blocker_values: tuple[int, int, Decimal] | None,
     ) -> None:
@@ -1157,6 +1438,18 @@ class RagProviderSafetyService:
         target['family_safety_generation'] = generation
         target['reviewed_transition_reference_hmac'] = reviewed_reference
         body['global_safety_generation'] = generation
+        remediation_event = {
+            'authority_uuid': old['authority_uuid'],
+            'component': component,
+            'external_envelope_digest': old['envelope_digest'],
+            'global_safety_generation': generation,
+            'incident_reference_hmac': actor_subject_hmac,
+            'state': 'blocked_remediation',
+        }
+        remediation_digest = hashlib.sha256(
+            b'paraworks:provider-safety-db-only-remediation:v1\x00'
+            + canonical_json_bytes(remediation_event)
+        ).hexdigest()
         synthetic = dict(old)
         synthetic['global_safety_generation'] = generation
         synthetic['_records_by_identity'] = {
@@ -1170,11 +1463,11 @@ class RagProviderSafetyService:
             connection,
             old_body=old,
             new_body=synthetic,
-            new_digest=old['envelope_digest'],
+            new_digest=remediation_digest,
             component=component,
             transition_kind='block_remediation',
             reviewed_reference=reviewed_reference,
-            actor_subject_hmac=None,
+            actor_subject_hmac=actor_subject_hmac,
             agent_run_id=agent_run_id,
             snapshot=None,
             supersession=False,
@@ -1184,90 +1477,82 @@ class RagProviderSafetyService:
     def mark_rebind_required(
         self,
         connection: Connection,
-        component: RagPaidComponent,
-        *,
-        expected_global_safety_generation: int,
-        expected_state_version: int,
-        reviewed_transition_reference_hmac: str,
+        command: ReviewedProviderSafetyCommand,
     ) -> None:
+        component = self._command_component(command)
         self._mutate(
             connection,
             component,
             transition_kind='rebind_required',
             new_state='rebind_required',
-            reviewed_reference=reviewed_transition_reference_hmac,
-            expected_global_generation=expected_global_safety_generation,
-            expected_state_version=expected_state_version,
+            reviewed_reference=None,
+            expected_global_generation=None,
+            expected_state_version=None,
             allowed_prior_states={'ready'},
+            reviewed_command=command,
+            reviewed_operation='mark_rebind_required',
         )
 
     def reviewed_rebind(
         self,
         connection: Connection,
-        component: RagPaidComponent,
+        command: ReviewedProviderSafetyCommand,
         policy_snapshot: AuthorizedProviderPolicySnapshot,
-        *,
-        expected_global_safety_generation: int,
-        expected_state_version: int,
-        reviewed_transition_reference_hmac: str,
     ) -> None:
+        component = self._command_component(command)
         self._mutate(
             connection,
             component,
             transition_kind='rebind',
             new_state='ready',
-            reviewed_reference=reviewed_transition_reference_hmac,
-            expected_global_generation=expected_global_safety_generation,
-            expected_state_version=expected_state_version,
+            reviewed_reference=None,
+            expected_global_generation=None,
+            expected_state_version=None,
             allowed_prior_states={'rebind_required'},
             snapshot=policy_snapshot,
+            reviewed_command=command,
+            reviewed_operation='rebind',
         )
 
     def reviewed_reset(
         self,
         connection: Connection,
-        component: RagPaidComponent,
-        *,
-        expected_global_safety_generation: int,
-        expected_state_version: int,
-        reviewed_transition_reference_hmac: str,
-        actor_subject_hmac: str,
+        command: ReviewedProviderSafetyCommand,
     ) -> None:
+        component = self._command_component(command)
         self._mutate(
             connection,
             component,
             transition_kind='reset',
             new_state='ready',
-            reviewed_reference=reviewed_transition_reference_hmac,
-            expected_global_generation=expected_global_safety_generation,
-            expected_state_version=expected_state_version,
+            reviewed_reference=None,
+            expected_global_generation=None,
+            expected_state_version=None,
             allowed_prior_states={'blocked_overrun', 'blocked_remediation'},
-            actor_subject_hmac=actor_subject_hmac,
+            reviewed_command=command,
+            reviewed_operation='reset',
         )
 
     def reviewed_supersession(
         self,
         connection: Connection,
-        component: RagPaidComponent,
+        command: ReviewedProviderSafetyCommand,
         successor: AuthorizedProviderPolicySnapshot,
-        *,
-        expected_global_safety_generation: int,
-        expected_state_version: int,
-        reviewed_transition_reference_hmac: str,
-        actor_subject_hmac: str,
     ) -> None:
+        component = self._command_component(command)
         self._mutate(
             connection,
             component,
             transition_kind='supersession',
             new_state='ready',
-            reviewed_reference=reviewed_transition_reference_hmac,
-            expected_global_generation=expected_global_safety_generation,
-            expected_state_version=expected_state_version,
+            reviewed_reference=None,
+            expected_global_generation=None,
+            expected_state_version=None,
             allowed_prior_states=set(_STATES),
-            actor_subject_hmac=actor_subject_hmac,
             snapshot=successor,
             supersession=True,
+            reviewed_command=command,
+            reviewed_operation='supersession',
         )
 
     def _block(
@@ -1280,6 +1565,7 @@ class RagProviderSafetyService:
         input_tokens: int,
         output_tokens: int,
         cost_usd: Decimal,
+        category: str,
     ) -> None:
         if (
             type(agent_run_id) is not int
@@ -1293,15 +1579,11 @@ class RagProviderSafetyService:
             or cost_usd < 0
         ):
             raise RagProviderSafetyError('provider blocker values are invalid')
-        category = (
-            'provider_usage_overrun'
-            if state == 'blocked_overrun'
-            else 'provider_safety_unavailable'
-        )
         reference = self._incident_reference(
             component=component,
             state=state,
             agent_run_id=agent_run_id,
+            category=category,
         )
         self._mutate(
             connection,
@@ -1310,13 +1592,15 @@ class RagProviderSafetyService:
                 'block_overrun' if state == 'blocked_overrun' else 'block_remediation'
             ),
             new_state=state,
-            reviewed_reference=reference,
+            reviewed_reference=None,
             expected_global_generation=None,
             expected_state_version=None,
             allowed_prior_states={'ready'},
             agent_run_id=agent_run_id,
             blocker_category=category,
             blocker_values=(input_tokens, output_tokens, cost_usd),
+            actor_subject_hmac=reference,
+            preserve_reviewed_reference=True,
         )
 
     def block_overrun(
@@ -1337,6 +1621,7 @@ class RagProviderSafetyService:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost_usd,
+            category='provider_usage_overrun',
         )
 
     def block_remediation(
@@ -1344,11 +1629,22 @@ class RagProviderSafetyService:
         connection: Connection,
         component: RagPaidComponent,
         *,
+        category: Literal[
+            'provider_response_identity_invalid',
+            'provider_embedding_payload_invalid',
+            'provider_safety_unavailable',
+        ],
         agent_run_id: int,
         input_tokens: int,
         output_tokens: int,
         cost_usd: Decimal,
     ) -> None:
+        if category not in {
+            'provider_response_identity_invalid',
+            'provider_embedding_payload_invalid',
+            'provider_safety_unavailable',
+        }:
+            raise RagProviderSafetyError('provider remediation category is invalid')
         self._block(
             connection,
             component,
@@ -1357,4 +1653,5 @@ class RagProviderSafetyService:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost_usd,
+            category=category,
         )

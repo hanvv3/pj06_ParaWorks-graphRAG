@@ -5,6 +5,8 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 
 from sqlalchemy import Connection, insert, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
 from backend.app.models.rag_runtime import RagAdvisoryLockKey
@@ -30,6 +32,16 @@ class RegisteredAdvisoryLock:
     def _require_authentic(self) -> None:
         if self._seal is not _CAPABILITY_SEAL:
             raise TypeError('registered advisory capability is required')
+
+    def matches(self, value: object, *, identity_namespace: str) -> bool:
+        self._require_authentic()
+        canonical = advisory_identity_bytes(value)
+        return (
+            self.identity_namespace == identity_namespace
+            and self.identity_digest == hashlib.sha256(canonical).hexdigest()
+            and self.canonical_identity == canonical
+            and self.key == advisory_int4_pair(value)
+        )
 
 
 ORDINARY_RAG_LOCK_ORDER = (
@@ -104,7 +116,7 @@ def register_advisory_identity(
 
 def register_advisory_identity_db(
     connection: Connection, value: object, *, identity_namespace: str
-) -> RegisteredAdvisoryLock:
+) -> None:
     """Durably register a lock identity before any advisory acquisition."""
     if identity_namespace not in {'static', 'dynamic'}:
         raise ValueError('advisory identity namespace is invalid')
@@ -121,26 +133,37 @@ def register_advisory_identity_db(
         .one_or_none()
     )
     if existing is None:
-        try:
+        values = {
+            'key1': pair[0],
+            'key2': pair[1],
+            'identity_namespace': identity_namespace,
+            'lock_identity_digest': digest,
+            'lock_identity_canonical_bytes': canonical,
+        }
+        if connection.dialect.name == 'postgresql':
+            statement = postgresql_insert(RagAdvisoryLockKey).values(**values)
+            statement = statement.on_conflict_do_nothing(
+                index_elements=['key1', 'key2']
+            )
+        elif connection.dialect.name == 'sqlite':
+            statement = sqlite_insert(RagAdvisoryLockKey).values(**values)
+            statement = statement.on_conflict_do_nothing(
+                index_elements=['key1', 'key2']
+            )
+        else:
+            statement = insert(RagAdvisoryLockKey).values(**values)
+        result = connection.execute(statement)
+        if result.rowcount == 1:
+            return None
+        existing = (
             connection.execute(
-                insert(RagAdvisoryLockKey).values(
-                    key1=pair[0],
-                    key2=pair[1],
-                    identity_namespace=identity_namespace,
-                    lock_identity_digest=digest,
-                    lock_identity_canonical_bytes=canonical,
+                select(RagAdvisoryLockKey.__table__).where(
+                    RagAdvisoryLockKey.key1 == pair[0],
+                    RagAdvisoryLockKey.key2 == pair[1],
                 )
             )
-        except Exception:
-            raise AdvisoryLockCollisionError(
-                'advisory lock identity registration failed'
-            ) from None
-        return RegisteredAdvisoryLock(
-            key=pair,
-            identity_namespace=identity_namespace,
-            identity_digest=digest,
-            canonical_identity=canonical,
-            _seal=_CAPABILITY_SEAL,
+            .mappings()
+            .one_or_none()
         )
     if (
         existing['identity_namespace'] != identity_namespace
@@ -148,6 +171,41 @@ def register_advisory_identity_db(
         or bytes(existing['lock_identity_canonical_bytes']) != canonical
     ):
         raise AdvisoryLockCollisionError('advisory lock key collision')
+    return None
+
+
+def load_registered_advisory_capability(
+    connection: Connection, value: object, *, identity_namespace: str
+) -> RegisteredAdvisoryLock:
+    """Load a capability only from a fresh post-commit registry read."""
+    if connection.in_transaction():
+        raise AdvisoryLockCollisionError(
+            'registered advisory capability requires a committed read'
+        )
+    if identity_namespace not in {'static', 'dynamic'}:
+        raise ValueError('advisory identity namespace is invalid')
+    canonical = advisory_identity_bytes(value)
+    digest = hashlib.sha256(canonical).hexdigest()
+    pair = advisory_int4_pair(value)
+    existing = (
+        connection.execute(
+            select(RagAdvisoryLockKey.__table__).where(
+                RagAdvisoryLockKey.key1 == pair[0],
+                RagAdvisoryLockKey.key2 == pair[1],
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if (
+        existing is None
+        or existing['identity_namespace'] != identity_namespace
+        or existing['lock_identity_digest'] != digest
+        or bytes(existing['lock_identity_canonical_bytes']) != canonical
+    ):
+        raise AdvisoryLockCollisionError(
+            'advisory identity is not committed in this database'
+        )
     return RegisteredAdvisoryLock(
         key=pair,
         identity_namespace=identity_namespace,
