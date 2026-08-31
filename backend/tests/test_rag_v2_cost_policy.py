@@ -311,3 +311,229 @@ def test_each_price_tokenizer_estimator_endpoint_or_tier_mutation_rebinds_policy
             authorized,
         )
     assert exc_info.value.code == 'model_unavailable'
+
+
+def test_existing_policy_behavior_is_frozen_against_registry_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy()
+    value = _answer_input(policy)
+    before_budget = policy.prepare_answer_generation(value)
+    before_actual = policy.charge_actual(
+        'answer_generation',
+        StrictProviderUsage(600, 10, 610),
+    )
+    before_hmac = policy.authorized_policy_snapshot_hmac('answer_generation')
+    query_value = QueryEmbeddingCostInput(
+        b'query',
+        policy.query_embedding_model_config_snapshot_hmac,
+    )
+    before_query_budget = policy.prepare_query_embedding(query_value)
+    before_query_actual = policy.charge_actual(
+        'query_embedding',
+        StrictProviderUsage(1, 0, 1),
+    )
+    before_query_hmac = policy.authorized_policy_snapshot_hmac(
+        'query_embedding'
+    )
+
+    monkeypatch.setattr(
+        rag_cost_policy,
+        'ANSWER_INPUT_USD_PER_1M',
+        Decimal('9.750000'),
+    )
+    monkeypatch.setattr(rag_cost_policy, 'MAX_ANSWER_INPUT_TOKENS', 1)
+    monkeypatch.setattr(rag_cost_policy, 'ANSWER_REPLY_PRIMING_TOKENS', 999)
+    monkeypatch.setattr(
+        rag_cost_policy,
+        'RAG_COMPONENT_CEILING_USD',
+        Decimal('0.000001'),
+    )
+    monkeypatch.setattr(
+        rag_cost_policy,
+        'QUERY_EMBEDDING_INPUT_USD_PER_1M',
+        Decimal('9.020000'),
+    )
+    monkeypatch.setattr(rag_cost_policy, 'MAX_QUERY_EMBEDDING_TOKENS', 1)
+    monkeypatch.setattr(
+        rag_cost_policy,
+        'QUERY_EMBEDDING_TOKENIZER_ENCODING',
+        'o200k_base',
+    )
+    monkeypatch.setattr(
+        rag_cost_policy,
+        'QUERY_EMBEDDING_ESTIMATOR_VERSION',
+        'openai-cl100k:mutated-after-init',
+    )
+    monkeypatch.setattr(
+        rag_cost_policy,
+        'ANSWER_ESTIMATOR_VERSION',
+        'openai-o200k-rag-answer:mutated-after-init',
+    )
+
+    assert policy.prepare_answer_generation(value) == before_budget
+    assert policy.charge_actual(
+        'answer_generation',
+        StrictProviderUsage(600, 10, 610),
+    ) == before_actual
+    assert policy.authorized_policy_snapshot_hmac(
+        'answer_generation'
+    ) == before_hmac
+    assert policy.prepare_query_embedding(query_value) == before_query_budget
+    assert policy.charge_actual(
+        'query_embedding',
+        StrictProviderUsage(1, 0, 1),
+    ) == before_query_actual
+    assert policy.authorized_policy_snapshot_hmac(
+        'query_embedding'
+    ) == before_query_hmac
+    with pytest.raises(AttributeError):
+        policy._answer_policy_hmac = '0' * 64
+
+
+def test_tokenizer_resolver_cannot_substitute_an_encoding_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    o200k = tiktoken.get_encoding('o200k_base')
+    original = tiktoken.get_encoding
+
+    def substitute(name: str):
+        if name == 'cl100k_base':
+            return o200k
+        return original(name)
+
+    monkeypatch.setattr(rag_cost_policy.tiktoken, 'get_encoding', substitute)
+
+    with pytest.raises(ValueError, match='tokenizer'):
+        _policy()
+
+    class SpoofedEncoding:
+        name = 'cl100k_base'
+
+        def encode(self, value, **kwargs):
+            return o200k.encode(value, **kwargs)
+
+    def spoof(name: str):
+        if name == 'cl100k_base':
+            return SpoofedEncoding()
+        return original(name)
+
+    monkeypatch.setattr(rag_cost_policy.tiktoken, 'get_encoding', spoof)
+    with pytest.raises(ValueError, match='tokenizer'):
+        _policy()
+
+
+def _answer_estimator_char_count(value: AnswerGenerationCostInput) -> int:
+    return len(_compact({
+        'messages': json.loads(value.exact_messages_json),
+        'model_config_identity': 'rag-answer-model-config:v1',
+        'output_schema': json.loads(value.exact_response_schema_json),
+        'output_schema_identity': 'rag-answer-blocks:v1',
+    }).decode())
+
+
+def _answer_input_with_estimator_chars(
+    policy: RagCostPolicy,
+    target: int,
+) -> AnswerGenerationCostInput:
+    empty = _answer_input(policy, content='')
+    base = _answer_estimator_char_count(empty)
+    assert base < target
+    value = _answer_input(policy, content='x' * (target - base))
+    assert _answer_estimator_char_count(value) == target
+    return value
+
+
+@pytest.mark.parametrize('character_count', (11_999, 12_000))
+def test_answer_exact_serialized_character_bound_passes(
+    character_count: int,
+) -> None:
+    policy = _policy()
+
+    prepared = policy.prepare_answer_generation(
+        _answer_input_with_estimator_chars(policy, character_count)
+    )
+
+    assert prepared.component == 'answer_generation'
+
+
+def test_answer_12001_serialized_characters_refuses() -> None:
+    policy = _policy()
+
+    with pytest.raises(RagBudgetExceededError):
+        policy.prepare_answer_generation(
+            _answer_input_with_estimator_chars(policy, 12_001)
+        )
+
+
+def _answer_input_with_framed_tokens(
+    policy: RagCostPolicy,
+    framed_tokens: int,
+) -> AnswerGenerationCostInput:
+    tokenizer = tiktoken.get_encoding('o200k_base')
+
+    def encoded_count(value: AnswerGenerationCostInput) -> int:
+        estimator = _compact({
+            'messages': json.loads(value.exact_messages_json),
+            'model_config_identity': 'rag-answer-model-config:v1',
+            'output_schema': json.loads(value.exact_response_schema_json),
+            'output_schema_identity': 'rag-answer-blocks:v1',
+        }).decode()
+        return len(tokenizer.encode(
+            estimator,
+            allowed_special=set(),
+            disallowed_special=(),
+        ))
+
+    base = encoded_count(_answer_input(policy, content=''))
+    target_encoded = framed_tokens - 16 - 512
+    content_length = target_encoded - base
+    for _ in range(4):
+        value = _answer_input(policy, content='가' * content_length)
+        difference = target_encoded - encoded_count(value)
+        if difference == 0:
+            break
+        content_length += difference
+    assert encoded_count(value) == target_encoded
+    return value
+
+
+@pytest.mark.parametrize('framed_tokens', (9_999, 10_000))
+def test_answer_exact_framed_token_bound_passes(
+    framed_tokens: int,
+) -> None:
+    policy = _policy()
+
+    prepared = policy.prepare_answer_generation(
+        _answer_input_with_framed_tokens(policy, framed_tokens)
+    )
+
+    assert prepared.estimated_input_tokens == framed_tokens
+
+
+def test_answer_10001_framed_tokens_refuses() -> None:
+    policy = _policy()
+
+    with pytest.raises(RagBudgetExceededError):
+        policy.prepare_answer_generation(
+            _answer_input_with_framed_tokens(policy, 10_001)
+        )
+
+
+def test_answer_real_component_ceiling_refuses_without_clamping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rag_cost_policy,
+        'ANSWER_OUTPUT_USD_PER_1M',
+        Decimal('100.000000'),
+    )
+    policy = _policy()
+
+    with pytest.raises(RagBudgetExceededError):
+        policy.prepare_answer_generation(_answer_input(policy))
+
+    assert policy.charge_actual(
+        'answer_generation',
+        StrictProviderUsage(0, 512, 512),
+    ) == Decimal('0.051200')

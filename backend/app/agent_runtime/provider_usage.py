@@ -5,6 +5,16 @@ from typing import Literal, TypeAlias
 
 from backend.app.rag.retrieval import StrictProviderUsage
 
+_TOKEN_FIELD_NAMES = frozenset({
+    'input_tokens',
+    'prompt_tokens',
+    'output_tokens',
+    'completion_tokens',
+    'total_tokens',
+})
+_USAGE_WRAPPER_NAMES = frozenset({'token_usage', 'usage'})
+_ALL_AUTHORITY_NAMES = _TOKEN_FIELD_NAMES | _USAGE_WRAPPER_NAMES
+
 RagRunProductOutcome = Literal[
     'supported',
     'search_projected',
@@ -71,25 +81,45 @@ class StrictChatUsageParser:
             primary_value,
             context='chat usage',
         )
-        if set(primary).intersection({
-            'prompt_tokens',
-            'completion_tokens',
-            'token_usage',
-            'usage',
-        }):
+        if set(primary).intersection(
+            {'prompt_tokens', 'completion_tokens'} | _USAGE_WRAPPER_NAMES
+        ):
             raise ValueError(
                 'chat primary usage contains extra authoritative aliases'
             )
+        _validate_non_authoritative_details(
+            primary,
+            allowed_authority_names={
+                'input_tokens',
+                'output_tokens',
+                'total_tokens',
+            },
+            context='chat usage',
+        )
         input_tokens = _required_exact_token(primary, 'input_tokens')
         output_tokens = _required_exact_token(primary, 'output_tokens')
         total_tokens = _required_exact_token(primary, 'total_tokens')
         usage = _strict_usage(input_tokens, output_tokens, total_tokens)
 
         response = _mapping_snapshot(response_value, context='chat usage')
+        if set(response).intersection(_TOKEN_FIELD_NAMES):
+            raise ValueError('chat response usage authority is misplaced')
+        _validate_non_authoritative_details(
+            response,
+            allowed_authority_names=_USAGE_WRAPPER_NAMES,
+            context='chat usage',
+        )
         for key in ('token_usage', 'usage'):
             if key not in response:
                 continue
             alias = _mapping_snapshot(response[key], context='chat usage')
+            if set(alias).intersection(_USAGE_WRAPPER_NAMES):
+                raise ValueError('chat response usage wrapper is nested')
+            _validate_non_authoritative_details(
+                alias,
+                allowed_authority_names=_TOKEN_FIELD_NAMES,
+                context='chat usage',
+            )
             alias_input = _required_synonym_token(
                 alias,
                 primary_key='input_tokens',
@@ -114,6 +144,13 @@ class StrictChatUsageParser:
 class StrictEmbeddingUsageParser:
     def parse_usage(self, usage: object) -> StrictProviderUsage:
         metadata = _mapping_snapshot(usage, context='embedding usage')
+        if set(metadata).intersection(_USAGE_WRAPPER_NAMES):
+            raise ValueError('embedding provider usage wrapper is misplaced')
+        _validate_non_authoritative_details(
+            metadata,
+            allowed_authority_names=_TOKEN_FIELD_NAMES,
+            context='embedding usage',
+        )
         prompt_tokens = _required_exact_token(metadata, 'prompt_tokens')
         if 'input_tokens' in metadata:
             input_tokens = _required_exact_token(metadata, 'input_tokens')
@@ -139,6 +176,46 @@ def _mapping_snapshot(value: object, *, context: str) -> dict[str, object]:
             raise ValueError(f'{context} contains invalid keys')
         result[key] = item
     return result
+
+
+def _validate_non_authoritative_details(
+    values: dict[str, object],
+    *,
+    allowed_authority_names: frozenset[str] | set[str],
+    context: str,
+) -> None:
+    for key, value in values.items():
+        if key in allowed_authority_names:
+            continue
+        _reject_nested_authority(value, context=context, depth=0)
+
+
+def _reject_nested_authority(
+    value: object,
+    *,
+    context: str,
+    depth: int,
+) -> None:
+    if depth > 32:
+        raise ValueError(f'{context} detail nesting is invalid')
+    if isinstance(value, Mapping):
+        nested = _mapping_snapshot(value, context=context)
+        if set(nested).intersection(_ALL_AUTHORITY_NAMES):
+            raise ValueError(f'{context} contains nested usage authority')
+        for item in nested.values():
+            _reject_nested_authority(
+                item,
+                context=context,
+                depth=depth + 1,
+            )
+        return
+    if type(value) in {list, tuple}:
+        for item in value:
+            _reject_nested_authority(
+                item,
+                context=context,
+                depth=depth + 1,
+            )
 
 
 def _required_exact_token(values: dict[str, object], key: str) -> int:

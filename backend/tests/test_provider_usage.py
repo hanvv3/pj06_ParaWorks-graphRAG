@@ -21,6 +21,10 @@ class _IntSubclass(int):
     pass
 
 
+class _StrSubclass(str):
+    pass
+
+
 class _Mapping(Mapping[str, object]):
     def __init__(self, values: dict[str, object]) -> None:
         self._values = values
@@ -148,3 +152,100 @@ def test_embedding_parser_rejects_missing_malformed_conflicting_or_nonzero_outpu
 ) -> None:
     with pytest.raises(ValueError, match='usage'):
         StrictEmbeddingUsageParser().parse_usage(usage)
+
+
+@pytest.mark.parametrize(
+    'usage',
+    (
+        {
+            'prompt_tokens': 4,
+            'total_tokens': 4,
+            'usage': {'prompt_tokens': 999, 'total_tokens': 999},
+        },
+        {
+            'prompt_tokens': 4,
+            'total_tokens': 4,
+            'token_usage': {'prompt_tokens': 999, 'total_tokens': 999},
+        },
+        {
+            'prompt_tokens': 4,
+            'total_tokens': 4,
+            'detail': {'usage': {'prompt_tokens': 999}},
+        },
+    ),
+)
+def test_embedding_parser_rejects_authority_wrappers_at_wrong_nesting(
+    usage: object,
+) -> None:
+    with pytest.raises(ValueError, match='usage'):
+        StrictEmbeddingUsageParser().parse_usage(usage)
+
+
+@pytest.mark.parametrize(
+    'response',
+    (
+        {
+            'token_usage': {
+                'input_tokens': 12,
+                'output_tokens': 3,
+                'total_tokens': 15,
+                'usage': {
+                    'input_tokens': 999,
+                    'output_tokens': 0,
+                    'total_tokens': 999,
+                },
+            }
+        },
+        {
+            'usage': {
+                'input_tokens': 12,
+                'output_tokens': 3,
+                'total_tokens': 15,
+                'token_usage': {
+                    'input_tokens': 999,
+                    'output_tokens': 0,
+                    'total_tokens': 999,
+                },
+            }
+        },
+        {
+            'input_tokens': 12,
+            'output_tokens': 3,
+            'total_tokens': 15,
+        },
+        {
+            'provider_detail': {
+                _IntSubclass(1): 'invalid key subclass',
+            },
+        },
+        {
+            _StrSubclass('usage'): {
+                'input_tokens': 12,
+                'output_tokens': 3,
+                'total_tokens': 15,
+            },
+        },
+    ),
+)
+def test_chat_parser_rejects_authority_at_wrong_response_position(
+    response: object,
+) -> None:
+    with pytest.raises(ValueError, match='usage'):
+        StrictChatUsageParser().parse_message(_message(response=response))
+
+
+def test_non_authoritative_nested_provider_detail_remains_allowed() -> None:
+    message = _message(response={
+        'provider_detail': {
+            'cached': {'count': 2},
+            'request_family': 'direct-standard',
+        },
+    })
+    embedding = {
+        'prompt_tokens': 4,
+        'total_tokens': 4,
+        'provider_detail': {'cached': {'count': 2}},
+    }
+
+    assert StrictChatUsageParser().parse_message(message).total_tokens == 15
+    assert StrictEmbeddingUsageParser().parse_usage(embedding).total_tokens == 4
