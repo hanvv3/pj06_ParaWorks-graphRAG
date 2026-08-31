@@ -702,31 +702,31 @@ def test_authorizer_rejects_stale_selected_link_even_when_another_link_is_live(
 def test_authorizer_requires_permission_for_every_selected_link_child(
     db_session: Session,
 ) -> None:
-    public_source, public_chunk = _seed_source(
+    selected_source, selected_chunk = _seed_source(
         db_session,
         ordinal=1,
-        permission='public',
+        permission='restricted',
     )
-    restricted_source, restricted_chunk = _seed_source(
+    denied_later_source, denied_later_chunk = _seed_source(
         db_session,
         ordinal=2,
-        permission='restricted',
+        permission='public',
     )
     target = _seed_target(db_session, permission='restricted')
     item = _seed_item(
         db_session,
-        source=public_source,
-        chunk=public_chunk,
+        source=selected_source,
+        chunk=selected_chunk,
         resolution_source='human',
         permission='restricted',
     )
-    item.source_links.append(restricted_source.source_url)
-    item.source_snippets.append(restricted_chunk.source_snippet)
+    item.source_links.append(denied_later_source.source_url)
+    item.source_snippets.append(denied_later_chunk.source_snippet)
     link = _seed_link(
         db_session,
         target=target,
         item=item,
-        source=public_source,
+        source=selected_source,
         resolution_source='human',
         permission='restricted',
     )
@@ -734,10 +734,10 @@ def test_authorizer_requires_permission_for_every_selected_link_child(
     db_session.add(
         TrustedKnowledgeEvidenceLink(
             approval_link_id=link.id,
-            canonical_source_kind=restricted_source.source_type,
-            canonical_source_id=str(restricted_source.id),
+            canonical_source_kind=denied_later_source.source_type,
+            canonical_source_id=str(denied_later_source.id),
             canonical_version_or_signature=(
-                restricted_source.server_content_signature
+                denied_later_source.server_content_signature
             ),
             evidence_hash='e' * 64,
             fingerprint_key_version=(
@@ -756,13 +756,20 @@ def test_authorizer_requires_permission_for_every_selected_link_child(
         settings=settings,
     ).resolve_for_index('history_event', target.id)
     assert envelope is not None
+    assert isinstance(envelope.evidence.provenance, ExplicitApprovalProvenance)
+    assert (
+        envelope.evidence.provenance.selected_citation_child.source_row_id
+        == selected_source.id
+    )
+    assert selected_source.permission_level == 'restricted'
+    assert denied_later_source.permission_level == 'public'
 
     classification = TrustedEvidenceAuthorizer(
         db=db_session,
         settings=settings,
     ).classify_access(
         _scope(
-            source_ids=(public_source.id, restricted_source.id),
+            source_ids=(selected_source.id, denied_later_source.id),
             permissions=('restricted',),
         ),
         envelope,
