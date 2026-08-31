@@ -714,6 +714,23 @@ class _InvalidationHook:
             invalidate(self.mode)
 
 
+class _ClassSwapHook(_InvalidationHook):
+    def __init__(self, target: str) -> None:
+        super().__init__(target, 'unused')
+        self.original_type = None
+        self.replacement_type = rag_cost_policy._create_rag_cost_policy_type()
+
+    def __call__(self, point, policy, invalidate) -> None:
+        if self.active and point == self.target:
+            self.active = False
+            self.original_type = type(policy)
+            policy.__class__ = self.replacement_type
+
+    def restore(self, policy) -> None:
+        if self.original_type is not None:
+            policy.__class__ = self.original_type
+
+
 def _isolated_policy(hook: _InvalidationHook):
     policy_type = rag_cost_policy._create_rag_cost_policy_type(test_hook=hook)
     settings = _settings()
@@ -781,6 +798,69 @@ def test_charge_registry_invalidation_is_typed_refusal(mode: str) -> None:
         )
 
     assert exc_info.value.code == 'model_unavailable'
+
+
+@pytest.mark.parametrize(
+    ('point', 'operation', 'expected_code'),
+    (
+        (
+            'query_property_before_return',
+            'query_property',
+            'retriever_not_configured',
+        ),
+        (
+            'query_embedding_policy_before_return',
+            'query_policy',
+            'retriever_not_configured',
+        ),
+        (
+            'query_encode_after_call',
+            'query_prepare',
+            'retriever_not_configured',
+        ),
+        ('answer_schema_after_hmac', 'answer_prepare', 'model_unavailable'),
+        ('answer_encode_after_call', 'answer_prepare', 'model_unavailable'),
+        ('charge_before_return', 'charge', 'model_unavailable'),
+    ),
+)
+def test_class_swap_during_public_operation_is_typed_refusal(
+    point: str,
+    operation: str,
+    expected_code: str,
+) -> None:
+    hook = _ClassSwapHook(point)
+    policy = _isolated_policy(hook)
+    original_type = type(policy)
+    query = QueryEmbeddingCostInput(
+        '한국어 그래프 검색'.encode(),
+        policy.query_embedding_model_config_snapshot_hmac,
+    )
+    answer = _answer_input(policy, content='한국어 근거 답변')
+    hook.active = True
+
+    try:
+        with pytest.raises(RagPolicyUnavailableError) as exc_info:
+            if operation == 'query_property':
+                _ = policy.query_embedding_model_config_snapshot_hmac
+            elif operation == 'query_policy':
+                policy.authorized_policy_snapshot_hmac('query_embedding')
+            elif operation == 'query_prepare':
+                policy.prepare_query_embedding(query)
+            elif operation == 'answer_prepare':
+                policy.prepare_answer_generation(answer)
+            elif operation == 'charge':
+                policy.charge_actual(
+                    'answer_generation',
+                    StrictProviderUsage(1, 1, 2),
+                )
+            else:
+                raise AssertionError('unknown class-swap operation')
+    finally:
+        hook.restore(policy)
+
+    assert exc_info.value.code == expected_code
+    assert type(policy) is original_type
+    assert len(policy.query_embedding_model_config_snapshot_hmac) == 64
 
 
 def test_answer_exact_rounded_component_ceiling_passes(

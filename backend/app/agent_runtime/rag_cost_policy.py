@@ -210,7 +210,7 @@ def _create_rag_cost_policy_type(
         unavailable_code: str,
     ) -> None:
         with state_lock:
-            unchanged = states.get(policy) is state
+            unchanged = type(policy) is Policy and states.get(policy) is state
         if not unchanged:
             raise RagPolicyUnavailableError(unavailable_code)
 
