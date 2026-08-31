@@ -17,6 +17,7 @@ from backend.app.rag.embeddings import (
     OpenAIEmbeddingConfig,
     OpenAIEmbeddingModel,
     ValidatedQueryEmbeddingVector,
+    validate_query_embedding_vector_carrier,
 )
 from backend.app.rag.lexical_projection import (
     score_rag_lexical_candidate,
@@ -28,7 +29,11 @@ from backend.app.rag.pgvector_store import (
     PgVectorServingCandidateRow,
     PgVectorStore,
 )
-from backend.app.rag.retrieval import ClassifiedRetrievalCandidate, RetrievalRequest
+from backend.app.rag.retrieval import (
+    QUERY_EMBEDDING_DIMENSIONS,
+    ClassifiedRetrievalCandidate,
+    RetrievalRequest,
+)
 from backend.app.rag.serving_contracts import (
     EvidenceAccessClassification,
     TrustedServingEnvelope,
@@ -108,6 +113,10 @@ class SqlAlchemyPgVectorSearchStore:
         request: RetrievalRequest,
         vector: ValidatedQueryEmbeddingVector,
     ) -> tuple[ClassifiedRetrievalCandidate, ...]:
+        validate_query_embedding_vector_carrier(
+            vector,
+            expected_dimensions=QUERY_EMBEDDING_DIMENSIONS,
+        )
         try:
             rows = self._store.search_rag_v2(
                 request=request,

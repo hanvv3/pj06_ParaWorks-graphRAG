@@ -10,6 +10,9 @@ from backend.app.agent_runtime.rag_v2_identity import (
     SecurityScope,
     security_scope_fingerprint,
 )
+from backend.app.agents.rag_orchestrator_agent.v2_embedding import (
+    StrictQueryEmbeddingAdapter,
+)
 from backend.app.core.config import Settings
 from backend.app.rag.embeddings import validate_query_embedding_vector
 from backend.app.rag.index_readiness import RagServingIndexReadiness
@@ -21,12 +24,11 @@ from backend.app.rag.pgvector_store import PgVectorServingCandidateRow
 from backend.app.rag.retrieval import (
     ClassifiedRetrievalCandidate,
     PreparedPaidCallBudget,
-    PreparedQueryEmbedding,
     QueryEmbeddingCallResult,
-    QueryEmbeddingReceipt,
     RetrievalRequest,
     RetrievalResult,
     SanitizedRetrievalTrace,
+    StrictProviderUsage,
 )
 from backend.app.rag.search_store import SqlAlchemyPgVectorSearchStore
 from backend.app.rag.serving_contracts import (
@@ -90,45 +92,79 @@ def _readiness(*, corpus: int = 7, vector: int = 11, hmac: str = 'a' * 64, ready
     )
 
 
+class _StrictUsageParser:
+    def parse_usage(self, usage: object) -> StrictProviderUsage:
+        assert usage == {'prompt_tokens': 3, 'total_tokens': 3}
+        return StrictProviderUsage(input_tokens=3, output_tokens=0, total_tokens=3)
+
+
+class _StrictCostPolicy:
+    def prepare_query_embedding(self, value) -> PreparedPaidCallBudget:
+        assert value.retrieval_query_utf8
+        return PreparedPaidCallBudget(
+            component='query_embedding',
+            estimated_input_tokens=3,
+            maximum_output_tokens=0,
+            reserved_cost_usd=Decimal('0.000777'),
+            cost_policy_snapshot_hmac='b' * 64,
+            estimator_input_hmac='c' * 64,
+        )
+
+    def charge_actual(self, component, usage) -> Decimal:
+        assert component == 'query_embedding'
+        assert usage.input_tokens == 3
+        return Decimal('0.000123')
+
+
+class _StrictTransport:
+    def dispatch(self, prepared) -> object:
+        del prepared
+        return {
+            'object': 'list',
+            'model': 'text-embedding-3-small',
+            'data': [
+                {
+                    'object': 'embedding',
+                    'index': 0,
+                    'embedding': [1.0, *([0.0] * 1535)],
+                }
+            ],
+            'usage': {'prompt_tokens': 3, 'total_tokens': 3},
+        }
+
+
+class _StrictPermit:
+    def __init__(self) -> None:
+        self.used = False
+
+    def consume_at_dispatch(self) -> None:
+        assert self.used is False
+        self.used = True
+
+
 def _embedding_result(*, query: str = 'exact query') -> QueryEmbeddingCallResult:
-    budget = PreparedPaidCallBudget(
-        component='query_embedding',
-        estimated_input_tokens=3,
-        maximum_output_tokens=0,
-        reserved_cost_usd=Decimal('0.000777'),
-        cost_policy_snapshot_hmac='b' * 64,
-        estimator_input_hmac='c' * 64,
+    settings = _settings()
+    scope = _scope()
+    request = RetrievalRequest(
+        retrieval_query_text=query,
+        security_scope=scope,
+        security_scope_fingerprint=security_scope_fingerprint(
+            scope,
+            settings=settings,
+        ),
+        query_embedding_result=None,
+        candidate_scan_limit=50,
+        visible_limit=5,
+        relevance_policy_version='rag-retrieval-policy:v2.0',
     )
-    prepared = PreparedQueryEmbedding(
-        retrieval_query_hmac='d' * 64,
-        transient_query_utf8=query.encode('utf-8'),
-        corpus_generation=7,
-        vector_index_generation=11,
-        readiness_snapshot_hmac='a' * 64,
-        model_config_snapshot_hmac='e' * 64,
-        provider_policy_snapshot_hmac='f' * 64,
-        estimated_input_tokens=3,
-        reserved_cost_usd=Decimal('0.000777'),
-        attempt_fence_hmac='1' * 64,
-        budget=budget,
+    adapter = StrictQueryEmbeddingAdapter(
+        usage_parser=_StrictUsageParser(),
+        cost_policy=_StrictCostPolicy(),
+        transport=_StrictTransport(),
+        settings=settings,
     )
-    receipt = QueryEmbeddingReceipt(
-        attempted=True,
-        input_tokens=3,
-        actual_cost_usd=Decimal('0.000123'),
-        latency_ms=1,
-        outcome='component_succeeded',
-        model_config_snapshot_hmac='e' * 64,
-        provider_policy_snapshot_hmac='f' * 64,
-    )
-    return QueryEmbeddingCallResult(
-        prepared=prepared,
-        vector=validate_query_embedding_vector([1.0, *([0.0] * 1535)]),
-        attempted=True,
-        validated_input_tokens=3,
-        actual_cost_usd=Decimal('0.000123'),
-        receipt=receipt,
-    )
+    prepared = adapter.prepare(request, _readiness())
+    return adapter.dispatch_once(prepared, _StrictPermit())
 
 
 def _request(
@@ -219,13 +255,18 @@ class _Store:
 
 
 class _Readiness:
-    def __init__(self, values: list[RagServingIndexReadiness]) -> None:
+    def __init__(
+        self,
+        values: list[RagServingIndexReadiness | Exception],
+    ) -> None:
         self.values = values
         self.calls = 0
 
     def inspect(self) -> RagServingIndexReadiness:
         value = self.values[min(self.calls, len(self.values) - 1)]
         self.calls += 1
+        if isinstance(value, Exception):
+            raise value
         return value
 
 
@@ -352,6 +393,203 @@ def test_storage_runtime_failure_after_valid_carrier_is_the_only_runtime_fallbac
     assert len(keyword.requests) == 1
 
 
+def test_store_failure_still_reads_post_readiness_and_drift_category_wins() -> None:
+    keyword = _Keyword()
+    request = _request()
+    readiness = _Readiness([_readiness(), _readiness(corpus=8)])
+
+    result = _retriever(
+        _Store(PgVectorSearchRuntimeError('storage failed during overlap')),
+        readiness,
+        keyword,
+    ).invoke(request)
+
+    assert readiness.calls == 2
+    assert result.trace.fallback_category == (
+        'serving_corpus_changed_during_pgvector_query'
+    )
+    assert result.trace.provider_attempt_count == 1
+    assert result.query_embedding_receipt is request.query_embedding_result.receipt
+    assert len(keyword.requests) == 1
+    assert keyword.requests[0].security_scope is request.security_scope
+    assert keyword.requests[0].query_embedding_result is None
+
+
+def test_post_readiness_inspection_failure_fails_closed_without_partial_result() -> None:
+    keyword = _Keyword()
+    readiness = _Readiness(
+        [_readiness(), RuntimeError('raw readiness inspection detail')]
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match='pgvector post-readiness observation failed',
+    ):
+        _retriever(
+            _Store((_candidate(1, 0.9),)),
+            readiness,
+            keyword,
+        ).invoke(_request())
+
+    assert readiness.calls == 2
+    assert keyword.requests == []
+
+
+def test_pre_readiness_inspection_failure_fails_closed_before_store_or_fallback() -> None:
+    keyword = _Keyword()
+    store = _Store((_candidate(1, 0.9),))
+    readiness = _Readiness([RuntimeError('raw readiness inspection detail')])
+
+    with pytest.raises(
+        RuntimeError,
+        match='pgvector pre-readiness observation failed',
+    ):
+        _retriever(store, readiness, keyword).invoke(_request())
+
+    assert readiness.calls == 1
+    assert store.calls == []
+    assert keyword.requests == []
+
+
+def _mutate_model_hmac(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        prepared=replace(result.prepared, model_config_snapshot_hmac='0' * 64),
+    )
+
+
+def _mutate_provider_hmac(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        receipt=replace(result.receipt, provider_policy_snapshot_hmac='0' * 64),
+    )
+
+
+def _mutate_query_hmac(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        prepared=replace(result.prepared, retrieval_query_hmac='0' * 64),
+    )
+
+
+def _mutate_attempt_fence(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        prepared=replace(result.prepared, attempt_fence_hmac='0' * 64),
+    )
+
+
+def _mutate_readiness_hmac(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        prepared=replace(result.prepared, readiness_snapshot_hmac='d' * 64),
+    )
+
+
+def _mutate_readiness_generation(
+    result: QueryEmbeddingCallResult,
+) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        prepared=replace(result.prepared, corpus_generation=8),
+    )
+
+
+def _mutate_budget_binding(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        prepared=replace(
+            result.prepared,
+            budget=replace(
+                result.prepared.budget,
+                estimator_input_hmac='d' * 64,
+            ),
+        ),
+    )
+
+
+def _mutate_receipt_model_identity(
+    result: QueryEmbeddingCallResult,
+) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        receipt=replace(result.receipt, model_config_snapshot_hmac='d' * 64),
+    )
+
+
+def _mutate_wrong_hash(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        vector=replace(
+            result.vector,
+            canonical_big_endian_float32_sha256='0' * 64,
+        ),
+    )
+
+
+def _mutate_wrong_dimensions(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        vector=replace(result.vector, coordinates=(1.0,)),
+    )
+
+
+def _mutate_zero_vector(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        vector=replace(result.vector, coordinates=(0.0,) * 1536),
+    )
+
+
+@pytest.mark.parametrize(
+    'mutation',
+    (
+        _mutate_model_hmac,
+        _mutate_provider_hmac,
+        _mutate_query_hmac,
+        _mutate_attempt_fence,
+        _mutate_readiness_hmac,
+        _mutate_readiness_generation,
+        _mutate_budget_binding,
+        _mutate_receipt_model_identity,
+        _mutate_wrong_hash,
+        _mutate_wrong_dimensions,
+        _mutate_zero_vector,
+    ),
+)
+def test_forged_embedding_carrier_is_terminal_before_readiness_store_or_fallback(
+    mutation,
+) -> None:
+    request = _request()
+    request = replace(
+        request,
+        query_embedding_result=mutation(request.query_embedding_result),
+    )
+    store = _Store()
+    readiness = _Readiness([_readiness()])
+    keyword = _Keyword()
+
+    with pytest.raises(ValueError, match='query embedding carrier is invalid'):
+        _retriever(store, readiness, keyword).invoke(request)
+
+    assert readiness.calls == 0
+    assert store.calls == []
+    assert keyword.requests == []
+
+
+def test_strict_adapter_result_is_accepted_end_to_end_by_pgvector_retriever() -> None:
+    request = _request()
+    store = _Store((_candidate(1, 0.9),))
+    result = _retriever(
+        store,
+        _Readiness([_readiness(), _readiness()]),
+    ).invoke(request)
+
+    assert result.effective_backend == 'pgvector'
+    assert result.query_embedding_receipt is request.query_embedding_result.receipt
+    assert store.calls[0][1] is request.query_embedding_result.vector
+
+
 def test_unexpected_store_error_does_not_fallback_but_post_embedding_drift_does() -> None:
     keyword = _Keyword()
     with pytest.raises(RuntimeError, match='programming defect'):
@@ -371,6 +609,21 @@ def test_unexpected_store_error_does_not_fallback_but_post_embedding_drift_does(
         'serving_corpus_changed_during_pgvector_query'
     )
     assert len(keyword.requests) == 1
+
+
+def test_store_side_value_error_is_not_remapped_to_allowed_keyword_fallback() -> None:
+    keyword = _Keyword()
+    readiness = _Readiness([_readiness()])
+
+    with pytest.raises(ValueError, match='invalid admitted carrier'):
+        _retriever(
+            _Store(ValueError('invalid admitted carrier')),
+            readiness,
+            keyword,
+        ).invoke(_request())
+
+    assert readiness.calls == 1
+    assert keyword.requests == []
 
 
 def test_sqlalchemy_vector_store_projects_from_fresh_canonical_rows(db_session) -> None:

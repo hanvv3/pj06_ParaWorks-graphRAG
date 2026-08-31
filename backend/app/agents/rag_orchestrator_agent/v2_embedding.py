@@ -1,27 +1,23 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from time import perf_counter_ns
 from typing import Literal, Protocol
 
-from backend.app.agent_runtime.fingerprints import (
-    fingerprint_secret_bytes,
-    keyed_fingerprint,
-)
 from backend.app.agent_runtime.rag_v2_contracts import ProviderDispatchPermit
 from backend.app.agent_runtime.rag_v2_identity import (
-    exact_utf8_bytes,
     verify_serialized_security_scope_fingerprint,
 )
 from backend.app.core.config import Settings
 from backend.app.rag.embeddings import validate_query_embedding_vector
 from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import (
+    QUERY_EMBEDDING_DIMENSIONS,
+    QUERY_EMBEDDING_INDEX_POLICY_VERSION,
+    QUERY_EMBEDDING_MODEL,
     EmbeddingUsageParserPort,
-    PreparedPaidCallBudget,
     PreparedQueryEmbedding,
     QueryEmbeddingCallResult,
     QueryEmbeddingCostInput,
@@ -29,14 +25,18 @@ from backend.app.rag.retrieval import (
     RagCostPolicyPort,
     RetrievalRequest,
     StrictProviderUsage,
+    build_query_embedding_attempt_fence_hmac,
+    build_query_embedding_model_config_snapshot_hmac,
+    build_query_embedding_provider_policy_snapshot_hmac,
+    build_query_embedding_retrieval_query_hmac,
+    is_lower_hex_64,
+    is_numeric_24_6_representable,
+    validate_query_embedding_budget,
 )
 
-_MODEL = 'text-embedding-3-small'
-_DIMENSIONS = 1536
-_MODEL_CONFIG_VERSION = 'rag-query-embedding-config:v1'
-_PROVIDER_POLICY_VERSION = 'openai-embeddings-api:v1'
-_PAYLOAD_VALIDATOR_VERSION = 'rag-query-embedding-payload:v1'
-_INDEX_POLICY_VERSION = 'rag-v2-serving-index:v1'
+_MODEL = QUERY_EMBEDDING_MODEL
+_DIMENSIONS = QUERY_EMBEDDING_DIMENSIONS
+_INDEX_POLICY_VERSION = QUERY_EMBEDDING_INDEX_POLICY_VERSION
 
 QueryEmbeddingErrorOutcome = Literal[
     'retriever_unavailable',
@@ -104,53 +104,39 @@ class StrictQueryEmbeddingAdapter:
             or readiness.corpus_generation < 0
             or type(readiness.vector_index_generation) is not int
             or readiness.vector_index_generation < 0
-            or not _is_lower_hex_64(readiness.readiness_snapshot_hmac)
+            or not is_lower_hex_64(readiness.readiness_snapshot_hmac)
             or readiness.embedding_model != _MODEL
             or readiness.embedding_dimensions != _DIMENSIONS
             or readiness.index_policy_version != _INDEX_POLICY_VERSION
         ):
             raise ValueError('serving index is not ready for query embedding')
         query_utf8 = request.retrieval_query_text.encode('utf-8', errors='strict')
-        model_snapshot_hmac = _model_config_snapshot_hmac(self._settings)
+        model_snapshot_hmac = build_query_embedding_model_config_snapshot_hmac(
+            self._settings
+        )
         budget = self._cost_policy.prepare_query_embedding(
             QueryEmbeddingCostInput(
                 retrieval_query_utf8=query_utf8,
                 model_config_snapshot_hmac=model_snapshot_hmac,
             )
         )
-        _validate_budget(budget)
-        secret, _ = fingerprint_secret_bytes(self._settings)
-        query_hmac = keyed_fingerprint(
-            exact_utf8_bytes(request.retrieval_query_text),
-            secret=secret,
-            schema_version='rag-query-embedding-query:v1',
-            policy_version=_MODEL_CONFIG_VERSION,
+        validate_query_embedding_budget(budget)
+        query_hmac = build_query_embedding_retrieval_query_hmac(
+            request.retrieval_query_text,
+            settings=self._settings,
         )
-        provider_policy_hmac = keyed_fingerprint(
-            {
-                'provider': 'openai',
-                'protocol_family': _PROVIDER_POLICY_VERSION,
-                'payload_validator': _PAYLOAD_VALIDATOR_VERSION,
-                'max_provider_attempts': 1,
-            },
-            secret=secret,
-            schema_version='rag-query-embedding-provider-policy:v1',
-            policy_version=_PROVIDER_POLICY_VERSION,
+        provider_policy_hmac = (
+            build_query_embedding_provider_policy_snapshot_hmac(self._settings)
         )
-        attempt_fence_hmac = keyed_fingerprint(
-            {
-                'query_hmac': query_hmac,
-                'corpus_generation': readiness.corpus_generation,
-                'vector_index_generation': readiness.vector_index_generation,
-                'readiness_snapshot_hmac': readiness.readiness_snapshot_hmac,
-                'model_config_snapshot_hmac': model_snapshot_hmac,
-                'provider_policy_snapshot_hmac': provider_policy_hmac,
-                'cost_policy_snapshot_hmac': budget.cost_policy_snapshot_hmac,
-                'estimator_input_hmac': budget.estimator_input_hmac,
-            },
-            secret=secret,
-            schema_version='rag-query-embedding-attempt-fence:v1',
-            policy_version=_MODEL_CONFIG_VERSION,
+        attempt_fence_hmac = build_query_embedding_attempt_fence_hmac(
+            retrieval_query_hmac=query_hmac,
+            corpus_generation=readiness.corpus_generation,
+            vector_index_generation=readiness.vector_index_generation,
+            readiness_snapshot_hmac=readiness.readiness_snapshot_hmac,
+            model_config_snapshot_hmac=model_snapshot_hmac,
+            provider_policy_snapshot_hmac=provider_policy_hmac,
+            budget=budget,
+            settings=self._settings,
         )
         return PreparedQueryEmbedding(
             retrieval_query_hmac=query_hmac,
@@ -257,7 +243,7 @@ class StrictQueryEmbeddingAdapter:
                 type(actual) is not Decimal
                 or not actual.is_finite()
                 or actual < Decimal('0')
-                or not _is_numeric_24_6_representable(actual)
+                or not is_numeric_24_6_representable(actual)
             ):
                 raise ValueError
             return _ParsedUsage(usage=usage, actual_cost_usd=actual)
@@ -361,56 +347,5 @@ def _is_overrun(prepared: PreparedQueryEmbedding, parsed: _ParsedUsage) -> bool:
     )
 
 
-def _validate_budget(value: PreparedPaidCallBudget) -> None:
-    if (
-        value.component != 'query_embedding'
-        or type(value.estimated_input_tokens) is not int
-        or value.estimated_input_tokens < 0
-        or type(value.maximum_output_tokens) is not int
-        or value.maximum_output_tokens != 0
-        or type(value.reserved_cost_usd) is not Decimal
-        or not value.reserved_cost_usd.is_finite()
-        or value.reserved_cost_usd < Decimal('0')
-        or not _is_numeric_24_6_representable(value.reserved_cost_usd)
-        or not _is_lower_hex_64(value.cost_policy_snapshot_hmac)
-        or not _is_lower_hex_64(value.estimator_input_hmac)
-    ):
-        raise ValueError('query embedding budget is invalid')
-
-
-def _model_config_snapshot_hmac(settings: Settings) -> str:
-    secret, _ = fingerprint_secret_bytes(settings)
-    return keyed_fingerprint(
-        {
-            'api_base_url': 'https://api.openai.com/v1',
-            'dimensions': _DIMENSIONS,
-            'encoding_format': 'float',
-            'endpoint_identity': 'openai-direct-standard-global:v1',
-            'input_count_per_query_call': 1,
-            'max_provider_attempts': 1,
-            'model': _MODEL,
-            'provider': 'openai',
-            'provider_send_start_window_seconds': 5,
-            'regional_processing': False,
-            'sdk_retry': 0,
-            'timeout_seconds': 30,
-        },
-        secret=secret,
-        schema_version='rag-query-embedding-model-config-snapshot:v1',
-        policy_version=_MODEL_CONFIG_VERSION,
-    )
-
-
 def _latency_ms(started_ns: int) -> int:
     return max(0, (perf_counter_ns() - started_ns) // 1_000_000)
-
-
-def _is_lower_hex_64(value: object) -> bool:
-    return bool(type(value) is str and re.fullmatch(r'[0-9a-f]{64}', value))
-
-
-def _is_numeric_24_6_representable(value: Decimal) -> bool:
-    normalized = value.normalize()
-    if normalized.is_zero():
-        return True
-    return normalized.as_tuple().exponent >= -6 and normalized.adjusted() <= 17

@@ -43,6 +43,22 @@ def validate_query_embedding_vector(
     )
 
 
+def validate_query_embedding_vector_carrier(
+    value: object,
+    *,
+    expected_dimensions: int = 1536,
+) -> ValidatedQueryEmbeddingVector:
+    if not isinstance(value, ValidatedQueryEmbeddingVector):
+        raise TypeError('RAG V2 search requires a validated query vector carrier')
+    canonical = validate_query_embedding_vector(
+        list(value.coordinates),
+        expected_dimensions=expected_dimensions,
+    )
+    if canonical != value:
+        raise ValueError('query embedding vector carrier is invalid')
+    return value
+
+
 @dataclass(frozen=True)
 class EmbeddingBatchResult:
     embeddings: list[list[float]]

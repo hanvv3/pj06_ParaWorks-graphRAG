@@ -20,7 +20,7 @@ from backend.app.knowledge.trusted_serving_eligibility import (
 )
 from backend.app.rag.embeddings import (
     ValidatedQueryEmbeddingVector,
-    validate_query_embedding_vector,
+    validate_query_embedding_vector_carrier,
 )
 from backend.app.rag.retrieval import RetrievalRequest
 from backend.app.rag.serving_locks import (
@@ -292,14 +292,10 @@ class PgVectorStore:
             serialized_fingerprint=request.security_scope_fingerprint,
             settings=settings,
         )
-        if not isinstance(query_embedding, ValidatedQueryEmbeddingVector):
-            raise TypeError('RAG V2 search requires a validated query vector carrier')
-        revalidated = validate_query_embedding_vector(
-            list(query_embedding.coordinates),
+        validate_query_embedding_vector_carrier(
+            query_embedding,
             expected_dimensions=self.config.embedding_dimensions,
         )
-        if revalidated != query_embedding:
-            raise ValueError('validated query vector carrier is inconsistent')
         # The declarative resource predicate is the single Task 6 authority.
         # This local import avoids making the legacy writer depend on search assembly.
         from backend.app.rag.search_store import (

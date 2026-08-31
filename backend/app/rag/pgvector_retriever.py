@@ -23,6 +23,7 @@ from backend.app.rag.retrieval import (
     RetrievalRequest,
     RetrievalResult,
     SanitizedRetrievalTrace,
+    validate_query_embedding_call_result,
 )
 
 
@@ -67,8 +68,11 @@ class PgVectorEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
             serialized_fingerprint=input.security_scope_fingerprint,
             settings=self._settings,
         )
-        embedding = _require_exact_embedding_carrier(input)
-        before_sql = self._readiness.inspect()
+        embedding = _require_exact_embedding_carrier(input, settings=self._settings)
+        try:
+            before_sql = self._readiness.inspect()
+        except Exception:
+            raise RuntimeError('pgvector pre-readiness observation failed') from None
         if not _matches_prepared_readiness(before_sql, input):
             return self._keyword_fallback(
                 input,
@@ -76,21 +80,28 @@ class PgVectorEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
                 category='serving_corpus_changed_during_pgvector_query',
                 started_ns=started_ns,
             )
+        storage_failure: PgVectorSearchRuntimeError | None = None
         try:
             candidates = self._store.search(input, embedding.vector)
-        except PgVectorSearchRuntimeError:
-            return self._keyword_fallback(
-                input,
-                config=config,
-                category='pgvector_storage_runtime_failure',
-                started_ns=started_ns,
-            )
-        after_sql = self._readiness.inspect()
+        except PgVectorSearchRuntimeError as exc:
+            storage_failure = exc
+            candidates = ()
+        try:
+            after_sql = self._readiness.inspect()
+        except Exception:
+            raise RuntimeError('pgvector post-readiness observation failed') from None
         if not _matches_prepared_readiness(after_sql, input):
             return self._keyword_fallback(
                 input,
                 config=config,
                 category='serving_corpus_changed_during_pgvector_query',
+                started_ns=started_ns,
+            )
+        if storage_failure is not None:
+            return self._keyword_fallback(
+                input,
+                config=config,
+                category='pgvector_storage_runtime_failure',
                 started_ns=started_ns,
             )
         window = _candidate_window(candidates, limit=input.candidate_scan_limit)
@@ -162,22 +173,12 @@ class PgVectorEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
         )
 
 
-def _require_exact_embedding_carrier(input: RetrievalRequest):
-    result = input.query_embedding_result
-    query_utf8 = input.retrieval_query_text.encode('utf-8', errors='strict')
-    if result is None:
-        raise ValueError('pgvector retrieval requires a validated query embedding')
-    if result.prepared.transient_query_utf8 != query_utf8:
-        raise ValueError('query bytes do not match the prepared embedding')
-    if (
-        not isinstance(result.vector, ValidatedQueryEmbeddingVector)
-        or result.attempted is not True
-        or result.receipt.attempted is not True
-        or result.actual_cost_usd != result.receipt.actual_cost_usd
-        or result.validated_input_tokens != result.receipt.input_tokens
-    ):
-        raise ValueError('query embedding carrier is invalid')
-    return result
+def _require_exact_embedding_carrier(
+    input: RetrievalRequest,
+    *,
+    settings: Settings,
+):
+    return validate_query_embedding_call_result(input, settings=settings)
 
 
 def _matches_prepared_readiness(
