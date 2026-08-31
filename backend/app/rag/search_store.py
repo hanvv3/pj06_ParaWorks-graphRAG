@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Protocol
 
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
@@ -73,7 +77,307 @@ class PgVectorSearchAdapter:
         )
 
 
-POSTGRES_KEYWORD_SEARCH_SQL = """
+@dataclass(frozen=True, slots=True)
+class PostgresKeywordApprovalLink:
+    workspace_scope_id: str
+    active: bool
+    resolution_source: str
+    child_source_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PostgresKeywordResourceCandidate:
+    serving_document_id: str
+    serving_kind: str
+    project_key: str | None
+    raw_source_id: int | None
+    score: float
+    links: tuple[PostgresKeywordApprovalLink, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PostgresKeywordResourceParameters:
+    workspace_scope_id: str
+    project_keys: tuple[str, ...] | None
+    source_ids: tuple[int, ...] | None
+
+    @classmethod
+    def from_security_scope(
+        cls,
+        scope: SecurityScope,
+    ) -> PostgresKeywordResourceParameters:
+        return cls(
+            workspace_scope_id=scope.workspace_scope_id,
+            project_keys=tuple(
+                value.removeprefix('project_key:')
+                for value in scope.project_constraints
+            ),
+            source_ids=tuple(
+                int(value.removeprefix('source_pk:'))
+                for value in scope.source_constraints
+            ),
+        )
+
+
+class _KeywordResourcePredicateNode(Protocol):
+    def render(self, *, alias: str) -> str: ...
+
+    def evaluate(
+        self,
+        candidate: PostgresKeywordResourceCandidate,
+        parameters: PostgresKeywordResourceParameters,
+    ) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _AllResourcePredicates:
+    children: tuple[_KeywordResourcePredicateNode, ...]
+
+    def render(self, *, alias: str) -> str:
+        return '(' + ' AND '.join(
+            child.render(alias=alias) for child in self.children
+        ) + ')'
+
+    def evaluate(
+        self,
+        candidate: PostgresKeywordResourceCandidate,
+        parameters: PostgresKeywordResourceParameters,
+    ) -> bool:
+        return all(child.evaluate(candidate, parameters) for child in self.children)
+
+
+@dataclass(frozen=True, slots=True)
+class _AnyResourcePredicate:
+    children: tuple[_KeywordResourcePredicateNode, ...]
+
+    def render(self, *, alias: str) -> str:
+        return '(' + ' OR '.join(
+            child.render(alias=alias) for child in self.children
+        ) + ')'
+
+    def evaluate(
+        self,
+        candidate: PostgresKeywordResourceCandidate,
+        parameters: PostgresKeywordResourceParameters,
+    ) -> bool:
+        return any(child.evaluate(candidate, parameters) for child in self.children)
+
+
+@dataclass(frozen=True, slots=True)
+class _ServingKindPredicate:
+    serving_kind: str
+
+    def render(self, *, alias: str) -> str:
+        return f"{alias}.serving_kind = '{self.serving_kind}'"
+
+    def evaluate(
+        self,
+        candidate: PostgresKeywordResourceCandidate,
+        parameters: PostgresKeywordResourceParameters,
+    ) -> bool:
+        del parameters
+        return candidate.serving_kind == self.serving_kind
+
+
+@dataclass(frozen=True, slots=True)
+class _RawScopePredicate:
+    def render(self, *, alias: str) -> str:
+        return f"""
+CAST(:project_keys AS text[]) IS NOT NULL
+AND CAST(:source_ids AS bigint[]) IS NOT NULL
+AND cardinality(CAST(:project_keys AS text[])) = 0
+AND (
+  cardinality(CAST(:source_ids AS bigint[])) = 0
+  OR EXISTS (
+    SELECT 1 FROM document_chunks AS chunk
+    WHERE chunk.id = split_part({alias}.serving_document_id, ':', 2)::bigint
+      AND chunk.source_id = ANY(CAST(:source_ids AS bigint[]))
+  )
+)
+""".strip()
+
+    def evaluate(
+        self,
+        candidate: PostgresKeywordResourceCandidate,
+        parameters: PostgresKeywordResourceParameters,
+    ) -> bool:
+        if parameters.project_keys is None or parameters.source_ids is None:
+            return False
+        return bool(
+            not parameters.project_keys
+            and (
+                not parameters.source_ids
+                or candidate.raw_source_id in parameters.source_ids
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _TrustedProjectPredicate:
+    def render(self, *, alias: str) -> str:
+        return f"""
+CAST(:project_keys AS text[]) IS NOT NULL
+AND (
+  cardinality(CAST(:project_keys AS text[])) = 0
+  OR (
+    (split_part({alias}.serving_document_id, ':', 1) = 'decision_record'
+     AND EXISTS (
+       SELECT 1 FROM decision_records AS knowledge
+       WHERE knowledge.id = split_part({alias}.serving_document_id, ':', 2)::bigint
+         AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
+     ))
+    OR (split_part({alias}.serving_document_id, ':', 1) = 'history_event'
+     AND EXISTS (
+       SELECT 1 FROM history_events AS knowledge
+       WHERE knowledge.id = split_part({alias}.serving_document_id, ':', 2)::bigint
+         AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
+     ))
+    OR (split_part({alias}.serving_document_id, ':', 1) = 'timeline_event'
+     AND EXISTS (
+       SELECT 1 FROM timeline_events AS knowledge
+       WHERE knowledge.id = split_part({alias}.serving_document_id, ':', 2)::bigint
+         AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
+     ))
+    OR (split_part({alias}.serving_document_id, ':', 1) = 'todo'
+     AND EXISTS (
+       SELECT 1 FROM todos AS knowledge
+       WHERE knowledge.id = split_part({alias}.serving_document_id, ':', 2)::bigint
+         AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
+     ))
+  )
+)
+""".strip()
+
+    def evaluate(
+        self,
+        candidate: PostgresKeywordResourceCandidate,
+        parameters: PostgresKeywordResourceParameters,
+    ) -> bool:
+        if parameters.project_keys is None:
+            return False
+        return bool(
+            not parameters.project_keys
+            or candidate.project_key in parameters.project_keys
+        )
+
+
+def _approval_target_sql(*, alias: str) -> str:
+    return f"""
+(
+  (split_part({alias}.serving_document_id, ':', 1) = 'decision_record'
+   AND approval.knowledge_type IN ('decision', 'decision_record'))
+  OR (
+    split_part({alias}.serving_document_id, ':', 1) <> 'decision_record'
+    AND approval.knowledge_type = split_part({alias}.serving_document_id, ':', 1)
+  )
+)
+AND approval.knowledge_id = split_part({alias}.serving_document_id, ':', 2)::bigint
+AND approval.active IS TRUE
+""".strip()
+
+
+@dataclass(frozen=True, slots=True)
+class _TrustedExplicitPredicate:
+    def render(self, *, alias: str) -> str:
+        target = _approval_target_sql(alias=alias)
+        return f"""
+CAST(:source_id_texts AS text[]) IS NOT NULL
+AND EXISTS (
+  SELECT 1
+  FROM trusted_knowledge_approval_links AS approval
+  WHERE {target}
+    AND approval.security_scope_id = :workspace_scope_id
+    AND approval.resolution_source IN ('human', 'auto_policy')
+    AND EXISTS (
+      SELECT 1 FROM trusted_knowledge_evidence_links AS child
+      WHERE child.approval_link_id = approval.id
+    )
+    AND (
+      cardinality(CAST(:source_id_texts AS text[])) = 0
+      OR NOT EXISTS (
+        SELECT 1 FROM trusted_knowledge_evidence_links AS child
+        WHERE child.approval_link_id = approval.id
+          AND child.canonical_source_id
+              <> ALL(CAST(:source_id_texts AS text[]))
+      )
+    )
+)
+""".strip()
+
+    def evaluate(
+        self,
+        candidate: PostgresKeywordResourceCandidate,
+        parameters: PostgresKeywordResourceParameters,
+    ) -> bool:
+        if parameters.source_ids is None:
+            return False
+        return any(
+            link.active
+            and link.workspace_scope_id == parameters.workspace_scope_id
+            and link.resolution_source in {'human', 'auto_policy'}
+            and bool(link.child_source_ids)
+            and (
+                not parameters.source_ids
+                or all(
+                    source_id in parameters.source_ids
+                    for source_id in link.child_source_ids
+                )
+            )
+            for link in candidate.links
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _TrustedLegacyPredicate:
+    def render(self, *, alias: str) -> str:
+        target = _approval_target_sql(alias=alias)
+        return f"""
+CAST(:source_id_texts AS text[]) IS NOT NULL
+AND cardinality(CAST(:source_id_texts AS text[])) = 0
+AND NOT EXISTS (
+  SELECT 1
+  FROM trusted_knowledge_approval_links AS approval
+  WHERE {target}
+)
+""".strip()
+
+    def evaluate(
+        self,
+        candidate: PostgresKeywordResourceCandidate,
+        parameters: PostgresKeywordResourceParameters,
+    ) -> bool:
+        if parameters.source_ids is None:
+            return False
+        return not parameters.source_ids and not any(
+            link.active for link in candidate.links
+        )
+
+
+POSTGRES_KEYWORD_RESOURCE_PREDICATE = _AnyResourcePredicate(
+    children=(
+        _AllResourcePredicates(
+            children=(
+                _ServingKindPredicate('raw_chunk'),
+                _RawScopePredicate(),
+            )
+        ),
+        _AllResourcePredicates(
+            children=(
+                _ServingKindPredicate('trusted_knowledge'),
+                _TrustedProjectPredicate(),
+                _AnyResourcePredicate(
+                    children=(
+                        _TrustedExplicitPredicate(),
+                        _TrustedLegacyPredicate(),
+                    )
+                ),
+            )
+        ),
+    )
+)
+
+
+_POSTGRES_KEYWORD_SEARCH_SQL_TEMPLATE = """
 WITH coarse_candidates AS (
   SELECT
     projection.serving_document_id,
@@ -100,114 +404,7 @@ WITH coarse_candidates AS (
       FROM unnest(CAST(:query_terms AS text[])) AS coarse_term(term)
       WHERE strpos(projection.searchable_lower, coarse_term.term) > 0
     )
-    AND (
-      (
-        projection.serving_kind = 'raw_chunk'
-        AND cardinality(CAST(:project_keys AS text[])) = 0
-        AND (
-          cardinality(CAST(:source_ids AS bigint[])) = 0
-          OR EXISTS (
-            SELECT 1 FROM document_chunks AS chunk
-            WHERE chunk.id = split_part(
-                    projection.serving_document_id, ':', 2
-                  )::bigint
-              AND chunk.source_id = ANY(CAST(:source_ids AS bigint[]))
-          )
-        )
-      )
-      OR (
-        projection.serving_kind = 'trusted_knowledge'
-        AND (
-          cardinality(CAST(:project_keys AS text[])) = 0
-          OR (
-            (split_part(projection.serving_document_id, ':', 1) = 'decision_record'
-             AND EXISTS (
-               SELECT 1 FROM decision_records AS knowledge
-               WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
-                 AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-             ))
-            OR (split_part(projection.serving_document_id, ':', 1) = 'history_event'
-             AND EXISTS (
-               SELECT 1 FROM history_events AS knowledge
-               WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
-                 AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-             ))
-            OR (split_part(projection.serving_document_id, ':', 1) = 'timeline_event'
-             AND EXISTS (
-               SELECT 1 FROM timeline_events AS knowledge
-               WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
-                 AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-             ))
-            OR (split_part(projection.serving_document_id, ':', 1) = 'todo'
-             AND EXISTS (
-               SELECT 1 FROM todos AS knowledge
-               WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
-                 AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-             ))
-          )
-        )
-        AND (
-          EXISTS (
-            SELECT 1
-            FROM trusted_knowledge_approval_links AS approval
-            WHERE (
-                (split_part(projection.serving_document_id, ':', 1)
-                   = 'decision_record'
-                 AND approval.knowledge_type IN ('decision', 'decision_record'))
-                OR (
-                  split_part(projection.serving_document_id, ':', 1)
-                    <> 'decision_record'
-                  AND approval.knowledge_type = split_part(
-                        projection.serving_document_id, ':', 1
-                      )
-                )
-              )
-              AND approval.knowledge_id = split_part(
-                    projection.serving_document_id, ':', 2
-                  )::bigint
-              AND approval.active IS TRUE
-              AND approval.security_scope_id = :workspace_scope_id
-              AND approval.resolution_source IN ('human', 'auto_policy')
-              AND EXISTS (
-                SELECT 1 FROM trusted_knowledge_evidence_links AS child
-                WHERE child.approval_link_id = approval.id
-              )
-              AND (
-                cardinality(CAST(:source_id_texts AS text[])) = 0
-                OR NOT EXISTS (
-                  SELECT 1 FROM trusted_knowledge_evidence_links AS child
-                  WHERE child.approval_link_id = approval.id
-                    AND child.canonical_source_id
-                        <> ALL(CAST(:source_id_texts AS text[]))
-                )
-              )
-          )
-          OR (
-            cardinality(CAST(:source_id_texts AS text[])) = 0
-            AND NOT EXISTS (
-              SELECT 1
-              FROM trusted_knowledge_approval_links AS approval
-              WHERE (
-                  (split_part(projection.serving_document_id, ':', 1)
-                     = 'decision_record'
-                   AND approval.knowledge_type IN ('decision', 'decision_record'))
-                  OR (
-                    split_part(projection.serving_document_id, ':', 1)
-                      <> 'decision_record'
-                    AND approval.knowledge_type = split_part(
-                          projection.serving_document_id, ':', 1
-                        )
-                  )
-                )
-                AND approval.knowledge_id = split_part(
-                      projection.serving_document_id, ':', 2
-                    )::bigint
-                AND approval.active IS TRUE
-            )
-          )
-        )
-      )
-    )
+    AND (__RESOURCE_PREDICATE__)
 ), scored_candidates AS (
   SELECT
     projection.*,
@@ -236,6 +433,23 @@ ORDER BY
   score DESC,
   serving_document_id
 """
+
+
+def build_postgres_keyword_search_sql(
+    predicate: _KeywordResourcePredicateNode,
+) -> str:
+    marker = '__RESOURCE_PREDICATE__'
+    if _POSTGRES_KEYWORD_SEARCH_SQL_TEMPLATE.count(marker) != 1:
+        raise RuntimeError('PostgreSQL keyword resource predicate marker is invalid')
+    return _POSTGRES_KEYWORD_SEARCH_SQL_TEMPLATE.replace(
+        marker,
+        predicate.render(alias='projection'),
+    )
+
+
+POSTGRES_KEYWORD_SEARCH_SQL = build_postgres_keyword_search_sql(
+    POSTGRES_KEYWORD_RESOURCE_PREDICATE
+)
 
 _SQLITE_ORACLE_MAX_PROJECTIONS = 10_000
 _POSTGRES_STATEMENT_TIMEOUT_MS = 5_000

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, dataclass, replace
+from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
 
 import pytest
@@ -43,9 +43,14 @@ from backend.app.rag.retrieval import (
     StrictProviderUsage,
 )
 from backend.app.rag.search_store import (
+    POSTGRES_KEYWORD_RESOURCE_PREDICATE,
     POSTGRES_KEYWORD_SEARCH_SQL,
     KeywordSearchTimeoutError,
+    PostgresKeywordApprovalLink,
+    PostgresKeywordResourceCandidate,
+    PostgresKeywordResourceParameters,
     SqlAlchemyKeywordSearchStore,
+    build_postgres_keyword_search_sql,
 )
 from backend.app.rag.serving_contracts import (
     EvidenceAccessClassification,
@@ -88,64 +93,15 @@ class _FakeStore:
         return self.candidates
 
 
-@dataclass(frozen=True, slots=True)
-class _OracleApprovalLink:
-    workspace_scope_id: str
-    active: bool
-    resolution_source: str
-    child_source_ids: tuple[int, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _OracleResourceRow:
-    serving_document_id: str
-    serving_kind: str
-    project_key: str | None
-    raw_source_id: int | None
-    score: float
-    links: tuple[_OracleApprovalLink, ...]
-
-
-def _independent_resource_coarse_eligible(
-    row: _OracleResourceRow,
+def _production_predicate_top_50(
+    rows: tuple[PostgresKeywordResourceCandidate, ...],
     scope: SecurityScope,
-) -> bool:
-    allowed_projects = {
-        value.removeprefix('project_key:') for value in scope.project_constraints
-    }
-    allowed_sources = {
-        int(value.removeprefix('source_pk:')) for value in scope.source_constraints
-    }
-    if row.serving_kind == 'raw_chunk':
-        return bool(
-            not allowed_projects
-            and (not allowed_sources or row.raw_source_id in allowed_sources)
-        )
-    if row.serving_kind != 'trusted_knowledge':
-        return False
-    if allowed_projects and row.project_key not in allowed_projects:
-        return False
-    active_links = tuple(link for link in row.links if link.active)
-    if not active_links:
-        return not allowed_sources
-    return any(
-        link.workspace_scope_id == scope.workspace_scope_id
-        and link.resolution_source in {'human', 'auto_policy'}
-        and bool(link.child_source_ids)
-        and (
-            not allowed_sources
-            or all(source_id in allowed_sources for source_id in link.child_source_ids)
-        )
-        for link in active_links
-    )
-
-
-def _independent_top_50(
-    rows: tuple[_OracleResourceRow, ...],
-    scope: SecurityScope,
-) -> tuple[_OracleResourceRow, ...]:
+) -> tuple[PostgresKeywordResourceCandidate, ...]:
+    parameters = PostgresKeywordResourceParameters.from_security_scope(scope)
     eligible = tuple(
-        row for row in rows if _independent_resource_coarse_eligible(row, scope)
+        row
+        for row in rows
+        if POSTGRES_KEYWORD_RESOURCE_PREDICATE.evaluate(row, parameters)
     )
     return tuple(
         sorted(
@@ -674,6 +630,9 @@ def test_postgresql_query_scores_before_limit_and_uses_literal_complete_superset
         '<> ALL(CAST(:source_id_texts AS text[]))'
     ) in sql
     assert ':all_scope' not in sql
+    assert sql.count('CAST(:project_keys AS text[]) IS NOT NULL') == 2
+    assert sql.count('CAST(:source_ids AS bigint[]) IS NOT NULL') == 1
+    assert sql.count('CAST(:source_id_texts AS text[]) IS NOT NULL') == 2
     assert 'approval.security_scope_id = :workspace_scope_id' in sql
     assert 'approval.active IS TRUE' in sql
     assert sql.count(
@@ -683,6 +642,12 @@ def test_postgresql_query_scores_before_limit_and_uses_literal_complete_superset
         'AND NOT EXISTS ( SELECT 1 '
         'FROM trusted_knowledge_approval_links AS approval'
     ) in sql
+    assert build_postgres_keyword_search_sql(
+        POSTGRES_KEYWORD_RESOURCE_PREDICATE
+    ) == POSTGRES_KEYWORD_SEARCH_SQL
+    assert 'TRUE OR EXISTS' not in POSTGRES_KEYWORD_RESOURCE_PREDICATE.render(
+        alias='projection'
+    )
 
 
 @pytest.mark.parametrize(
@@ -696,18 +661,18 @@ def test_postgresql_query_scores_before_limit_and_uses_literal_complete_superset
         ),
     ),
 )
-def test_independent_resource_oracle_excludes_foreign_workspace_before_top_50(
+def test_production_resource_predicate_excludes_foreign_workspace_before_top_50(
     scope: SecurityScope,
 ) -> None:
     foreign = tuple(
-        _OracleResourceRow(
+        PostgresKeywordResourceCandidate(
             serving_document_id=f'history_event:{index}',
             serving_kind='trusted_knowledge',
             project_key='project-a',
             raw_source_id=None,
             score=3.0,
             links=(
-                _OracleApprovalLink(
+                PostgresKeywordApprovalLink(
                     workspace_scope_id='workspace-foreign',
                     active=True,
                     resolution_source='human',
@@ -718,14 +683,14 @@ def test_independent_resource_oracle_excludes_foreign_workspace_before_top_50(
         for index in range(1, 61)
     )
     valid = tuple(
-        _OracleResourceRow(
+        PostgresKeywordResourceCandidate(
             serving_document_id=f'history_event:{index}',
             serving_kind='trusted_knowledge',
             project_key='project-a',
             raw_source_id=None,
             score=1.0,
             links=(
-                _OracleApprovalLink(
+                PostgresKeywordApprovalLink(
                     workspace_scope_id=scope.workspace_scope_id,
                     active=True,
                     resolution_source='auto_policy',
@@ -736,28 +701,33 @@ def test_independent_resource_oracle_excludes_foreign_workspace_before_top_50(
         for index in range(101, 152)
     )
 
-    window = _independent_top_50((*foreign, *valid), scope)
+    window = _production_predicate_top_50((*foreign, *valid), scope)
 
     assert len(window) == 50
     assert all(row.serving_document_id.startswith('history_event:1') for row in window)
     assert not any(row in foreign for row in window)
 
 
-def test_independent_resource_oracle_keeps_explicit_and_legacy_branches_disjoint() -> None:
+def test_production_resource_predicate_keeps_explicit_and_legacy_branches_disjoint() -> None:
     all_scope = _scope(allowed_permission_levels=('public',))
+    project_scope = _scope(
+        resource_scope_mode='constrained',
+        project_constraints=('project_key:project-a',),
+        allowed_permission_levels=('public',),
+    )
     source_scope = _scope(
         resource_scope_mode='constrained',
         source_constraints=('source_pk:7',),
         allowed_permission_levels=('public',),
     )
-    foreign_explicit = _OracleResourceRow(
+    foreign_explicit = PostgresKeywordResourceCandidate(
         serving_document_id='history_event:1',
         serving_kind='trusted_knowledge',
         project_key='project-a',
         raw_source_id=None,
         score=2.0,
         links=(
-            _OracleApprovalLink(
+            PostgresKeywordApprovalLink(
                 workspace_scope_id='workspace-foreign',
                 active=True,
                 resolution_source='human',
@@ -776,14 +746,68 @@ def test_independent_resource_oracle_keeps_explicit_and_legacy_branches_disjoint
     )
     legacy = replace(foreign_explicit, serving_document_id='history_event:2', links=())
 
-    assert not _independent_resource_coarse_eligible(foreign_explicit, all_scope)
-    assert _independent_resource_coarse_eligible(current_explicit, all_scope)
-    assert _independent_resource_coarse_eligible(legacy, all_scope)
-    assert not _independent_resource_coarse_eligible(legacy, source_scope)
-    assert not _independent_resource_coarse_eligible(
-        replace(current_explicit, links=(replace(current_explicit.links[0], child_source_ids=(8,)),)),
-        source_scope,
+    all_parameters = PostgresKeywordResourceParameters.from_security_scope(all_scope)
+    project_parameters = PostgresKeywordResourceParameters.from_security_scope(
+        project_scope
     )
+    source_parameters = PostgresKeywordResourceParameters.from_security_scope(
+        source_scope
+    )
+    predicate = POSTGRES_KEYWORD_RESOURCE_PREDICATE
+    assert not predicate.evaluate(foreign_explicit, all_parameters)
+    assert predicate.evaluate(current_explicit, all_parameters)
+    assert predicate.evaluate(current_explicit, project_parameters)
+    assert not predicate.evaluate(
+        replace(current_explicit, project_key='project-foreign'),
+        project_parameters,
+    )
+    assert predicate.evaluate(legacy, all_parameters)
+    assert not predicate.evaluate(legacy, source_parameters)
+    assert not predicate.evaluate(
+        replace(
+            current_explicit,
+            links=(
+                replace(current_explicit.links[0], child_source_ids=(8,)),
+            ),
+        ),
+        source_parameters,
+    )
+
+
+def test_production_resource_predicate_handles_null_empty_and_raw_without_bypass() -> None:
+    predicate = POSTGRES_KEYWORD_RESOURCE_PREDICATE
+    empty = PostgresKeywordResourceParameters(
+        workspace_scope_id='workspace-1',
+        project_keys=(),
+        source_ids=(),
+    )
+    null_projects = replace(empty, project_keys=None)
+    null_sources = replace(empty, source_ids=None)
+    raw = PostgresKeywordResourceCandidate(
+        serving_document_id='chunk:1',
+        serving_kind='raw_chunk',
+        project_key=None,
+        raw_source_id=7,
+        score=1.0,
+        links=(),
+    )
+    legacy = PostgresKeywordResourceCandidate(
+        serving_document_id='history_event:1',
+        serving_kind='trusted_knowledge',
+        project_key='project-a',
+        raw_source_id=None,
+        score=1.0,
+        links=(),
+    )
+
+    assert predicate.evaluate(raw, empty)
+    assert predicate.evaluate(legacy, empty)
+    assert predicate.evaluate(raw, replace(empty, source_ids=(7,)))
+    assert not predicate.evaluate(raw, replace(empty, source_ids=(8,)))
+    assert not predicate.evaluate(raw, null_projects)
+    assert not predicate.evaluate(raw, null_sources)
+    assert not predicate.evaluate(legacy, null_projects)
+    assert not predicate.evaluate(legacy, null_sources)
 
 
 def test_sqlite_oracle_uses_canonical_projection_and_permission_second_stage(
