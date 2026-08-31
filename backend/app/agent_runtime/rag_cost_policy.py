@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Callable
 from decimal import ROUND_CEILING, Decimal, localcontext
 from threading import RLock
 from typing import Final, NamedTuple
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, WeakSet
 
 import tiktoken
 import tiktoken._tiktoken as _tiktoken
@@ -77,68 +78,6 @@ _MAX_TOKENIZER_SPECIAL_TOKENS: Final = 256
 _MAX_TOKENIZER_SPECIAL_TEXT_BYTES: Final = 4_096
 
 
-class _RagCostAuthority(NamedTuple):
-    component_ceiling_usd: Decimal
-    query_input_usd_per_1m: Decimal
-    query_cost_policy_version: str
-    query_estimator_version: str
-    query_tokenizer_encoding: str
-    query_count_rule: str
-    max_query_tokens: int
-    answer_input_usd_per_1m: Decimal
-    answer_output_usd_per_1m: Decimal
-    answer_cost_policy_version: str
-    answer_estimator_version: str
-    answer_tokenizer_encoding: str
-    answer_count_rule: str
-    max_answer_serialized_chars: int
-    max_answer_input_tokens: int
-    max_answer_output_tokens: int
-    answer_reply_priming_tokens: int
-    answer_framing_safety_tokens: int
-    rounding_identity: str
-    cost_divisor: Decimal
-    rounding_quantum: Decimal
-    rounding_mode: str
-    answer_model_config_identity: str
-    query_tokenizer_fingerprint: str
-    answer_tokenizer_fingerprint: str
-
-    def __copy__(self) -> None:
-        raise TypeError('RAG cost authority is non-transferable')
-
-    def __deepcopy__(self, memo: object) -> None:
-        raise TypeError('RAG cost authority is non-transferable')
-
-    def __reduce_ex__(self, protocol: int) -> None:
-        raise TypeError('RAG cost authority is non-transferable')
-
-
-class _PrivateTokenizer(NamedTuple):
-    encoding: tiktoken.Encoding
-    core: _tiktoken.CoreBPE
-    definition_fingerprint: str
-
-
-class _PolicyState(NamedTuple):
-    authority: _RagCostAuthority
-    secret: bytes
-    key_version: str
-    key_material_verifier: str
-    answer_schema_hmac: str
-    answer_prompt_renderer_hmac: str
-    query_config_hmac: str
-    answer_config_hmac: str
-    query_policy_hmac: str
-    answer_policy_hmac: str
-    query_tokenizer: _PrivateTokenizer
-    answer_tokenizer: _PrivateTokenizer
-
-
-_POLICY_STATES: WeakKeyDictionary[object, _PolicyState] = WeakKeyDictionary()
-_POLICY_STATES_LOCK = RLock()
-
-
 class RagCostPolicyError(ValueError):
     code: str
 
@@ -183,318 +122,493 @@ def _answer_output_schema_hmac(
     )
 
 
-class RagCostPolicy:
-    __slots__ = ('__weakref__',)
+def _create_rag_cost_policy_type(
+    *,
+    test_hook: Callable[[str, object, Callable[[str], None]], None] | None = None,
+) -> type:
+    class Authority(NamedTuple):
+        component_ceiling_usd: Decimal
+        query_input_usd_per_1m: Decimal
+        query_cost_policy_version: str
+        query_estimator_version: str
+        query_tokenizer_encoding: str
+        query_count_rule: str
+        max_query_tokens: int
+        answer_input_usd_per_1m: Decimal
+        answer_output_usd_per_1m: Decimal
+        answer_cost_policy_version: str
+        answer_estimator_version: str
+        answer_tokenizer_encoding: str
+        answer_count_rule: str
+        max_answer_serialized_chars: int
+        max_answer_input_tokens: int
+        max_answer_output_tokens: int
+        answer_reply_priming_tokens: int
+        answer_framing_safety_tokens: int
+        rounding_identity: str
+        cost_divisor: Decimal
+        rounding_quantum: Decimal
+        rounding_mode: str
+        answer_model_config_identity: str
+        query_tokenizer_fingerprint: str
+        answer_tokenizer_fingerprint: str
 
-    def __init_subclass__(cls, **kwargs: object) -> None:
-        raise TypeError('RAG cost policy subclassing is forbidden')
+    class PrivateTokenizer(NamedTuple):
+        encoding: tiktoken.Encoding
+        core: _tiktoken.CoreBPE
+        definition_fingerprint: str
 
-    def __init__(
-        self,
-        *,
-        settings: Settings,
-        answer_output_schema_hmac: str,
-        answer_prompt_renderer_hmac: str,
+    class State:
+        __slots__ = (
+            'answer_config_hmac',
+            'answer_estimator_signer',
+            'answer_policy_hmac',
+            'answer_tokenizer',
+            'authority',
+            'query_config_hmac',
+            'query_estimator_signer',
+            'query_policy_hmac',
+            'query_tokenizer',
+            'schema_verifier',
+        )
+
+        def __init__(self, **values: object) -> None:
+            for name, value in values.items():
+                object.__setattr__(self, name, value)
+
+        def __setattr__(self, name: str, value: object) -> None:
+            raise AttributeError('RAG cost policy state is immutable')
+
+        def __repr__(self) -> str:
+            return '<RagCostPolicyState redacted>'
+
+        def __copy__(self) -> None:
+            raise TypeError('RAG cost policy state is non-transferable')
+
+        def __deepcopy__(self, memo: object) -> None:
+            raise TypeError('RAG cost policy state is non-transferable')
+
+        def __reduce_ex__(self, protocol: int) -> None:
+            raise TypeError('RAG cost policy state is non-transferable')
+
+    states: WeakKeyDictionary[object, object] = WeakKeyDictionary()
+    issued: WeakSet[object] = WeakSet()
+    state_lock = RLock()
+
+    def get_state(policy: object, unavailable_code: str) -> State:
+        if type(policy) is not Policy:
+            raise RagPolicyUnavailableError(unavailable_code)
+        with state_lock:
+            state = states.get(policy)
+        if type(state) is not State:
+            raise RagPolicyUnavailableError(unavailable_code)
+        return state
+
+    def require_same_state(
+        policy: object,
+        state: State,
+        unavailable_code: str,
     ) -> None:
-        if type(self) is not RagCostPolicy or type(settings) is not Settings:
-            raise ValueError('RAG cost policy settings are invalid')
-        if not is_lower_hex_64(answer_output_schema_hmac) or not is_lower_hex_64(
-            answer_prompt_renderer_hmac
-        ):
-            raise ValueError('RAG answer policy identities are invalid')
-        authority = _build_cost_authority()
-        query_tokenizer = _clone_approved_tokenizer(
-            authority.query_tokenizer_encoding,
-            expected_fingerprint=authority.query_tokenizer_fingerprint,
-        )
-        answer_tokenizer = _clone_approved_tokenizer(
-            authority.answer_tokenizer_encoding,
-            expected_fingerprint=authority.answer_tokenizer_fingerprint,
-        )
-        secret, key_version = fingerprint_secret_bytes(settings)
-        key_material_verifier = fingerprint_key_material_verifier(
-            settings.agent_runtime_fingerprint_secret
-        )
-        query_config_hmac = build_query_embedding_model_config_snapshot_hmac(
-            settings
-        )
-        answer_config_hmac = build_rag_answer_model_config_snapshot_hmac(
-            settings,
-            output_schema_hmac=answer_output_schema_hmac,
-            prompt_renderer_hmac=answer_prompt_renderer_hmac,
-        )
-        query_policy_hmac = _build_query_policy_hmac(
-            authority=authority,
-            secret=secret,
-            key_version=key_version,
-            key_material_verifier=key_material_verifier,
-            query_config_hmac=query_config_hmac,
-        )
-        answer_policy_hmac = _build_answer_policy_hmac(
-            authority=authority,
-            secret=secret,
-            key_version=key_version,
-            key_material_verifier=key_material_verifier,
-            answer_config_hmac=answer_config_hmac,
-            answer_output_schema_hmac=answer_output_schema_hmac,
-            answer_prompt_renderer_hmac=answer_prompt_renderer_hmac,
-        )
-        state = _PolicyState(
-            authority=authority,
-            secret=secret,
-            key_version=key_version,
-            key_material_verifier=key_material_verifier,
-            answer_schema_hmac=answer_output_schema_hmac,
-            answer_prompt_renderer_hmac=answer_prompt_renderer_hmac,
-            query_config_hmac=query_config_hmac,
-            answer_config_hmac=answer_config_hmac,
-            query_policy_hmac=query_policy_hmac,
-            answer_policy_hmac=answer_policy_hmac,
-            query_tokenizer=query_tokenizer,
-            answer_tokenizer=answer_tokenizer,
-        )
-        with _POLICY_STATES_LOCK:
-            if self in _POLICY_STATES:
-                raise ValueError('RAG cost policy is already initialized')
-            _POLICY_STATES[self] = state
+        with state_lock:
+            unchanged = states.get(policy) is state
+        if not unchanged:
+            raise RagPolicyUnavailableError(unavailable_code)
 
-    def __copy__(self) -> None:
-        raise TypeError('RAG cost policy is non-transferable')
+    def invoke_hook(point: str, policy: object) -> None:
+        if test_hook is None:
+            return
 
-    def __deepcopy__(self, memo: object) -> None:
-        raise TypeError('RAG cost policy is non-transferable')
+        def invalidate(mode: str) -> None:
+            with state_lock:
+                if mode == 'remove':
+                    states.pop(policy, None)
+                elif mode == 'replace':
+                    states[policy] = object()
+                else:
+                    raise ValueError('test invalidation mode is invalid')
 
-    def __reduce_ex__(self, protocol: int) -> None:
-        raise TypeError('RAG cost policy is non-transferable')
+        test_hook(point, policy, invalidate)
 
-    @property
-    def query_embedding_model_config_snapshot_hmac(self) -> str:
-        return _policy_state(
+    class Policy:
+        __slots__ = ('__weakref__',)
+
+        def __init_subclass__(cls, **kwargs: object) -> None:
+            raise TypeError('RAG cost policy subclassing is forbidden')
+
+        def __init__(
             self,
-            'retriever_not_configured',
-        ).query_config_hmac
+            *,
+            settings: Settings,
+            answer_output_schema_hmac: str,
+            answer_prompt_renderer_hmac: str,
+        ) -> None:
+            if type(self) is not Policy or type(settings) is not Settings:
+                raise ValueError('RAG cost policy settings are invalid')
+            with state_lock:
+                if self in issued:
+                    raise ValueError('RAG cost policy is already initialized')
+            if not is_lower_hex_64(
+                answer_output_schema_hmac
+            ) or not is_lower_hex_64(answer_prompt_renderer_hmac):
+                raise ValueError('RAG answer policy identities are invalid')
+            authority = Authority(*_validated_cost_authority_values())
+            query_tokenizer = PrivateTokenizer(*_clone_approved_tokenizer(
+                authority.query_tokenizer_encoding,
+                expected_fingerprint=authority.query_tokenizer_fingerprint,
+            ))
+            answer_tokenizer = PrivateTokenizer(*_clone_approved_tokenizer(
+                authority.answer_tokenizer_encoding,
+                expected_fingerprint=authority.answer_tokenizer_fingerprint,
+            ))
+            secret, key_version = fingerprint_secret_bytes(settings)
+            key_material_verifier = fingerprint_key_material_verifier(
+                settings.agent_runtime_fingerprint_secret
+            )
+            query_config_hmac = (
+                build_query_embedding_model_config_snapshot_hmac(settings)
+            )
+            answer_config_hmac = build_rag_answer_model_config_snapshot_hmac(
+                settings,
+                output_schema_hmac=answer_output_schema_hmac,
+                prompt_renderer_hmac=answer_prompt_renderer_hmac,
+            )
+            query_policy_hmac = _build_query_policy_hmac(
+                authority=authority,
+                secret=secret,
+                key_version=key_version,
+                key_material_verifier=key_material_verifier,
+                query_config_hmac=query_config_hmac,
+            )
+            answer_policy_hmac = _build_answer_policy_hmac(
+                authority=authority,
+                secret=secret,
+                key_version=key_version,
+                key_material_verifier=key_material_verifier,
+                answer_config_hmac=answer_config_hmac,
+                answer_output_schema_hmac=answer_output_schema_hmac,
+                answer_prompt_renderer_hmac=answer_prompt_renderer_hmac,
+            )
 
-    @property
-    def answer_model_config_snapshot_hmac(self) -> str:
-        return _policy_state(self, 'model_unavailable').answer_config_hmac
+            def schema_verifier(
+                exact_schema_json: bytes,
+                after_hmac: Callable[[], None],
+            ) -> bool:
+                observed = _answer_output_schema_hmac(
+                    secret,
+                    exact_schema_json,
+                )
+                after_hmac()
+                return hmac.compare_digest(
+                    observed,
+                    answer_output_schema_hmac,
+                )
 
-    def authorized_policy_snapshot_hmac(
-        self,
-        component: RagPaidComponent,
-    ) -> str:
-        selected = _exact_component(component)
-        state = _policy_state(
+            def query_estimator_signer(payload: object) -> str:
+                return keyed_fingerprint(
+                    payload,
+                    secret=secret,
+                    schema_version=(
+                        'rag-query-embedding-estimator-input-bytes:v1'
+                    ),
+                    policy_version=authority.query_estimator_version,
+                )
+
+            def answer_estimator_signer(payload: object) -> str:
+                return keyed_fingerprint(
+                    payload,
+                    secret=secret,
+                    schema_version='rag-generation-estimator-input-bytes:v1',
+                    policy_version=authority.answer_estimator_version,
+                )
+
+            state = State(
+                authority=authority,
+                schema_verifier=schema_verifier,
+                query_estimator_signer=query_estimator_signer,
+                answer_estimator_signer=answer_estimator_signer,
+                query_config_hmac=query_config_hmac,
+                answer_config_hmac=answer_config_hmac,
+                query_policy_hmac=query_policy_hmac,
+                answer_policy_hmac=answer_policy_hmac,
+                query_tokenizer=query_tokenizer,
+                answer_tokenizer=answer_tokenizer,
+            )
+            with state_lock:
+                if self in issued:
+                    raise ValueError('RAG cost policy is already initialized')
+                states[self] = state
+                issued.add(self)
+
+        def __copy__(self) -> None:
+            raise TypeError('RAG cost policy is non-transferable')
+
+        def __deepcopy__(self, memo: object) -> None:
+            raise TypeError('RAG cost policy is non-transferable')
+
+        def __reduce_ex__(self, protocol: int) -> None:
+            raise TypeError('RAG cost policy is non-transferable')
+
+        @property
+        def query_embedding_model_config_snapshot_hmac(self) -> str:
+            code = 'retriever_not_configured'
+            state = get_state(self, code)
+            value = state.query_config_hmac
+            invoke_hook('query_property_before_return', self)
+            require_same_state(self, state, code)
+            return value
+
+        @property
+        def answer_model_config_snapshot_hmac(self) -> str:
+            code = 'model_unavailable'
+            state = get_state(self, code)
+            value = state.answer_config_hmac
+            invoke_hook('answer_property_before_return', self)
+            require_same_state(self, state, code)
+            return value
+
+        def authorized_policy_snapshot_hmac(
             self,
-            'retriever_not_configured'
-            if selected == 'query_embedding'
-            else 'model_unavailable',
-        )
-        if selected == 'query_embedding':
-            return state.query_policy_hmac
-        return state.answer_policy_hmac
-
-    def require_authorized_policy_snapshot(
-        self,
-        component: RagPaidComponent,
-        observed_hmac: str,
-    ) -> None:
-        selected = _exact_component(component)
-        if not is_lower_hex_64(observed_hmac) or not hmac.compare_digest(
-            observed_hmac,
-            self.authorized_policy_snapshot_hmac(selected),
-        ):
+            component: RagPaidComponent,
+        ) -> str:
+            selected = _exact_component(component)
             code = (
                 'retriever_not_configured'
                 if selected == 'query_embedding'
                 else 'model_unavailable'
             )
-            raise RagPolicyUnavailableError(code)
+            state = get_state(self, code)
+            value = (
+                state.query_policy_hmac
+                if selected == 'query_embedding'
+                else state.answer_policy_hmac
+            )
+            invoke_hook(f'{selected}_policy_before_return', self)
+            require_same_state(self, state, code)
+            return value
 
-    def prepare_query_embedding(
-        self,
-        value: QueryEmbeddingCostInput,
-    ) -> PreparedPaidCallBudget:
-        state = _policy_state(self, 'retriever_not_configured')
-        if (
-            type(value) is not QueryEmbeddingCostInput
-            or type(value.retrieval_query_utf8) is not bytes
-            or not is_lower_hex_64(value.model_config_snapshot_hmac)
-        ):
-            raise ValueError('query embedding cost input is invalid')
-        if not hmac.compare_digest(
-            value.model_config_snapshot_hmac,
-            state.query_config_hmac,
-        ):
-            raise RagPolicyUnavailableError('retriever_not_configured')
-        try:
-            text = value.retrieval_query_utf8.decode('utf-8', errors='strict')
-        except UnicodeDecodeError:
-            raise ValueError('query embedding input must be strict UTF-8') from None
-        authority = state.authority
-        encoded_tokens = _count_private_tokens(
-            state.query_tokenizer,
-            text,
-            unavailable_code='retriever_not_configured',
-        )
-        if encoded_tokens > authority.max_query_tokens:
-            raise RagBudgetExceededError
-        reserved = _rounded_cost(
-            input_tokens=encoded_tokens,
-            output_tokens=0,
-            input_price=authority.query_input_usd_per_1m,
-            output_price=Decimal('0.000000'),
-            authority=authority,
-        )
-        _require_component_ceiling(
-            reserved,
-            ceiling=authority.component_ceiling_usd,
-        )
-        estimator_input_hmac = keyed_fingerprint(
-            exact_utf8_bytes(text),
-            secret=state.secret,
-            schema_version='rag-query-embedding-estimator-input-bytes:v1',
-            policy_version=authority.query_estimator_version,
-        )
-        return PreparedPaidCallBudget(
-            component='query_embedding',
-            estimated_input_tokens=encoded_tokens,
-            maximum_output_tokens=0,
-            reserved_cost_usd=reserved,
-            cost_policy_snapshot_hmac=state.query_policy_hmac,
-            estimator_input_hmac=estimator_input_hmac,
-        )
-
-    def prepare_answer_generation(
-        self,
-        value: AnswerGenerationCostInput,
-    ) -> PreparedPaidCallBudget:
-        state = _policy_state(self, 'model_unavailable')
-        if (
-            type(value) is not AnswerGenerationCostInput
-            or type(value.exact_messages_json) is not bytes
-            or type(value.exact_response_schema_json) is not bytes
-            or not is_lower_hex_64(value.model_config_snapshot_hmac)
-        ):
-            raise ValueError('answer generation cost input is invalid')
-        if not hmac.compare_digest(
-            value.model_config_snapshot_hmac,
-            state.answer_config_hmac,
-        ):
-            raise RagPolicyUnavailableError('model_unavailable')
-
-        messages = _decode_exact_json(value.exact_messages_json, 'messages')
-        schema = _decode_exact_json(value.exact_response_schema_json, 'schema')
-        _validate_exact_messages(messages)
-        if type(schema) is not dict:
-            raise ValueError('answer response schema must be an object')
-        observed_schema_hmac = _answer_output_schema_hmac(
-            state.secret,
-            value.exact_response_schema_json,
-        )
-        if not hmac.compare_digest(
-            observed_schema_hmac,
-            state.answer_schema_hmac,
-        ):
-            raise RagPolicyUnavailableError('model_unavailable')
-
-        estimator_bytes = _canonical_json_bytes({
-            'messages': messages,
-            'model_config_identity': state.authority.answer_model_config_identity,
-            'output_schema': schema,
-            'output_schema_identity': 'rag-answer-blocks:v1',
-        })
-        estimator_text = estimator_bytes.decode('utf-8')
-        authority = state.authority
-        if len(estimator_text) > authority.max_answer_serialized_chars:
-            raise RagBudgetExceededError
-        encoded_tokens = _count_private_tokens(
-            state.answer_tokenizer,
-            estimator_text,
-            unavailable_code='model_unavailable',
-        )
-        framed_tokens = (
-            encoded_tokens
-            + authority.answer_reply_priming_tokens
-            + authority.answer_framing_safety_tokens
-        )
-        if framed_tokens > authority.max_answer_input_tokens:
-            raise RagBudgetExceededError
-        reserved = _rounded_cost(
-            input_tokens=framed_tokens,
-            output_tokens=authority.max_answer_output_tokens,
-            input_price=authority.answer_input_usd_per_1m,
-            output_price=authority.answer_output_usd_per_1m,
-            authority=authority,
-        )
-        _require_component_ceiling(
-            reserved,
-            ceiling=authority.component_ceiling_usd,
-        )
-        estimator_hmac = keyed_fingerprint(
-            exact_utf8_bytes(estimator_text),
-            secret=state.secret,
-            schema_version='rag-generation-estimator-input-bytes:v1',
-            policy_version=authority.answer_estimator_version,
-        )
-        return PreparedPaidCallBudget(
-            component='answer_generation',
-            estimated_input_tokens=framed_tokens,
-            maximum_output_tokens=authority.max_answer_output_tokens,
-            reserved_cost_usd=reserved,
-            cost_policy_snapshot_hmac=state.answer_policy_hmac,
-            estimator_input_hmac=estimator_hmac,
-        )
-
-    def charge_actual(
-        self,
-        component: RagPaidComponent,
-        usage: StrictProviderUsage,
-    ) -> Decimal:
-        selected = _exact_component(component)
-        state = _policy_state(
+        def require_authorized_policy_snapshot(
             self,
-            'retriever_not_configured'
-            if selected == 'query_embedding'
-            else 'model_unavailable',
-        )
-        strict_usage = validate_strict_provider_usage(usage)
-        authority = state.authority
-        if selected == 'query_embedding':
-            if strict_usage.output_tokens != 0:
-                raise ValueError('query embedding output usage must be zero')
-            return _rounded_cost(
-                input_tokens=strict_usage.input_tokens,
+            component: RagPaidComponent,
+            observed_hmac: str,
+        ) -> None:
+            selected = _exact_component(component)
+            code = (
+                'retriever_not_configured'
+                if selected == 'query_embedding'
+                else 'model_unavailable'
+            )
+            state = get_state(self, code)
+            expected = (
+                state.query_policy_hmac
+                if selected == 'query_embedding'
+                else state.answer_policy_hmac
+            )
+            if not is_lower_hex_64(observed_hmac) or not hmac.compare_digest(
+                observed_hmac,
+                expected,
+            ):
+                raise RagPolicyUnavailableError(code)
+            require_same_state(self, state, code)
+
+        def prepare_query_embedding(
+            self,
+            value: QueryEmbeddingCostInput,
+        ) -> PreparedPaidCallBudget:
+            code = 'retriever_not_configured'
+            state = get_state(self, code)
+            if (
+                type(value) is not QueryEmbeddingCostInput
+                or type(value.retrieval_query_utf8) is not bytes
+                or not is_lower_hex_64(value.model_config_snapshot_hmac)
+            ):
+                raise ValueError('query embedding cost input is invalid')
+            if not hmac.compare_digest(
+                value.model_config_snapshot_hmac,
+                state.query_config_hmac,
+            ):
+                raise RagPolicyUnavailableError(code)
+            try:
+                text = value.retrieval_query_utf8.decode(
+                    'utf-8',
+                    errors='strict',
+                )
+            except UnicodeDecodeError:
+                raise ValueError(
+                    'query embedding input must be strict UTF-8'
+                ) from None
+            authority = state.authority
+            encoded_tokens = _count_private_tokens(
+                state.query_tokenizer.encoding,
+                state.query_tokenizer.core,
+                state.query_tokenizer.definition_fingerprint,
+                text,
+                unavailable_code=code,
+                after_encode=lambda: invoke_hook(
+                    'query_encode_after_call',
+                    self,
+                ),
+            )
+            if encoded_tokens > authority.max_query_tokens:
+                raise RagBudgetExceededError
+            reserved = _rounded_cost(
+                input_tokens=encoded_tokens,
                 output_tokens=0,
                 input_price=authority.query_input_usd_per_1m,
                 output_price=Decimal('0.000000'),
                 authority=authority,
             )
-        return _rounded_cost(
-            input_tokens=strict_usage.input_tokens,
-            output_tokens=strict_usage.output_tokens,
-            input_price=authority.answer_input_usd_per_1m,
-            output_price=authority.answer_output_usd_per_1m,
-            authority=authority,
-        )
+            _require_component_ceiling(
+                reserved,
+                ceiling=authority.component_ceiling_usd,
+            )
+            result = PreparedPaidCallBudget(
+                component='query_embedding',
+                estimated_input_tokens=encoded_tokens,
+                maximum_output_tokens=0,
+                reserved_cost_usd=reserved,
+                cost_policy_snapshot_hmac=state.query_policy_hmac,
+                estimator_input_hmac=state.query_estimator_signer(
+                    exact_utf8_bytes(text)
+                ),
+            )
+            require_same_state(self, state, code)
+            return result
+
+        def prepare_answer_generation(
+            self,
+            value: AnswerGenerationCostInput,
+        ) -> PreparedPaidCallBudget:
+            code = 'model_unavailable'
+            state = get_state(self, code)
+            if (
+                type(value) is not AnswerGenerationCostInput
+                or type(value.exact_messages_json) is not bytes
+                or type(value.exact_response_schema_json) is not bytes
+                or not is_lower_hex_64(value.model_config_snapshot_hmac)
+            ):
+                raise ValueError('answer generation cost input is invalid')
+            if not hmac.compare_digest(
+                value.model_config_snapshot_hmac,
+                state.answer_config_hmac,
+            ):
+                raise RagPolicyUnavailableError(code)
+            messages = _decode_exact_json(
+                value.exact_messages_json,
+                'messages',
+            )
+            schema = _decode_exact_json(
+                value.exact_response_schema_json,
+                'schema',
+            )
+            _validate_exact_messages(messages)
+            if type(schema) is not dict:
+                raise ValueError('answer response schema must be an object')
+            if not state.schema_verifier(
+                value.exact_response_schema_json,
+                lambda: invoke_hook('answer_schema_after_hmac', self),
+            ):
+                raise RagPolicyUnavailableError(code)
+            require_same_state(self, state, code)
+            authority = state.authority
+            estimator_text = _canonical_json_bytes({
+                'messages': messages,
+                'model_config_identity': authority.answer_model_config_identity,
+                'output_schema': schema,
+                'output_schema_identity': 'rag-answer-blocks:v1',
+            }).decode('utf-8')
+            if len(estimator_text) > authority.max_answer_serialized_chars:
+                raise RagBudgetExceededError
+            encoded_tokens = _count_private_tokens(
+                state.answer_tokenizer.encoding,
+                state.answer_tokenizer.core,
+                state.answer_tokenizer.definition_fingerprint,
+                estimator_text,
+                unavailable_code=code,
+                after_encode=lambda: invoke_hook(
+                    'answer_encode_after_call',
+                    self,
+                ),
+            )
+            framed_tokens = (
+                encoded_tokens
+                + authority.answer_reply_priming_tokens
+                + authority.answer_framing_safety_tokens
+            )
+            if framed_tokens > authority.max_answer_input_tokens:
+                raise RagBudgetExceededError
+            reserved = _rounded_cost(
+                input_tokens=framed_tokens,
+                output_tokens=authority.max_answer_output_tokens,
+                input_price=authority.answer_input_usd_per_1m,
+                output_price=authority.answer_output_usd_per_1m,
+                authority=authority,
+            )
+            _require_component_ceiling(
+                reserved,
+                ceiling=authority.component_ceiling_usd,
+            )
+            result = PreparedPaidCallBudget(
+                component='answer_generation',
+                estimated_input_tokens=framed_tokens,
+                maximum_output_tokens=authority.max_answer_output_tokens,
+                reserved_cost_usd=reserved,
+                cost_policy_snapshot_hmac=state.answer_policy_hmac,
+                estimator_input_hmac=state.answer_estimator_signer(
+                    exact_utf8_bytes(estimator_text)
+                ),
+            )
+            require_same_state(self, state, code)
+            return result
+
+        def charge_actual(
+            self,
+            component: RagPaidComponent,
+            usage: StrictProviderUsage,
+        ) -> Decimal:
+            selected = _exact_component(component)
+            code = (
+                'retriever_not_configured'
+                if selected == 'query_embedding'
+                else 'model_unavailable'
+            )
+            state = get_state(self, code)
+            strict_usage = validate_strict_provider_usage(usage)
+            authority = state.authority
+            if selected == 'query_embedding':
+                if strict_usage.output_tokens != 0:
+                    raise ValueError('query embedding output usage must be zero')
+                result = _rounded_cost(
+                    input_tokens=strict_usage.input_tokens,
+                    output_tokens=0,
+                    input_price=authority.query_input_usd_per_1m,
+                    output_price=Decimal('0.000000'),
+                    authority=authority,
+                )
+            else:
+                result = _rounded_cost(
+                    input_tokens=strict_usage.input_tokens,
+                    output_tokens=strict_usage.output_tokens,
+                    input_price=authority.answer_input_usd_per_1m,
+                    output_price=authority.answer_output_usd_per_1m,
+                    authority=authority,
+                )
+            invoke_hook('charge_before_return', self)
+            require_same_state(self, state, code)
+            return result
+
+    Policy.__name__ = 'RagCostPolicy'
+    Policy.__qualname__ = 'RagCostPolicy'
+    Policy.__module__ = __name__
+    return Policy
 
 
-def _policy_state(
-    policy: object,
-    unavailable_code: str,
-) -> _PolicyState:
-    if type(policy) is not RagCostPolicy:
-        raise RagPolicyUnavailableError(unavailable_code)
-    with _POLICY_STATES_LOCK:
-        state = _POLICY_STATES.get(policy)
-    if type(state) is not _PolicyState:
-        raise RagPolicyUnavailableError(unavailable_code)
-    return state
+RagCostPolicy = _create_rag_cost_policy_type()
 
 
 
 def _build_query_policy_hmac(
     *,
-    authority: _RagCostAuthority,
+    authority: object,
     secret: bytes,
     key_version: str,
     key_material_verifier: str,
@@ -537,7 +651,7 @@ def _build_query_policy_hmac(
 
 def _build_answer_policy_hmac(
     *,
-    authority: _RagCostAuthority,
+    authority: object,
     secret: bytes,
     key_version: str,
     key_material_verifier: str,
@@ -665,7 +779,7 @@ def _rounded_cost(
     output_tokens: int,
     input_price: Decimal,
     output_price: Decimal,
-    authority: _RagCostAuthority,
+    authority: object,
 ) -> Decimal:
     with localcontext() as context:
         context.prec = 64
@@ -684,7 +798,7 @@ def _require_component_ceiling(value: Decimal, *, ceiling: Decimal) -> None:
         raise RagBudgetExceededError
 
 
-def _build_cost_authority() -> _RagCostAuthority:
+def _validated_cost_authority_values() -> tuple[object, ...]:
     prices = (
         RAG_COMPONENT_CEILING_USD,
         QUERY_EMBEDDING_INPUT_USD_PER_1M,
@@ -727,32 +841,32 @@ def _build_cost_authority() -> _RagCostAuthority:
     ):
         raise ValueError('RAG cost rounding registry is invalid')
 
-    return _RagCostAuthority(
-        component_ceiling_usd=RAG_COMPONENT_CEILING_USD,
-        query_input_usd_per_1m=QUERY_EMBEDDING_INPUT_USD_PER_1M,
-        query_cost_policy_version=QUERY_EMBEDDING_COST_POLICY_VERSION,
-        query_estimator_version=QUERY_EMBEDDING_ESTIMATOR_VERSION,
-        query_tokenizer_encoding=QUERY_EMBEDDING_TOKENIZER_ENCODING,
-        query_count_rule=QUERY_EMBEDDING_COUNT_RULE,
-        max_query_tokens=MAX_QUERY_EMBEDDING_TOKENS,
-        answer_input_usd_per_1m=ANSWER_INPUT_USD_PER_1M,
-        answer_output_usd_per_1m=ANSWER_OUTPUT_USD_PER_1M,
-        answer_cost_policy_version=ANSWER_COST_POLICY_VERSION,
-        answer_estimator_version=ANSWER_ESTIMATOR_VERSION,
-        answer_tokenizer_encoding=ANSWER_TOKENIZER_ENCODING,
-        answer_count_rule=ANSWER_COUNT_RULE,
-        max_answer_serialized_chars=MAX_ANSWER_SERIALIZED_CHARS,
-        max_answer_input_tokens=MAX_ANSWER_INPUT_TOKENS,
-        max_answer_output_tokens=MAX_ANSWER_OUTPUT_TOKENS,
-        answer_reply_priming_tokens=ANSWER_REPLY_PRIMING_TOKENS,
-        answer_framing_safety_tokens=ANSWER_FRAMING_SAFETY_TOKENS,
-        rounding_identity=ROUNDING_IDENTITY,
-        cost_divisor=_MILLION,
-        rounding_quantum=_SIX_PLACES,
-        rounding_mode=ROUND_CEILING,
-        answer_model_config_identity=RAG_ANSWER_MODEL_CONFIG_VERSION,
-        query_tokenizer_fingerprint=_QUERY_TOKENIZER_REGISTRY_FINGERPRINT,
-        answer_tokenizer_fingerprint=_ANSWER_TOKENIZER_REGISTRY_FINGERPRINT,
+    return (
+        RAG_COMPONENT_CEILING_USD,
+        QUERY_EMBEDDING_INPUT_USD_PER_1M,
+        QUERY_EMBEDDING_COST_POLICY_VERSION,
+        QUERY_EMBEDDING_ESTIMATOR_VERSION,
+        QUERY_EMBEDDING_TOKENIZER_ENCODING,
+        QUERY_EMBEDDING_COUNT_RULE,
+        MAX_QUERY_EMBEDDING_TOKENS,
+        ANSWER_INPUT_USD_PER_1M,
+        ANSWER_OUTPUT_USD_PER_1M,
+        ANSWER_COST_POLICY_VERSION,
+        ANSWER_ESTIMATOR_VERSION,
+        ANSWER_TOKENIZER_ENCODING,
+        ANSWER_COUNT_RULE,
+        MAX_ANSWER_SERIALIZED_CHARS,
+        MAX_ANSWER_INPUT_TOKENS,
+        MAX_ANSWER_OUTPUT_TOKENS,
+        ANSWER_REPLY_PRIMING_TOKENS,
+        ANSWER_FRAMING_SAFETY_TOKENS,
+        ROUNDING_IDENTITY,
+        _MILLION,
+        _SIX_PLACES,
+        ROUND_CEILING,
+        RAG_ANSWER_MODEL_CONFIG_VERSION,
+        _QUERY_TOKENIZER_REGISTRY_FINGERPRINT,
+        _ANSWER_TOKENIZER_REGISTRY_FINGERPRINT,
     )
 
 
@@ -760,7 +874,7 @@ def _clone_approved_tokenizer(
     name: str,
     *,
     expected_fingerprint: str,
-) -> _PrivateTokenizer:
+) -> tuple[tiktoken.Encoding, _tiktoken.CoreBPE, str]:
     try:
         source = tiktoken.get_encoding(name)
     except Exception:
@@ -795,20 +909,24 @@ def _clone_approved_tokenizer(
     clone_fingerprint = _tokenizer_definition_fingerprint(clone)
     if not hmac.compare_digest(clone_fingerprint, expected_fingerprint):
         raise ValueError('RAG tokenizer clone definition is invalid')
-    return _PrivateTokenizer(
-        encoding=clone,
-        core=clone._core_bpe,
-        definition_fingerprint=clone_fingerprint,
-    )
+    return clone, clone._core_bpe, clone_fingerprint
 
 
 def _count_private_tokens(
-    private: _PrivateTokenizer,
+    encoding: tiktoken.Encoding,
+    core: _tiktoken.CoreBPE,
+    definition_fingerprint: str,
     text: str,
     *,
     unavailable_code: str,
+    after_encode: Callable[[], None] | None = None,
 ) -> int:
-    tokenizer = _verified_private_encoding(private, unavailable_code)
+    tokenizer = _verified_private_encoding(
+        encoding,
+        core,
+        definition_fingerprint,
+        unavailable_code,
+    )
     try:
         tokens = tokenizer.encode(
             text,
@@ -817,32 +935,40 @@ def _count_private_tokens(
         )
     except Exception:
         raise RagPolicyUnavailableError(unavailable_code) from None
-    _verified_private_encoding(private, unavailable_code)
+    if after_encode is not None:
+        after_encode()
+    _verified_private_encoding(
+        encoding,
+        core,
+        definition_fingerprint,
+        unavailable_code,
+    )
     if type(tokens) is not list or any(type(token) is not int for token in tokens):
         raise RagPolicyUnavailableError(unavailable_code)
     return len(tokens)
 
 
 def _verified_private_encoding(
-    private: object,
+    encoding: object,
+    core: object,
+    definition_fingerprint: object,
     unavailable_code: str,
 ) -> tiktoken.Encoding:
     try:
         if (
-            type(private) is not _PrivateTokenizer
-            or type(private.encoding) is not tiktoken.Encoding
-            or type(private.core) is not _tiktoken.CoreBPE
-            or type(private.encoding._core_bpe) is not _tiktoken.CoreBPE
-            or private.encoding._core_bpe is not private.core
-            or type(private.definition_fingerprint) is not str
+            type(encoding) is not tiktoken.Encoding
+            or type(core) is not _tiktoken.CoreBPE
+            or type(encoding._core_bpe) is not _tiktoken.CoreBPE
+            or encoding._core_bpe is not core
+            or type(definition_fingerprint) is not str
         ):
             raise ValueError
-        observed = _tokenizer_definition_fingerprint(private.encoding)
+        observed = _tokenizer_definition_fingerprint(encoding)
     except (AttributeError, TypeError, ValueError):
         raise RagPolicyUnavailableError(unavailable_code) from None
-    if not hmac.compare_digest(observed, private.definition_fingerprint):
+    if not hmac.compare_digest(observed, definition_fingerprint):
         raise RagPolicyUnavailableError(unavailable_code)
-    return private.encoding
+    return encoding
 
 
 def _tokenizer_definition_fingerprint(

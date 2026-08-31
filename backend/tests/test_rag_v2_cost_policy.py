@@ -690,6 +690,99 @@ def test_global_cached_tokenizer_core_drift_cannot_reach_private_clones(
     assert policy.prepare_answer_generation(answer) == before_answer
 
 
+def test_module_exposes_no_canonical_policy_state_or_registry_accessor() -> None:
+    for name in (
+        '_POLICY_STATES',
+        '_POLICY_STATES_LOCK',
+        '_PolicyState',
+        '_PrivateTokenizer',
+        '_RagCostAuthority',
+        '_policy_state',
+    ):
+        assert not hasattr(rag_cost_policy, name)
+
+
+class _InvalidationHook:
+    def __init__(self, target: str, mode: str) -> None:
+        self.target = target
+        self.mode = mode
+        self.active = False
+
+    def __call__(self, point, policy, invalidate) -> None:
+        if self.active and point == self.target:
+            self.active = False
+            invalidate(self.mode)
+
+
+def _isolated_policy(hook: _InvalidationHook):
+    policy_type = rag_cost_policy._create_rag_cost_policy_type(test_hook=hook)
+    settings = _settings()
+    schema_hmac = build_answer_output_schema_hmac(settings, _schema_bytes())
+    policy = policy_type(
+        settings=settings,
+        answer_output_schema_hmac=schema_hmac,
+        answer_prompt_renderer_hmac='b' * 64,
+    )
+    assert policy_type is not RagCostPolicy
+    return policy
+
+
+@pytest.mark.parametrize('mode', ('remove', 'replace'))
+def test_property_registry_invalidation_is_typed_refusal(mode: str) -> None:
+    hook = _InvalidationHook('query_property_before_return', mode)
+    policy = _isolated_policy(hook)
+    hook.active = True
+
+    with pytest.raises(RagPolicyUnavailableError) as exc_info:
+        _ = policy.query_embedding_model_config_snapshot_hmac
+
+    assert exc_info.value.code == 'retriever_not_configured'
+
+
+@pytest.mark.parametrize('mode', ('remove', 'replace'))
+def test_query_encode_registry_invalidation_is_typed_refusal(mode: str) -> None:
+    hook = _InvalidationHook('query_encode_after_call', mode)
+    policy = _isolated_policy(hook)
+    query = QueryEmbeddingCostInput(
+        '한국어 그래프 검색'.encode(),
+        policy.query_embedding_model_config_snapshot_hmac,
+    )
+    hook.active = True
+
+    with pytest.raises(RagPolicyUnavailableError) as exc_info:
+        policy.prepare_query_embedding(query)
+
+    assert exc_info.value.code == 'retriever_not_configured'
+
+
+@pytest.mark.parametrize('mode', ('remove', 'replace'))
+def test_answer_schema_registry_invalidation_is_typed_refusal(mode: str) -> None:
+    hook = _InvalidationHook('answer_schema_after_hmac', mode)
+    policy = _isolated_policy(hook)
+    value = _answer_input(policy, content='한국어 근거 답변')
+    hook.active = True
+
+    with pytest.raises(RagPolicyUnavailableError) as exc_info:
+        policy.prepare_answer_generation(value)
+
+    assert exc_info.value.code == 'model_unavailable'
+
+
+@pytest.mark.parametrize('mode', ('remove', 'replace'))
+def test_charge_registry_invalidation_is_typed_refusal(mode: str) -> None:
+    hook = _InvalidationHook('charge_before_return', mode)
+    policy = _isolated_policy(hook)
+    hook.active = True
+
+    with pytest.raises(RagPolicyUnavailableError) as exc_info:
+        policy.charge_actual(
+            'answer_generation',
+            StrictProviderUsage(1, 1, 2),
+        )
+
+    assert exc_info.value.code == 'model_unavailable'
+
+
 def test_answer_exact_rounded_component_ceiling_passes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
