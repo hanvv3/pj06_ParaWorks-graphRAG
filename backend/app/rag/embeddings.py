@@ -33,12 +33,11 @@ def validate_query_embedding_vector(
         value,
         expected_dimensions=expected_dimensions,
     )
-    payload = b'paraworks:pgvector-float32:v1\x00' + b''.join(
-        struct.pack('>f', coordinate) for coordinate in coordinates
-    )
     return ValidatedQueryEmbeddingVector(
         coordinates=coordinates,
-        canonical_big_endian_float32_sha256=hashlib.sha256(payload).hexdigest(),
+        canonical_big_endian_float32_sha256=(
+            _query_embedding_vector_sha256(coordinates)
+        ),
         cosine_indexability_policy_version='pgvector-cosine-indexable:v1',
     )
 
@@ -48,15 +47,47 @@ def validate_query_embedding_vector_carrier(
     *,
     expected_dimensions: int = 1536,
 ) -> ValidatedQueryEmbeddingVector:
-    if not isinstance(value, ValidatedQueryEmbeddingVector):
+    if type(value) is not ValidatedQueryEmbeddingVector:
         raise TypeError('RAG V2 search requires a validated query vector carrier')
-    canonical = validate_query_embedding_vector(
-        list(value.coordinates),
-        expected_dimensions=expected_dimensions,
-    )
-    if canonical != value:
+    coordinates = value.coordinates
+    if (
+        type(expected_dimensions) is not int
+        or expected_dimensions <= 0
+        or type(coordinates) is not tuple
+        or len(coordinates) != expected_dimensions
+        or type(value.canonical_big_endian_float32_sha256) is not str
+        or not re.fullmatch(
+            r'[0-9a-f]{64}',
+            value.canonical_big_endian_float32_sha256,
+        )
+        or value.cosine_indexability_policy_version
+        != 'pgvector-cosine-indexable:v1'
+        or type(value.cosine_indexability_policy_version) is not str
+    ):
+        raise ValueError('query embedding vector carrier is invalid')
+    try:
+        for coordinate in coordinates:
+            if type(coordinate) is not float or not math.isfinite(coordinate):
+                raise ValueError
+            canonical = struct.unpack('>f', struct.pack('>f', coordinate))[0]
+            if not math.isfinite(canonical) or canonical != coordinate:
+                raise ValueError
+    except (OverflowError, TypeError, ValueError, struct.error):
+        raise ValueError('query embedding vector carrier is invalid') from None
+    if (
+        not any(coordinate != 0.0 for coordinate in coordinates)
+        or value.canonical_big_endian_float32_sha256
+        != _query_embedding_vector_sha256(coordinates)
+    ):
         raise ValueError('query embedding vector carrier is invalid')
     return value
+
+
+def _query_embedding_vector_sha256(coordinates: tuple[float, ...]) -> str:
+    payload = b'paraworks:pgvector-float32:v1\x00' + b''.join(
+        struct.pack('>f', coordinate) for coordinate in coordinates
+    )
+    return hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)

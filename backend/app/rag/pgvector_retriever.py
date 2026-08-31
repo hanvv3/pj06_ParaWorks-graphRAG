@@ -80,11 +80,11 @@ class PgVectorEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
                 category='serving_corpus_changed_during_pgvector_query',
                 started_ns=started_ns,
             )
-        storage_failure: PgVectorSearchRuntimeError | None = None
+        store_failure: Exception | None = None
         try:
             candidates = self._store.search(input, embedding.vector)
-        except PgVectorSearchRuntimeError as exc:
-            storage_failure = exc
+        except Exception as exc:
+            store_failure = exc
             candidates = ()
         try:
             after_sql = self._readiness.inspect()
@@ -97,13 +97,15 @@ class PgVectorEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
                 category='serving_corpus_changed_during_pgvector_query',
                 started_ns=started_ns,
             )
-        if storage_failure is not None:
+        if isinstance(store_failure, PgVectorSearchRuntimeError):
             return self._keyword_fallback(
                 input,
                 config=config,
                 category='pgvector_storage_runtime_failure',
                 started_ns=started_ns,
             )
+        if store_failure is not None:
+            raise store_failure
         window = _candidate_window(candidates, limit=input.candidate_scan_limit)
         visible_internal = tuple(
             candidate

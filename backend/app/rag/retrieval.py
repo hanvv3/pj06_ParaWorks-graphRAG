@@ -38,6 +38,7 @@ QUERY_EMBEDDING_MODEL_CONFIG_VERSION = 'rag-query-embedding-config:v1'
 QUERY_EMBEDDING_PROVIDER_POLICY_VERSION = 'openai-embeddings-api:v1'
 QUERY_EMBEDDING_PAYLOAD_VALIDATOR_VERSION = 'rag-query-embedding-payload:v1'
 QUERY_EMBEDDING_INDEX_POLICY_VERSION = 'rag-v2-serving-index:v1'
+SIGNED_BIGINT_MAX = 2**63 - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +53,9 @@ class StrictProviderUsage:
             or type(self.output_tokens) is not int
             or type(self.total_tokens) is not int
             or self.input_tokens < 0
+            or self.input_tokens > SIGNED_BIGINT_MAX
+            or self.output_tokens > SIGNED_BIGINT_MAX
+            or self.total_tokens > SIGNED_BIGINT_MAX
             or self.output_tokens < 0
             or self.total_tokens != self.input_tokens + self.output_tokens
         ):
@@ -160,13 +164,17 @@ def validate_query_embedding_call_result(
         if type(result) is not QueryEmbeddingCallResult:
             raise ValueError
         prepared = result.prepared
+        if type(prepared) is not PreparedQueryEmbedding:
+            raise ValueError
         query_utf8 = request.retrieval_query_text.encode('utf-8', errors='strict')
         if (
-            type(prepared) is PreparedQueryEmbedding
+            type(prepared.transient_query_utf8) is bytes
             and prepared.transient_query_utf8 != query_utf8
         ):
             raise ValueError('query bytes do not match the prepared embedding')
         receipt = result.receipt
+        if type(receipt) is not QueryEmbeddingReceipt:
+            raise ValueError
         budget = prepared.budget
         validate_query_embedding_budget(budget)
         vector = validate_query_embedding_vector_carrier(
@@ -194,39 +202,44 @@ def validate_query_embedding_call_result(
             settings=settings,
         )
         if (
-            type(prepared) is not PreparedQueryEmbedding
-            or type(receipt) is not QueryEmbeddingReceipt
+            type(prepared.transient_query_utf8) is not bytes
             or prepared.transient_query_utf8 != query_utf8
+            or not is_lower_hex_64(prepared.retrieval_query_hmac)
             or prepared.retrieval_query_hmac != expected_query_hmac
-            or type(prepared.corpus_generation) is not int
-            or prepared.corpus_generation < 0
-            or type(prepared.vector_index_generation) is not int
-            or prepared.vector_index_generation < 0
+            or not is_signed_bigint(prepared.corpus_generation)
+            or not is_signed_bigint(prepared.vector_index_generation)
             or not is_lower_hex_64(prepared.readiness_snapshot_hmac)
+            or not is_lower_hex_64(prepared.model_config_snapshot_hmac)
             or prepared.model_config_snapshot_hmac != expected_model_hmac
+            or not is_lower_hex_64(prepared.provider_policy_snapshot_hmac)
             or prepared.provider_policy_snapshot_hmac != expected_provider_hmac
+            or not is_signed_bigint(prepared.estimated_input_tokens)
             or prepared.estimated_input_tokens != budget.estimated_input_tokens
-            or type(prepared.reserved_cost_usd) is not Decimal
-            or prepared.reserved_cost_usd != budget.reserved_cost_usd
+            or not same_decimal_storage_value(
+                prepared.reserved_cost_usd,
+                budget.reserved_cost_usd,
+            )
+            or not is_lower_hex_64(prepared.attempt_fence_hmac)
             or prepared.attempt_fence_hmac != expected_attempt_fence
             or result.vector is not vector
             or result.attempted is not True
-            or type(result.validated_input_tokens) is not int
-            or result.validated_input_tokens < 0
+            or not is_signed_bigint(result.validated_input_tokens)
             or result.validated_input_tokens > prepared.estimated_input_tokens
-            or type(result.actual_cost_usd) is not Decimal
-            or not is_numeric_24_6_representable(result.actual_cost_usd)
-            or result.actual_cost_usd < Decimal('0')
+            or not is_storage_decimal(result.actual_cost_usd)
             or result.actual_cost_usd > prepared.reserved_cost_usd
             or receipt.attempted is not True
-            or type(receipt.input_tokens) is not int
+            or not is_signed_bigint(receipt.input_tokens)
             or receipt.input_tokens != result.validated_input_tokens
-            or type(receipt.actual_cost_usd) is not Decimal
-            or receipt.actual_cost_usd != result.actual_cost_usd
-            or type(receipt.latency_ms) is not int
-            or receipt.latency_ms < 0
+            or not same_decimal_storage_value(
+                receipt.actual_cost_usd,
+                result.actual_cost_usd,
+            )
+            or not is_signed_bigint(receipt.latency_ms)
+            or type(receipt.outcome) is not str
             or receipt.outcome != 'component_succeeded'
+            or not is_lower_hex_64(receipt.model_config_snapshot_hmac)
             or receipt.model_config_snapshot_hmac != expected_model_hmac
+            or not is_lower_hex_64(receipt.provider_policy_snapshot_hmac)
             or receipt.provider_policy_snapshot_hmac != expected_provider_hmac
         ):
             raise ValueError
@@ -242,15 +255,12 @@ def validate_query_embedding_call_result(
 def validate_query_embedding_budget(value: PreparedPaidCallBudget) -> None:
     if (
         type(value) is not PreparedPaidCallBudget
+        or type(value.component) is not str
         or value.component != 'query_embedding'
-        or type(value.estimated_input_tokens) is not int
-        or value.estimated_input_tokens < 0
-        or type(value.maximum_output_tokens) is not int
+        or not is_signed_bigint(value.estimated_input_tokens)
+        or not is_signed_bigint(value.maximum_output_tokens)
         or value.maximum_output_tokens != 0
-        or type(value.reserved_cost_usd) is not Decimal
-        or not value.reserved_cost_usd.is_finite()
-        or value.reserved_cost_usd < Decimal('0')
-        or not is_numeric_24_6_representable(value.reserved_cost_usd)
+        or not is_storage_decimal(value.reserved_cost_usd)
         or not is_lower_hex_64(value.cost_policy_snapshot_hmac)
         or not is_lower_hex_64(value.estimator_input_hmac)
     ):
@@ -329,6 +339,12 @@ def build_query_embedding_attempt_fence_hmac(
             'readiness_snapshot_hmac': readiness_snapshot_hmac,
             'model_config_snapshot_hmac': model_config_snapshot_hmac,
             'provider_policy_snapshot_hmac': provider_policy_snapshot_hmac,
+            'budget_component': budget.component,
+            'estimated_input_tokens': budget.estimated_input_tokens,
+            'maximum_output_tokens': budget.maximum_output_tokens,
+            'reserved_cost_usd': decimal_storage_representation(
+                budget.reserved_cost_usd
+            ),
             'cost_policy_snapshot_hmac': budget.cost_policy_snapshot_hmac,
             'estimator_input_hmac': budget.estimator_input_hmac,
         },
@@ -345,10 +361,41 @@ def is_lower_hex_64(value: object) -> bool:
 def is_numeric_24_6_representable(value: Decimal) -> bool:
     if type(value) is not Decimal or not value.is_finite():
         return False
+    if value.as_tuple().exponent < -6:
+        return False
     normalized = value.normalize()
     if normalized.is_zero():
         return True
-    return normalized.as_tuple().exponent >= -6 and normalized.adjusted() <= 17
+    return normalized.adjusted() <= 17
+
+
+def is_signed_bigint(value: object) -> bool:
+    return bool(type(value) is int and 0 <= value <= SIGNED_BIGINT_MAX)
+
+
+def is_storage_decimal(value: object) -> bool:
+    return bool(
+        type(value) is Decimal
+        and value.is_finite()
+        and value >= Decimal('0')
+        and is_numeric_24_6_representable(value)
+    )
+
+
+def decimal_storage_representation(value: object) -> str:
+    if not is_storage_decimal(value):
+        raise ValueError('query embedding cost is invalid')
+    assert type(value) is Decimal
+    return format(value, 'f')
+
+
+def same_decimal_storage_value(left: object, right: object) -> bool:
+    return bool(
+        is_storage_decimal(left)
+        and is_storage_decimal(right)
+        and decimal_storage_representation(left)
+        == decimal_storage_representation(right)
+    )
 
 
 @dataclass(frozen=True, slots=True)

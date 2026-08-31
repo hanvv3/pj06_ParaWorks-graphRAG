@@ -415,6 +415,40 @@ def test_store_failure_still_reads_post_readiness_and_drift_category_wins() -> N
     assert keyword.requests[0].query_embedding_result is None
 
 
+def test_untyped_store_failure_still_reads_post_readiness_and_drift_wins() -> None:
+    keyword = _Keyword()
+    request = _request()
+    readiness = _Readiness([_readiness(), _readiness(vector=12)])
+
+    result = _retriever(
+        _Store(RuntimeError('unexpected store defect during overlap')),
+        readiness,
+        keyword,
+    ).invoke(request)
+
+    assert readiness.calls == 2
+    assert result.trace.fallback_category == (
+        'serving_corpus_changed_during_pgvector_query'
+    )
+    assert result.query_embedding_receipt is request.query_embedding_result.receipt
+    assert len(keyword.requests) == 1
+    assert keyword.requests[0].security_scope is request.security_scope
+    assert keyword.requests[0].query_embedding_result is None
+
+
+def test_stable_readiness_rethrows_exact_untyped_store_exception_after_observation() -> None:
+    error = RuntimeError('exact programming defect')
+    readiness = _Readiness([_readiness(), _readiness()])
+    keyword = _Keyword()
+
+    with pytest.raises(RuntimeError) as captured:
+        _retriever(_Store(error), readiness, keyword).invoke(_request())
+
+    assert captured.value is error
+    assert readiness.calls == 2
+    assert keyword.requests == []
+
+
 def test_post_readiness_inspection_failure_fails_closed_without_partial_result() -> None:
     keyword = _Keyword()
     readiness = _Readiness(
@@ -427,6 +461,26 @@ def test_post_readiness_inspection_failure_fails_closed_without_partial_result()
     ):
         _retriever(
             _Store((_candidate(1, 0.9),)),
+            readiness,
+            keyword,
+        ).invoke(_request())
+
+    assert readiness.calls == 2
+    assert keyword.requests == []
+
+
+def test_post_readiness_failure_after_untyped_store_error_is_sanitized_terminal() -> None:
+    keyword = _Keyword()
+    readiness = _Readiness(
+        [_readiness(), RuntimeError('raw readiness inspection detail')]
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match='pgvector post-readiness observation failed',
+    ):
+        _retriever(
+            _Store(ValueError('unexpected store defect')),
             readiness,
             keyword,
         ).invoke(_request())
@@ -517,6 +571,87 @@ def _mutate_receipt_model_identity(
     )
 
 
+def _mutate_transient_query_to_bytearray(
+    result: QueryEmbeddingCallResult,
+) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        prepared=replace(
+            result.prepared,
+            transient_query_utf8=bytearray(result.prepared.transient_query_utf8),
+        ),
+    )
+
+
+def _mutate_vector_coordinate_to_int(
+    result: QueryEmbeddingCallResult,
+) -> QueryEmbeddingCallResult:
+    coordinates = (1, *result.vector.coordinates[1:])
+    return replace(
+        result,
+        vector=replace(result.vector, coordinates=coordinates),
+    )
+
+
+def _mutate_bigint_overflow_with_old_fence(
+    result: QueryEmbeddingCallResult,
+) -> QueryEmbeddingCallResult:
+    overflow = 2**63
+    return replace(
+        result,
+        prepared=replace(
+            result.prepared,
+            estimated_input_tokens=overflow,
+            budget=replace(
+                result.prepared.budget,
+                estimated_input_tokens=overflow,
+            ),
+        ),
+    )
+
+
+def _mutate_budget_scalar_with_old_fence(
+    result: QueryEmbeddingCallResult,
+) -> QueryEmbeddingCallResult:
+    return replace(
+        result,
+        prepared=replace(
+            result.prepared,
+            estimated_input_tokens=4,
+            budget=replace(
+                result.prepared.budget,
+                estimated_input_tokens=4,
+            ),
+        ),
+    )
+
+
+def _mutate_reserve_scale_with_old_fence(
+    result: QueryEmbeddingCallResult,
+) -> QueryEmbeddingCallResult:
+    scaled = Decimal('0.0007770')
+    return replace(
+        result,
+        prepared=replace(
+            result.prepared,
+            reserved_cost_usd=scaled,
+            budget=replace(result.prepared.budget, reserved_cost_usd=scaled),
+        ),
+    )
+
+
+def _mutate_actual_cost_mirror_scale(
+    result: QueryEmbeddingCallResult,
+) -> QueryEmbeddingCallResult:
+    return replace(result, actual_cost_usd=Decimal('0.0001230'))
+
+
+def _mutate_bool_receipt_latency(
+    result: QueryEmbeddingCallResult,
+) -> QueryEmbeddingCallResult:
+    return replace(result, receipt=replace(result.receipt, latency_ms=True))
+
+
 def _mutate_wrong_hash(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
     return replace(
         result,
@@ -552,6 +687,13 @@ def _mutate_zero_vector(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallR
         _mutate_readiness_generation,
         _mutate_budget_binding,
         _mutate_receipt_model_identity,
+        _mutate_transient_query_to_bytearray,
+        _mutate_vector_coordinate_to_int,
+        _mutate_bigint_overflow_with_old_fence,
+        _mutate_budget_scalar_with_old_fence,
+        _mutate_reserve_scale_with_old_fence,
+        _mutate_actual_cost_mirror_scale,
+        _mutate_bool_receipt_latency,
         _mutate_wrong_hash,
         _mutate_wrong_dimensions,
         _mutate_zero_vector,
@@ -622,7 +764,7 @@ def test_store_side_value_error_is_not_remapped_to_allowed_keyword_fallback() ->
             keyword,
         ).invoke(_request())
 
-    assert readiness.calls == 1
+    assert readiness.calls == 2
     assert keyword.requests == []
 
 
