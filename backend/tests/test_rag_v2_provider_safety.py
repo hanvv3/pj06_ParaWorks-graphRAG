@@ -532,6 +532,63 @@ def test_rebind_reset_and_supersession_are_cas_bound_and_preserve_history(
     ).scalars().all() == [0, 1, 2, 3, 4, 5]
 
 
+def test_inactive_same_component_blocker_requires_ack_for_later_supersession(
+    tmp_path: Path,
+):
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    connection = engine.connect()
+    path = tmp_path / 'provider.json'
+    service = RagProviderSafetyService(
+        latch_path=path,
+        identity_secret=_REVIEW_SECRET,
+        designated_environment_id='test',
+    )
+    snapshots = _bootstrap(service, connection)
+    service.block_overrun(
+        connection,
+        'query_embedding',
+        agent_run_id=31,
+        input_tokens=2,
+        output_tokens=0,
+        cost_usd=Decimal('0.000001'),
+    )
+    successor_b = replace(
+        snapshots[0],
+        model='text-embedding-3-large',
+        reasoning_or_config_identity='dimensions:3072',
+        authorized_policy_snapshot_hmac='d' * 64,
+    )
+    acknowledged = _reviewed_command(
+        service,
+        connection,
+        'query_embedding',
+        'supersession',
+        successor=successor_b,
+        historical_block_acknowledged=True,
+    )
+    service.reviewed_supersession(connection, acknowledged, successor_b)
+
+    context = service.review_context(connection, 'query_embedding')
+    assert context.has_historical_blocker is True
+    successor_c = replace(
+        successor_b,
+        model='text-embedding-4',
+        authorized_policy_snapshot_hmac='e' * 64,
+    )
+    with pytest.raises(RagProviderSafetyError, match='acknowledgement is required'):
+        RagProviderSafetyReviewAuthority(identity_secret=_REVIEW_SECRET).issue(
+            context,
+            operation='supersession',
+            successor=successor_c,
+            actor_subject_hmac='4' * 64,
+            reviewed_gate_reference_hmac='5' * 64,
+            historical_block_acknowledged=False,
+        )
+    body = json.loads(path.read_text(encoding='utf-8'))['signed_payload']['body']
+    assert len(body['family_records']) == 3
+
+
 def test_bootstrap_plan_reference_is_signed_and_recovery_rejects_wrong_shape(
     tmp_path: Path,
 ):

@@ -29,6 +29,7 @@ from backend.app.agent_runtime.rag_provider_safety import (
     RagProviderSafetyService,
 )
 from backend.app.core.config import get_settings
+from backend.app.models.rag_runtime import RagProviderSafetyTransition
 from backend.tests.test_rag_v2_costs import _snapshot
 
 REVISION = 'e2b3c4d5f6a7'
@@ -135,6 +136,7 @@ def test_postgresql_guard_installers_declare_deferred_lifecycle_and_generation_g
     generation_source = pyinspect.getsource(
         migration._install_postgresql_generation_guards
     )
+    transition_model_source = pyinspect.getsource(RagProviderSafetyTransition)
 
     assert 'CREATE CONSTRAINT TRIGGER rag_agent_run_v2_costs_guard' in runtime_source
     assert 'DEFERRABLE INITIALLY DEFERRED' in runtime_source
@@ -155,6 +157,16 @@ def test_postgresql_guard_installers_declare_deferred_lifecycle_and_generation_g
     assert 'targeted family transition state mismatch' in runtime_source
     assert 'untouched bootstrap family drift' in runtime_source
     assert 'new_state_version IS DISTINCT FROM 1' in runtime_source
+    assert (
+        'ck_rag_provider_safety_transition_bootstrap_generation'
+        in transition_model_source
+    )
+    assert "global_safety_generation = 0 AND transition_kind = 'bootstrap'" in (
+        transition_model_source
+    )
+    assert "global_safety_generation > 0 AND transition_kind <> 'bootstrap'" in (
+        transition_model_source
+    )
 
     assert 'rag_mark_corpus_generation_mutation' in generation_source
     assert 'rag_mark_vector_generation_mutation' in generation_source
@@ -262,6 +274,13 @@ def test_sqlite_revision_declares_exact_new_columns_indexes_and_foreign_keys(
         item['name'] for item in schema.get_indexes('assistant_messages')
     }
     assert 'ix_assistant_messages_linked_agent_run_id' in assistant_indexes
+    transition_checks = {
+        item['name']
+        for item in schema.get_check_constraints('rag_provider_safety_transitions')
+    }
+    assert 'ck_rag_provider_safety_transition_bootstrap_generation' in (
+        transition_checks
+    )
 
 
 def test_upgrade_replaces_dependency_kind_checks_for_legacy_v1_only_rows(
@@ -856,6 +875,58 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
                 ':digest,:review,CURRENT_TIMESTAMP)'
             ),
             {'digest': 'c' * 64, 'review': 'c' * 64},
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            text(
+                'UPDATE rag_provider_safety_authorities SET '
+                'global_safety_generation=1,envelope_digest=:digest WHERE id=1'
+            ),
+            {'digest': 'b' * 64},
+        )
+        connection.execute(
+            text(
+                'INSERT INTO rag_provider_safety_transitions '
+                '(authority_id,readiness_id,global_safety_generation,transition_kind,'
+                'prior_state,new_state,prior_state_version,new_state_version,'
+                'prior_family_safety_generation,new_family_safety_generation,'
+                'envelope_digest,reviewed_transition_reference_hmac,created_at) VALUES '
+                "(1,NULL,1,'bootstrap',NULL,NULL,NULL,NULL,NULL,NULL,"
+                ':digest,:review,CURRENT_TIMESTAMP)'
+            ),
+            {'digest': 'b' * 64, 'review': 'd' * 64},
+        )
+        connection.execute(
+            text(
+                'UPDATE rag_provider_safety_authorities SET '
+                'global_safety_generation=2,envelope_digest=:digest WHERE id=1'
+            ),
+            {'digest': 'a' * 64},
+        )
+        connection.execute(
+            text(
+                "UPDATE rag_provider_readiness SET state='rebind_required', "
+                'state_version=2,family_safety_generation=2,'
+                'reviewed_gate_reference_hmac=:review WHERE id=:id'
+            ),
+            {'id': readiness_ids[0], 'review': 'e' * 64},
+        )
+        connection.execute(
+            text(
+                'INSERT INTO rag_provider_safety_transitions '
+                '(authority_id,readiness_id,global_safety_generation,transition_kind,'
+                'prior_state,new_state,prior_state_version,new_state_version,'
+                'prior_family_safety_generation,new_family_safety_generation,'
+                'envelope_digest,reviewed_transition_reference_hmac,created_at) VALUES '
+                "(1,:id,2,'rebind_required','ready','rebind_required',1,2,0,2,"
+                ':digest,:review,CURRENT_TIMESTAMP)'
+            ),
+            {
+                'id': readiness_ids[0],
+                'digest': 'a' * 64,
+                'review': 'e' * 64,
+            },
         )
 
     with pytest.raises(IntegrityError), engine.begin() as connection:

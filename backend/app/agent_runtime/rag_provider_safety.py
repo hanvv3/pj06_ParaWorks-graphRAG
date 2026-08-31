@@ -1015,7 +1015,11 @@ class RagProviderSafetyService:
             state=record['state'],  # type: ignore[arg-type]
             state_version=record['state_version'],  # type: ignore[arg-type]
             global_safety_generation=body['global_safety_generation'],  # type: ignore[arg-type]
-            has_historical_blocker=record['first_blocker_category'] is not None,
+            has_historical_blocker=any(
+                item['component'] == component
+                and item['first_blocker_category'] is not None
+                for item in body['_records_by_identity'].values()
+            ),
             _seal=_REVIEW_CAPABILITY_SEAL,
         )
 

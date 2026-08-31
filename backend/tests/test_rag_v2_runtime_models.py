@@ -571,6 +571,61 @@ def test_provider_transition_rejects_partial_family_snapshot() -> None:
 
 
 @pytest.mark.parametrize(
+    (
+        'generation',
+        'kind',
+        'readiness_id',
+        'prior_state',
+        'new_state',
+        'prior_version',
+        'new_version',
+        'prior_family_generation',
+        'new_family_generation',
+    ),
+    (
+        (0, 'rebind_required', 1, 'ready', 'rebind_required', 1, 2, 0, 0),
+        (1, 'bootstrap', None, None, None, None, None, None, None),
+    ),
+)
+def test_provider_transition_bootstrap_exists_iff_generation_zero(
+    generation: int,
+    kind: str,
+    readiness_id: int | None,
+    prior_state: str | None,
+    new_state: str | None,
+    prior_version: int | None,
+    new_version: int | None,
+    prior_family_generation: int | None,
+    new_family_generation: int | None,
+) -> None:
+    engine = create_engine('sqlite://')
+    Base.metadata.create_all(engine)
+    assert {
+        constraint.name
+        for constraint in models.RagProviderSafetyTransition.__table__.constraints
+    } >= {'ck_rag_provider_safety_transition_bootstrap_generation'}
+    with Session(engine) as db:
+        db.add(
+            models.RagProviderSafetyTransition(
+                authority_id=1,
+                readiness_id=readiness_id,
+                global_safety_generation=generation,
+                transition_kind=kind,
+                prior_state=prior_state,
+                new_state=new_state,
+                prior_state_version=prior_version,
+                new_state_version=new_version,
+                prior_family_safety_generation=prior_family_generation,
+                new_family_safety_generation=new_family_generation,
+                envelope_digest='a' * 64,
+                reviewed_transition_reference_hmac='b' * 64,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db.commit()
+
+
+@pytest.mark.parametrize(
     ('key1', 'key2', 'namespace', 'digest', 'payload'),
     (
         (2**31, 0, 'static', 'a' * 64, b'{}'),

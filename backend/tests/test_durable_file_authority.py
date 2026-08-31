@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.agent_runtime import durable_file_authority as durable_module
 from backend.app.agent_runtime.durable_file_authority import (
     DurableFileAuthority,
     DurableFileAuthorityError,
@@ -61,7 +62,10 @@ def test_secure_init_reuses_trusted_sidecar_alone_but_refuses_partial_data(
     data = tmp_path / 'provider.json'
     lock = Path(str(data) + '.lock')
     lock.write_bytes(b'\0')
-    os.chmod(lock, 0o600)
+    if os.name == 'nt':
+        durable_module._windows_apply_owner_only(lock)
+    else:
+        os.chmod(lock, 0o600)
     inode = os.stat(lock).st_ino
     DurableFileAuthority(data).write({'generation': 0})
     assert os.stat(lock).st_ino == inode
@@ -146,6 +150,52 @@ def test_windows_casefold_and_trailing_dot_aliases_are_rejected(tmp_path: Path):
         DurableFileAuthority.validate_configured_path(
             str(tmp_path / 'provider.json') + '.'
         )
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows DACL semantics')
+def test_windows_creation_applies_owner_only_dacl_to_every_authority_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    protected = tmp_path / 'protected'
+    data = protected / 'provider.json'
+    secured: list[Path] = []
+    original = durable_module._windows_apply_owner_only
+
+    def observed(path: Path) -> None:
+        secured.append(path)
+        original(path)
+
+    monkeypatch.setattr(durable_module, '_windows_apply_owner_only', observed)
+    DurableFileAuthority(data).write({'generation': 0})
+    lock = Path(str(data) + '.lock')
+    assert durable_module._windows_has_owner_only_dacl(protected)
+    assert durable_module._windows_has_owner_only_dacl(lock)
+    assert durable_module._windows_has_owner_only_dacl(data)
+    assert protected in secured
+    assert lock in secured
+    assert any(path.name.startswith(f'.{data.name}.') for path in secured)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows DACL semantics')
+@pytest.mark.parametrize('artifact', ('parent', 'sidecar', 'envelope'))
+def test_windows_foreign_principal_write_access_is_rejected(
+    tmp_path: Path, artifact: str
+):
+    protected = tmp_path / 'protected'
+    data = protected / 'provider.json'
+    DurableFileAuthority(data).write({'generation': 0})
+    target = {
+        'parent': protected,
+        'sidecar': Path(str(data) + '.lock'),
+        'envelope': data,
+    }[artifact]
+    owner_sid = durable_module._windows_current_user_sid()
+    durable_module._windows_apply_sddl(
+        target,
+        f'O:{owner_sid}D:P(A;;FA;;;{owner_sid})(A;;FW;;;WD)',
+    )
+    with pytest.raises(DurableFileAuthorityError, match='owner-only DACL'):
+        DurableFileAuthority.open_runtime(data).read()
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX permission mode assertion')

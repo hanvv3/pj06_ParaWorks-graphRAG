@@ -297,6 +297,13 @@ class RagProviderSafetyTransition(Base):
             'prior_family_safety_generation >= 0)))',
             name='ck_rag_provider_safety_transition_family_snapshot',
         ),
+        CheckConstraint(
+            "(global_safety_generation = 0 AND transition_kind = 'bootstrap' AND "
+            'readiness_id IS NULL) OR '
+            "(global_safety_generation > 0 AND transition_kind <> 'bootstrap' AND "
+            'readiness_id IS NOT NULL)',
+            name='ck_rag_provider_safety_transition_bootstrap_generation',
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
