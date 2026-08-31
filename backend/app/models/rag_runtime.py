@@ -300,8 +300,7 @@ class RagProviderSafetyTransition(Base):
         CheckConstraint(
             "(global_safety_generation = 0 AND transition_kind = 'bootstrap' AND "
             'readiness_id IS NULL) OR '
-            "(global_safety_generation > 0 AND transition_kind <> 'bootstrap' AND "
-            'readiness_id IS NOT NULL)',
+            "(global_safety_generation > 0 AND transition_kind <> 'bootstrap')",
             name='ck_rag_provider_safety_transition_bootstrap_generation',
         ),
     )

@@ -625,6 +625,29 @@ def test_provider_transition_bootstrap_exists_iff_generation_zero(
             db.commit()
 
 
+def test_provider_transition_positive_generation_allows_targetless_nonbootstrap() -> None:
+    engine = create_engine('sqlite://')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(
+            models.RagProviderSafetyTransition(
+                authority_id=1,
+                readiness_id=None,
+                global_safety_generation=1,
+                transition_kind='rebind_required',
+                prior_state=None,
+                new_state=None,
+                prior_state_version=None,
+                new_state_version=None,
+                prior_family_safety_generation=None,
+                new_family_safety_generation=None,
+                envelope_digest='a' * 64,
+                reviewed_transition_reference_hmac='b' * 64,
+            )
+        )
+        db.commit()
+
+
 @pytest.mark.parametrize(
     ('key1', 'key2', 'namespace', 'digest', 'payload'),
     (

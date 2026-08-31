@@ -33,9 +33,14 @@ from backend.app.models.rag_runtime import RagProviderSafetyTransition
 from backend.tests.test_rag_v2_costs import _snapshot
 
 REVISION = 'e2b3c4d5f6a7'
+HEAD_REVISION = 'f3c4d5e6a7b8'
 PREVIOUS_REVISION = 'd1a2b3c4e5f6'
 MIGRATION_PATH = Path(
     'backend/migrations/versions/e2b3c4d5f6a7_add_rag_runtime_safety.py'
+)
+TRANSITION_GUARD_MIGRATION_PATH = Path(
+    'backend/migrations/versions/'
+    'f3c4d5e6a7b8_deploy_provider_transition_generation_guard.py'
 )
 NEW_TABLES = {
     'agent_run_cost_components',
@@ -77,12 +82,37 @@ def _load_migration_module():
     return module
 
 
+def _load_transition_guard_migration_module():
+    assert TRANSITION_GUARD_MIGRATION_PATH.is_file()
+    spec = importlib.util.spec_from_file_location(
+        'rag_v2_transition_guard_migration', TRANSITION_GUARD_MIGRATION_PATH
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_second_d_revision_has_exact_chain_and_postgresql_guard_installers() -> None:
     migration = _load_migration_module()
     assert migration.revision == REVISION
     assert migration.down_revision == PREVIOUS_REVISION
     assert callable(migration._install_postgresql_runtime_guards)
     assert callable(migration._install_postgresql_generation_guards)
+
+
+def test_transition_generation_guard_revision_has_exact_chain_and_constraint() -> None:
+    migration = _load_transition_guard_migration_module()
+    assert migration.revision == HEAD_REVISION
+    assert migration.down_revision == REVISION
+    assert migration.CONSTRAINT_NAME == (
+        'ck_rag_provider_safety_transition_bootstrap_generation'
+    )
+    assert migration.CONSTRAINT_SQL == (
+        "(global_safety_generation = 0 AND transition_kind = 'bootstrap' AND "
+        'readiness_id IS NULL) OR '
+        "(global_safety_generation > 0 AND transition_kind <> 'bootstrap')"
+    )
 
 
 def test_sqlite_head_upgrade_is_additive_and_leaves_historical_rows_null(
@@ -109,7 +139,7 @@ def test_sqlite_head_upgrade_is_additive_and_leaves_historical_rows_null(
     with engine.connect() as connection:
         assert (
             connection.scalar(text('SELECT version_num FROM alembic_version'))
-            == REVISION
+            == HEAD_REVISION
         )
         row = connection.execute(
             text(
@@ -125,7 +155,7 @@ def test_alembic_exposes_one_head() -> None:
     config = Config('alembic.ini')
     from alembic.script import ScriptDirectory
 
-    assert ScriptDirectory.from_config(config).get_heads() == [REVISION]
+    assert ScriptDirectory.from_config(config).get_heads() == [HEAD_REVISION]
 
 
 def test_postgresql_guard_installers_declare_deferred_lifecycle_and_generation_guards() -> (
@@ -167,6 +197,10 @@ def test_postgresql_guard_installers_declare_deferred_lifecycle_and_generation_g
     assert "global_safety_generation > 0 AND transition_kind <> 'bootstrap'" in (
         transition_model_source
     )
+    assert (
+        "global_safety_generation > 0 AND transition_kind <> 'bootstrap' AND "
+        'readiness_id IS NOT NULL'
+    ) not in transition_model_source
 
     assert 'rag_mark_corpus_generation_mutation' in generation_source
     assert 'rag_mark_vector_generation_mutation' in generation_source
@@ -281,6 +315,124 @@ def test_sqlite_revision_declares_exact_new_columns_indexes_and_foreign_keys(
     assert 'ck_rag_provider_safety_transition_bootstrap_generation' in (
         transition_checks
     )
+
+
+def test_transition_guard_upgrades_an_already_stamped_e2_database(
+    sqlite_migration: tuple[Config, str],
+) -> None:
+    config, database_url = sqlite_migration
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                'CREATE TABLE rag_provider_safety_transitions ('
+                'id INTEGER PRIMARY KEY, authority_id INTEGER NOT NULL, '
+                'readiness_id INTEGER, global_safety_generation BIGINT NOT NULL, '
+                'transition_kind VARCHAR(32) NOT NULL, prior_state VARCHAR(32), '
+                'new_state VARCHAR(32), prior_state_version BIGINT, '
+                'new_state_version BIGINT, prior_family_safety_generation BIGINT, '
+                'new_family_safety_generation BIGINT, envelope_digest VARCHAR(64) NOT NULL, '
+                'reviewed_transition_reference_hmac VARCHAR(64) NOT NULL, '
+                'actor_subject_hmac VARCHAR(64), agent_run_id INTEGER, '
+                'created_at DATETIME NOT NULL)'
+            )
+        )
+        connection.execute(
+            text('CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)')
+        )
+        connection.execute(
+            text('INSERT INTO alembic_version (version_num) VALUES (:revision)'),
+            {'revision': REVISION},
+        )
+
+    command.upgrade(config, 'head')
+
+    checks_at_head = {
+        item['name']: item['sqltext']
+        for item in inspect(engine).get_check_constraints(
+            'rag_provider_safety_transitions'
+        )
+    }
+    exact_sql = checks_at_head[
+        'ck_rag_provider_safety_transition_bootstrap_generation'
+    ]
+    assert "global_safety_generation > 0 AND transition_kind <> 'bootstrap'" in exact_sql
+    assert 'readiness_id IS NOT NULL' not in exact_sql
+    with engine.connect() as connection:
+        assert (
+            connection.scalar(text('SELECT version_num FROM alembic_version'))
+            == HEAD_REVISION
+        )
+
+    command.downgrade(config, REVISION)
+    reverted_sql = {
+        item['name']: item['sqltext']
+        for item in inspect(engine).get_check_constraints(
+            'rag_provider_safety_transitions'
+        )
+    }['ck_rag_provider_safety_transition_bootstrap_generation']
+    assert 'readiness_id IS NOT NULL' in reverted_sql
+
+
+def test_sqlite_transition_guard_rejects_hidden_bootstrap_and_allows_targetless_event(
+    sqlite_migration: tuple[Config, str],
+) -> None:
+    config, database_url = sqlite_migration
+    command.upgrade(config, 'head')
+    engine = create_engine(database_url)
+    insert = text(
+        'INSERT INTO rag_provider_safety_transitions '
+        '(authority_id,readiness_id,global_safety_generation,transition_kind,'
+        'prior_state,new_state,prior_state_version,new_state_version,'
+        'prior_family_safety_generation,new_family_safety_generation,'
+        'envelope_digest,reviewed_transition_reference_hmac,created_at) VALUES '
+        '(:authority,NULL,:generation,:kind,NULL,NULL,NULL,NULL,NULL,NULL,'
+        ':digest,:review,CURRENT_TIMESTAMP)'
+    )
+
+    with engine.begin() as connection:
+        connection.execute(
+            insert,
+            {
+                'authority': 1,
+                'generation': 2,
+                'kind': 'rebind_required',
+                'digest': 'c' * 64,
+                'review': 'd' * 64,
+            },
+        )
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            insert,
+            {
+                'authority': 2,
+                'generation': 0,
+                'kind': 'bootstrap',
+                'digest': 'a' * 64,
+                'review': 'b' * 64,
+            },
+        )
+        connection.execute(
+            insert,
+            {
+                'authority': 2,
+                'generation': 1,
+                'kind': 'bootstrap',
+                'digest': 'e' * 64,
+                'review': 'f' * 64,
+            },
+        )
+        connection.execute(
+            insert,
+            {
+                'authority': 2,
+                'generation': 2,
+                'kind': 'rebind_required',
+                'digest': '1' * 64,
+                'review': '2' * 64,
+            },
+        )
 
 
 def test_upgrade_replaces_dependency_kind_checks_for_legacy_v1_only_rows(
@@ -876,6 +1028,24 @@ def test_postgresql_runtime_relational_guards_reject_confirmed_bypasses(
             ),
             {'digest': 'c' * 64, 'review': 'c' * 64},
         )
+
+    # The row invariant intentionally permits targetless positive-generation
+    # non-bootstrap audit events. Roll back before the deferred whole-set guard.
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        connection.execute(
+            text(
+                'INSERT INTO rag_provider_safety_transitions '
+                '(authority_id,readiness_id,global_safety_generation,transition_kind,'
+                'prior_state,new_state,prior_state_version,new_state_version,'
+                'prior_family_safety_generation,new_family_safety_generation,'
+                'envelope_digest,reviewed_transition_reference_hmac,created_at) VALUES '
+                "(1,NULL,1,'rebind_required',NULL,NULL,NULL,NULL,NULL,NULL,"
+                ':digest,:review,CURRENT_TIMESTAMP)'
+            ),
+            {'digest': 'b' * 64, 'review': 'd' * 64},
+        )
+        transaction.rollback()
 
     with pytest.raises(IntegrityError), engine.begin() as connection:
         connection.execute(
