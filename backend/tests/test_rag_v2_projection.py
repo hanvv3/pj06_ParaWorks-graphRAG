@@ -44,15 +44,20 @@ from backend.app.rag.evidence_projection import (
 from backend.app.rag.retrieval import RetrievalCandidate, rank_evidence_slots
 from backend.app.rag.serving_contracts import (
     CanonicalServingProjection,
+    ExplicitApprovalProvenance,
     LegacyHumanProvenance,
     RawChunkProvenance,
     RawServingVersionEnvelope,
+    SelectedCitationChild,
     ServingEvidence,
     ServingEvidenceIdentity,
+    TrustedEvidenceLinkIdentity,
     TrustedServingVersionEnvelope,
     build_approval_provenance_hmac,
     build_canonical_citation_projection_hmac,
+    build_evidence_link_set_hmac,
     build_model_content_hmac,
+    build_selected_citation_child_hmac,
     build_serving_identity_hmac,
     build_serving_version_fingerprint,
 )
@@ -212,6 +217,93 @@ def _projection(ordinal: int, *, trusted: bool = False) -> CanonicalServingProje
         revision_id=f'rev-{ordinal}',
         approval_provenance_hmac=approval_hmac,
         evidence_link_set_hmac=None,
+    )
+
+
+def _explicit_projection(
+    *,
+    canonical_source_id: str = '1',
+    selected_link_id: int = 101,
+    selected_source_row_id: int = 1,
+    selected_source_type: str = 'gmail',
+    selected_version: str = 'revision-1',
+) -> CanonicalServingProjection:
+    row = _projection(1, trusted=True)
+    identity = TrustedEvidenceLinkIdentity(
+        trusted_knowledge_evidence_link_id=101,
+        approval_link_id=201,
+        canonical_source_kind='gmail',
+        canonical_source_id=canonical_source_id,
+        canonical_version_or_signature='revision-1',
+        evidence_hash='a' * 64,
+        fingerprint_key_version='task8-key-v1',
+        fingerprint_key_material_verifier='b' * 64,
+    )
+    selected_child = SelectedCitationChild(
+        trusted_knowledge_evidence_link_id=selected_link_id,
+        source_row_id=selected_source_row_id,
+        canonical_source_type=selected_source_type,
+        canonical_version_or_signature=selected_version,
+        review_item_source_pair_ordinal=0,
+    )
+    provenance = ExplicitApprovalProvenance(
+        branch='explicit_approval',
+        approval_link_id=201,
+        review_item_id=1,
+        security_scope_id='workspace-a',
+        promotion_effect_kind='trusted_knowledge',
+        resolution_source='human',
+        claim_fingerprint='c' * 64,
+        approval_permission_level='internal',
+        approval_fingerprint_key_version='task8-key-v1',
+        approval_fingerprint_key_material_verifier='d' * 64,
+        evidence_links=(identity,),
+        selected_citation_child=selected_child,
+    )
+    evidence_link_hmac = 'e' * 64
+    link_set_hmac = build_evidence_link_set_hmac(
+        approval_link_id=201,
+        ordered_link_hmacs=((101, evidence_link_hmac),),
+        settings=_settings(),
+    )
+    approval_hmac = build_approval_provenance_hmac(
+        branch='explicit_approval',
+        approval_fingerprint_key_material_verifier=(
+            provenance.approval_fingerprint_key_material_verifier
+        ),
+        approval_fingerprint_key_version=provenance.approval_fingerprint_key_version,
+        approval_link_id=provenance.approval_link_id,
+        approval_permission=provenance.approval_permission_level,
+        claim_fingerprint=provenance.claim_fingerprint,
+        evidence_link_set_hmac=link_set_hmac,
+        legacy_evidence_pairs_hmac=None,
+        promotion_effect_kind=provenance.promotion_effect_kind,
+        resolution_source=provenance.resolution_source,
+        review_item_id=provenance.review_item_id,
+        security_scope_id=provenance.security_scope_id,
+        selected_citation_child_hmac=build_selected_citation_child_hmac(
+            selected_child, settings=_settings()
+        ),
+        settings=_settings(),
+    )
+    envelope = replace(row.evidence.version_envelope, provenance=provenance)
+    version_hmac = build_serving_version_fingerprint(envelope, settings=_settings())
+    return replace(
+        row,
+        identity=replace(
+            row.identity,
+            serving_version_fingerprint=version_hmac,
+            version_envelope=envelope,
+        ),
+        evidence=replace(
+            row.evidence,
+            serving_version_fingerprint=version_hmac,
+            version_envelope=envelope,
+            provenance=provenance,
+        ),
+        approval_provenance_hmac=approval_hmac,
+        evidence_link_set_hmac=link_set_hmac,
+        evidence_link_hmacs=(evidence_link_hmac,),
     )
 
 
@@ -1263,6 +1355,179 @@ def test_self_consistent_corrupt_cross_field_authority_is_rejected(mutation: str
         ),
     )
     assert result.citations == ()
+
+
+@pytest.mark.parametrize(
+    'mutation',
+    ['support_subclass', 'raw_third_branch', 'raw_canonical_id', 'trusted_canonical_id'],
+)
+def test_branch_literals_and_canonical_serving_ids_are_exact(mutation: str) -> None:
+    trusted = mutation.startswith('trusted')
+    row = _projection(1, trusted=trusted)
+    evidence = row.evidence
+    identity = row.identity
+    envelope = evidence.version_envelope
+    if mutation == 'support_subclass':
+        evidence = replace(
+            evidence, support_mode=_SlotStringSubclass('source_observation')
+        )
+    elif mutation == 'raw_third_branch':
+        evidence = replace(
+            evidence,
+            provenance=replace(evidence.provenance, branch='third_branch'),
+        )
+    else:
+        forged_id = 'forged:1'
+        forged_citation_hmac = (
+            build_canonical_citation_projection_hmac(
+                public_source_id=forged_id,
+                public_source_type=evidence.public_source_type,
+                source_url=row.source_url,
+                source_snippet=row.source_snippet,
+                effective_permission=evidence.effective_permission,
+                settings=_settings(),
+            )
+            if trusted
+            else evidence.canonical_citation_projection_hmac
+        )
+        envelope = replace(envelope, serving_document_id=forged_id)
+        if trusted:
+            envelope = replace(
+                envelope,
+                canonical_citation_projection_hmac=forged_citation_hmac,
+            )
+        evidence = replace(
+            evidence,
+            serving_document_id=forged_id,
+            public_source_id=(forged_id if trusted else evidence.public_source_id),
+            canonical_citation_projection_hmac=forged_citation_hmac,
+        )
+        identity = replace(
+            identity,
+            serving_document_id=forged_id,
+            public_source_id=(forged_id if trusted else identity.public_source_id),
+            canonical_citation_projection_hmac=forged_citation_hmac,
+        )
+    if envelope is not evidence.version_envelope:
+        version_hmac = build_serving_version_fingerprint(envelope, settings=_settings())
+        evidence = replace(
+            evidence,
+            serving_version_fingerprint=version_hmac,
+            version_envelope=envelope,
+            provenance=(
+                envelope.provenance
+                if trusted
+                else replace(evidence.provenance, raw_version=envelope)
+            ),
+            serving_identity_hmac=build_serving_identity_hmac(
+                serving_document_id=evidence.serving_document_id,
+                serving_kind=evidence.serving_kind,
+                settings=_settings(),
+            ),
+        )
+        identity = replace(
+            identity,
+            serving_version_fingerprint=version_hmac,
+            version_envelope=envelope,
+        )
+    current = replace(row, identity=identity, evidence=evidence)
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(), settings=_settings(),
+        resolver=_Resolver({current.evidence.serving_document_id: current}),
+    )
+    slots = rank_evidence_slots((_candidate(current, 0.9),))
+    if mutation == 'support_subclass':
+        slots = (replace(slots[0], support_mode='source_observation'),)
+    result = projector.project_selected(
+        slots,
+        selected_slot_ids=('E1',), scope=_scope(),
+        fence=_fence(hidden_hmac=_hidden().membership_hmac),
+    )
+    assert result.citations == ()
+
+
+@pytest.mark.parametrize(
+    'row',
+    [
+        _explicit_projection(selected_source_row_id=2),
+        _explicit_projection(selected_source_type='drive'),
+        _explicit_projection(selected_version='revision-2'),
+        _explicit_projection(canonical_source_id='01'),
+    ],
+    ids=['source-row', 'source-type', 'version', 'noncanonical-source-id'],
+)
+def test_explicit_selected_child_must_match_exactly_one_evidence_link(
+    row: CanonicalServingProjection,
+) -> None:
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(), settings=_settings(),
+        resolver=_Resolver({row.evidence.serving_document_id: row}),
+    )
+    result = projector.project_selected(
+        rank_evidence_slots((_candidate(row, 0.9),)),
+        selected_slot_ids=('E1',), scope=_scope(),
+        fence=_fence(hidden_hmac=_hidden().membership_hmac),
+    )
+    assert result.citations == ()
+
+
+def test_explicit_selected_child_missing_or_duplicate_link_fails_closed() -> None:
+    row = _explicit_projection()
+    envelope = row.evidence.version_envelope
+    provenance = envelope.provenance
+    assert type(provenance) is ExplicitApprovalProvenance
+    missing = replace(
+        provenance,
+        evidence_links=(
+            replace(
+                provenance.evidence_links[0],
+                trusted_knowledge_evidence_link_id=102,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match='outside the evidence set'):
+        build_serving_version_fingerprint(
+            replace(envelope, provenance=missing), settings=_settings()
+        )
+
+    duplicate = replace(
+        provenance.evidence_links[0],
+        canonical_source_id='2',
+    )
+    duplicate_provenance = replace(
+        provenance,
+        evidence_links=(provenance.evidence_links[0], duplicate),
+    )
+    duplicate_envelope = replace(envelope, provenance=duplicate_provenance)
+    version_hmac = build_serving_version_fingerprint(
+        duplicate_envelope, settings=_settings()
+    )
+    duplicate_row = replace(
+        row,
+        identity=replace(
+            row.identity,
+            serving_version_fingerprint=version_hmac,
+            version_envelope=duplicate_envelope,
+        ),
+        evidence=replace(
+            row.evidence,
+            serving_version_fingerprint=version_hmac,
+            version_envelope=duplicate_envelope,
+            provenance=duplicate_provenance,
+        ),
+        evidence_link_hmacs=('e' * 64, 'f' * 64),
+    )
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(), settings=_settings(),
+        resolver=_Resolver(
+            {duplicate_row.evidence.serving_document_id: duplicate_row}
+        ),
+    )
+    assert projector.project_selected(
+        rank_evidence_slots((_candidate(duplicate_row, 0.9),)),
+        selected_slot_ids=('E1',), scope=_scope(),
+        fence=_fence(hidden_hmac=_hidden().membership_hmac),
+    ).citations == ()
 
 
 class _SlotStringSubclass(str):

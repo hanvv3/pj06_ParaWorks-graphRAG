@@ -18,6 +18,9 @@ from backend.app.agent_runtime.rag_v2_identity import (
     exact_utf8_bytes,
 )
 from backend.app.core.config import Settings
+from backend.app.knowledge.trusted_serving_eligibility import (
+    canonical_knowledge_document_id,
+)
 from backend.app.rag.retrieval import EvidenceSlot, EvidenceSlotId
 from backend.app.rag.serving_contracts import (
     CanonicalServingProjection,
@@ -948,11 +951,21 @@ def _validate_row(
     if evidence.serving_kind == 'raw_chunk':
         envelope = evidence.version_envelope
         branch_valid = bool(
-            evidence.support_mode == 'source_observation'
+            type(evidence.serving_kind) is str
+            and evidence.serving_kind == 'raw_chunk'
+            and type(evidence.support_mode) is str
+            and evidence.support_mode == 'source_observation'
+            and type(evidence.public_source_type) is str
             and evidence.public_source_type in _RAW_PUBLIC_SOURCE_TYPES
             and type(envelope) is RawServingVersionEnvelope
             and type(evidence.provenance) is RawChunkProvenance
+            and type(evidence.provenance.branch) is str
+            and evidence.provenance.branch == 'raw_chunk'
             and evidence.provenance.raw_version is envelope
+            and type(envelope.document_chunk_id) is int
+            and envelope.document_chunk_id > 0
+            and evidence.serving_document_id
+            == f'chunk:{envelope.document_chunk_id}'
             and envelope.serving_document_id == evidence.serving_document_id
             and envelope.public_source_id == evidence.public_source_id
             and envelope.model_content_hmac == evidence.model_content_hmac
@@ -967,11 +980,20 @@ def _validate_row(
     elif evidence.serving_kind == 'trusted_knowledge':
         envelope = evidence.version_envelope
         branch_valid = bool(
-            evidence.support_mode == 'trusted_fact'
+            type(evidence.serving_kind) is str
+            and evidence.serving_kind == 'trusted_knowledge'
+            and type(evidence.support_mode) is str
+            and evidence.support_mode == 'trusted_fact'
             and type(envelope) is TrustedServingVersionEnvelope
+            and type(envelope.knowledge_type) is str
+            and type(envelope.knowledge_id) is int
+            and envelope.knowledge_id > 0
             and envelope.serving_document_id
             == evidence.public_source_id
             == evidence.serving_document_id
+            == canonical_knowledge_document_id(
+                envelope.knowledge_type, envelope.knowledge_id
+            )
             and evidence.public_source_type == envelope.knowledge_type
             and row.public_result_id == envelope.knowledge_id
             and envelope.model_content_hmac == evidence.model_content_hmac
@@ -1062,6 +1084,7 @@ def _trusted_provenance_hmac_is_exact(
                 for value in provenance.evidence_links
             )
             or type(provenance.selected_citation_child) is not SelectedCitationChild
+            or not _selected_child_matches_exact_link(provenance)
             or type(row.evidence_link_hmacs) is not tuple
             or len(row.evidence_link_hmacs) != len(provenance.evidence_links)
         ):
@@ -1128,6 +1151,40 @@ def _trusted_provenance_hmac_is_exact(
         )
         return row.approval_provenance_hmac == expected_approval
     return False
+
+
+def _selected_child_matches_exact_link(
+    provenance: ExplicitApprovalProvenance,
+) -> bool:
+    selected = provenance.selected_citation_child
+    matches = tuple(
+        identity
+        for identity in provenance.evidence_links
+        if identity.trusted_knowledge_evidence_link_id
+        == selected.trusted_knowledge_evidence_link_id
+    )
+    if len(matches) != 1:
+        return False
+    link = matches[0]
+    canonical_source_id = link.canonical_source_id
+    if (
+        type(canonical_source_id) is not str
+        or not canonical_source_id.isascii()
+        or not canonical_source_id.isdecimal()
+    ):
+        return False
+    source_row_id = int(canonical_source_id)
+    return bool(
+        source_row_id > 0
+        and str(source_row_id) == canonical_source_id
+        and type(selected.source_row_id) is int
+        and selected.source_row_id == source_row_id
+        and type(selected.canonical_source_type) is str
+        and selected.canonical_source_type == link.canonical_source_kind
+        and type(selected.canonical_version_or_signature) is str
+        and selected.canonical_version_or_signature
+        == link.canonical_version_or_signature
+    )
 
 
 def _citation(

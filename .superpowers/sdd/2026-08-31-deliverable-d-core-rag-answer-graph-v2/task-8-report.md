@@ -189,3 +189,53 @@
 - Compileall, direct imports, and `git diff --check`: PASS.
 - Existing Slack-data quality failures were not rerun and remain deferred under
   the approved Slack-last decision.
+
+## Review Fix Round 3/5
+
+### Result
+
+- Status: COMPLETE
+- Review base: `d0b382486702a55277ab0bb3cc5ec301854fc2a1`
+- Reviewer findings: 2 Important, 0 Critical, 0 Minor
+- Live/provider/network/Docker/PostgreSQL calls: 0
+- Paid calls/cost: 0 / USD 0
+
+### TDD evidence
+
+- The corrected targeted RED reproduced public projection leakage for raw
+  `support_mode` str subclasses, `RawChunkProvenance.branch='third_branch'`, a
+  self-consistent forged raw serving ID, and self-consistent explicit selected
+  child source-row/type/version/noncanonical-source-ID mismatches.
+- The first missing-link fixture was rejected earlier by the existing serving
+  contract (`selected citation child is outside the evidence set`); the final
+  suite records that existing fail-closed boundary plus duplicate-link rejection.
+- Targeted GREEN: `8 passed in 0.24s`.
+- Final focused Task 8: `63 passed in 1.08s`.
+
+### Corrections
+
+- Raw projection now requires exact built-in branch/support literals,
+  `RawChunkProvenance.branch == 'raw_chunk'`, and exact canonical serving identity
+  `chunk:{document_chunk_id}` in addition to the existing envelope/content/
+  citation/permission HMAC fences.
+- Trusted projection now validates exact knowledge type/ID constituents and
+  reuses `canonical_knowledge_document_id` for the exact
+  `{knowledge_type}:{knowledge_id}` serving/public identity mapping.
+- Explicit selected citation authority now resolves exactly one evidence-link
+  identity by link ID and binds canonical source ID, integer canonicalization,
+  source row, source kind/type, and canonical version/signature. Missing,
+  duplicate, noncanonical, and mismatched links fail closed even when the caller
+  recomputes approval, link-set, and trusted-version HMACs.
+- Approved v1 HMAC payloads and goldens were unchanged.
+
+### Final verification
+
+- Focused Task 8: `63 passed in 1.08s`.
+- Task 4-8 RAG V2/source/trusted: `334 passed, 2 skipped, 10 warnings in 6.82s`.
+  The two skips remain PostgreSQL-only migration gates.
+- Adjacent process-scoped SQLite: `22 passed in 1.46s`.
+- Secret hygiene: `3 passed in 5.25s`.
+- Ruff exact Task 8 paths with `--no-fix`: `All checks passed!`.
+- Compileall, direct imports, and `git diff --check`: PASS.
+- Existing Slack-data quality failures remain deferred under the approved
+  Slack-last decision.
