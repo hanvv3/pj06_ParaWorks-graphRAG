@@ -101,53 +101,90 @@ WITH coarse_candidates AS (
       WHERE strpos(projection.searchable_lower, coarse_term.term) > 0
     )
     AND (
-      CAST(:all_scope AS boolean)
+      (
+        projection.serving_kind = 'raw_chunk'
+        AND cardinality(CAST(:project_keys AS text[])) = 0
+        AND (
+          cardinality(CAST(:source_ids AS bigint[])) = 0
+          OR EXISTS (
+            SELECT 1 FROM document_chunks AS chunk
+            WHERE chunk.id = split_part(
+                    projection.serving_document_id, ':', 2
+                  )::bigint
+              AND chunk.source_id = ANY(CAST(:source_ids AS bigint[]))
+          )
+        )
+      )
       OR (
-        (
+        projection.serving_kind = 'trusted_knowledge'
+        AND (
           cardinality(CAST(:project_keys AS text[])) = 0
           OR (
-            projection.serving_kind = 'trusted_knowledge'
-            AND (
-              (split_part(projection.serving_document_id, ':', 1) = 'decision_record'
-               AND EXISTS (
-                 SELECT 1 FROM decision_records AS knowledge
-                 WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
-                   AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-               ))
-              OR (split_part(projection.serving_document_id, ':', 1) = 'history_event'
-               AND EXISTS (
-                 SELECT 1 FROM history_events AS knowledge
-                 WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
-                   AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-               ))
-              OR (split_part(projection.serving_document_id, ':', 1) = 'timeline_event'
-               AND EXISTS (
-                 SELECT 1 FROM timeline_events AS knowledge
-                 WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
-                   AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-               ))
-              OR (split_part(projection.serving_document_id, ':', 1) = 'todo'
-               AND EXISTS (
-                 SELECT 1 FROM todos AS knowledge
-                 WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
-                   AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
-               ))
-            )
+            (split_part(projection.serving_document_id, ':', 1) = 'decision_record'
+             AND EXISTS (
+               SELECT 1 FROM decision_records AS knowledge
+               WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
+                 AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
+             ))
+            OR (split_part(projection.serving_document_id, ':', 1) = 'history_event'
+             AND EXISTS (
+               SELECT 1 FROM history_events AS knowledge
+               WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
+                 AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
+             ))
+            OR (split_part(projection.serving_document_id, ':', 1) = 'timeline_event'
+             AND EXISTS (
+               SELECT 1 FROM timeline_events AS knowledge
+               WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
+                 AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
+             ))
+            OR (split_part(projection.serving_document_id, ':', 1) = 'todo'
+             AND EXISTS (
+               SELECT 1 FROM todos AS knowledge
+               WHERE knowledge.id = split_part(projection.serving_document_id, ':', 2)::bigint
+                 AND knowledge.project_key = ANY(CAST(:project_keys AS text[]))
+             ))
           )
         )
         AND (
-          cardinality(CAST(:source_ids AS bigint[])) = 0
-          OR (
-            projection.serving_kind = 'raw_chunk'
-            AND EXISTS (
-              SELECT 1 FROM document_chunks AS chunk
-              WHERE chunk.id = split_part(projection.serving_document_id, ':', 2)::bigint
-                AND chunk.source_id = ANY(CAST(:source_ids AS bigint[]))
-            )
+          EXISTS (
+            SELECT 1
+            FROM trusted_knowledge_approval_links AS approval
+            WHERE (
+                (split_part(projection.serving_document_id, ':', 1)
+                   = 'decision_record'
+                 AND approval.knowledge_type IN ('decision', 'decision_record'))
+                OR (
+                  split_part(projection.serving_document_id, ':', 1)
+                    <> 'decision_record'
+                  AND approval.knowledge_type = split_part(
+                        projection.serving_document_id, ':', 1
+                      )
+                )
+              )
+              AND approval.knowledge_id = split_part(
+                    projection.serving_document_id, ':', 2
+                  )::bigint
+              AND approval.active IS TRUE
+              AND approval.security_scope_id = :workspace_scope_id
+              AND approval.resolution_source IN ('human', 'auto_policy')
+              AND EXISTS (
+                SELECT 1 FROM trusted_knowledge_evidence_links AS child
+                WHERE child.approval_link_id = approval.id
+              )
+              AND (
+                cardinality(CAST(:source_id_texts AS text[])) = 0
+                OR NOT EXISTS (
+                  SELECT 1 FROM trusted_knowledge_evidence_links AS child
+                  WHERE child.approval_link_id = approval.id
+                    AND child.canonical_source_id
+                        <> ALL(CAST(:source_id_texts AS text[]))
+                )
+              )
           )
           OR (
-            projection.serving_kind = 'trusted_knowledge'
-            AND EXISTS (
+            cardinality(CAST(:source_id_texts AS text[])) = 0
+            AND NOT EXISTS (
               SELECT 1
               FROM trusted_knowledge_approval_links AS approval
               WHERE (
@@ -166,17 +203,6 @@ WITH coarse_candidates AS (
                       projection.serving_document_id, ':', 2
                     )::bigint
                 AND approval.active IS TRUE
-                AND approval.security_scope_id = :workspace_scope_id
-                AND EXISTS (
-                  SELECT 1 FROM trusted_knowledge_evidence_links AS child
-                  WHERE child.approval_link_id = approval.id
-                )
-                AND NOT EXISTS (
-                  SELECT 1 FROM trusted_knowledge_evidence_links AS child
-                  WHERE child.approval_link_id = approval.id
-                    AND child.canonical_source_id
-                        <> ALL(CAST(:source_id_texts AS text[]))
-                )
             )
           )
         )
@@ -272,7 +298,6 @@ class SqlAlchemyKeywordSearchStore:
                     'key_material_verifier': fingerprint_key_material_verifier(
                         self._settings.agent_runtime_fingerprint_secret
                     ),
-                    'all_scope': scope.resource_scope_mode == 'all_current_scope',
                     'project_keys': [
                         value.removeprefix('project_key:')
                         for value in scope.project_constraints

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, dataclass, replace
 from decimal import Decimal
 
 import pytest
@@ -86,6 +86,77 @@ class _FakeStore:
         if self.failure is not None:
             raise self.failure
         return self.candidates
+
+
+@dataclass(frozen=True, slots=True)
+class _OracleApprovalLink:
+    workspace_scope_id: str
+    active: bool
+    resolution_source: str
+    child_source_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _OracleResourceRow:
+    serving_document_id: str
+    serving_kind: str
+    project_key: str | None
+    raw_source_id: int | None
+    score: float
+    links: tuple[_OracleApprovalLink, ...]
+
+
+def _independent_resource_coarse_eligible(
+    row: _OracleResourceRow,
+    scope: SecurityScope,
+) -> bool:
+    allowed_projects = {
+        value.removeprefix('project_key:') for value in scope.project_constraints
+    }
+    allowed_sources = {
+        int(value.removeprefix('source_pk:')) for value in scope.source_constraints
+    }
+    if row.serving_kind == 'raw_chunk':
+        return bool(
+            not allowed_projects
+            and (not allowed_sources or row.raw_source_id in allowed_sources)
+        )
+    if row.serving_kind != 'trusted_knowledge':
+        return False
+    if allowed_projects and row.project_key not in allowed_projects:
+        return False
+    active_links = tuple(link for link in row.links if link.active)
+    if not active_links:
+        return not allowed_sources
+    return any(
+        link.workspace_scope_id == scope.workspace_scope_id
+        and link.resolution_source in {'human', 'auto_policy'}
+        and bool(link.child_source_ids)
+        and (
+            not allowed_sources
+            or all(source_id in allowed_sources for source_id in link.child_source_ids)
+        )
+        for link in active_links
+    )
+
+
+def _independent_top_50(
+    rows: tuple[_OracleResourceRow, ...],
+    scope: SecurityScope,
+) -> tuple[_OracleResourceRow, ...]:
+    eligible = tuple(
+        row for row in rows if _independent_resource_coarse_eligible(row, scope)
+    )
+    return tuple(
+        sorted(
+            eligible,
+            key=lambda row: (
+                0 if row.serving_kind == 'trusted_knowledge' else 1,
+                -row.score,
+                row.serving_document_id,
+            ),
+        )[:50]
+    )
 
 
 def _settings() -> Settings:
@@ -602,6 +673,117 @@ def test_postgresql_query_scores_before_limit_and_uses_literal_complete_superset
         'child.canonical_source_id '
         '<> ALL(CAST(:source_id_texts AS text[]))'
     ) in sql
+    assert ':all_scope' not in sql
+    assert 'approval.security_scope_id = :workspace_scope_id' in sql
+    assert 'approval.active IS TRUE' in sql
+    assert sql.count(
+        'FROM trusted_knowledge_approval_links AS approval'
+    ) == 2
+    assert (
+        'AND NOT EXISTS ( SELECT 1 '
+        'FROM trusted_knowledge_approval_links AS approval'
+    ) in sql
+
+
+@pytest.mark.parametrize(
+    'scope',
+    (
+        _scope(allowed_permission_levels=('public',)),
+        _scope(
+            resource_scope_mode='constrained',
+            project_constraints=('project_key:project-a',),
+            allowed_permission_levels=('public',),
+        ),
+    ),
+)
+def test_independent_resource_oracle_excludes_foreign_workspace_before_top_50(
+    scope: SecurityScope,
+) -> None:
+    foreign = tuple(
+        _OracleResourceRow(
+            serving_document_id=f'history_event:{index}',
+            serving_kind='trusted_knowledge',
+            project_key='project-a',
+            raw_source_id=None,
+            score=3.0,
+            links=(
+                _OracleApprovalLink(
+                    workspace_scope_id='workspace-foreign',
+                    active=True,
+                    resolution_source='human',
+                    child_source_ids=(1,),
+                ),
+            ),
+        )
+        for index in range(1, 61)
+    )
+    valid = tuple(
+        _OracleResourceRow(
+            serving_document_id=f'history_event:{index}',
+            serving_kind='trusted_knowledge',
+            project_key='project-a',
+            raw_source_id=None,
+            score=1.0,
+            links=(
+                _OracleApprovalLink(
+                    workspace_scope_id=scope.workspace_scope_id,
+                    active=True,
+                    resolution_source='auto_policy',
+                    child_source_ids=(1,),
+                ),
+            ),
+        )
+        for index in range(101, 152)
+    )
+
+    window = _independent_top_50((*foreign, *valid), scope)
+
+    assert len(window) == 50
+    assert all(row.serving_document_id.startswith('history_event:1') for row in window)
+    assert not any(row in foreign for row in window)
+
+
+def test_independent_resource_oracle_keeps_explicit_and_legacy_branches_disjoint() -> None:
+    all_scope = _scope(allowed_permission_levels=('public',))
+    source_scope = _scope(
+        resource_scope_mode='constrained',
+        source_constraints=('source_pk:7',),
+        allowed_permission_levels=('public',),
+    )
+    foreign_explicit = _OracleResourceRow(
+        serving_document_id='history_event:1',
+        serving_kind='trusted_knowledge',
+        project_key='project-a',
+        raw_source_id=None,
+        score=2.0,
+        links=(
+            _OracleApprovalLink(
+                workspace_scope_id='workspace-foreign',
+                active=True,
+                resolution_source='human',
+                child_source_ids=(7,),
+            ),
+        ),
+    )
+    current_explicit = replace(
+        foreign_explicit,
+        links=(
+            replace(
+                foreign_explicit.links[0],
+                workspace_scope_id=all_scope.workspace_scope_id,
+            ),
+        ),
+    )
+    legacy = replace(foreign_explicit, serving_document_id='history_event:2', links=())
+
+    assert not _independent_resource_coarse_eligible(foreign_explicit, all_scope)
+    assert _independent_resource_coarse_eligible(current_explicit, all_scope)
+    assert _independent_resource_coarse_eligible(legacy, all_scope)
+    assert not _independent_resource_coarse_eligible(legacy, source_scope)
+    assert not _independent_resource_coarse_eligible(
+        replace(current_explicit, links=(replace(current_explicit.links[0], child_source_ids=(8,)),)),
+        source_scope,
+    )
 
 
 def test_sqlite_oracle_uses_canonical_projection_and_permission_second_stage(
