@@ -113,6 +113,15 @@ class _ExplodingClassValue:
         raise RuntimeError('custom value class must be sanitized')
 
 
+class _SecretValueErrorClassValue:
+    @property
+    def __class__(self):
+        try:
+            raise RuntimeError('inner-secret')
+        except RuntimeError as exc:
+            raise ValueError('provider-secret') from exc
+
+
 class _ExplodingItemsMapping(Mapping[str, object]):
     def __getitem__(self, key: str) -> object:
         raise KeyError(key)
@@ -300,10 +309,57 @@ def test_usage_parser_sanitizes_custom_detail_type_failures(
 
 
 @pytest.mark.parametrize(
-    'case',
-    ('message_property', 'chat_items', 'embedding_items'),
+    ('position', 'expected_message'),
+    (
+        ('chat_primary', 'chat provider usage is invalid'),
+        ('chat_response', 'chat provider usage is invalid'),
+        ('embedding', 'embedding provider usage is invalid'),
+    ),
 )
-def test_public_usage_parser_boundary_returns_only_value_error(case: str) -> None:
+def test_public_usage_boundary_redacts_value_error_message_and_cause(
+    position: str,
+    expected_message: str,
+) -> None:
+    detail = _SecretValueErrorClassValue()
+
+    with pytest.raises(ValueError) as exc_info:
+        if position == 'chat_primary':
+            StrictChatUsageParser().parse_message(_message(primary={
+                'input_tokens': 12,
+                'output_tokens': 3,
+                'total_tokens': 15,
+                'provider_detail': detail,
+            }))
+        elif position == 'chat_response':
+            StrictChatUsageParser().parse_message(_message(response={
+                'provider_detail': detail,
+            }))
+        else:
+            StrictEmbeddingUsageParser().parse_usage({
+                'prompt_tokens': 4,
+                'total_tokens': 4,
+                'provider_detail': detail,
+            })
+
+    assert type(exc_info.value) is ValueError
+    assert str(exc_info.value) == expected_message
+    assert exc_info.value.__cause__ is None
+    assert 'provider-secret' not in str(exc_info.value)
+    assert 'inner-secret' not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ('case', 'expected_message'),
+    (
+        ('message_property', 'chat provider usage is invalid'),
+        ('chat_items', 'chat provider usage is invalid'),
+        ('embedding_items', 'embedding provider usage is invalid'),
+    ),
+)
+def test_public_usage_parser_boundary_returns_only_value_error(
+    case: str,
+    expected_message: str,
+) -> None:
     try:
         if case == 'message_property':
             StrictChatUsageParser().parse_message(_ExplodingUsageMessage())
@@ -315,7 +371,9 @@ def test_public_usage_parser_boundary_returns_only_value_error(case: str) -> Non
             StrictEmbeddingUsageParser().parse_usage(_ExplodingItemsMapping())
     except Exception as exc:
         assert type(exc) is ValueError
+        assert str(exc) == expected_message
         assert exc.__cause__ is None
+        assert 'must be sanitized' not in str(exc)
     else:
         pytest.fail('malformed provider usage must be refused')
 

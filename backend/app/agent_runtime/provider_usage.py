@@ -76,8 +76,6 @@ class StrictChatUsageParser:
     def parse_message(self, message: object) -> StrictProviderUsage:
         try:
             return self._parse_message(message)
-        except ValueError:
-            raise
         except Exception:
             raise ValueError('chat provider usage is invalid') from None
 
@@ -155,8 +153,6 @@ class StrictEmbeddingUsageParser:
     def parse_usage(self, usage: object) -> StrictProviderUsage:
         try:
             return self._parse_usage(usage)
-        except ValueError:
-            raise
         except Exception:
             raise ValueError('embedding provider usage is invalid') from None
 
