@@ -641,7 +641,7 @@ def build_approval_provenance_hmac(
             )
         )
         or legacy_evidence_pairs_hmac is None
-        or selected_citation_child_hmac is None
+        or selected_citation_child_hmac is not None
     ):
         raise ValueError('legacy approval provenance is incomplete')
     return _fingerprint(

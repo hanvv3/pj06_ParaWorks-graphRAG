@@ -166,8 +166,12 @@ class TrustedServingEligibilityService:
                     knowledge_id=knowledge_id,
                 ):
                     legacy_item = self._db.get(ReviewItem, legacy_id)
-                    if legacy_item is not None:
-                        permission_levels.append(legacy_item.permission_level)
+                    if (
+                        legacy_item is None
+                        or legacy_item.permission_level not in _PERMISSION_RANK
+                    ):
+                        return _ineligible()
+                    permission_levels.append(legacy_item.permission_level)
                 return TrustedServingEligibility(
                     eligible=True,
                     effective_permission=_strictest_permission(permission_levels),
@@ -498,6 +502,10 @@ def canonical_evidence_version_is_current(
 
 
 def _strictest_permission(permission_levels: list[str]) -> str:
+    if not permission_levels or any(
+        value not in _PERMISSION_RANK for value in permission_levels
+    ):
+        raise ValueError('trusted permission level is unknown')
     return max(permission_levels, key=_PERMISSION_RANK.__getitem__)
 
 

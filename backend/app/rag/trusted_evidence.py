@@ -604,7 +604,7 @@ class TrustedServingEnvelopeResolver:
             resolution_source=None,
             review_item_id=item.id,
             security_scope_id=None,
-            selected_citation_child_hmac=citation_hmac,
+            selected_citation_child_hmac=None,
             settings=self._settings,
         )
         return _build_trusted_envelope(
@@ -624,8 +624,12 @@ class TrustedServingEnvelopeResolver:
 class TrustedEvidenceAuthorizer:
     """Classify trusted access without projecting any citation/source bytes."""
 
-    def __init__(self, *, db: Session) -> None:
+    def __init__(self, *, db: Session, settings: Settings) -> None:
         self._db = db
+        self._resolver = TrustedServingEnvelopeResolver(
+            db=db,
+            settings=settings,
+        )
 
     def classify_access(
         self,
@@ -633,25 +637,13 @@ class TrustedEvidenceAuthorizer:
         evidence: TrustedServingEnvelope,
     ) -> EvidenceAccessClassification:
         permission = known_permission(evidence.identity.effective_permission)
-        globally_eligible = _trusted_envelope_is_consistent(evidence)
-        target = None
-        if globally_eligible:
-            target = self._db.get(
-                knowledge_model_for_type(evidence.trusted_version.knowledge_type),
-                evidence.trusted_version.knowledge_id,
-            )
-            current = TrustedServingEligibilityService(
-                self._db
-            ).for_serving_envelope(
+        fresh = None
+        if _trusted_envelope_is_consistent(evidence):
+            fresh = self._resolver.resolve_for_index(
                 evidence.trusted_version.knowledge_type,
                 evidence.trusted_version.knowledge_id,
             )
-            globally_eligible = bool(
-                target is not None
-                and current.eligible
-                and current.effective_permission == permission
-            )
-        if not globally_eligible:
+        if fresh is None or not _same_trusted_authority(evidence, fresh):
             return EvidenceAccessClassification(
                 global_eligibility='ineligible',
                 resource_scope='invalid_scope',
@@ -661,20 +653,20 @@ class TrustedEvidenceAuthorizer:
                     else 'denied_known'
                 ),
             )
-        resource_scope = _trusted_resource_scope(
-            scope=scope,
-            target=target,
-            provenance=evidence.evidence.provenance,
-        )
         if permission is None:
             visibility = 'unknown_permission'
         elif permission in scope.allowed_permission_levels:
             visibility = 'visible'
         else:
             visibility = 'denied_known'
+        scoped = self._resolver.resolve_for_scope(
+            fresh.trusted_version.knowledge_type,
+            fresh.trusted_version.knowledge_id,
+            scope=scope,
+        )
         return EvidenceAccessClassification(
             global_eligibility='eligible',
-            resource_scope=resource_scope,
+            resource_scope='in_scope' if scoped is not None else 'out_of_scope',
             permission_visibility=visibility,
         )
 
@@ -718,21 +710,31 @@ class ServingEvidenceResolver:
         if parsed is None:
             return None
         knowledge_type, knowledge_id = parsed
-        envelope = TrustedServingEnvelopeResolver(
+        envelope_resolver = TrustedServingEnvelopeResolver(
             db=db,
             settings=self._settings,
-        ).resolve_for_scope(
+        )
+        actorless = envelope_resolver.resolve_for_index(
+            knowledge_type,
+            knowledge_id,
+        )
+        if actorless is None or actorless.identity != identity:
+            return None
+        classification = TrustedEvidenceAuthorizer(
+            db=db,
+            settings=self._settings,
+        ).classify_access(
+            scope,
+            actorless,
+        )
+        if not _is_visible(classification):
+            return None
+        scoped = envelope_resolver.resolve_for_scope(
             knowledge_type,
             knowledge_id,
             scope=scope,
         )
-        if envelope is None or envelope.identity != identity:
-            return None
-        classification = TrustedEvidenceAuthorizer(db=db).classify_access(
-            scope,
-            envelope,
-        )
-        return envelope.evidence if _is_visible(classification) else None
+        return scoped.evidence if scoped is not None else None
 
     def resolve_trusted_candidate(
         self,
@@ -742,21 +744,31 @@ class ServingEvidenceResolver:
         knowledge_id: int,
         scope: SecurityScope,
     ) -> ServingEvidence | None:
-        envelope = TrustedServingEnvelopeResolver(
+        envelope_resolver = TrustedServingEnvelopeResolver(
             db=db,
             settings=self._settings,
-        ).resolve_for_scope(
+        )
+        actorless = envelope_resolver.resolve_for_index(
+            knowledge_type,
+            knowledge_id,
+        )
+        if actorless is None:
+            return None
+        classification = TrustedEvidenceAuthorizer(
+            db=db,
+            settings=self._settings,
+        ).classify_access(
+            scope,
+            actorless,
+        )
+        if not _is_visible(classification):
+            return None
+        scoped = envelope_resolver.resolve_for_scope(
             knowledge_type,
             knowledge_id,
             scope=scope,
         )
-        if envelope is None:
-            return None
-        classification = TrustedEvidenceAuthorizer(db=db).classify_access(
-            scope,
-            envelope,
-        )
-        return envelope.evidence if _is_visible(classification) else None
+        return scoped.evidence if scoped is not None else None
 
 
 def _build_trusted_envelope(
@@ -968,6 +980,17 @@ def _trusted_envelope_is_consistent(envelope: TrustedServingEnvelope) -> bool:
         == trusted_version.canonical_citation_projection_hmac
         and identity.serving_version_fingerprint
         == evidence.serving_version_fingerprint
+    )
+
+
+def _same_trusted_authority(
+    supplied: TrustedServingEnvelope,
+    fresh: TrustedServingEnvelope,
+) -> bool:
+    return bool(
+        supplied.identity == fresh.identity
+        and supplied.trusted_version == fresh.trusted_version
+        and supplied.evidence.provenance == fresh.evidence.provenance
     )
 
 

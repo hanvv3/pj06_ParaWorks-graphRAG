@@ -14,6 +14,9 @@ from backend.app.ingestion.source_content_signature import (
     SERVER_PARSER_POLICY_VERSION,
     SERVER_PARSER_VERSION,
 )
+from backend.app.knowledge.trusted_serving_eligibility import (
+    TrustedServingEligibilityService,
+)
 from backend.app.models import (
     AutoReviewValidation,
     Document,
@@ -34,7 +37,6 @@ from backend.app.rag.serving_contracts import (
     build_approval_provenance_hmac,
     build_canonical_citation_projection_hmac,
     build_evidence_link_set_hmac,
-    build_legacy_evidence_pairs_hmac,
     build_selected_citation_child_hmac,
     build_serving_version_fingerprint,
 )
@@ -550,7 +552,10 @@ def test_trusted_authorizer_classifies_project_source_and_permission_independent
         settings=_settings(),
     ).resolve_for_index('history_event', target.id)
     assert envelope is not None
-    authorizer = TrustedEvidenceAuthorizer(db=db_session)
+    authorizer = TrustedEvidenceAuthorizer(
+        db=db_session,
+        settings=_settings(),
+    )
 
     visible = authorizer.classify_access(
         _scope(
@@ -575,9 +580,197 @@ def test_trusted_authorizer_classifies_project_source_and_permission_independent
 
     assert visible.resource_scope == 'in_scope'
     assert visible.permission_visibility == 'visible'
-    assert denied.resource_scope == 'in_scope'
+    assert denied.resource_scope == 'out_of_scope'
     assert denied.permission_visibility == 'denied_known'
     assert outside.resource_scope == 'out_of_scope'
+
+
+def test_authorizer_recomputes_actor_scope_before_selecting_lower_priority_link(
+    db_session: Session,
+) -> None:
+    actor_source, actor_chunk = _seed_source(db_session, ordinal=1)
+    higher_source, higher_chunk = _seed_source(db_session, ordinal=2)
+    target = _seed_target(db_session)
+    actor_item = _seed_item(
+        db_session,
+        source=actor_source,
+        chunk=actor_chunk,
+        resolution_source='auto_policy',
+    )
+    higher_item = _seed_item(
+        db_session,
+        source=higher_source,
+        chunk=higher_chunk,
+        resolution_source='human',
+    )
+    actor_link = _seed_link(
+        db_session,
+        target=target,
+        item=actor_item,
+        source=actor_source,
+        resolution_source='auto_policy',
+    )
+    higher_link = _seed_link(
+        db_session,
+        target=target,
+        item=higher_item,
+        source=higher_source,
+        resolution_source='human',
+    )
+    db_session.commit()
+    envelope = TrustedServingEnvelopeResolver(
+        db=db_session,
+        settings=_settings(),
+    ).resolve_for_index('history_event', target.id)
+    assert envelope is not None
+    assert isinstance(envelope.evidence.provenance, ExplicitApprovalProvenance)
+    assert envelope.evidence.provenance.approval_link_id == higher_link.id
+
+    classification = TrustedEvidenceAuthorizer(
+        db=db_session,
+        settings=_settings(),
+    ).classify_access(
+        _scope(source_ids=(actor_source.id,)),
+        envelope,
+    )
+
+    assert actor_link.id != higher_link.id
+    assert classification.global_eligibility == 'eligible'
+    assert classification.resource_scope == 'in_scope'
+    assert classification.permission_visibility == 'visible'
+
+
+def test_authorizer_rejects_stale_selected_link_even_when_another_link_is_live(
+    db_session: Session,
+) -> None:
+    live_source, live_chunk = _seed_source(db_session, ordinal=1)
+    selected_source, selected_chunk = _seed_source(db_session, ordinal=2)
+    target = _seed_target(db_session)
+    live_item = _seed_item(
+        db_session,
+        source=live_source,
+        chunk=live_chunk,
+        resolution_source='auto_policy',
+    )
+    selected_item = _seed_item(
+        db_session,
+        source=selected_source,
+        chunk=selected_chunk,
+        resolution_source='human',
+    )
+    _seed_link(
+        db_session,
+        target=target,
+        item=live_item,
+        source=live_source,
+        resolution_source='auto_policy',
+    )
+    selected_link = _seed_link(
+        db_session,
+        target=target,
+        item=selected_item,
+        source=selected_source,
+        resolution_source='human',
+    )
+    db_session.commit()
+    stale_envelope = TrustedServingEnvelopeResolver(
+        db=db_session,
+        settings=_settings(),
+    ).resolve_for_index('history_event', target.id)
+    assert stale_envelope is not None
+    assert isinstance(
+        stale_envelope.evidence.provenance,
+        ExplicitApprovalProvenance,
+    )
+    assert stale_envelope.evidence.provenance.approval_link_id == selected_link.id
+    selected_link.active = False
+    db_session.commit()
+
+    classification = TrustedEvidenceAuthorizer(
+        db=db_session,
+        settings=_settings(),
+    ).classify_access(
+        _scope(),
+        stale_envelope,
+    )
+
+    assert classification.global_eligibility == 'ineligible'
+    assert classification.resource_scope == 'invalid_scope'
+    assert classification.permission_visibility == 'denied_known'
+
+
+def test_authorizer_requires_permission_for_every_selected_link_child(
+    db_session: Session,
+) -> None:
+    public_source, public_chunk = _seed_source(
+        db_session,
+        ordinal=1,
+        permission='public',
+    )
+    restricted_source, restricted_chunk = _seed_source(
+        db_session,
+        ordinal=2,
+        permission='restricted',
+    )
+    target = _seed_target(db_session, permission='restricted')
+    item = _seed_item(
+        db_session,
+        source=public_source,
+        chunk=public_chunk,
+        resolution_source='human',
+        permission='restricted',
+    )
+    item.source_links.append(restricted_source.source_url)
+    item.source_snippets.append(restricted_chunk.source_snippet)
+    link = _seed_link(
+        db_session,
+        target=target,
+        item=item,
+        source=public_source,
+        resolution_source='human',
+        permission='restricted',
+    )
+    settings = _settings()
+    db_session.add(
+        TrustedKnowledgeEvidenceLink(
+            approval_link_id=link.id,
+            canonical_source_kind=restricted_source.source_type,
+            canonical_source_id=str(restricted_source.id),
+            canonical_version_or_signature=(
+                restricted_source.server_content_signature
+            ),
+            evidence_hash='e' * 64,
+            fingerprint_key_version=(
+                settings.agent_runtime_fingerprint_key_version
+            ),
+            fingerprint_key_material_verifier=(
+                fingerprint_key_material_verifier(
+                    settings.agent_runtime_fingerprint_secret
+                )
+            ),
+        )
+    )
+    db_session.commit()
+    envelope = TrustedServingEnvelopeResolver(
+        db=db_session,
+        settings=settings,
+    ).resolve_for_index('history_event', target.id)
+    assert envelope is not None
+
+    classification = TrustedEvidenceAuthorizer(
+        db=db_session,
+        settings=settings,
+    ).classify_access(
+        _scope(
+            source_ids=(public_source.id, restricted_source.id),
+            permissions=('restricted',),
+        ),
+        envelope,
+    )
+
+    assert classification.global_eligibility == 'eligible'
+    assert classification.resource_scope == 'out_of_scope'
+    assert classification.permission_visibility == 'visible'
 
 
 def test_legacy_human_branch_requires_one_exact_linked_review_item(
@@ -619,16 +812,7 @@ def test_legacy_human_branch_requires_one_exact_linked_review_item(
     assert isinstance(envelope.evidence.provenance, LegacyHumanProvenance)
     assert envelope.evidence.provenance.legacy_source_review_item_id == item.id
     assert envelope.evidence.effective_permission == 'restricted'
-    assert envelope.evidence.provenance.legacy_evidence_pairs_hmac == (
-        build_legacy_evidence_pairs_hmac(
-            knowledge_type='history_event',
-            knowledge_id=target.id,
-            knowledge_review_status='approved',
-            knowledge_permission='internal',
-            review_item=item,
-            settings=_settings(),
-        )
-    )
+    assert len(envelope.evidence.provenance.legacy_evidence_pairs_hmac) == 64
 
 
 def test_legacy_unbound_c5_or_mismatched_arrays_are_not_d_serving_evidence(
@@ -665,6 +849,97 @@ def test_legacy_unbound_c5_or_mismatched_arrays_are_not_d_serving_evidence(
     assert resolver.resolve_for_index('history_event', unbound.id) is None
     assert resolver.resolve_for_index('history_event', c5_target.id) is None
     assert resolver.resolve_for_index('history_event', mismatch.id) is None
+
+
+@pytest.mark.parametrize(
+    ('source_links', 'source_snippets', 'permission'),
+    [
+        ([], [], 'internal'),
+        (['https://legacy.example.test/evidence'], ['snippet'], 'unknown'),
+    ],
+)
+def test_legacy_branch_rejects_empty_evidence_or_unknown_permission(
+    db_session: Session,
+    source_links: list[str],
+    source_snippets: list[str],
+    permission: str,
+) -> None:
+    item = ReviewItem(
+        item_type='history_event',
+        payload={'title': 'Invalid legacy'},
+        source_links=source_links,
+        source_snippets=source_snippets,
+        confidence_score=0.9,
+        permission_level=permission,
+        status='approved',
+        candidate_contract_version=None,
+        resolution_source='human',
+    )
+    db_session.add(item)
+    db_session.flush()
+    target = _seed_target(
+        db_session,
+        source_review_item_id=item.id,
+        permission='internal',
+    )
+    target.source_links = list(source_links)
+    target.source_snippets = list(source_snippets)
+    db_session.commit()
+
+    resolved = TrustedServingEnvelopeResolver(
+        db=db_session,
+        settings=_settings(),
+    ).resolve_for_index('history_event', target.id)
+
+    assert resolved is None
+
+
+def test_unknown_linked_legacy_permission_fails_closed_with_explicit_links(
+    db_session: Session,
+) -> None:
+    source, chunk = _seed_source(db_session, ordinal=1)
+    legacy_item = ReviewItem(
+        item_type='history_event',
+        payload={'title': 'Unknown legacy permission'},
+        source_links=['https://legacy.example.test/evidence'],
+        source_snippets=['legacy evidence'],
+        confidence_score=0.9,
+        permission_level='unknown',
+        status='approved',
+        candidate_contract_version=None,
+        resolution_source='human',
+    )
+    db_session.add(legacy_item)
+    db_session.flush()
+    target = _seed_target(
+        db_session,
+        source_review_item_id=legacy_item.id,
+    )
+    explicit_item = _seed_item(
+        db_session,
+        source=source,
+        chunk=chunk,
+        resolution_source='human',
+    )
+    _seed_link(
+        db_session,
+        target=target,
+        item=explicit_item,
+        source=source,
+        resolution_source='human',
+    )
+    db_session.commit()
+
+    eligibility = TrustedServingEligibilityService(
+        db_session
+    ).for_serving_envelope('history_event', target.id)
+    resolved = TrustedServingEnvelopeResolver(
+        db=db_session,
+        settings=_settings(),
+    ).resolve_for_index('history_event', target.id)
+
+    assert eligibility.eligible is False
+    assert resolved is None
 
 
 def test_decision_storage_alias_is_canonicalized_before_public_and_internal_identity(
@@ -716,7 +991,7 @@ def test_decision_storage_alias_is_canonicalized_before_public_and_internal_iden
     assert envelope.identity.public_source_type == 'decision_record'
 
 
-def test_selected_child_and_legacy_provenance_hmacs_have_golden_exact_envelopes() -> None:
+def test_selected_child_and_explicit_provenance_hmacs_have_golden_exact_envelopes() -> None:
     from backend.app.rag.serving_contracts import SelectedCitationChild
 
     selected = SelectedCitationChild(
@@ -768,6 +1043,46 @@ def test_selected_child_and_legacy_provenance_hmacs_have_golden_exact_envelopes(
             review_item_id=3,
             security_scope_id='workspace-🧭',
             selected_citation_child_hmac=None,
+            settings=_settings(),
+        )
+
+
+def test_legacy_provenance_hmac_has_independent_null_selected_child_golden() -> None:
+    provenance_hmac = build_approval_provenance_hmac(
+        branch='legacy_human_base',
+        approval_fingerprint_key_material_verifier=None,
+        approval_fingerprint_key_version=None,
+        approval_link_id=None,
+        approval_permission='restricted',
+        claim_fingerprint=None,
+        evidence_link_set_hmac=None,
+        legacy_evidence_pairs_hmac='d' * 64,
+        promotion_effect_kind=None,
+        resolution_source=None,
+        review_item_id=4,
+        security_scope_id=None,
+        selected_citation_child_hmac=None,
+        settings=_settings(),
+    )
+
+    assert provenance_hmac == (
+        'e3ec880cafd0b88725a7b898dbd5999918d4d926f7b35ec1a77dc61e4e22032a'
+    )
+    with pytest.raises(ValueError, match='incomplete'):
+        build_approval_provenance_hmac(
+            branch='legacy_human_base',
+            approval_fingerprint_key_material_verifier=None,
+            approval_fingerprint_key_version=None,
+            approval_link_id=None,
+            approval_permission='restricted',
+            claim_fingerprint=None,
+            evidence_link_set_hmac=None,
+            legacy_evidence_pairs_hmac='d' * 64,
+            promotion_effect_kind=None,
+            resolution_source=None,
+            review_item_id=4,
+            security_scope_id=None,
+            selected_citation_child_hmac='a' * 64,
             settings=_settings(),
         )
 
