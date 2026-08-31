@@ -239,3 +239,53 @@
 - Compileall, direct imports, and `git diff --check`: PASS.
 - Existing Slack-data quality failures remain deferred under the approved
   Slack-last decision.
+
+## Review Fix Round 4/5
+
+### Result
+
+- Status: COMPLETE
+- Review base: `c42d0d1c840391e028d6cd73316feccfbf90d116`
+- Reviewer findings: 1 Important, 0 Critical, 0 Minor
+- Live/provider/network/Docker/PostgreSQL calls: 0
+- Paid calls/cost: 0 / USD 0
+
+### TDD evidence
+
+- RED reproduced all 41 equality-based authority bypasses: every direct
+  `ServingEvidenceIdentity` string constituent for raw and trusted rows, every
+  raw nested version-envelope string/integer constituent, every trusted nested
+  envelope string constituent, raw/trusted bool-as-integer values, and a custom
+  equality impostor. Each corrupt fresh resolver row emitted one citation before
+  the production correction.
+- Targeted GREEN: `41 passed, 63 deselected in 0.54s`.
+- Final focused Task 8: `104 passed in 1.47s`.
+
+### Correction
+
+- Final projection now validates the resolver-owned identity before any
+  dataclass equality comparison. Every identity scalar must be an exact built-in
+  string and every nested canonical identifier must be an exact built-in
+  positive integer, excluding bool and subclasses.
+- Raw and trusted identity branches require exact allowed literals and exact
+  envelope dataclass types. Raw IDs bind to `chunk:{document_chunk_id}`;
+  trusted IDs bind to the existing canonical
+  `{knowledge_type}:{knowledge_id}` helper and allowed knowledge types.
+- The nested envelope's permission, content/citation HMACs and complete v1
+  serving-version fingerprint are recomputed and cross-bound to the identity.
+  Equal-value subclasses and equality impostors cannot inherit canonical HMAC
+  authority.
+- Approved v1 HMAC payloads/goldens and the round-3 selected-child-to-link
+  binding were unchanged.
+
+### Final verification
+
+- Task 4-8 RAG V2/source/trusted broad suite:
+  `375 passed, 2 skipped, 10 warnings in 7.27s`. The two skips remain the
+  PostgreSQL-only migration gates; the warnings are the existing Alembic
+  `path_separator` deprecations.
+- Adjacent process-scoped SQLite: `22 passed in 1.38s`.
+- Secret hygiene: `3 passed in 4.91s`.
+- Ruff exact changed paths: `All checks passed!` before final report assembly.
+- No existing Slack-data quality test was changed or hidden; the approved
+  Slack-last deferral remains in effect.

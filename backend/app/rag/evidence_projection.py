@@ -527,9 +527,11 @@ class CanonicalEvidenceProjector:
             row = self._strict_resolve(
                 db=self._db, identity=identity, scope=scope
             )
-            if row is None or row.identity != identity:
+            if row is None:
                 return None
             _validate_row(slot, row, settings=self._settings)
+            if row.identity != identity:
+                return None
             self._require_transaction()
             rows.append(row)
         self._require_transaction()
@@ -937,6 +939,119 @@ def _identity_from_evidence(evidence: ServingEvidence) -> ServingEvidenceIdentit
     )
 
 
+def _validate_identity_authority(
+    identity: ServingEvidenceIdentity, *, settings: Settings
+) -> None:
+    if type(identity) is not ServingEvidenceIdentity:
+        raise ValueError('canonical serving identity type is invalid')
+    for value in (
+        identity.serving_document_id,
+        identity.public_source_id,
+        identity.public_source_type,
+    ):
+        require_exact_nonblank(value)
+    if (
+        type(identity.serving_kind) is not str
+        or identity.serving_kind not in {'raw_chunk', 'trusted_knowledge'}
+    ):
+        raise ValueError('canonical serving identity kind is invalid')
+    _permission(identity.effective_permission)
+    require_lower_hex_64(identity.model_content_hmac)
+    require_lower_hex_64(identity.canonical_citation_projection_hmac)
+    require_lower_hex_64(identity.serving_version_fingerprint)
+
+    envelope = identity.version_envelope
+    if identity.serving_kind == 'raw_chunk':
+        if type(envelope) is not RawServingVersionEnvelope:
+            raise ValueError('canonical raw identity envelope is invalid')
+        _validate_raw_identity_envelope(envelope)
+        if (
+            identity.serving_document_id != f'chunk:{envelope.document_chunk_id}'
+            or identity.serving_document_id != envelope.serving_document_id
+            or identity.public_source_id != envelope.public_source_id
+            or identity.public_source_type not in _RAW_PUBLIC_SOURCE_TYPES
+        ):
+            raise ValueError('canonical raw identity mapping is invalid')
+    else:
+        if type(envelope) is not TrustedServingVersionEnvelope:
+            raise ValueError('canonical trusted identity envelope is invalid')
+        _validate_trusted_identity_envelope(envelope)
+        serving_document_id = canonical_knowledge_document_id(
+            envelope.knowledge_type, envelope.knowledge_id
+        )
+        if (
+            identity.serving_document_id != serving_document_id
+            or identity.public_source_id != serving_document_id
+            or envelope.serving_document_id != serving_document_id
+            or identity.public_source_type != envelope.knowledge_type
+        ):
+            raise ValueError('canonical trusted identity mapping is invalid')
+
+    if (
+        identity.effective_permission != envelope.effective_permission
+        or identity.model_content_hmac != envelope.model_content_hmac
+        or identity.canonical_citation_projection_hmac
+        != envelope.canonical_citation_projection_hmac
+        or identity.serving_version_fingerprint
+        != build_serving_version_fingerprint(envelope, settings=settings)
+    ):
+        raise ValueError('canonical serving identity HMAC drifted')
+
+
+def _validate_raw_identity_envelope(envelope: RawServingVersionEnvelope) -> None:
+    for value in (
+        envelope.source_row_id,
+        envelope.document_id,
+        envelope.document_version_id,
+        envelope.current_document_version_id,
+        envelope.document_chunk_id,
+        envelope.parser_run_id,
+    ):
+        require_positive_int(value)
+    for value in (
+        envelope.serving_document_id,
+        envelope.public_source_id,
+        envelope.server_content_signature_schema,
+        envelope.server_content_signature,
+        envelope.parser_policy_version,
+        envelope.parser_version,
+        envelope.chunk_policy_version,
+    ):
+        require_exact_nonblank(value)
+    if envelope.external_revision is not None:
+        require_exact_nonblank(envelope.external_revision)
+    require_lower_hex_64(envelope.model_content_hmac)
+    require_lower_hex_64(envelope.canonical_citation_projection_hmac)
+    _permission(envelope.effective_permission)
+    if envelope.serving_document_id != f'chunk:{envelope.document_chunk_id}':
+        raise ValueError('canonical raw envelope document is invalid')
+
+
+def _validate_trusted_identity_envelope(
+    envelope: TrustedServingVersionEnvelope,
+) -> None:
+    require_exact_nonblank(envelope.serving_document_id)
+    if (
+        type(envelope.knowledge_type) is not str
+        or envelope.knowledge_type
+        not in {'decision_record', 'history_event', 'timeline_event', 'todo'}
+    ):
+        raise ValueError('canonical trusted envelope type is invalid')
+    require_positive_int(envelope.knowledge_id)
+    require_lower_hex_64(envelope.model_content_hmac)
+    require_lower_hex_64(envelope.canonical_citation_projection_hmac)
+    _permission(envelope.effective_permission)
+    if type(envelope.provenance) not in {
+        ExplicitApprovalProvenance,
+        LegacyHumanProvenance,
+    }:
+        raise ValueError('canonical trusted envelope provenance is invalid')
+    if envelope.serving_document_id != canonical_knowledge_document_id(
+        envelope.knowledge_type, envelope.knowledge_id
+    ):
+        raise ValueError('canonical trusted envelope document is invalid')
+
+
 def _validate_row(
     slot: EvidenceSlot, row: CanonicalServingProjection, *, settings: Settings
 ) -> None:
@@ -948,6 +1063,7 @@ def _validate_row(
         or type(identity) is not ServingEvidenceIdentity
     ):
         raise ValueError('canonical projection type is invalid')
+    _validate_identity_authority(identity, settings=settings)
     if evidence.serving_kind == 'raw_chunk':
         envelope = evidence.version_envelope
         branch_valid = bool(

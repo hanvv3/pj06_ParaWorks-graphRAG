@@ -32,6 +32,7 @@ from backend.app.rag.evidence_projection import (
     HiddenMembershipSnapshot,
     PreparedModelInfluenceSet,
     ProjectionFence,
+    V1EvidenceProjection,
     build_model_influence_dependency_hmac,
     build_model_influence_set_hmac,
     build_prepared_model_influence_observation_hmac,
@@ -339,6 +340,20 @@ def _candidate(row: CanonicalServingProjection, score: float) -> RetrievalCandid
         evidence=row.evidence,
         relevance_score=score,
         matched_terms=('alpha', f'term-{row.public_result_id}'),
+    )
+
+
+def _project_single_row(row: CanonicalServingProjection) -> V1EvidenceProjection:
+    projector = CanonicalEvidenceProjector(
+        db=_Transaction(),
+        settings=_settings(),
+        resolver=_Resolver({row.evidence.serving_document_id: row}),
+    )
+    return projector.project_selected(
+        rank_evidence_slots((_candidate(row, 0.9),)),
+        selected_slot_ids=('E1',),
+        scope=_scope(),
+        fence=_fence(hidden_hmac=_hidden().membership_hmac),
     )
 
 
@@ -1534,6 +1549,18 @@ class _SlotStringSubclass(str):
     pass
 
 
+class _IdentityIntSubclass(int):
+    pass
+
+
+class _IdentityEqualityImpostor:
+    def __init__(self, expected: object) -> None:
+        self._expected = expected
+
+    def __eq__(self, other: object) -> bool:
+        return other == self._expected
+
+
 class _SlotEqualityImpostor:
     def __hash__(self) -> int:
         return hash('E1')
@@ -1555,6 +1582,168 @@ def test_selected_slot_ids_require_exact_builtin_literal_strings(selected: tuple
         scope=_scope(), fence=_fence(hidden_hmac=_hidden().membership_hmac),
     )
     assert result.citations == ()
+
+
+_IDENTITY_STRING_FIELDS = (
+    'serving_document_id',
+    'serving_kind',
+    'public_source_id',
+    'public_source_type',
+    'effective_permission',
+    'model_content_hmac',
+    'canonical_citation_projection_hmac',
+    'serving_version_fingerprint',
+)
+_RAW_ENVELOPE_STRING_FIELDS = (
+    'serving_document_id',
+    'public_source_id',
+    'external_revision',
+    'server_content_signature_schema',
+    'server_content_signature',
+    'parser_policy_version',
+    'parser_version',
+    'chunk_policy_version',
+    'model_content_hmac',
+    'canonical_citation_projection_hmac',
+    'effective_permission',
+)
+_RAW_ENVELOPE_INT_FIELDS = (
+    'source_row_id',
+    'document_id',
+    'document_version_id',
+    'current_document_version_id',
+    'document_chunk_id',
+    'parser_run_id',
+)
+_TRUSTED_ENVELOPE_STRING_FIELDS = (
+    'serving_document_id',
+    'knowledge_type',
+    'model_content_hmac',
+    'canonical_citation_projection_hmac',
+    'effective_permission',
+)
+
+
+@pytest.mark.parametrize('trusted', [False, True], ids=['raw', 'trusted'])
+@pytest.mark.parametrize('field', _IDENTITY_STRING_FIELDS)
+def test_serving_identity_requires_exact_builtin_string_constituents(
+    trusted: bool, field: str
+) -> None:
+    row = _projection(1, trusted=trusted)
+    original = getattr(row.identity, field)
+    assert type(original) is str
+    current = replace(
+        row,
+        identity=replace(
+            row.identity,
+            **{field: _SlotStringSubclass(original)},
+        ),
+    )
+
+    assert _project_single_row(current).citations == ()
+
+
+@pytest.mark.parametrize('field', _RAW_ENVELOPE_STRING_FIELDS)
+def test_raw_identity_envelope_requires_exact_builtin_string_constituents(
+    field: str,
+) -> None:
+    row = _projection(1)
+    envelope = row.identity.version_envelope
+    assert type(envelope) is RawServingVersionEnvelope
+    original = getattr(envelope, field)
+    assert type(original) is str
+    current = replace(
+        row,
+        identity=replace(
+            row.identity,
+            version_envelope=replace(
+                envelope,
+                **{field: _SlotStringSubclass(original)},
+            ),
+        ),
+    )
+
+    assert _project_single_row(current).citations == ()
+
+
+@pytest.mark.parametrize('field', _RAW_ENVELOPE_INT_FIELDS)
+def test_raw_identity_envelope_requires_exact_builtin_integer_constituents(
+    field: str,
+) -> None:
+    row = _projection(1)
+    envelope = row.identity.version_envelope
+    assert type(envelope) is RawServingVersionEnvelope
+    original = getattr(envelope, field)
+    assert type(original) is int
+    current = replace(
+        row,
+        identity=replace(
+            row.identity,
+            version_envelope=replace(
+                envelope,
+                **{field: _IdentityIntSubclass(original)},
+            ),
+        ),
+    )
+
+    assert _project_single_row(current).citations == ()
+
+
+@pytest.mark.parametrize('field', _TRUSTED_ENVELOPE_STRING_FIELDS)
+def test_trusted_identity_envelope_requires_exact_builtin_string_constituents(
+    field: str,
+) -> None:
+    row = _projection(1, trusted=True)
+    envelope = row.identity.version_envelope
+    assert type(envelope) is TrustedServingVersionEnvelope
+    original = getattr(envelope, field)
+    assert type(original) is str
+    current = replace(
+        row,
+        identity=replace(
+            row.identity,
+            version_envelope=replace(
+                envelope,
+                **{field: _SlotStringSubclass(original)},
+            ),
+        ),
+    )
+
+    assert _project_single_row(current).citations == ()
+
+
+@pytest.mark.parametrize(
+    ('trusted', 'field'),
+    [(False, 'document_chunk_id'), (True, 'knowledge_id')],
+    ids=['raw-bool', 'trusted-bool'],
+)
+def test_identity_envelope_rejects_bool_integer_impostors(
+    trusted: bool, field: str
+) -> None:
+    row = _projection(1, trusted=trusted)
+    envelope = row.identity.version_envelope
+    current = replace(
+        row,
+        identity=replace(
+            row.identity,
+            version_envelope=replace(envelope, **{field: True}),
+        ),
+    )
+
+    assert _project_single_row(current).citations == ()
+
+
+def test_serving_identity_rejects_equality_impostor_with_matching_hmac_bytes() -> None:
+    row = _projection(1, trusted=True)
+    current = replace(
+        row,
+        identity=replace(
+            row.identity,
+            serving_kind=_IdentityEqualityImpostor('trusted_knowledge'),
+        ),
+    )
+
+    assert _project_single_row(current).citations == ()
 
 
 def test_prepare_rejects_zero_observations() -> None:
