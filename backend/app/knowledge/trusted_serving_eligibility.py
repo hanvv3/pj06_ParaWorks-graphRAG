@@ -117,6 +117,84 @@ class TrustedServingEligibilityService:
         except (SQLAlchemyError, TypeError, ValueError):
             return _ineligible()
 
+    def for_serving_envelope(
+        self, knowledge_type: str, knowledge_id: int
+    ) -> TrustedServingEligibility:
+        """Apply D's all-active provenance rule without changing C.5 reads."""
+        try:
+            canonical_type = canonical_knowledge_type(knowledge_type)
+            target = self._db.get(
+                knowledge_model_for_type(canonical_type),
+                knowledge_id,
+            )
+            base = self._for_knowledge(canonical_type, knowledge_id)
+            if target is None or not base.eligible:
+                return _ineligible()
+            links = tuple(
+                self._db.scalars(
+                    select(TrustedKnowledgeApprovalLink)
+                    .where(
+                        TrustedKnowledgeApprovalLink.knowledge_type.in_(
+                            knowledge_type_storage_aliases(canonical_type)
+                        ),
+                        TrustedKnowledgeApprovalLink.knowledge_id == knowledge_id,
+                        TrustedKnowledgeApprovalLink.active.is_(True),
+                    )
+                    .order_by(TrustedKnowledgeApprovalLink.id)
+                ).all()
+            )
+            permission_levels = [target.permission_level]
+            if links:
+                for link in links:
+                    if not self.approval_link_is_live(link.id):
+                        return _ineligible()
+                    item = self._db.get(ReviewItem, link.review_item_id)
+                    evidence = self._current_evidence(link)
+                    if item is None or not evidence.valid:
+                        return _ineligible()
+                    permission_levels.extend(
+                        [
+                            link.permission_level,
+                            item.permission_level,
+                            *evidence.permission_levels,
+                        ]
+                    )
+                legacy_id = getattr(target, 'source_review_item_id', None)
+                if legacy_id is not None and has_legacy_human_base(
+                    self._db,
+                    knowledge_type=canonical_type,
+                    knowledge_id=knowledge_id,
+                ):
+                    legacy_item = self._db.get(ReviewItem, legacy_id)
+                    if legacy_item is not None:
+                        permission_levels.append(legacy_item.permission_level)
+                return TrustedServingEligibility(
+                    eligible=True,
+                    effective_permission=_strictest_permission(permission_levels),
+                )
+
+            legacy_id = getattr(target, 'source_review_item_id', None)
+            if legacy_id is None or not has_legacy_human_base(
+                self._db,
+                knowledge_type=canonical_type,
+                knowledge_id=knowledge_id,
+            ):
+                return _ineligible()
+            legacy_item = self._db.get(ReviewItem, legacy_id)
+            if (
+                legacy_item is None
+                or legacy_item.permission_level not in _PERMISSION_RANK
+            ):
+                return _ineligible()
+            return TrustedServingEligibility(
+                eligible=True,
+                effective_permission=_strictest_permission(
+                    [target.permission_level, legacy_item.permission_level]
+                ),
+            )
+        except (SQLAlchemyError, TypeError, ValueError):
+            return _ineligible()
+
     def approval_link_is_live(self, approval_link_id: int) -> bool:
         """Return whether one exact explicit approval effect is still authoritative."""
         try:
