@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
 
 import pytest
@@ -21,6 +21,7 @@ from backend.app.rag.retrieval import (
     QueryEmbeddingCostInput,
     RetrievalRequest,
     StrictProviderUsage,
+    decimal_storage_representation,
 )
 
 
@@ -169,11 +170,13 @@ class _Transport:
 class _Permit:
     def __init__(self) -> None:
         self.used = False
+        self.uses = 0
 
     def consume_at_dispatch(self) -> None:
         if self.used:
             raise RuntimeError('permit already consumed')
         self.used = True
+        self.uses += 1
 
 
 def _adapter(
@@ -224,6 +227,58 @@ def test_prepare_rejects_not_ready_or_wrong_embedding_identity_without_dispatch(
     with pytest.raises(ValueError, match='serving index is not ready'):
         adapter.prepare(_request(), wrong)
     assert policy.prepared_inputs == []
+    assert transport.calls == 0
+
+
+def test_prepare_rejects_malformed_or_bigint_overflow_readiness_before_cost() -> None:
+    adapter, _, policy, transport = _adapter()
+    overflow = _readiness()
+    object.__setattr__(overflow, 'corpus_generation', 2**63)
+    with pytest.raises(ValueError, match='serving index readiness'):
+        adapter.prepare(_request(), overflow)
+
+    forged_ready = _readiness()
+    object.__setattr__(forged_ready, 'ready', 1)
+    with pytest.raises(ValueError, match='serving index readiness'):
+        adapter.prepare(_request(), forged_ready)
+
+    malformed_hmac = _readiness()
+    object.__setattr__(malformed_hmac, 'readiness_snapshot_hmac', 'not-a-hmac')
+    with pytest.raises(ValueError, match='serving index readiness'):
+        adapter.prepare(_request(), malformed_hmac)
+
+    assert policy.prepared_inputs == []
+    assert transport.calls == 0
+
+
+@pytest.mark.parametrize(
+    'mutate',
+    (
+        lambda value: replace(value, attempt_fence_hmac='0' * 64),
+        lambda value: replace(
+            value,
+            estimated_input_tokens=4,
+            budget=replace(value.budget, estimated_input_tokens=4),
+        ),
+        lambda value: replace(
+            value,
+            reserved_cost_usd=Decimal('-0.000000'),
+            budget=replace(
+                value.budget,
+                reserved_cost_usd=Decimal('-0.000000'),
+            ),
+        ),
+    ),
+)
+def test_dispatch_rejects_forged_prepared_before_permit_or_transport(mutate) -> None:
+    adapter, _, _, transport = _adapter()
+    prepared = mutate(adapter.prepare(_request(), _readiness()))
+    permit = _Permit()
+
+    with pytest.raises(ValueError, match='prepared query embedding'):
+        adapter.dispatch_once(prepared, permit)
+
+    assert permit.uses == 0
     assert transport.calls == 0
 
 
@@ -286,6 +341,93 @@ def test_strict_response_identity_and_vector_matrix(mutate, outcome: str) -> Non
     assert caught.value.vector is None
     assert len(parser.seen) == 1
     assert transport.calls == 1
+
+
+class _EqualityForgingValue:
+    def __eq__(self, other: object) -> bool:
+        del other
+        return True
+
+
+class _StringSubclass(str):
+    pass
+
+
+@pytest.mark.parametrize(
+    ('path', 'value'),
+    (
+        ('top_object', _EqualityForgingValue()),
+        ('top_model', _StringSubclass('text-embedding-3-small')),
+        ('item_object', _StringSubclass('embedding')),
+    ),
+)
+def test_response_identity_rejects_equality_forgers_and_str_subclasses(
+    path: str,
+    value: object,
+) -> None:
+    payload = _raw_response()
+    if path == 'top_object':
+        payload['object'] = value
+    elif path == 'top_model':
+        payload['model'] = value
+    else:
+        payload['data'][0]['object'] = value
+    adapter, _, _, transport = _adapter(transport=_Transport(payload))
+    prepared = adapter.prepare(_request(), _readiness())
+
+    with pytest.raises(QueryEmbeddingDispatchError) as caught:
+        adapter.dispatch_once(prepared, _Permit())
+
+    assert caught.value.outcome == 'provider_response_identity_invalid'
+    assert transport.calls == 1
+
+
+class _UsageSubclass(StrictProviderUsage):
+    def __post_init__(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    'usage',
+    (
+        _UsageSubclass(input_tokens=3, output_tokens=0, total_tokens=3),
+        StrictProviderUsage(input_tokens=3, output_tokens=0, total_tokens=3),
+    ),
+)
+def test_usage_requires_exact_class_and_exact_bounded_arithmetic_without_charge(
+    usage: StrictProviderUsage,
+) -> None:
+    if type(usage) is StrictProviderUsage:
+        object.__setattr__(usage, 'input_tokens', True)
+    parser = _UsageParser(usage)
+    policy = _CostPolicy()
+    adapter, _, _, _ = _adapter(parser=parser, policy=policy)
+    prepared = adapter.prepare(_request(), _readiness())
+
+    with pytest.raises(QueryEmbeddingDispatchError) as caught:
+        adapter.dispatch_once(prepared, _Permit())
+
+    assert caught.value.outcome == 'provider_safety_unavailable'
+    assert policy.charges == []
+
+
+def test_negative_zero_costs_are_never_admitted() -> None:
+    adapter, _, policy, transport = _adapter(
+        policy=_CostPolicy(reserved=Decimal('-0.000000'))
+    )
+    with pytest.raises(ValueError, match='budget'):
+        adapter.prepare(_request(), _readiness())
+    assert len(policy.prepared_inputs) == 1
+    assert transport.calls == 0
+
+    policy = _CostPolicy(actual=Decimal('-0.000000'))
+    adapter, _, _, _ = _adapter(policy=policy)
+    prepared = adapter.prepare(_request(), _readiness())
+    with pytest.raises(QueryEmbeddingDispatchError) as caught:
+        adapter.dispatch_once(prepared, _Permit())
+    assert caught.value.outcome == 'provider_safety_unavailable'
+    assert decimal_storage_representation(Decimal('0')) == '0'
+    assert decimal_storage_representation(Decimal('0.000000')) == '0'
 
 
 def test_parse_precedence_is_overrun_then_identity_then_vector_then_usage() -> None:

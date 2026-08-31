@@ -270,6 +270,14 @@ class _Readiness:
         return value
 
 
+class _ReadinessIntSubclass(int):
+    pass
+
+
+class _ReadinessStringSubclass(str):
+    pass
+
+
 class _Keyword(Runnable[RetrievalRequest, RetrievalResult]):
     def __init__(self) -> None:
         self.requests: list[RetrievalRequest] = []
@@ -505,6 +513,50 @@ def test_pre_readiness_inspection_failure_fails_closed_before_store_or_fallback(
     assert keyword.requests == []
 
 
+def test_pre_readiness_rejects_equal_int_subclass_before_store_or_fallback() -> None:
+    keyword = _Keyword()
+    store = _Store((_candidate(1, 0.9),))
+    forged = _readiness()
+    object.__setattr__(
+        forged,
+        'corpus_generation',
+        _ReadinessIntSubclass(7),
+    )
+    readiness = _Readiness([forged])
+
+    with pytest.raises(
+        RuntimeError,
+        match='pgvector pre-readiness observation failed',
+    ):
+        _retriever(store, readiness, keyword).invoke(_request())
+
+    assert readiness.calls == 1
+    assert store.calls == []
+    assert keyword.requests == []
+
+
+def test_post_readiness_rejects_equal_str_subclass_without_partial_result() -> None:
+    keyword = _Keyword()
+    store = _Store((_candidate(1, 0.9),))
+    forged = _readiness()
+    object.__setattr__(
+        forged,
+        'readiness_snapshot_hmac',
+        _ReadinessStringSubclass('a' * 64),
+    )
+    readiness = _Readiness([_readiness(), forged])
+
+    with pytest.raises(
+        RuntimeError,
+        match='pgvector post-readiness observation failed',
+    ):
+        _retriever(store, readiness, keyword).invoke(_request())
+
+    assert readiness.calls == 2
+    assert len(store.calls) == 1
+    assert keyword.requests == []
+
+
 def _mutate_model_hmac(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
     return replace(
         result,
@@ -652,6 +704,17 @@ def _mutate_bool_receipt_latency(
     return replace(result, receipt=replace(result.receipt, latency_ms=True))
 
 
+def _mutate_negative_zero_actual_cost(
+    result: QueryEmbeddingCallResult,
+) -> QueryEmbeddingCallResult:
+    negative_zero = Decimal('-0.000000')
+    return replace(
+        result,
+        actual_cost_usd=negative_zero,
+        receipt=replace(result.receipt, actual_cost_usd=negative_zero),
+    )
+
+
 def _mutate_wrong_hash(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallResult:
     return replace(
         result,
@@ -694,6 +757,7 @@ def _mutate_zero_vector(result: QueryEmbeddingCallResult) -> QueryEmbeddingCallR
         _mutate_reserve_scale_with_old_fence,
         _mutate_actual_cost_mirror_scale,
         _mutate_bool_receipt_latency,
+        _mutate_negative_zero_actual_cost,
         _mutate_wrong_hash,
         _mutate_wrong_dimensions,
         _mutate_zero_vector,

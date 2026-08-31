@@ -4,7 +4,7 @@ import math
 import re
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
 from langchain_core.runnables import Runnable
 
@@ -39,6 +39,19 @@ QUERY_EMBEDDING_PROVIDER_POLICY_VERSION = 'openai-embeddings-api:v1'
 QUERY_EMBEDDING_PAYLOAD_VALIDATOR_VERSION = 'rag-query-embedding-payload:v1'
 QUERY_EMBEDDING_INDEX_POLICY_VERSION = 'rag-v2-serving-index:v1'
 SIGNED_BIGINT_MAX = 2**63 - 1
+RagServingReadinessSnapshot: TypeAlias = tuple[
+    bool,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+    str,
+    int,
+    str,
+    str,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,18 +61,7 @@ class StrictProviderUsage:
     total_tokens: int
 
     def __post_init__(self) -> None:
-        if (
-            type(self.input_tokens) is not int
-            or type(self.output_tokens) is not int
-            or type(self.total_tokens) is not int
-            or self.input_tokens < 0
-            or self.input_tokens > SIGNED_BIGINT_MAX
-            or self.output_tokens > SIGNED_BIGINT_MAX
-            or self.total_tokens > SIGNED_BIGINT_MAX
-            or self.output_tokens < 0
-            or self.total_tokens != self.input_tokens + self.output_tokens
-        ):
-            raise ValueError('provider usage must contain exact nonnegative totals')
+        validate_strict_provider_usage(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,65 +165,28 @@ def validate_query_embedding_call_result(
         result = request.query_embedding_result
         if type(result) is not QueryEmbeddingCallResult:
             raise ValueError
-        prepared = result.prepared
-        if type(prepared) is not PreparedQueryEmbedding:
-            raise ValueError
         query_utf8 = request.retrieval_query_text.encode('utf-8', errors='strict')
+        prepared = result.prepared
         if (
-            type(prepared.transient_query_utf8) is bytes
+            type(prepared) is PreparedQueryEmbedding
+            and type(prepared.transient_query_utf8) is bytes
             and prepared.transient_query_utf8 != query_utf8
         ):
             raise ValueError('query bytes do not match the prepared embedding')
+        prepared = validate_prepared_query_embedding(
+            prepared,
+            settings=settings,
+            expected_query_utf8=query_utf8,
+        )
         receipt = result.receipt
         if type(receipt) is not QueryEmbeddingReceipt:
             raise ValueError
-        budget = prepared.budget
-        validate_query_embedding_budget(budget)
         vector = validate_query_embedding_vector_carrier(
             result.vector,
             expected_dimensions=QUERY_EMBEDDING_DIMENSIONS,
         )
-        expected_query_hmac = build_query_embedding_retrieval_query_hmac(
-            request.retrieval_query_text,
-            settings=settings,
-        )
-        expected_model_hmac = build_query_embedding_model_config_snapshot_hmac(
-            settings
-        )
-        expected_provider_hmac = build_query_embedding_provider_policy_snapshot_hmac(
-            settings
-        )
-        expected_attempt_fence = build_query_embedding_attempt_fence_hmac(
-            retrieval_query_hmac=expected_query_hmac,
-            corpus_generation=prepared.corpus_generation,
-            vector_index_generation=prepared.vector_index_generation,
-            readiness_snapshot_hmac=prepared.readiness_snapshot_hmac,
-            model_config_snapshot_hmac=expected_model_hmac,
-            provider_policy_snapshot_hmac=expected_provider_hmac,
-            budget=budget,
-            settings=settings,
-        )
         if (
-            type(prepared.transient_query_utf8) is not bytes
-            or prepared.transient_query_utf8 != query_utf8
-            or not is_lower_hex_64(prepared.retrieval_query_hmac)
-            or prepared.retrieval_query_hmac != expected_query_hmac
-            or not is_signed_bigint(prepared.corpus_generation)
-            or not is_signed_bigint(prepared.vector_index_generation)
-            or not is_lower_hex_64(prepared.readiness_snapshot_hmac)
-            or not is_lower_hex_64(prepared.model_config_snapshot_hmac)
-            or prepared.model_config_snapshot_hmac != expected_model_hmac
-            or not is_lower_hex_64(prepared.provider_policy_snapshot_hmac)
-            or prepared.provider_policy_snapshot_hmac != expected_provider_hmac
-            or not is_signed_bigint(prepared.estimated_input_tokens)
-            or prepared.estimated_input_tokens != budget.estimated_input_tokens
-            or not same_decimal_storage_value(
-                prepared.reserved_cost_usd,
-                budget.reserved_cost_usd,
-            )
-            or not is_lower_hex_64(prepared.attempt_fence_hmac)
-            or prepared.attempt_fence_hmac != expected_attempt_fence
-            or result.vector is not vector
+            result.vector is not vector
             or result.attempted is not True
             or not is_signed_bigint(result.validated_input_tokens)
             or result.validated_input_tokens > prepared.estimated_input_tokens
@@ -238,9 +203,11 @@ def validate_query_embedding_call_result(
             or type(receipt.outcome) is not str
             or receipt.outcome != 'component_succeeded'
             or not is_lower_hex_64(receipt.model_config_snapshot_hmac)
-            or receipt.model_config_snapshot_hmac != expected_model_hmac
+            or receipt.model_config_snapshot_hmac
+            != prepared.model_config_snapshot_hmac
             or not is_lower_hex_64(receipt.provider_policy_snapshot_hmac)
-            or receipt.provider_policy_snapshot_hmac != expected_provider_hmac
+            or receipt.provider_policy_snapshot_hmac
+            != prepared.provider_policy_snapshot_hmac
         ):
             raise ValueError
         return result
@@ -250,6 +217,130 @@ def validate_query_embedding_call_result(
         raise ValueError('query embedding carrier is invalid') from None
     except (AttributeError, TypeError, UnicodeError):
         raise ValueError('query embedding carrier is invalid') from None
+
+
+def validate_prepared_query_embedding(
+    value: object,
+    *,
+    settings: Settings,
+    expected_query_utf8: bytes | None = None,
+    expected_readiness: RagServingReadinessSnapshot | None = None,
+) -> PreparedQueryEmbedding:
+    try:
+        if type(value) is not PreparedQueryEmbedding:
+            raise ValueError
+        if (
+            type(value.transient_query_utf8) is not bytes
+            or (
+                expected_query_utf8 is not None
+                and (
+                    type(expected_query_utf8) is not bytes
+                    or value.transient_query_utf8 != expected_query_utf8
+                )
+            )
+            or not is_signed_bigint(value.corpus_generation)
+            or not is_signed_bigint(value.vector_index_generation)
+            or not is_lower_hex_64(value.readiness_snapshot_hmac)
+            or not is_signed_bigint(value.estimated_input_tokens)
+            or not is_lower_hex_64(value.retrieval_query_hmac)
+            or value.retrieval_query_hmac
+            != build_query_embedding_retrieval_query_hmac_from_utf8(
+                value.transient_query_utf8,
+                settings=settings,
+            )
+            or (
+                expected_readiness is not None
+                and (
+                    type(expected_readiness) is not tuple
+                    or len(expected_readiness) != 11
+                    or (
+                        value.corpus_generation,
+                        value.vector_index_generation,
+                        value.readiness_snapshot_hmac,
+                    )
+                    != (
+                        expected_readiness[1],
+                        expected_readiness[2],
+                        expected_readiness[10],
+                    )
+                )
+            )
+        ):
+            raise ValueError
+        budget = value.budget
+        validate_query_embedding_budget(budget)
+        expected_model_hmac = build_query_embedding_model_config_snapshot_hmac(
+            settings
+        )
+        expected_provider_hmac = (
+            build_query_embedding_provider_policy_snapshot_hmac(settings)
+        )
+        expected_fence = build_query_embedding_attempt_fence_hmac(
+            retrieval_query_hmac=value.retrieval_query_hmac,
+            corpus_generation=value.corpus_generation,
+            vector_index_generation=value.vector_index_generation,
+            readiness_snapshot_hmac=value.readiness_snapshot_hmac,
+            model_config_snapshot_hmac=expected_model_hmac,
+            provider_policy_snapshot_hmac=expected_provider_hmac,
+            budget=budget,
+            settings=settings,
+        )
+        if (
+            not is_lower_hex_64(value.model_config_snapshot_hmac)
+            or value.model_config_snapshot_hmac != expected_model_hmac
+            or not is_lower_hex_64(value.provider_policy_snapshot_hmac)
+            or value.provider_policy_snapshot_hmac != expected_provider_hmac
+            or value.estimated_input_tokens != budget.estimated_input_tokens
+            or not same_decimal_storage_value(
+                value.reserved_cost_usd,
+                budget.reserved_cost_usd,
+            )
+            or not is_lower_hex_64(value.attempt_fence_hmac)
+            or value.attempt_fence_hmac != expected_fence
+        ):
+            raise ValueError
+        return value
+    except (AttributeError, TypeError, UnicodeError, ValueError):
+        raise ValueError('prepared query embedding is invalid') from None
+
+
+def validate_rag_serving_index_readiness(
+    value: object,
+) -> RagServingReadinessSnapshot:
+    from backend.app.rag.index_readiness import RagServingIndexReadiness
+
+    if (
+        type(value) is not RagServingIndexReadiness
+        or type(value.ready) is not bool
+        or not is_signed_bigint(value.corpus_generation)
+        or not is_signed_bigint(value.vector_index_generation)
+        or not is_signed_bigint(value.expected_document_count)
+        or not is_signed_bigint(value.live_vector_count)
+        or not is_signed_bigint(value.tombstone_count)
+        or not is_signed_bigint(value.mismatch_count_capped_at_20)
+        or value.mismatch_count_capped_at_20 > 20
+        or type(value.embedding_model) is not str
+        or value.embedding_model != QUERY_EMBEDDING_MODEL
+        or type(value.embedding_dimensions) is not int
+        or value.embedding_dimensions != QUERY_EMBEDDING_DIMENSIONS
+        or type(value.index_policy_version) is not str
+        or value.index_policy_version != QUERY_EMBEDDING_INDEX_POLICY_VERSION
+        or not is_lower_hex_64(value.readiness_snapshot_hmac)
+    ):
+        raise ValueError('serving index readiness snapshot is invalid')
+    return (
+        value.ready,
+        value.corpus_generation,
+        value.vector_index_generation,
+        value.expected_document_count,
+        value.live_vector_count,
+        value.tombstone_count,
+        value.mismatch_count_capped_at_20,
+        value.embedding_model,
+        value.embedding_dimensions,
+        value.index_policy_version,
+        value.readiness_snapshot_hmac,
+    )
 
 
 def validate_query_embedding_budget(value: PreparedPaidCallBudget) -> None:
@@ -272,9 +363,42 @@ def build_query_embedding_retrieval_query_hmac(
     *,
     settings: Settings,
 ) -> str:
+    if type(query) is not str:
+        raise ValueError('query embedding query is invalid')
+    query_identity = exact_utf8_bytes(query)
+    return _build_query_embedding_retrieval_query_hmac(
+        query_identity,
+        settings=settings,
+    )
+
+
+def build_query_embedding_retrieval_query_hmac_from_utf8(
+    query_utf8: bytes,
+    *,
+    settings: Settings,
+) -> str:
+    if type(query_utf8) is not bytes:
+        raise ValueError('query embedding query bytes are invalid')
+    try:
+        query_identity = exact_utf8_bytes(
+            query_utf8.decode('utf-8', errors='strict')
+        )
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError('query embedding query bytes are invalid') from None
+    return _build_query_embedding_retrieval_query_hmac(
+        query_identity,
+        settings=settings,
+    )
+
+
+def _build_query_embedding_retrieval_query_hmac(
+    query_identity: dict[str, int | str],
+    *,
+    settings: Settings,
+) -> str:
     secret, _ = fingerprint_secret_bytes(settings)
     return keyed_fingerprint(
-        exact_utf8_bytes(query),
+        query_identity,
         secret=secret,
         schema_version='rag-query-embedding-query:v1',
         policy_version=QUERY_EMBEDDING_MODEL_CONFIG_VERSION,
@@ -378,6 +502,7 @@ def is_storage_decimal(value: object) -> bool:
         type(value) is Decimal
         and value.is_finite()
         and value >= Decimal('0')
+        and not (value.is_zero() and value.is_signed())
         and is_numeric_24_6_representable(value)
     )
 
@@ -386,6 +511,8 @@ def decimal_storage_representation(value: object) -> str:
     if not is_storage_decimal(value):
         raise ValueError('query embedding cost is invalid')
     assert type(value) is Decimal
+    if value.is_zero():
+        return '0'
     return format(value, 'f')
 
 
@@ -396,6 +523,18 @@ def same_decimal_storage_value(left: object, right: object) -> bool:
         and decimal_storage_representation(left)
         == decimal_storage_representation(right)
     )
+
+
+def validate_strict_provider_usage(value: object) -> StrictProviderUsage:
+    if (
+        type(value) is not StrictProviderUsage
+        or not is_signed_bigint(value.input_tokens)
+        or not is_signed_bigint(value.output_tokens)
+        or not is_signed_bigint(value.total_tokens)
+        or value.total_tokens != value.input_tokens + value.output_tokens
+    ):
+        raise ValueError('provider usage must contain exact bounded totals')
+    return value
 
 
 @dataclass(frozen=True, slots=True)

@@ -15,7 +15,6 @@ from backend.app.rag.embeddings import validate_query_embedding_vector
 from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import (
     QUERY_EMBEDDING_DIMENSIONS,
-    QUERY_EMBEDDING_INDEX_POLICY_VERSION,
     QUERY_EMBEDDING_MODEL,
     EmbeddingUsageParserPort,
     PreparedQueryEmbedding,
@@ -29,14 +28,15 @@ from backend.app.rag.retrieval import (
     build_query_embedding_model_config_snapshot_hmac,
     build_query_embedding_provider_policy_snapshot_hmac,
     build_query_embedding_retrieval_query_hmac,
-    is_lower_hex_64,
-    is_numeric_24_6_representable,
+    is_storage_decimal,
+    validate_prepared_query_embedding,
     validate_query_embedding_budget,
+    validate_rag_serving_index_readiness,
+    validate_strict_provider_usage,
 )
 
 _MODEL = QUERY_EMBEDDING_MODEL
 _DIMENSIONS = QUERY_EMBEDDING_DIMENSIONS
-_INDEX_POLICY_VERSION = QUERY_EMBEDDING_INDEX_POLICY_VERSION
 
 QueryEmbeddingErrorOutcome = Literal[
     'retriever_unavailable',
@@ -98,17 +98,13 @@ class StrictQueryEmbeddingAdapter:
             serialized_fingerprint=request.security_scope_fingerprint,
             settings=self._settings,
         )
-        if (
-            not readiness.ready
-            or type(readiness.corpus_generation) is not int
-            or readiness.corpus_generation < 0
-            or type(readiness.vector_index_generation) is not int
-            or readiness.vector_index_generation < 0
-            or not is_lower_hex_64(readiness.readiness_snapshot_hmac)
-            or readiness.embedding_model != _MODEL
-            or readiness.embedding_dimensions != _DIMENSIONS
-            or readiness.index_policy_version != _INDEX_POLICY_VERSION
-        ):
+        try:
+            readiness_snapshot = validate_rag_serving_index_readiness(readiness)
+        except ValueError:
+            raise ValueError(
+                'serving index is not ready; serving index readiness is invalid'
+            ) from None
+        if readiness_snapshot[0] is not True:
             raise ValueError('serving index is not ready for query embedding')
         query_utf8 = request.retrieval_query_text.encode('utf-8', errors='strict')
         model_snapshot_hmac = build_query_embedding_model_config_snapshot_hmac(
@@ -130,20 +126,20 @@ class StrictQueryEmbeddingAdapter:
         )
         attempt_fence_hmac = build_query_embedding_attempt_fence_hmac(
             retrieval_query_hmac=query_hmac,
-            corpus_generation=readiness.corpus_generation,
-            vector_index_generation=readiness.vector_index_generation,
-            readiness_snapshot_hmac=readiness.readiness_snapshot_hmac,
+            corpus_generation=readiness_snapshot[1],
+            vector_index_generation=readiness_snapshot[2],
+            readiness_snapshot_hmac=readiness_snapshot[10],
             model_config_snapshot_hmac=model_snapshot_hmac,
             provider_policy_snapshot_hmac=provider_policy_hmac,
             budget=budget,
             settings=self._settings,
         )
-        return PreparedQueryEmbedding(
+        prepared = PreparedQueryEmbedding(
             retrieval_query_hmac=query_hmac,
             transient_query_utf8=query_utf8,
-            corpus_generation=readiness.corpus_generation,
-            vector_index_generation=readiness.vector_index_generation,
-            readiness_snapshot_hmac=readiness.readiness_snapshot_hmac,
+            corpus_generation=readiness_snapshot[1],
+            vector_index_generation=readiness_snapshot[2],
+            readiness_snapshot_hmac=readiness_snapshot[10],
             model_config_snapshot_hmac=model_snapshot_hmac,
             provider_policy_snapshot_hmac=provider_policy_hmac,
             estimated_input_tokens=budget.estimated_input_tokens,
@@ -151,12 +147,22 @@ class StrictQueryEmbeddingAdapter:
             attempt_fence_hmac=attempt_fence_hmac,
             budget=budget,
         )
+        return validate_prepared_query_embedding(
+            prepared,
+            settings=self._settings,
+            expected_query_utf8=query_utf8,
+            expected_readiness=readiness_snapshot,
+        )
 
     def dispatch_once(
         self,
         prepared: PreparedQueryEmbedding,
         permit: ProviderDispatchPermit,
     ) -> QueryEmbeddingCallResult:
+        prepared = validate_prepared_query_embedding(
+            prepared,
+            settings=self._settings,
+        )
         permit.consume_at_dispatch()
         started_ns = perf_counter_ns()
         try:
@@ -231,20 +237,11 @@ class StrictQueryEmbeddingAdapter:
     def _parse_usage_once(self, response: object) -> _ParsedUsage:
         raw_usage = response.get('usage') if isinstance(response, Mapping) else None
         try:
-            usage = self._usage_parser.parse_usage(raw_usage)
-            if not isinstance(usage, StrictProviderUsage):
-                raise TypeError
-            if max(usage.input_tokens, usage.output_tokens, usage.total_tokens) > (
-                2**63 - 1
-            ):
-                raise ValueError
+            usage = validate_strict_provider_usage(
+                self._usage_parser.parse_usage(raw_usage)
+            )
             actual = self._cost_policy.charge_actual('query_embedding', usage)
-            if (
-                type(actual) is not Decimal
-                or not actual.is_finite()
-                or actual < Decimal('0')
-                or not is_numeric_24_6_representable(actual)
-            ):
+            if not is_storage_decimal(actual):
                 raise ValueError
             return _ParsedUsage(usage=usage, actual_cost_usd=actual)
         except Exception:
@@ -319,15 +316,24 @@ def share_query_embedding_result(
 def _validated_response_identity(response: object) -> Mapping[str, object] | None:
     if not isinstance(response, Mapping):
         return None
-    if response.get('object') != 'list' or response.get('model') != _MODEL:
+    top_object = response.get('object')
+    model = response.get('model')
+    if (
+        type(top_object) is not str
+        or top_object != 'list'
+        or type(model) is not str
+        or model != _MODEL
+    ):
         return None
     data = response.get('data')
     if not isinstance(data, list) or len(data) != 1:
         return None
     item = data[0]
+    item_object = item.get('object') if isinstance(item, Mapping) else None
     if (
         not isinstance(item, Mapping)
-        or item.get('object') != 'embedding'
+        or type(item_object) is not str
+        or item_object != 'embedding'
         or type(item.get('index')) is not int
         or item.get('index') != 0
     ):

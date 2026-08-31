@@ -19,11 +19,13 @@ from backend.app.rag.embeddings import ValidatedQueryEmbeddingVector
 from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import (
     ClassifiedRetrievalCandidate,
+    RagServingReadinessSnapshot,
     RetrievalCandidate,
     RetrievalRequest,
     RetrievalResult,
     SanitizedRetrievalTrace,
     validate_query_embedding_call_result,
+    validate_rag_serving_index_readiness,
 )
 
 
@@ -70,7 +72,9 @@ class PgVectorEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
         )
         embedding = _require_exact_embedding_carrier(input, settings=self._settings)
         try:
-            before_sql = self._readiness.inspect()
+            before_sql = validate_rag_serving_index_readiness(
+                self._readiness.inspect()
+            )
         except Exception:
             raise RuntimeError('pgvector pre-readiness observation failed') from None
         if not _matches_prepared_readiness(before_sql, input):
@@ -87,7 +91,9 @@ class PgVectorEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
             store_failure = exc
             candidates = ()
         try:
-            after_sql = self._readiness.inspect()
+            after_sql = validate_rag_serving_index_readiness(
+                self._readiness.inspect()
+            )
         except Exception:
             raise RuntimeError('pgvector post-readiness observation failed') from None
         if not _matches_prepared_readiness(after_sql, input):
@@ -184,20 +190,25 @@ def _require_exact_embedding_carrier(
 
 
 def _matches_prepared_readiness(
-    readiness: RagServingIndexReadiness,
+    readiness: RagServingReadinessSnapshot,
     request: RetrievalRequest,
 ) -> bool:
     result = request.query_embedding_result
     assert result is not None
     prepared = result.prepared
-    return bool(
-        readiness.ready
-        and readiness.corpus_generation == prepared.corpus_generation
-        and readiness.vector_index_generation == prepared.vector_index_generation
-        and readiness.readiness_snapshot_hmac == prepared.readiness_snapshot_hmac
-        and readiness.embedding_model == 'text-embedding-3-small'
-        and readiness.embedding_dimensions == 1536
-        and readiness.index_policy_version == 'rag-v2-serving-index:v1'
+    return (
+        (
+            readiness[0],
+            readiness[1],
+            readiness[2],
+            readiness[10],
+        )
+        == (
+            True,
+            prepared.corpus_generation,
+            prepared.vector_index_generation,
+            prepared.readiness_snapshot_hmac,
+        )
     )
 
 
