@@ -7,6 +7,14 @@ from backend.app.agents.rag_orchestrator_agent.llm import (
 )
 
 
+def test_v2_structured_answer_boundary_is_exported_without_changing_v1() -> None:
+    from backend.app.agents.rag_orchestrator_agent import llm
+
+    assert llm.StructuredRagAnswerModel.__name__ == 'StructuredRagAnswerModel'
+    assert llm.PreparedAnswerInvocation.__name__ == 'PreparedAnswerInvocation'
+    assert llm.ProviderAnswerEnvelope.__name__ == 'ProviderAnswerEnvelope'
+
+
 def build_packet() -> EvidencePacket:
     return EvidencePacket(
         source_type='rag',

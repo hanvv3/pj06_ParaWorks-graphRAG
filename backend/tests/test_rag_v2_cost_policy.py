@@ -58,6 +58,85 @@ def _schema_bytes() -> bytes:
     })
 
 
+def _insertion_order_schema_bytes() -> bytes:
+    return json.dumps(
+        {
+            'name': 'rag_answer_blocks_v1',
+            'strict': True,
+            'schema': {
+                'type': 'object',
+                'properties': {'answer_blocks': {'type': 'array'}},
+                'required': ['answer_blocks'],
+                'additionalProperties': False,
+            },
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=False,
+        separators=(',', ':'),
+    ).encode()
+
+
+def test_answer_cost_accepts_exact_hmac_bound_insertion_order_schema() -> None:
+    settings = _settings()
+    schema = _insertion_order_schema_bytes()
+    policy = RagCostPolicy(
+        settings=settings,
+        answer_output_schema_hmac=build_answer_output_schema_hmac(settings, schema),
+        answer_prompt_renderer_hmac='b' * 64,
+    )
+
+    prepared = policy.prepare_answer_generation(AnswerGenerationCostInput(
+        exact_messages_json=_compact([
+            {'content': 'question', 'ordinal': 1, 'role': 'user'},
+        ]),
+        exact_response_schema_json=schema,
+        model_config_snapshot_hmac=policy.answer_model_config_snapshot_hmac,
+    ))
+
+    assert prepared.estimator_input_hmac == policy.prepare_answer_generation(
+        AnswerGenerationCostInput(
+            exact_messages_json=_compact([
+                {'content': 'question', 'ordinal': 1, 'role': 'user'},
+            ]),
+            exact_response_schema_json=schema,
+            model_config_snapshot_hmac=policy.answer_model_config_snapshot_hmac,
+        )
+    ).estimator_input_hmac
+
+
+@pytest.mark.parametrize(
+    'schema',
+    (
+        b'{"name":"x","name":"y"}',
+        b'{"name":"x"} ',
+        b'{"name":NaN}',
+        b'{"name":',
+        b'\xff',
+    ),
+)
+def test_answer_cost_rejects_malformed_or_unstable_exact_schema(
+    schema: bytes,
+) -> None:
+    settings = _settings()
+    with pytest.raises(ValueError, match='schema'):
+        policy = RagCostPolicy(
+            settings=settings,
+            answer_output_schema_hmac=build_answer_output_schema_hmac(
+                settings,
+                schema,
+            ),
+            answer_prompt_renderer_hmac='b' * 64,
+        )
+        policy.prepare_answer_generation(AnswerGenerationCostInput(
+            exact_messages_json=_compact([
+                {'content': 'question', 'ordinal': 1, 'role': 'user'},
+            ]),
+            exact_response_schema_json=schema,
+            model_config_snapshot_hmac=policy.answer_model_config_snapshot_hmac,
+        ))
+
+
 def _policy(settings: Settings | None = None) -> RagCostPolicy:
     selected = settings or _settings()
     return RagCostPolicy(

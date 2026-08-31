@@ -4,6 +4,15 @@ from typing import Any
 
 from backend.app.agent_runtime import EvidencePacket
 from backend.app.agents.rag_orchestrator_agent.agent import RagModelResponse
+from backend.app.agents.rag_orchestrator_agent.v2_answer import (
+    PreparedAnswerInvocation as PreparedAnswerInvocation,
+)
+from backend.app.agents.rag_orchestrator_agent.v2_answer import (
+    ProviderAnswerEnvelope as ProviderAnswerEnvelope,
+)
+from backend.app.agents.rag_orchestrator_agent.v2_answer import (
+    StructuredRagAnswerModel as StructuredRagAnswerModel,
+)
 
 DEFAULT_RAG_OPENAI_MODEL = 'gpt-5.4'
 DEFAULT_RAG_GEMINI_MODEL = 'gemini-2.5-flash'

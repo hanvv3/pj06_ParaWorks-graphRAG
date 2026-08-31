@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from backend.app.agent_runtime.auto_review_cost_policy import (
     AUTO_REVIEW_MAX_OUTPUT_TOKENS,
@@ -44,6 +44,67 @@ class RoutedReviewModel:
     model_name: str
     route_version: str
     deterministic: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RoutedRagAnswerModel:
+    model: Any
+    provider: Literal['openai']
+    model_name: Literal['gpt-5.4-mini-2026-03-17']
+    model_config_snapshot_hmac: str
+
+
+def build_rag_answer_model_route(*, settings: Settings) -> RoutedRagAnswerModel:
+    from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
+        ANSWER_OUTPUT_SCHEMA_PROVIDER_FORMAT,
+        assert_answer_contract_registry_ready,
+        build_answer_output_schema_hmac,
+        build_answer_prompt_renderer_hmac,
+    )
+
+    if not settings.openai_api_key:
+        raise ReviewModelUnavailableError('review model is unavailable')
+    try:
+        assert_answer_contract_registry_ready()
+        output_schema_hmac = build_answer_output_schema_hmac(settings)
+        renderer_hmac = build_answer_prompt_renderer_hmac(settings)
+        model_config_hmac = build_rag_answer_model_config_snapshot_hmac(
+            settings,
+            output_schema_hmac=output_schema_hmac,
+            prompt_renderer_hmac=renderer_hmac,
+        )
+        from langchain_openai import ChatOpenAI
+
+        raw_model = ChatOpenAI(
+            model=RAG_ANSWER_MODEL,
+            api_key=settings.openai_api_key,
+            base_url=RAG_OPENAI_API_BASE_URL,
+            reasoning_effort='none',
+            use_responses_api=True,
+            service_tier=RAG_ANSWER_SERVICE_TIER,
+            timeout=30,
+            max_retries=0,
+            max_completion_tokens=512,
+            store=False,
+            streaming=False,
+            verbose=False,
+            cache=False,
+            callbacks=None,
+        )
+        model = raw_model.with_structured_output(
+            ANSWER_OUTPUT_SCHEMA_PROVIDER_FORMAT,
+            method='json_schema',
+            strict=True,
+            include_raw=True,
+        )
+    except Exception:
+        raise ReviewModelUnavailableError('review model is unavailable') from None
+    return RoutedRagAnswerModel(
+        model=model,
+        provider='openai',
+        model_name=RAG_ANSWER_MODEL,
+        model_config_snapshot_hmac=model_config_hmac,
+    )
 
 
 def rag_answer_model_config_snapshot(

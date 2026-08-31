@@ -161,6 +161,7 @@ def _create_rag_cost_policy_type(
     class State:
         __slots__ = (
             'answer_config_hmac',
+            'answer_artifact_signer',
             'answer_estimator_signer',
             'answer_policy_hmac',
             'answer_tokenizer',
@@ -321,11 +322,45 @@ def _create_rag_cost_policy_type(
                     policy_version=authority.answer_estimator_version,
                 )
 
+            def answer_artifact_signer(kind: str, payload: object) -> str:
+                domains = {
+                    'rendered_input': (
+                        'rag-rendered-answer-input:v1',
+                        'rag-answer:v2',
+                    ),
+                    'block_text': (
+                        'rag-answer-block-text-bytes:v1',
+                        'rag-answer:v2',
+                    ),
+                    'block_result': (
+                        'rag-answer-block-result:v1',
+                        'rag-answer-block-confidence:v1',
+                    ),
+                    'audit_set': (
+                        'rag-answer-block-audit-set:v1',
+                        'rag-answer-block-confidence:v1',
+                    ),
+                    'assembled': (
+                        'rag-assembled-answer-bytes:v1',
+                        'rag-answer-block-joiner:v1',
+                    ),
+                }
+                if type(kind) is not str or kind not in domains:
+                    raise ValueError('RAG answer artifact domain is invalid')
+                schema_version, policy_version = domains[kind]
+                return keyed_fingerprint(
+                    payload,
+                    secret=secret,
+                    schema_version=schema_version,
+                    policy_version=policy_version,
+                )
+
             state = State(
                 authority=authority,
                 schema_verifier=schema_verifier,
                 query_estimator_signer=query_estimator_signer,
                 answer_estimator_signer=answer_estimator_signer,
+                answer_artifact_signer=answer_artifact_signer,
                 query_config_hmac=query_config_hmac,
                 answer_config_hmac=answer_config_hmac,
                 query_policy_hmac=query_policy_hmac,
@@ -499,6 +534,7 @@ def _create_rag_cost_policy_type(
             schema = _decode_exact_json(
                 value.exact_response_schema_json,
                 'schema',
+                require_canonical=False,
             )
             _validate_exact_messages(messages)
             if type(schema) is not dict:
@@ -593,6 +629,13 @@ def _create_rag_cost_policy_type(
                     authority=authority,
                 )
             invoke_hook('charge_before_return', self)
+            require_same_state(self, state, code)
+            return result
+
+        def sign_answer_artifact(self, kind: str, payload: object) -> str:
+            code = 'model_unavailable'
+            state = get_state(self, code)
+            result = state.answer_artifact_signer(kind, payload)
             require_same_state(self, state, code)
             return result
 
@@ -713,18 +756,35 @@ def _exact_component(component: object) -> RagPaidComponent:
     return component
 
 
-def _decode_exact_json(value: bytes, name: str) -> object:
+def _decode_exact_json(
+    value: bytes,
+    name: str,
+    *,
+    require_canonical: bool = True,
+) -> object:
+    def strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, item in pairs:
+            if type(key) is not str or key in result:
+                raise ValueError
+            result[key] = item
+        return result
+
     try:
         text = value.decode('utf-8', errors='strict')
         parsed = json.loads(
             text,
             parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+            object_pairs_hook=strict_object,
         )
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError, RecursionError):
         raise ValueError(f'answer {name} JSON is invalid') from None
     _validate_json_tree(parsed)
-    if _canonical_json_bytes(parsed) != value:
-        raise ValueError(f'answer {name} JSON is not canonical')
+    if require_canonical:
+        if _canonical_json_bytes(parsed) != value:
+            raise ValueError(f'answer {name} JSON is not canonical')
+    elif _insertion_order_json_bytes(parsed) != value:
+        raise ValueError(f'answer {name} JSON is not exact')
     return parsed
 
 
@@ -735,6 +795,19 @@ def _canonical_json_bytes(value: object) -> bytes:
             ensure_ascii=False,
             allow_nan=False,
             sort_keys=True,
+            separators=(',', ':'),
+        ).encode('utf-8')
+    except (TypeError, ValueError, RecursionError):
+        raise ValueError('answer estimator JSON is invalid') from None
+
+
+def _insertion_order_json_bytes(value: object) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=False,
             separators=(',', ':'),
         ).encode('utf-8')
     except (TypeError, ValueError, RecursionError):
