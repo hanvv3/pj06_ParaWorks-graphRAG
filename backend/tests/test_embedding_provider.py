@@ -1,7 +1,10 @@
+import pytest
+
 from backend.app.rag.embeddings import (
     OpenAIEmbeddingConfig,
     OpenAIEmbeddingModel,
     openai_compatible_embedding_config,
+    validate_query_embedding_vector,
 )
 
 
@@ -88,3 +91,18 @@ def test_openai_compatible_embedding_config_accepts_azure_openai_alias_with_open
     assert config.api_key == 'openai-compatible-key'
     assert config.model == 'text-embedding-3-small'
     assert config.base_url == 'https://api.openai.com/v1'
+
+
+def test_query_vector_carrier_is_float32_canonical_and_rejects_bool_or_zero() -> None:
+    carrier = validate_query_embedding_vector(
+        [0.1, -0.2],
+        expected_dimensions=2,
+    )
+    assert carrier.coordinates == (
+        0.10000000149011612,
+        -0.20000000298023224,
+    )
+    with pytest.raises(ValueError, match='cosine-indexable'):
+        validate_query_embedding_vector([True, 0.0], expected_dimensions=2)
+    with pytest.raises(ValueError, match='cosine-indexable'):
+        validate_query_embedding_vector([0.0, -0.0], expected_dimensions=2)

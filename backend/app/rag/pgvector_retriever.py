@@ -1,0 +1,254 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from time import perf_counter_ns
+from typing import Protocol
+
+from langchain_core.runnables import Runnable, RunnableConfig
+
+from backend.app.agent_runtime.fingerprints import (
+    fingerprint_secret_bytes,
+    keyed_fingerprint,
+)
+from backend.app.agent_runtime.rag_v2_identity import (
+    exact_utf8_bytes,
+    verify_serialized_security_scope_fingerprint,
+)
+from backend.app.core.config import Settings
+from backend.app.rag.embeddings import ValidatedQueryEmbeddingVector
+from backend.app.rag.index_readiness import RagServingIndexReadiness
+from backend.app.rag.retrieval import (
+    ClassifiedRetrievalCandidate,
+    RetrievalCandidate,
+    RetrievalRequest,
+    RetrievalResult,
+    SanitizedRetrievalTrace,
+)
+
+
+class PgVectorSearchRuntimeError(RuntimeError):
+    """Sanitized PostgreSQL/pgvector read failure eligible for lexical fallback."""
+
+
+class PgVectorSearchStorePort(Protocol):
+    def search(
+        self,
+        request: RetrievalRequest,
+        vector: ValidatedQueryEmbeddingVector,
+    ) -> tuple[ClassifiedRetrievalCandidate, ...]: ...
+
+
+class ReadinessSnapshotPort(Protocol):
+    def inspect(self) -> RagServingIndexReadiness: ...
+
+
+class PgVectorEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
+    def __init__(
+        self,
+        *,
+        store: PgVectorSearchStorePort,
+        readiness: ReadinessSnapshotPort,
+        keyword_retriever: Runnable[RetrievalRequest, RetrievalResult],
+        settings: Settings,
+    ) -> None:
+        self._store = store
+        self._readiness = readiness
+        self._keyword_retriever = keyword_retriever
+        self._settings = settings
+
+    def invoke(
+        self,
+        input: RetrievalRequest,
+        config: RunnableConfig | None = None,
+    ) -> RetrievalResult:
+        started_ns = perf_counter_ns()
+        verify_serialized_security_scope_fingerprint(
+            input.security_scope,
+            serialized_fingerprint=input.security_scope_fingerprint,
+            settings=self._settings,
+        )
+        embedding = _require_exact_embedding_carrier(input)
+        before_sql = self._readiness.inspect()
+        if not _matches_prepared_readiness(before_sql, input):
+            return self._keyword_fallback(
+                input,
+                config=config,
+                category='serving_corpus_changed_during_pgvector_query',
+                started_ns=started_ns,
+            )
+        try:
+            candidates = self._store.search(input, embedding.vector)
+        except PgVectorSearchRuntimeError:
+            return self._keyword_fallback(
+                input,
+                config=config,
+                category='pgvector_storage_runtime_failure',
+                started_ns=started_ns,
+            )
+        after_sql = self._readiness.inspect()
+        if not _matches_prepared_readiness(after_sql, input):
+            return self._keyword_fallback(
+                input,
+                config=config,
+                category='serving_corpus_changed_during_pgvector_query',
+                started_ns=started_ns,
+            )
+        window = _candidate_window(candidates, limit=input.candidate_scan_limit)
+        visible_internal = tuple(
+            candidate
+            for candidate in window
+            if candidate.access.permission_visibility == 'visible'
+        )[: input.visible_limit]
+        visible = tuple(
+            RetrievalCandidate(
+                evidence=candidate.evidence,
+                relevance_score=candidate.relevance_score,
+                matched_terms=candidate.matched_terms,
+            )
+            for candidate in visible_internal
+        )
+        denied_count = sum(
+            candidate.access.permission_visibility == 'denied_known'
+            for candidate in window
+        )
+        hidden = min(denied_count, 20)
+        latency_ms = _latency_ms(started_ns)
+        return RetrievalResult(
+            configured_backend='pgvector',
+            effective_backend='pgvector',
+            visible=visible,
+            hidden_match_count=hidden,
+            hidden_count_capped=denied_count > 20,
+            top_candidate_window_hmac=_window_hmac(window, settings=self._settings),
+            query_embedding_receipt=embedding.receipt,
+            trace=SanitizedRetrievalTrace(
+                candidate_window_count=len(window),
+                visible_count=len(visible),
+                hidden_match_count=hidden,
+                provider_attempt_count=1,
+                latency_ms=latency_ms,
+                fallback_category=None,
+            ),
+        )
+
+    def _keyword_fallback(
+        self,
+        request: RetrievalRequest,
+        *,
+        config: RunnableConfig | None,
+        category: str,
+        started_ns: int,
+    ) -> RetrievalResult:
+        embedding = request.query_embedding_result
+        assert embedding is not None
+        lexical_request = replace(request, query_embedding_result=None)
+        lexical = self._keyword_retriever.invoke(lexical_request, config=config)
+        return RetrievalResult(
+            configured_backend='pgvector',
+            effective_backend='deterministic_lexical',
+            visible=lexical.visible,
+            hidden_match_count=lexical.hidden_match_count,
+            hidden_count_capped=lexical.hidden_count_capped,
+            top_candidate_window_hmac=lexical.top_candidate_window_hmac,
+            query_embedding_receipt=embedding.receipt,
+            trace=SanitizedRetrievalTrace(
+                candidate_window_count=lexical.trace.candidate_window_count,
+                visible_count=len(lexical.visible),
+                hidden_match_count=lexical.hidden_match_count,
+                provider_attempt_count=1,
+                latency_ms=_latency_ms(started_ns),
+                fallback_category=category,
+            ),
+        )
+
+
+def _require_exact_embedding_carrier(input: RetrievalRequest):
+    result = input.query_embedding_result
+    query_utf8 = input.retrieval_query_text.encode('utf-8', errors='strict')
+    if result is None:
+        raise ValueError('pgvector retrieval requires a validated query embedding')
+    if result.prepared.transient_query_utf8 != query_utf8:
+        raise ValueError('query bytes do not match the prepared embedding')
+    if (
+        not isinstance(result.vector, ValidatedQueryEmbeddingVector)
+        or result.attempted is not True
+        or result.receipt.attempted is not True
+        or result.actual_cost_usd != result.receipt.actual_cost_usd
+        or result.validated_input_tokens != result.receipt.input_tokens
+    ):
+        raise ValueError('query embedding carrier is invalid')
+    return result
+
+
+def _matches_prepared_readiness(
+    readiness: RagServingIndexReadiness,
+    request: RetrievalRequest,
+) -> bool:
+    result = request.query_embedding_result
+    assert result is not None
+    prepared = result.prepared
+    return bool(
+        readiness.ready
+        and readiness.corpus_generation == prepared.corpus_generation
+        and readiness.vector_index_generation == prepared.vector_index_generation
+        and readiness.readiness_snapshot_hmac == prepared.readiness_snapshot_hmac
+        and readiness.embedding_model == 'text-embedding-3-small'
+        and readiness.embedding_dimensions == 1536
+        and readiness.index_policy_version == 'rag-v2-serving-index:v1'
+    )
+
+
+def _candidate_window(
+    candidates: tuple[ClassifiedRetrievalCandidate, ...],
+    *,
+    limit: int,
+) -> tuple[ClassifiedRetrievalCandidate, ...]:
+    eligible = tuple(
+        candidate
+        for candidate in candidates
+        if candidate.relevance_score >= 0.25
+        and candidate.access.global_eligibility == 'eligible'
+        and candidate.access.resource_scope == 'in_scope'
+        and candidate.access.permission_visibility in {'visible', 'denied_known'}
+    )
+    return tuple(
+        sorted(
+            eligible,
+            key=lambda candidate: (
+                0 if candidate.evidence.serving_kind == 'trusted_knowledge' else 1,
+                -candidate.relevance_score,
+                candidate.evidence.serving_document_id,
+            ),
+        )[:limit]
+    )
+
+
+def _window_hmac(
+    window: tuple[ClassifiedRetrievalCandidate, ...],
+    *,
+    settings: Settings,
+) -> str:
+    secret, _ = fingerprint_secret_bytes(settings)
+    return keyed_fingerprint(
+        [
+            {
+                'serving_identity_hmac': candidate.evidence.serving_identity_hmac,
+                'serving_version_fingerprint': (
+                    candidate.evidence.serving_version_fingerprint
+                ),
+                'score': candidate.relevance_score,
+                'matched_term_bytes': [
+                    exact_utf8_bytes(term) for term in candidate.matched_terms
+                ],
+                'permission_visibility': candidate.access.permission_visibility,
+            }
+            for candidate in window
+        ],
+        secret=secret,
+        schema_version='rag-pgvector-candidate-window:v1',
+        policy_version='rag-retrieval-policy:v2.0',
+    )
+
+
+def _latency_ms(started_ns: int) -> int:
+    return max(0, (perf_counter_ns() - started_ns) // 1_000_000)

@@ -7,6 +7,9 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from backend.app.agent_runtime.rag_v2_identity import (
+    verify_serialized_security_scope_fingerprint,
+)
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
 from backend.app.ingestion.source_authority import (
@@ -15,6 +18,11 @@ from backend.app.ingestion.source_authority import (
 from backend.app.knowledge.trusted_serving_eligibility import (
     knowledge_type_storage_aliases,
 )
+from backend.app.rag.embeddings import (
+    ValidatedQueryEmbeddingVector,
+    validate_query_embedding_vector,
+)
+from backend.app.rag.retrieval import RetrievalRequest
 from backend.app.rag.serving_locks import (
     VectorServingLockedContext,
     VectorServingLockManager,
@@ -35,6 +43,21 @@ class PgVectorConfig:
             raise ValueError('embedding_dimensions must be positive')
 
 
+@dataclass(frozen=True, slots=True)
+class PgVectorServingCandidateRow:
+    serving_document_id: str
+    serving_kind: str
+    support_mode: str
+    effective_permission: str
+    serving_identity_hmac: str
+    serving_version_fingerprint: str
+    model_content_hmac: str
+    canonical_citation_projection_hmac: str
+    title_lower: str
+    searchable_lower: str
+    score: float
+
+
 class PgVectorStore:
     def __init__(
         self,
@@ -45,6 +68,7 @@ class PgVectorStore:
     ) -> None:
         self.session = session
         self.config = config or PgVectorConfig()
+        self._settings = settings
         self._lock_manager = (
             VectorServingLockManager(db=session, settings=settings)
             if settings is not None
@@ -254,6 +278,157 @@ class PgVectorStore:
         ]
         hidden_match_count = int(rows[0]['hidden_match_count']) if rows else 0
         return VectorSearchResult(matches=matches, hidden_match_count=hidden_match_count)
+
+    def search_rag_v2(
+        self,
+        *,
+        request: RetrievalRequest,
+        query_embedding: ValidatedQueryEmbeddingVector,
+    ) -> tuple[PgVectorServingCandidateRow, ...]:
+        """Return the permission-unfiltered top 50 from the D serving corpus."""
+        settings = self._required_settings()
+        verify_serialized_security_scope_fingerprint(
+            request.security_scope,
+            serialized_fingerprint=request.security_scope_fingerprint,
+            settings=settings,
+        )
+        if not isinstance(query_embedding, ValidatedQueryEmbeddingVector):
+            raise TypeError('RAG V2 search requires a validated query vector carrier')
+        revalidated = validate_query_embedding_vector(
+            list(query_embedding.coordinates),
+            expected_dimensions=self.config.embedding_dimensions,
+        )
+        if revalidated != query_embedding:
+            raise ValueError('validated query vector carrier is inconsistent')
+        # The declarative resource predicate is the single Task 6 authority.
+        # This local import avoids making the legacy writer depend on search assembly.
+        from backend.app.rag.search_store import (
+            POSTGRES_KEYWORD_RESOURCE_PREDICATE,
+            build_postgres_keyword_bind_values,
+            render_postgres_keyword_predicate,
+        )
+
+        bind_values = build_postgres_keyword_bind_values(
+            request=request,
+            terms=(),
+            settings=settings,
+        )
+        parameters = {
+            'query_embedding': _embedding_literal(query_embedding.coordinates),
+            'fingerprint_key_version': bind_values['fingerprint_key_version'],
+            'key_material_verifier': bind_values['key_material_verifier'],
+            'project_keys': bind_values['project_keys'],
+            'source_ids': bind_values['source_ids'],
+            'source_id_texts': bind_values['source_id_texts'],
+            'workspace_scope_id': bind_values['workspace_scope_id'],
+        }
+        rows = tuple(
+            self.session.execute(
+                text(
+                    self._rag_v2_search_sql(
+                        resource_predicate=render_postgres_keyword_predicate(
+                            POSTGRES_KEYWORD_RESOURCE_PREDICATE
+                        )
+                    )
+                ),
+                parameters,
+            )
+            .mappings()
+            .all()
+        )
+        return tuple(
+            PgVectorServingCandidateRow(
+                serving_document_id=str(row['serving_document_id']),
+                serving_kind=str(row['serving_kind']),
+                support_mode=str(row['support_mode']),
+                effective_permission=str(row['effective_permission']),
+                serving_identity_hmac=str(row['serving_identity_hmac']),
+                serving_version_fingerprint=str(
+                    row['serving_version_fingerprint']
+                ),
+                model_content_hmac=str(row['model_content_hmac']),
+                canonical_citation_projection_hmac=str(
+                    row['canonical_citation_projection_hmac']
+                ),
+                title_lower=str(row['title_lower']),
+                searchable_lower=str(row['searchable_lower']),
+                score=float(row['score']),
+            )
+            for row in rows
+        )
+
+    def _required_settings(self) -> Settings:
+        if self._settings is None:
+            raise TypeError('RAG V2 search requires explicit settings')
+        return self._settings
+
+    def _rag_v2_search_sql(self, *, resource_predicate: str) -> str:
+        table = self.config.table_name
+        live_eligibility = self._live_eligibility_sql(
+            'vector_document',
+            allow_rag_v2_raw_write=True,
+        )
+        return f"""
+        WITH ranked AS (
+            SELECT
+                projection.serving_document_id,
+                projection.serving_kind,
+                projection.support_mode,
+                projection.effective_permission,
+                projection.serving_identity_hmac,
+                projection.serving_version_fingerprint,
+                projection.model_content_hmac,
+                projection.canonical_citation_projection_hmac,
+                projection.title_lower,
+                projection.searchable_lower,
+                1 - (
+                    vector_document.embedding <=> CAST(:query_embedding AS vector)
+                ) AS score
+            FROM {table} AS vector_document
+            JOIN rag_lexical_serving_projections AS projection
+              ON projection.serving_document_id = vector_document.document_id
+            JOIN rag_serving_corpus_generations AS generation
+              ON generation.id = projection.corpus_generation_id
+             AND generation.corpus_generation = projection.corpus_generation
+            WHERE projection.corpus_generation_id = 1
+              AND projection.fingerprint_key_version = :fingerprint_key_version
+              AND projection.fingerprint_key_material_verifier = :key_material_verifier
+              AND projection.effective_permission IN (
+                  'public', 'internal', 'restricted'
+              )
+              AND vector_document.metadata_json->>'index_policy_version'
+                  = 'rag-v2-serving-index:v1'
+              AND vector_document.metadata_json->>'serving_identity_hmac'
+                  = projection.serving_identity_hmac
+              AND vector_document.metadata_json->>'serving_version_fingerprint'
+                  = projection.serving_version_fingerprint
+              AND vector_document.metadata_json->>'model_content_hmac'
+                  = projection.model_content_hmac
+              AND vector_document.metadata_json->>'canonical_citation_projection_hmac'
+                  = projection.canonical_citation_projection_hmac
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM vector_serving_tombstones AS tombstone
+                  WHERE tombstone.document_id = vector_document.document_id
+              )
+              AND ({live_eligibility})
+              AND ({resource_predicate})
+        ), relevant AS (
+            SELECT *
+            FROM ranked
+            WHERE score >= 0.25
+            ORDER BY
+              CASE WHEN serving_kind = 'trusted_knowledge' THEN 0 ELSE 1 END,
+              score DESC,
+              serving_document_id
+            LIMIT 50
+        )
+        SELECT * FROM relevant
+        ORDER BY
+          CASE WHEN serving_kind = 'trusted_knowledge' THEN 0 ELSE 1 END,
+          score DESC,
+          serving_document_id
+        """
 
     def _upsert_sql(self) -> str:
         table = self.config.table_name

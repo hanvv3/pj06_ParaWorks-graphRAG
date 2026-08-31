@@ -12,11 +12,11 @@ from backend.app.agent_runtime.rag_v2_contracts import (
     RagRetrievalBackend,
 )
 from backend.app.agent_runtime.rag_v2_identity import SecurityScope
+from backend.app.rag.embeddings import ValidatedQueryEmbeddingVector
 from backend.app.rag.serving_contracts import (
     EvidenceAccessClassification,
     ServingEvidence,
 )
-from backend.app.rag.vector_validation import CanonicalFloat32Vector
 
 RagPaidComponent = Literal['query_embedding', 'answer_generation']
 
@@ -124,7 +124,7 @@ class QueryEmbeddingReceipt:
 @dataclass(frozen=True, slots=True)
 class QueryEmbeddingCallResult:
     prepared: PreparedQueryEmbedding
-    vector: CanonicalFloat32Vector
+    vector: ValidatedQueryEmbeddingVector
     attempted: Literal[True]
     validated_input_tokens: int
     actual_cost_usd: Decimal
@@ -191,7 +191,6 @@ class ClassifiedRetrievalCandidate:
             or not math.isfinite(self.relevance_score)
             or self.relevance_score <= 0
             or type(self.matched_terms) is not tuple
-            or not self.matched_terms
         ):
             raise ValueError('classified retrieval candidate is invalid')
 

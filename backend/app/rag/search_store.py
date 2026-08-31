@@ -13,12 +13,21 @@ from backend.app.agent_runtime.rag_v2_identity import SecurityScope
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
 from backend.app.models import RagLexicalServingProjection, RagServingCorpusGeneration
-from backend.app.rag.embeddings import OpenAIEmbeddingConfig, OpenAIEmbeddingModel
+from backend.app.rag.embeddings import (
+    OpenAIEmbeddingConfig,
+    OpenAIEmbeddingModel,
+    ValidatedQueryEmbeddingVector,
+)
 from backend.app.rag.lexical_projection import (
     score_rag_lexical_candidate,
     tokenize_rag_lexical_query,
 )
-from backend.app.rag.pgvector_store import PgVectorConfig, PgVectorStore
+from backend.app.rag.pgvector_retriever import PgVectorSearchRuntimeError
+from backend.app.rag.pgvector_store import (
+    PgVectorConfig,
+    PgVectorServingCandidateRow,
+    PgVectorStore,
+)
 from backend.app.rag.retrieval import ClassifiedRetrievalCandidate, RetrievalRequest
 from backend.app.rag.serving_contracts import (
     EvidenceAccessClassification,
@@ -57,6 +66,147 @@ def build_pgvector_search_store(*, db: Session, settings: Settings):
         )
     )
     return PgVectorSearchAdapter(store=store, embedding_model=embedding_model)
+
+
+def build_rag_v2_pgvector_search_store(
+    *,
+    db: Session,
+    settings: Settings,
+):
+    if db.get_bind().dialect.name != 'postgresql':
+        return None
+    store = PgVectorStore(
+        session=db,
+        config=PgVectorConfig(
+            embedding_dimensions=settings.openai_embedding_dimensions
+        ),
+        settings=settings,
+    )
+    return SqlAlchemyPgVectorSearchStore(
+        db=db,
+        store=store,
+        settings=settings,
+    )
+
+
+class SqlAlchemyPgVectorSearchStore:
+    """D-only store: vector rows rank; canonical resolvers authorize/project."""
+
+    def __init__(
+        self,
+        *,
+        db: Session,
+        store: PgVectorStore,
+        settings: Settings,
+    ) -> None:
+        self._db = db
+        self._store = store
+        self._settings = settings
+
+    def search(
+        self,
+        request: RetrievalRequest,
+        vector: ValidatedQueryEmbeddingVector,
+    ) -> tuple[ClassifiedRetrievalCandidate, ...]:
+        try:
+            rows = self._store.search_rag_v2(
+                request=request,
+                query_embedding=vector,
+            )
+            candidates: list[ClassifiedRetrievalCandidate] = []
+            for row in rows:
+                candidate = self._canonical_candidate(row, request=request)
+                if candidate is None or not _is_stage_one_candidate(candidate.access):
+                    raise PgVectorSearchRuntimeError(
+                        'pgvector retrieval is unavailable'
+                    )
+                candidates.append(candidate)
+            return tuple(candidates)
+        except PgVectorSearchRuntimeError:
+            raise
+        except (DBAPIError, SQLAlchemyError, TypeError, ValueError):
+            raise PgVectorSearchRuntimeError(
+                'pgvector retrieval is unavailable'
+            ) from None
+
+    def _canonical_candidate(
+        self,
+        row: PgVectorServingCandidateRow,
+        *,
+        request: RetrievalRequest,
+    ) -> ClassifiedRetrievalCandidate | None:
+        resolved = _resolve_canonical_projection(
+            self._db,
+            self._settings,
+            row,
+            request=request,
+        )
+        if resolved is None:
+            return None
+        evidence, access = resolved
+        return ClassifiedRetrievalCandidate(
+            evidence=evidence,
+            relevance_score=row.score,
+            matched_terms=(),
+            access=access,
+        )
+
+
+def _resolve_canonical_projection(
+    db: Session,
+    settings: Settings,
+    row: Mapping[str, object] | PgVectorServingCandidateRow,
+    *,
+    request: RetrievalRequest,
+) -> tuple[object, EvidenceAccessClassification] | None:
+    document_id = str(_row_value(row, 'serving_document_id'))
+    prefix, separator, raw_id = document_id.partition(':')
+    if separator != ':' or not raw_id.isascii() or not raw_id.isdecimal():
+        return None
+    identifier = int(raw_id)
+    if identifier <= 0 or str(identifier) != raw_id:
+        return None
+    if prefix == 'chunk':
+        observation = CanonicalSourceObservationResolver(
+            db=db,
+            settings=settings,
+        ).resolve_for_index(identifier)
+        if observation is None:
+            return None
+        identity = observation.identity
+        evidence = observation.evidence
+        access = CanonicalSourceObservationEligibilityService().classify_access(
+            request.security_scope,
+            observation,
+        )
+    elif prefix in {'decision_record', 'history_event', 'timeline_event', 'todo'}:
+        envelope = TrustedServingEnvelopeResolver(
+            db=db,
+            settings=settings,
+        ).resolve_for_index(prefix, identifier)
+        if envelope is None:
+            return None
+        identity = envelope.identity
+        evidence = envelope.evidence
+        access = _classify_trusted_stage_one_access(
+            TrustedEvidenceAuthorizer(db=db, settings=settings),
+            scope=request.security_scope,
+            envelope=envelope,
+        )
+    else:
+        return None
+    if not _projection_matches(row, evidence=evidence):
+        return None
+    if access.permission_visibility == 'visible':
+        visible = ServingEvidenceResolver(settings=settings).resolve_candidate(
+            db=db,
+            identity=identity,
+            scope=request.security_scope,
+        )
+        if visible is None:
+            return None
+        evidence = visible
+    return evidence, access
 
 
 class PgVectorSearchAdapter:

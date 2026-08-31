@@ -1,10 +1,46 @@
 import hashlib
 import math
 import re
+import struct
 from dataclasses import dataclass
 from typing import Protocol
 
 import httpx
+
+from backend.app.rag.vector_validation import (
+    CanonicalFloat32Vector,
+    CosineIndexableVectorValidator,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedQueryEmbeddingVector:
+    """Canonical query vector; provider and storage metadata are not authority."""
+
+    coordinates: CanonicalFloat32Vector
+    canonical_big_endian_float32_sha256: str
+    cosine_indexability_policy_version: str
+
+
+def validate_query_embedding_vector(
+    value: object,
+    *,
+    expected_dimensions: int = 1536,
+) -> ValidatedQueryEmbeddingVector:
+    if not isinstance(value, list):
+        raise ValueError('query embedding must be a JSON array')
+    coordinates = CosineIndexableVectorValidator().validate(
+        value,
+        expected_dimensions=expected_dimensions,
+    )
+    payload = b'paraworks:pgvector-float32:v1\x00' + b''.join(
+        struct.pack('>f', coordinate) for coordinate in coordinates
+    )
+    return ValidatedQueryEmbeddingVector(
+        coordinates=coordinates,
+        canonical_big_endian_float32_sha256=hashlib.sha256(payload).hexdigest(),
+        cosine_indexability_policy_version='pgvector-cosine-indexable:v1',
+    )
 
 
 @dataclass(frozen=True)

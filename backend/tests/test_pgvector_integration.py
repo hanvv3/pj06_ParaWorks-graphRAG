@@ -15,6 +15,10 @@ from backend.app.agent_runtime.keyed_mutation_guard import (
     KeyedMutationGuard,
     lock_runtime_state,
 )
+from backend.app.agent_runtime.rag_v2_identity import (
+    SecurityScope,
+    security_scope_fingerprint,
+)
 from backend.app.agents.rag_orchestrator_agent.service import (
     build_serving_dependency_snapshot,
     candidates_from_vector_matches,
@@ -50,13 +54,17 @@ from backend.app.models import (
     VectorIndexState,
     VectorServingTombstone,
 )
-from backend.app.rag.embeddings import DeterministicHashEmbeddingModel
+from backend.app.rag.embeddings import (
+    DeterministicHashEmbeddingModel,
+    validate_query_embedding_vector,
+)
 from backend.app.rag.indexing import (
     build_rag_index_documents,
     compute_vector_document_hash,
     index_changed_vector_documents,
 )
 from backend.app.rag.pgvector_store import PgVectorConfig, PgVectorStore
+from backend.app.rag.retrieval import RetrievalRequest
 from backend.app.rag.serving_locks import (
     ServingMutationLockCoordinator,
     build_serving_lock_plan,
@@ -81,6 +89,97 @@ class RefusingEmbeddingModel:
 
     def embed_many(self, texts: list[str]):
         raise AssertionError('stale evidence reached the embedding provider')
+
+
+def test_rag_v2_pgvector_sql_accepts_only_validated_carrier_and_ranks_before_permission() -> None:
+    class _Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    'serving_document_id': 'chunk:1',
+                    'serving_kind': 'raw_chunk',
+                    'support_mode': 'source_observation',
+                    'effective_permission': 'internal',
+                    'serving_identity_hmac': 'a' * 64,
+                    'serving_version_fingerprint': 'b' * 64,
+                    'model_content_hmac': 'c' * 64,
+                    'canonical_citation_projection_hmac': 'd' * 64,
+                    'title_lower': 'title',
+                    'searchable_lower': 'title\nbody',
+                    'score': 0.75,
+                }
+            ]
+
+    class _Session:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def execute(self, statement, parameters):
+            self.calls.append((str(statement), dict(parameters)))
+            return _Result()
+
+    settings = Settings(
+        database_url='postgresql+psycopg://test:test@localhost/test',
+        agent_runtime_fingerprint_secret='task7-static-pgvector-secret-32-bytes',
+        openai_embedding_dimensions=2,
+    )
+    scope = SecurityScope(
+        contract_version='rag-security-scope:v1',
+        principal_subject='user-1',
+        workspace_scope_id='workspace-1',
+        resource_scope_mode='all_current_scope',
+        project_constraints=(),
+        source_constraints=(),
+        allowed_permission_levels=('public',),
+        auth_policy_version='demo-auth:v1',
+        permission_policy_version='rag-permission-policy:v1',
+    )
+    request = RetrievalRequest(
+        retrieval_query_text='must not enter SQL',
+        security_scope=scope,
+        security_scope_fingerprint=security_scope_fingerprint(
+            scope,
+            settings=settings,
+        ),
+        query_embedding_result=None,
+        candidate_scan_limit=50,
+        visible_limit=5,
+        relevance_policy_version='rag-retrieval-policy:v2.0',
+    )
+    session = _Session()
+    store = PgVectorStore(
+        session=session,  # type: ignore[arg-type]
+        config=PgVectorConfig(embedding_dimensions=2),
+        settings=settings,
+    )
+    carrier = validate_query_embedding_vector(
+        [1.0, 0.0],
+        expected_dimensions=2,
+    )
+
+    rows = store.search_rag_v2(request=request, query_embedding=carrier)
+
+    assert rows[0].serving_document_id == 'chunk:1'
+    sql, parameters = session.calls[0]
+    assert 'WHERE score >= 0.25' in sql
+    assert 'LIMIT 50' in sql
+    assert 'allowed_permissions' not in sql
+    assert 'must not enter SQL' not in sql
+    assert parameters['query_embedding'] == '[1.0,0.0]'
+    with pytest.raises(ValueError, match='fingerprint'):
+        store.search_rag_v2(
+            request=replace(request, security_scope_fingerprint='0' * 64),
+            query_embedding=carrier,
+        )
+    assert len(session.calls) == 1
+    with pytest.raises(TypeError, match='validated query vector carrier'):
+        store.search_rag_v2(  # type: ignore[arg-type]
+            request=request,
+            query_embedding=[1.0, 0.0],
+        )
 
 
 def _task6_recovery_postgres_url() -> str:
