@@ -56,13 +56,24 @@ def _budget(component: str, reserve: str) -> PreparedPaidCallBudget:
     )
 
 
-def _ledger(commits: list[str] | None = None) -> RagCostLedger:
+def _ledger(
+    commits: list[str] | None = None,
+    safety_events: list[object] | None = None,
+) -> RagCostLedger:
     engine = create_engine('sqlite+pysqlite:///:memory:')
     Base.metadata.create_all(engine)
     return RagCostLedger(
         Session(engine),
         identity_secret=b'task-12-test-identity-secret',
         after_commit=(None if commits is None else lambda: commits.append('commit')),
+        actual_cost_authority=lambda component, usage: {
+            ('query_embedding', 20, 0): Decimal('0.000003'),
+            ('answer_generation', 50, 10): Decimal('0.000100'),
+            ('answer_generation', 5000, 2000): Decimal('0.020001'),
+        }[(component, usage.input_tokens, usage.output_tokens)],
+        apply_safety_action=(
+            None if safety_events is None else safety_events.append
+        ),
     )
 
 
@@ -150,13 +161,15 @@ def test_claim_is_committed_before_opaque_one_use_grant_and_actual_replaces_rese
 
 
 def test_response_less_uses_full_reserve_and_known_overrun_is_unclamped():
-    ledger = _ledger()
+    safety_events: list[object] = []
+    ledger = _ledger(safety_events=safety_events)
     _admit(ledger, 10)
     query = ledger.claim_component(
         run_id=10,
         component='query_embedding',
         prepared=_budget('query_embedding', '0.000010'),
     )
+    query.consume_at_dispatch()
     response_less = ledger.finalize_component(
         grant=query,
         outcome=StrictProviderOutcome(
@@ -178,6 +191,7 @@ def test_response_less_uses_full_reserve_and_known_overrun_is_unclamped():
         component='answer_generation',
         prepared=_budget('answer_generation', '0.002000'),
     )
+    answer.consume_at_dispatch()
     overrun = ledger.finalize_component(
         grant=answer,
         outcome=StrictProviderOutcome(
@@ -194,13 +208,14 @@ def test_response_less_uses_full_reserve_and_known_overrun_is_unclamped():
     assert overrun.overrun is True
     assert overrun.charged_cost_usd == Decimal('0.020001')
     assert ledger.total_charged_cost(10) == Decimal('0.020011')
+    assert safety_events == [overrun] or len(safety_events) == 1
 
 
 def test_projectionless_failure_closes_exact_two_terminal_zero_children():
     ledger = _ledger()
     _admit(ledger, 11)
     terminal = ledger.finalize_projectionless_failure(
-        run_id=11, outcome='retriever_not_configured'
+        run_id=11, outcome='abandoned_unknown'
     )
     assert terminal.run_record_phase == 'admission_only'
     assert terminal.source_window == 'rag-v2:admission:enforce:ask:keyword'
@@ -214,3 +229,86 @@ def test_projectionless_failure_closes_exact_two_terminal_zero_children():
         and final.charged_cost_usd == Decimal('0.000000')
         for final in terminal.component_finals
     )
+
+
+def test_unconsumed_forged_outcome_cannot_finalize_or_trigger_ignored_safety():
+    safety_events = []
+    ledger = _ledger(safety_events=safety_events)
+    _admit(ledger, 12)
+    grant = ledger.claim_component(
+        run_id=12,
+        component='query_embedding',
+        prepared=_budget('query_embedding', '0.000010'),
+    )
+    forged = StrictProviderOutcome(
+        component='query_embedding',
+        classification='response_less_failure',
+        terminal_outcome='component_succeeded',
+        provider_dispatch_started=True,
+        provider_response_received=False,
+        strict_usage=None,
+        actual_cost_usd=None,
+        safety_action='block_overrun',
+    )
+    with pytest.raises((RagCostLedgerError, ValueError)):
+        ledger.finalize_component(grant=grant, outcome=forged)
+    assert safety_events == []
+
+
+def test_second_terminal_child_moves_parent_to_pending_projection_with_owner_fence():
+    ledger = _ledger()
+    _admit(ledger, 13)
+    for component, reserve, usage, actual in (
+        ('query_embedding', '0.000010', StrictProviderUsage(20, 0, 20), Decimal('0.000003')),
+        ('answer_generation', '0.002000', StrictProviderUsage(50, 10, 60), Decimal('0.000100')),
+    ):
+        grant = ledger.claim_component(
+            run_id=13, component=component, prepared=_budget(component, reserve)
+        )
+        grant.consume_at_dispatch()
+        final = ledger.finalize_component(
+            grant=grant,
+            outcome=StrictProviderOutcome(
+                component=component,
+                classification='validated_success',
+                terminal_outcome='component_succeeded',
+                provider_dispatch_started=True,
+                provider_response_received=True,
+                strict_usage=usage,
+                actual_cost_usd=actual,
+                safety_action='unchanged',
+            ),
+        )
+    assert final.parent_run_record_phase == 'cost_finalized_pending_projection'
+    assert final.projection_owner_fence_hmac is not None
+
+
+@pytest.mark.parametrize(
+    ('mode', 'surface', 'backend', 'window'),
+    (
+        ('enforce', 'ask', 'keyword', 'rag-v2:admission:shadow:assistant:pgvector'),
+        ('shadow', 'assistant', 'pgvector', 'rag-v2:admission:enforce:ask:keyword'),
+    ),
+)
+def test_admission_rejects_source_window_not_derived_from_route(
+    mode: str, surface: str, backend: str, window: str
+):
+    ledger = _ledger()
+    with pytest.raises(ValueError):
+        ledger.create_admission(
+            agent_run_id=14,
+            surface=surface,
+            mode=mode,
+            cutover_stage=surface,
+            configured_backend=backend,
+            query_context_version='direct-query:v1',
+            current_text_hmac='1' * 64,
+            retrieval_query_hmac='2' * 64,
+            security_scope_fingerprint='3' * 64,
+            admission_cache_identity_hmac='4' * 64,
+            source_window=window,
+            components=(
+                (_snapshot('query_embedding'), _budget('query_embedding', '0.000010')),
+                (_snapshot('answer_generation'), _budget('answer_generation', '0.002000')),
+            ),
+        )

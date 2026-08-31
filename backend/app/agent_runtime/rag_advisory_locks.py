@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 from collections.abc import MutableMapping
 
+from sqlalchemy import Connection, insert, select
+
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
+from backend.app.models.rag_runtime import RagAdvisoryLockKey
 
 
 class AdvisoryLockCollisionError(RuntimeError):
@@ -64,6 +67,46 @@ def register_advisory_identity(
         raise AdvisoryLockCollisionError('advisory lock key collision')
     registry[pair] = canonical
     return canonical
+
+
+def register_advisory_identity_db(
+    connection: Connection, value: object, *, identity_namespace: str
+) -> tuple[int, int]:
+    """Durably register a lock identity before any advisory acquisition."""
+    if identity_namespace not in {'static', 'dynamic'}:
+        raise ValueError('advisory identity namespace is invalid')
+    canonical = advisory_identity_bytes(value)
+    digest = hashlib.sha256(canonical).hexdigest()
+    pair = advisory_int4_pair(value)
+    existing = connection.execute(
+        select(RagAdvisoryLockKey.__table__).where(
+            RagAdvisoryLockKey.key1 == pair[0], RagAdvisoryLockKey.key2 == pair[1]
+        )
+    ).mappings().one_or_none()
+    if existing is None:
+        try:
+            connection.execute(insert(RagAdvisoryLockKey).values(
+                key1=pair[0], key2=pair[1],
+                identity_namespace=identity_namespace,
+                lock_identity_digest=digest,
+                lock_identity_canonical_bytes=canonical,
+            ))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise AdvisoryLockCollisionError(
+                'advisory lock identity registration failed'
+            ) from None
+        return pair
+    if (
+        existing['identity_namespace'] != identity_namespace
+        or existing['lock_identity_digest'] != digest
+        or bytes(existing['lock_identity_canonical_bytes']) != canonical
+    ):
+        connection.rollback()
+        raise AdvisoryLockCollisionError('advisory lock key collision')
+    connection.rollback()
+    return pair
 
 
 def acquire_advisory_lock(connection: object, key: tuple[int, int], *, shared: bool) -> None:

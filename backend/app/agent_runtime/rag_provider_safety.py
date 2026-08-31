@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -9,6 +10,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import Connection, insert, select, update
 
 from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
+from backend.app.agent_runtime.fingerprints import canonical_json_bytes
 from backend.app.agent_runtime.rag_runtime_contracts import (
     AuthorizedProviderPolicySnapshot,
     RagProviderSafetyBinding,
@@ -47,7 +49,8 @@ class RagProviderSafetyService:
             raise ValueError('provider safety signer is required')
         if type(designated_environment_id) is not str or not designated_environment_id.strip():
             raise ValueError('provider safety environment is required')
-        self._authority = DurableFileAuthority(latch_path)
+        self._latch_path = DurableFileAuthority.validate_configured_path(latch_path)
+        self._authority = DurableFileAuthority.open_runtime(self._latch_path)
         self._secret = identity_secret
         self._environment = designated_environment_id
 
@@ -55,15 +58,33 @@ class RagProviderSafetyService:
     def validate_disabled_path(path: str | Path) -> None:
         DurableFileAuthority.validate_configured_path(path)
 
-    def _digest(self, envelope: dict[str, object]) -> str:
-        unsigned = dict(envelope)
-        unsigned.pop('envelope_digest', None)
+    def _digest(self, signed_payload: dict[str, object]) -> str:
         return rag_identity_hmac(
-            unsigned,
+            signed_payload,
             secret=self._secret,
-            schema_version='rag-provider-safety-envelope:v1',
-            policy_version='rag-provider-safety:v1',
+            schema_version='rag-provider-safety-latch-envelope:v1',
+            policy_version='rag-provider-safety-latch-body:v1',
         )
+
+    @staticmethod
+    def _file_digest(envelope: dict[str, object]) -> str:
+        return hashlib.sha256(
+            b'paraworks:provider-safety-envelope-file:v1\x00'
+            + canonical_json_bytes(envelope)
+        ).hexdigest()
+
+    def _wrap(
+        self, body: dict[str, object], *, key_version: str, key_verifier: str
+    ) -> dict[str, object]:
+        signed_payload = {
+            'body': body,
+            'fingerprint_key_material_verifier': key_verifier,
+            'fingerprint_key_version': key_version,
+        }
+        return {
+            'signed_payload': signed_payload,
+            'hmac_sha256': self._digest(signed_payload),
+        }
 
     @staticmethod
     def _family(snapshot: AuthorizedProviderPolicySnapshot) -> dict[str, object]:
@@ -98,17 +119,24 @@ class RagProviderSafetyService:
             != ('query_embedding', 'answer_generation')
         ):
             raise RagProviderSafetyError('exactly two ordered provider families are required')
-        envelope: dict[str, object] = {
+        body: dict[str, object] = {
             'authority_uuid': str(uuid4()),
             'designated_environment_id': self._environment,
             'global_safety_generation': 0,
             'families': [self._family(item) for item in snapshots],
+            'latch_schema_version': 'rag-provider-safety-latch-body:v1',
         }
-        envelope['envelope_digest'] = self._digest(envelope)
-        self._authority.write(envelope)
+        envelope = self._wrap(
+            body,
+            key_version=snapshots[0].fingerprint_key_version,
+            key_verifier=snapshots[0].fingerprint_key_material_verifier,
+        )
+        initializer = DurableFileAuthority(self._latch_path)
+        initializer.write(envelope)
+        self._authority = DurableFileAuthority.open_runtime(self._latch_path)
         try:
-            authority_uuid = envelope['authority_uuid']
-            digest = envelope['envelope_digest']
+            authority_uuid = body['authority_uuid']
+            digest = self._file_digest(envelope)
             connection.execute(insert(RagProviderSafetyAuthority).values(
                 id=1,
                 authority_uuid=authority_uuid,
@@ -160,14 +188,21 @@ class RagProviderSafetyService:
 
     def _read(self) -> dict[str, object]:
         envelope = self._authority.read()
-        digest = envelope.get('envelope_digest')
+        if set(envelope) != {'signed_payload', 'hmac_sha256'}:
+            raise RagProviderSafetyError('provider safety authority is inconsistent')
+        signed = envelope.get('signed_payload')
+        signature = envelope.get('hmac_sha256')
         if (
-            type(digest) is not str
-            or not hmac.compare_digest(digest, self._digest(envelope))
-            or envelope.get('designated_environment_id') != self._environment
+            type(signed) is not dict
+            or type(signature) is not str
+            or not hmac.compare_digest(signature, self._digest(signed))
+            or type(signed.get('body')) is not dict
         ):
             raise RagProviderSafetyError('provider safety authority is inconsistent')
-        families = envelope.get('families')
+        body = dict(signed['body'])
+        if body.get('designated_environment_id') != self._environment:
+            raise RagProviderSafetyError('provider safety authority is inconsistent')
+        families = body.get('families')
         if (
             type(families) is not list
             or len(families) != 2
@@ -175,7 +210,12 @@ class RagProviderSafetyService:
             != ['query_embedding', 'answer_generation']
         ):
             raise RagProviderSafetyError('provider safety families are inconsistent')
-        return envelope
+        body['envelope_digest'] = self._file_digest(envelope)
+        body['_fingerprint_key_version'] = signed.get('fingerprint_key_version')
+        body['_fingerprint_key_material_verifier'] = signed.get(
+            'fingerprint_key_material_verifier'
+        )
+        return body
 
     def require_ready(
         self,
@@ -268,75 +308,82 @@ class RagProviderSafetyService:
         cost_usd: Decimal,
     ) -> None:
         def transition(envelope: dict[str, object]) -> dict[str, object]:
-            digest = envelope.get('envelope_digest')
+            signed = envelope.get('signed_payload')
+            digest = envelope.get('hmac_sha256')
             if type(digest) is not str or not hmac.compare_digest(
-                digest, self._digest(envelope)
+                digest, self._digest(signed)
             ):
                 raise RagProviderSafetyError('provider safety authority is inconsistent')
-            families = envelope['families']
+            body = signed['body']
+            families = body['families']
             family = families[0 if component == 'query_embedding' else 1]
             family['state'] = state
             family['state_version'] += 1
             family['family_safety_generation'] += 1
             family['overrun_agent_run_id'] = agent_run_id
-            envelope['global_safety_generation'] += 1
-            envelope['envelope_digest'] = self._digest(envelope)
-            return envelope
+            body['global_safety_generation'] += 1
+            return self._wrap(
+                body,
+                key_version=signed['fingerprint_key_version'],
+                key_verifier=signed['fingerprint_key_material_verifier'],
+            )
 
-        envelope = self._authority.update(transition)
-        try:
-            row = connection.execute(
-                select(RagProviderReadiness.__table__).where(
-                    RagProviderReadiness.component == component,
-                    RagProviderReadiness.active.is_(True),
-                )
-            ).mappings().one()
-            now = datetime.now(UTC)
-            connection.execute(update(RagProviderSafetyAuthority).where(
-                RagProviderSafetyAuthority.id == 1
-            ).values(
-                global_safety_generation=envelope['global_safety_generation'],
-                envelope_digest=envelope['envelope_digest'],
-                updated_at=now,
-            ))
-            connection.execute(update(RagProviderReadiness).where(
-                RagProviderReadiness.id == row['id']
-            ).values(
-                state=state,
-                state_version=row['state_version'] + 1,
-                family_safety_generation=row['family_safety_generation'] + 1,
-                overrun_agent_run_id=agent_run_id,
-                overrun_input_tokens=input_tokens,
-                overrun_output_tokens=output_tokens,
-                overrun_cost_usd=cost_usd,
-                overrun_observed_at=now,
-                updated_at=now,
-            ))
-            connection.execute(insert(RagProviderSafetyTransition).values(
-                authority_id=1,
-                readiness_id=row['id'],
-                global_safety_generation=envelope['global_safety_generation'],
-                transition_kind=(
-                    'block_overrun' if state == 'blocked_overrun'
-                    else 'block_remediation'
-                ),
-                prior_state=row['state'],
-                new_state=state,
-                prior_state_version=row['state_version'],
-                new_state_version=row['state_version'] + 1,
-                prior_family_safety_generation=row['family_safety_generation'],
-                new_family_safety_generation=row['family_safety_generation'] + 1,
-                envelope_digest=envelope['envelope_digest'],
-                reviewed_transition_reference_hmac=envelope['envelope_digest'],
-                actor_subject_hmac=None,
-                agent_run_id=agent_run_id,
-            ))
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise RagProviderSafetyError(
-                'external provider blocker persisted but DB transition failed'
-            ) from None
+        def commit_db(raw_envelope: dict[str, object]) -> None:
+            signed = raw_envelope['signed_payload']
+            envelope = signed['body']
+            digest = self._file_digest(raw_envelope)
+            try:
+                rows = connection.execute(
+                    select(RagProviderReadiness.__table__)
+                    .where(RagProviderReadiness.active.is_(True))
+                    .order_by(RagProviderReadiness.component)
+                    .with_for_update()
+                ).mappings().all()
+                if len(rows) != 2:
+                    raise RagProviderSafetyError('provider safety whole set is invalid')
+                row = next(item for item in rows if item['component'] == component)
+                now = datetime.now(UTC)
+                connection.execute(update(RagProviderSafetyAuthority).where(
+                    RagProviderSafetyAuthority.id == 1
+                ).values(
+                    global_safety_generation=envelope['global_safety_generation'],
+                    envelope_digest=digest, updated_at=now,
+                ))
+                connection.execute(update(RagProviderReadiness).where(
+                    RagProviderReadiness.id == row['id'],
+                    RagProviderReadiness.state_version == row['state_version'],
+                ).values(
+                    state=state, state_version=row['state_version'] + 1,
+                    family_safety_generation=row['family_safety_generation'] + 1,
+                    overrun_agent_run_id=agent_run_id,
+                    overrun_input_tokens=input_tokens,
+                    overrun_output_tokens=output_tokens,
+                    overrun_cost_usd=cost_usd,
+                    overrun_observed_at=now, updated_at=now,
+                ))
+                connection.execute(insert(RagProviderSafetyTransition).values(
+                    authority_id=1, readiness_id=row['id'],
+                    global_safety_generation=envelope['global_safety_generation'],
+                    transition_kind=(
+                        'block_overrun' if state == 'blocked_overrun'
+                        else 'block_remediation'
+                    ), prior_state=row['state'], new_state=state,
+                    prior_state_version=row['state_version'],
+                    new_state_version=row['state_version'] + 1,
+                    prior_family_safety_generation=row['family_safety_generation'],
+                    new_family_safety_generation=row['family_safety_generation'] + 1,
+                    envelope_digest=digest,
+                    reviewed_transition_reference_hmac=digest,
+                    actor_subject_hmac=None, agent_run_id=agent_run_id,
+                ))
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise RagProviderSafetyError(
+                    'external provider blocker persisted but DB transition failed'
+                ) from None
+
+        self._authority.update(transition, after_replace=commit_db)
 
     def block_overrun(
         self,

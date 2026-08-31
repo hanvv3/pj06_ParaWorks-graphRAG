@@ -16,9 +16,16 @@ class DurableFileAuthorityError(RuntimeError):
 class DurableFileAuthority:
     """Stable OS-lock sidecar plus atomically replaced canonical JSON data."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, runtime: bool = False) -> None:
         self.path = self.validate_configured_path(path)
         self.lock_path = Path(str(self.path) + '.lock')
+        self._runtime = runtime
+        self._initialized = runtime
+
+    @classmethod
+    def open_runtime(cls, path: str | Path) -> DurableFileAuthority:
+        """Open an existing authority without creating any artifact."""
+        return cls(path, runtime=True)
 
     @staticmethod
     def validate_configured_path(path: str | Path) -> Path:
@@ -44,9 +51,26 @@ class DurableFileAuthority:
 
     @contextmanager
     def locked(self) -> Iterator[None]:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self._runtime:
+            if (
+                not self.path.parent.is_dir()
+                or not self.path.is_file()
+                or not self.lock_path.is_file()
+            ):
+                raise DurableFileAuthorityError('runtime authority is unavailable')
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._validate_existing_regular(self.lock_path)
-        handle = self.lock_path.open('a+b')
+        if self._runtime or self._initialized:
+            handle = self.lock_path.open('r+b')
+        else:
+            try:
+                handle = self.lock_path.open('x+b')
+            except FileExistsError:
+                raise DurableFileAuthorityError(
+                    'authority initialization already exists'
+                ) from None
+            self._initialized = True
         try:
             if handle.tell() == 0:
                 handle.write(b'\0')
@@ -92,7 +116,10 @@ class DurableFileAuthority:
             return parsed
 
     def update(
-        self, transform: Callable[[dict[str, object]], dict[str, object]]
+        self,
+        transform: Callable[[dict[str, object]], dict[str, object]],
+        *,
+        after_replace: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, object]:
         """Read/modify/replace under one stable sidecar acquisition."""
         with self.locked():
@@ -107,6 +134,8 @@ class DurableFileAuthority:
             if type(updated) is not dict:
                 raise DurableFileAuthorityError('authority envelope is invalid')
             self._replace_unlocked(updated)
+            if after_replace is not None:
+                after_replace(updated)
             return updated
 
     def write(self, value: dict[str, object]) -> None:
@@ -133,6 +162,12 @@ class DurableFileAuthority:
                 os.fsync(handle.fileno())
             os.replace(temp_name, self.path)
             temp_name = None
+            if os.name != 'nt':
+                directory_fd = os.open(self.path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             if temp_name is not None:
                 with suppress(FileNotFoundError):

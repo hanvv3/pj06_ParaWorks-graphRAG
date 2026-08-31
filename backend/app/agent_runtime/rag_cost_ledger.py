@@ -24,6 +24,7 @@ from backend.app.agent_runtime.rag_safety_identity import (
     dispatch_fence_identity,
     process_instance_identity,
     provider_safety_snapshot_identity,
+    rag_identity_hmac,
     require_lower_hmac,
     runtime_cost_identity,
 )
@@ -115,12 +116,16 @@ class RagCostLedger:
         *,
         identity_secret: bytes,
         after_commit: Callable[[], None] | None = None,
+        actual_cost_authority: Callable[[RagPaidComponent, object], Decimal] | None = None,
+        apply_safety_action: Callable[[StrictProviderOutcome], None] | None = None,
     ) -> None:
         if type(identity_secret) is not bytes or not identity_secret:
             raise ValueError('cost-ledger identity secret is required')
         self._session = session
         self._secret = identity_secret
         self._after_commit = after_commit
+        self._actual_cost_authority = actual_cost_authority
+        self._apply_safety_action = apply_safety_action
         self._active_grants: dict[tuple[int, str], object] = {}
         self._process_nonce = secrets.token_hex(32)
 
@@ -156,6 +161,7 @@ class RagCostLedger:
             type(agent_run_id) is not int
             or agent_run_id <= 0
             or source_window not in ADMISSION_SOURCE_WINDOWS
+            or source_window != f'rag-v2:admission:{mode}:{surface}:{configured_backend}'
             or surface not in {'ask', 'search', 'assistant'}
             or mode not in {'shadow', 'enforce'}
             or cutover_stage not in {'none', 'ask', 'search', 'assistant'}
@@ -390,6 +396,9 @@ class RagCostLedger:
         key = (grant.agent_run_id, grant.component)
         if self._active_grants.get(key) is not grant:
             raise RagCostLedgerError('dispatch grant is not active')
+        if getattr(grant, 'consumed', None) is not True:
+            raise RagCostLedgerError('dispatch grant was not consumed by transport')
+        self._validate_outcome(outcome)
         parent = self._session.get(AgentRun, grant.agent_run_id, with_for_update=True)
         row = self._session.scalar(
             select(AgentRunCostComponent).where(
@@ -423,6 +432,11 @@ class RagCostLedger:
         else:
             if type(actual) is not Decimal or actual < 0:
                 raise ValueError('actual provider cost is invalid')
+            if self._actual_cost_authority is None:
+                raise RagCostLedgerError('actual provider cost authority is unavailable')
+            expected_actual = self._actual_cost_authority(outcome.component, usage)
+            if type(expected_actual) is not Decimal or expected_actual != actual:
+                raise ValueError('actual provider cost does not match authority')
             row.actual_input_tokens = usage.input_tokens
             row.actual_output_tokens = usage.output_tokens
             row.charged_cost_usd = actual
@@ -430,17 +444,88 @@ class RagCostLedger:
             row.overrun = actual > Decimal(row.reserved_cost_usd)
             if row.overrun != (outcome.classification == 'known_overrun'):
                 raise ValueError('provider overrun classification is inconsistent')
-        total = self._session.scalar(
-            select(AgentRunCostComponent).where(
-                AgentRunCostComponent.agent_run_id == grant.agent_run_id
-            )
-        )
-        del total
+        if outcome.safety_action != 'unchanged':
+            if self._apply_safety_action is None:
+                raise RagCostLedgerError('provider safety authority is unavailable')
+            self._apply_safety_action(outcome)
         self._session.flush()
         parent.total_charged_cost_usd = self.total_charged_cost(grant.agent_run_id)
+        siblings = tuple(self._session.scalars(
+            select(AgentRunCostComponent)
+            .where(AgentRunCostComponent.agent_run_id == grant.agent_run_id)
+            .order_by(AgentRunCostComponent.component_ordinal)
+        ))
+        if all(item.dispatch_state in {'terminal', 'abandoned_unknown'} for item in siblings):
+            owner_process = next(
+                item.process_instance_hmac for item in siblings
+                if item.process_instance_hmac is not None
+            )
+            parent.run_record_phase = 'cost_finalized_pending_projection'
+            parent.projection_owner_fence_hmac = rag_identity_hmac(
+                {
+                    'advisory_lock_identity_digest': None,
+                    'agent_run_id': grant.agent_run_id,
+                    'lock_backend': 'sqlite_process_mutex',
+                    'lock_namespace': 'sqlite_rag_smoke_projection_owner',
+                    'owner_nonce_hex': secrets.token_hex(32),
+                    'owner_phase': 'cost_finalized_pending_projection',
+                    'process_instance_hmac': owner_process,
+                }, secret=self._secret,
+                schema_version='rag-projection-owner-fence:v1',
+                policy_version='rag-run:v2',
+            )
         self._commit()
         self._active_grants.pop(key, None)
         return self._component_final(parent, row)
+
+    @staticmethod
+    def _validate_outcome(outcome: StrictProviderOutcome) -> None:
+        matrix = {
+            'validated_success': ('component_succeeded', True, True, 'actual', 'unchanged'),
+            'response_less_failure': ('model_provider_failed', True, False, 'reserved', 'unchanged'),
+            'response_identity_invalid': (
+                'provider_response_identity_invalid', True, True, 'reserved',
+                'block_remediation',
+            ),
+            'embedding_payload_invalid': (
+                'provider_embedding_payload_invalid', True, True, 'actual',
+                'block_remediation',
+            ),
+            'usage_contract_invalid': (
+                'provider_safety_unavailable', True, True, 'reserved',
+                'block_remediation',
+            ),
+            'usage_storage_invalid': (
+                'provider_safety_unavailable', True, True, 'reserved',
+                'block_remediation',
+            ),
+            'known_overrun': (
+                'provider_usage_overrun', True, True, 'actual', 'block_overrun'
+            ),
+            'structured_output_invalid': (
+                'structured_output_invalid', True, True, 'actual', 'unchanged'
+            ),
+            'citation_validation_failed': (
+                'citation_validation_failed', True, True, 'actual', 'unchanged'
+            ),
+            'evidence_validation_failed': (
+                'evidence_unavailable', True, True, 'actual', 'unchanged'
+            ),
+        }
+        expected = matrix.get(outcome.classification)
+        if expected is None or outcome.classification == 'pre_send_refusal':
+            raise ValueError('provider outcome classification is not finalizable')
+        terminal, started, received, basis, action = expected
+        has_actual = outcome.strict_usage is not None and outcome.actual_cost_usd is not None
+        if (
+            outcome.terminal_outcome != terminal
+            or outcome.provider_dispatch_started is not started
+            or outcome.provider_response_received is not received
+            or outcome.safety_action != action
+            or has_actual != (basis == 'actual')
+            or (outcome.strict_usage is None) != (outcome.actual_cost_usd is None)
+        ):
+            raise ValueError('provider outcome classification is inconsistent')
 
     def total_charged_cost(self, run_id: int) -> Decimal:
         rows = self._session.scalars(select(AgentRunCostComponent).where(
@@ -456,6 +541,8 @@ class RagCostLedger:
         completed_at: datetime | None = None,
     ) -> RagRunTerminal:
         """Close an admission before any paid dispatch using exact terminal-zero rows."""
+        if outcome != 'abandoned_unknown':
+            raise ValueError('admission-only outcome must be abandoned_unknown')
         parent = self._session.get(AgentRun, run_id, with_for_update=True)
         rows = tuple(self._session.scalars(
             select(AgentRunCostComponent)

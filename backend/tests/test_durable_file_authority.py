@@ -46,3 +46,10 @@ def test_symlink_and_hardlink_authority_are_rejected(tmp_path: Path):
     os.link(target, hardlink)
     with pytest.raises(DurableFileAuthorityError):
         DurableFileAuthority(target).read()
+
+
+def test_runtime_read_of_missing_authority_creates_no_parent_or_lock(tmp_path: Path):
+    data = tmp_path / 'missing-parent' / 'provider.json'
+    with pytest.raises(DurableFileAuthorityError):
+        DurableFileAuthority.open_runtime(data).read()
+    assert not data.parent.exists()
