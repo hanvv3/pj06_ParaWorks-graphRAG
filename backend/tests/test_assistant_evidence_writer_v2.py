@@ -6,7 +6,9 @@ import pytest
 
 from backend.app.assistant.evidence_persistence import (
     AssistantEvidenceWriter,
+    AssistantExactWriteAuthority,
     AssistantMessageProjection,
+    _mint_assistant_exact_write_authority,
 )
 from backend.app.rag.evidence_projection import (
     CanonicalEvidenceProjector,
@@ -49,6 +51,19 @@ def _empty_projection() -> V1EvidenceProjection:
     return V1EvidenceProjection((), (), (), (), (), 'a' * 64)
 
 
+def _authority(
+    projection: AssistantMessageProjection,
+    *,
+    conversation_id: int = 7,
+) -> AssistantExactWriteAuthority:
+    return _mint_assistant_exact_write_authority(
+        parent_agent_run_id=9,
+        conversation_id=conversation_id,
+        projection=projection,
+        parent_result_hmac=projection.result_hmac,
+    )
+
+
 def test_v2_writer_preserves_exact_utf8_bytes_and_never_commits() -> None:
     db = _Session()
     writer = AssistantEvidenceWriter(
@@ -65,7 +80,6 @@ def test_v2_writer_preserves_exact_utf8_bytes_and_never_commits() -> None:
         assembled_answer_hmac=None,
         canned_message_identity='rag-canned-evidence-unavailable:v1',
         result_hmac='b' * 64,
-        write_mode='rag_v2_exact',
         model_influence=(),
     )
 
@@ -73,7 +87,7 @@ def test_v2_writer_preserves_exact_utf8_bytes_and_never_commits() -> None:
         db=db,
         conversation=SimpleNamespace(id=7, user_id='owner', updated_at=None),
         projection=projection,
-        pending=SimpleNamespace(parent_agent_run_id=9),
+        authority=_authority(projection),
     )
 
     assert message.content.encode() == '  정확한 답변\n'.encode()
@@ -93,7 +107,6 @@ def test_v2_writer_rejects_blank_and_assembled_canned_identity_ambiguity() -> No
         'permission_notice': None,
         'hidden_match_count': 0,
         'result_hmac': 'b' * 64,
-        'write_mode': 'rag_v2_exact',
         'model_influence': (),
     }
     with pytest.raises(ValueError, match='nonblank'):
@@ -111,8 +124,46 @@ def test_v2_writer_rejects_blank_and_assembled_canned_identity_ambiguity() -> No
 def test_public_writer_has_no_mode_switch() -> None:
     import inspect
 
+    projection_signature = inspect.signature(AssistantMessageProjection)
+    assert 'write_mode' not in projection_signature.parameters
     signature = inspect.signature(AssistantEvidenceWriter.append_final)
     assert 'write_mode' not in signature.parameters
+    assert 'pending' not in signature.parameters
+    assert 'authority' in signature.parameters
+
+
+def test_v2_exact_authority_is_nonconstructible_and_identity_bound() -> None:
+    projection = AssistantMessageProjection(
+        content='exact',
+        metadata={},
+        evidence=_empty_projection(),
+        permission_level=None,
+        permission_notice=None,
+        hidden_match_count=0,
+        assembled_answer_hmac=None,
+        canned_message_identity='rag-canned-no-evidence:v1',
+        result_hmac='b' * 64,
+        model_influence=(),
+    )
+    with pytest.raises(TypeError, match='finalizer-minted'):
+        AssistantExactWriteAuthority(object())
+    authority = _mint_assistant_exact_write_authority(
+        parent_agent_run_id=9,
+        conversation_id=7,
+        projection=projection,
+        parent_result_hmac='b' * 64,
+    )
+    writer = AssistantEvidenceWriter(
+        fingerprint_secret=b'test-finalization-secret',
+        fingerprint_key_version='test-v1',
+    )
+    with pytest.raises(ValueError, match='authority'):
+        writer.append_final(
+            db=_Session(),
+            conversation=SimpleNamespace(id=8, user_id='owner', updated_at=None),
+            projection=projection,
+            authority=authority,
+        )
 
 
 def test_v2_projection_rejects_transient_query_or_scope_metadata() -> None:
@@ -130,7 +181,6 @@ def test_v2_projection_rejects_transient_query_or_scope_metadata() -> None:
             assembled_answer_hmac=None,
             canned_message_identity='rag-canned-no-evidence:v1',
             result_hmac='b' * 64,
-            write_mode='rag_v2_exact',
             model_influence=(),
         )
 
@@ -180,23 +230,23 @@ def test_v2_writer_persists_all_model_influence_roles_with_one_whole_set() -> No
         fingerprint_key_version='task-nine-v1',
         settings=_settings(),
     )
+    projection = AssistantMessageProjection(
+        content=' exact ',
+        metadata={},
+        evidence=evidence,
+        permission_level='internal',
+        permission_notice=None,
+        hidden_match_count=0,
+        assembled_answer_hmac='c' * 64,
+        canned_message_identity=None,
+        result_hmac='b' * 64,
+        model_influence=dependencies,
+    )
     message = writer.append_final(
         db=db,
         conversation=SimpleNamespace(id=7, user_id='owner', updated_at=None),
-        projection=AssistantMessageProjection(
-            content=' exact ',
-            metadata={},
-            evidence=evidence,
-            permission_level='internal',
-            permission_notice=None,
-            hidden_match_count=0,
-            assembled_answer_hmac='c' * 64,
-            canned_message_identity=None,
-            result_hmac='b' * 64,
-            write_mode='rag_v2_exact',
-            model_influence=dependencies,
-        ),
-        pending=SimpleNamespace(parent_agent_run_id=9),
+        projection=projection,
+        authority=_authority(projection),
     )
     dependency_rows = [
         value
@@ -207,6 +257,9 @@ def test_v2_writer_persists_all_model_influence_roles_with_one_whole_set() -> No
         'selected_citation',
         'unselected_model_influence',
     ]
+    assert dependency_rows[0].selected_v1_citation_projection_hmac == (
+        evidence.citation_projection_hmacs[0]
+    )
     assert all(
         value.dependency_set_hmac == message.dependency_set_hmac
         for value in dependency_rows

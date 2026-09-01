@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Literal
@@ -43,14 +43,11 @@ class AssistantMessageProjection:
     assembled_answer_hmac: str | None
     canned_message_identity: RagCannedMessageIdentity | None
     result_hmac: str
-    write_mode: Literal['rag_v2_exact']
     model_influence: tuple[ModelInfluenceDependencySnapshot, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.content) is not str or not self.content.strip():
             raise ValueError('V2 assistant content must be nonblank')
-        if self.write_mode != 'rag_v2_exact':
-            raise ValueError('V2 assistant write mode is server-owned')
         if not isinstance(self.metadata, Mapping):
             raise ValueError('V2 assistant metadata is invalid')
         if not set(self.metadata).issubset(
@@ -94,6 +91,73 @@ class LegacyAssistantMessageProjection:
     write_mode: Literal['legacy_trimmed'] = 'legacy_trimmed'
 
 
+_ASSISTANT_EXACT_WRITE_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _AssistantExactWriteGrant:
+    parent_agent_run_id: int
+    conversation_id: int
+    projection: AssistantMessageProjection = field(repr=False)
+    parent_result_hmac: str
+    _seal: object = field(repr=False, compare=False)
+
+
+class AssistantExactWriteAuthority:
+    """Unforgeable-by-constructor grant minted by the final product boundary."""
+
+    __slots__ = ('_grant',)
+
+    def __init__(self, grant: object) -> None:
+        if (
+            type(grant) is not _AssistantExactWriteGrant
+            or grant._seal is not _ASSISTANT_EXACT_WRITE_SEAL
+        ):
+            raise TypeError('rag_v2_exact requires finalizer-minted authority')
+        self._grant = grant
+
+    def require(
+        self,
+        *,
+        conversation: AssistantConversation,
+        projection: AssistantMessageProjection,
+    ) -> int:
+        grant = self._grant
+        if (
+            projection is not grant.projection
+            or conversation.id != grant.conversation_id
+            or projection.result_hmac != grant.parent_result_hmac
+        ):
+            raise ValueError('rag_v2_exact authority does not match the product')
+        return grant.parent_agent_run_id
+
+
+def _mint_assistant_exact_write_authority(
+    *,
+    parent_agent_run_id: int,
+    conversation_id: int,
+    projection: AssistantMessageProjection,
+    parent_result_hmac: str,
+) -> AssistantExactWriteAuthority:
+    if (
+        type(parent_agent_run_id) is not int
+        or parent_agent_run_id <= 0
+        or type(conversation_id) is not int
+        or conversation_id <= 0
+        or type(projection) is not AssistantMessageProjection
+        or not _lower_hmac(parent_result_hmac)
+        or projection.result_hmac != parent_result_hmac
+    ):
+        raise ValueError('rag_v2_exact finalizer authority is invalid')
+    return AssistantExactWriteAuthority(_AssistantExactWriteGrant(
+        parent_agent_run_id=parent_agent_run_id,
+        conversation_id=conversation_id,
+        projection=projection,
+        parent_result_hmac=parent_result_hmac,
+        _seal=_ASSISTANT_EXACT_WRITE_SEAL,
+    ))
+
+
 class AssistantEvidenceWriter:
     """Flush assistant evidence rows without ever owning the transaction commit."""
 
@@ -121,13 +185,16 @@ class AssistantEvidenceWriter:
         db: Session,
         conversation: AssistantConversation,
         projection: AssistantMessageProjection,
-        pending: object,
+        authority: AssistantExactWriteAuthority,
     ) -> AssistantMessage:
         if type(projection) is not AssistantMessageProjection:
             raise TypeError('server-issued V2 assistant projection is required')
-        parent_id = getattr(pending, 'parent_agent_run_id', None)
-        if type(parent_id) is not int or parent_id <= 0:
-            raise ValueError('V2 assistant parent is invalid')
+        if type(authority) is not AssistantExactWriteAuthority:
+            raise TypeError('rag_v2_exact requires finalizer-minted authority')
+        parent_id = authority.require(
+            conversation=conversation,
+            projection=projection,
+        )
         if type(conversation.id) is not int or conversation.id <= 0:
             raise ValueError('V2 assistant conversation is invalid')
         origin = (
@@ -279,7 +346,7 @@ class AssistantEvidenceWriter:
         dependencies: tuple[ModelInfluenceDependencySnapshot, ...],
     ) -> list[AssistantMessageEvidenceDependency]:
         rows: list[AssistantMessageEvidenceDependency] = []
-        selected_citations = iter(projection.evidence.citations)
+        selected_hmacs = iter(projection.evidence.citation_projection_hmacs)
         for ordinal, dependency in enumerate(dependencies):
             observation = dependency.observation
             identity = dependency.fresh_lookup_identity
@@ -287,17 +354,13 @@ class AssistantEvidenceWriter:
             selected_hmac = None
             if dependency.dependency_role == 'selected_citation':
                 try:
-                    citation = next(selected_citations)
+                    selected_hmac = next(selected_hmacs)
                 except StopIteration:
                     raise ValueError(
                         'selected dependency projection is incomplete'
                     ) from None
-                selected_hmac = keyed_fingerprint(
-                    _json_safe(dict(citation)),
-                    secret=self._secret,
-                    schema_version='rag-v1-selected-citation-child:v1',
-                    policy_version='rag-v1-evidence-projection:v1',
-                )
+                if not _lower_hmac(selected_hmac):
+                    raise ValueError('selected citation HMAC is invalid')
             values, evidence_link_ids = _dependency_storage_values(envelope)
             child_hmac = keyed_fingerprint(
                 {
@@ -384,7 +447,7 @@ class AssistantEvidenceWriter:
                     )
                 row.serving_content_hash = content_hash
             rows.append(row)
-        if next(selected_citations, None) is not None:
+        if next(selected_hmacs, None) is not None:
             raise ValueError('selected dependency projection has extra entries')
         return rows
 

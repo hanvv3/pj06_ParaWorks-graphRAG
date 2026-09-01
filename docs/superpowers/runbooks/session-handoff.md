@@ -3888,17 +3888,21 @@ tests passed with 53 tests; ruff passed.
   verifies the string owner/conversation/user-message target, writes the answer
   plus full selected/unselected model-influence dependency set, and never lets
   route or legacy helpers request the server-only `rag_v2_exact` mode.
-- Dead projection-owner recovery accepts only the sealed callback assembled
-  after exact session-lock reacquisition and fence/CAS checks. Provider output is
-  never retried. The executable real-PostgreSQL concurrency check is URL-gated.
-- SQLite smoke is deterministic and provider-free only. A process-lifetime file
-  lock and stable in-process RLock serialize one `BEGIN IMMEDIATE` transaction;
-  canonical-path, hardlink, alias, second-process, pgvector, paid, production,
-  and release attempts refuse before mutation.
-- Fresh evidence: focused `22 passed, 1 skipped`; affected regression `251
-  passed, 1 skipped`; advisory/secret `9 passed, 2 skipped`; Ruff `--no-fix`,
-  compile/import, Alembic head `a4d5e6f7b8c9`, and diff checks pass. All skips
-  require absent `PARAWORKS_TEST_POSTGRES_URL`; no external/provider/paid call,
-  Docker action, or `.env` read occurred.
+- Dead projection-owner recovery accepts only the concrete sealed cost-ledger
+  authority. It retains paid sidecar/safety when paid work occurred, performs a
+  nonblocking exact session-lock reacquisition, rechecks the owner fence and
+  runtime-cost snapshot under row locks, and closes `persistence_failed` without
+  provider/output retry. The real two-session parent-mutation check is URL-gated.
+- SQLite smoke is deterministic and provider-free only. The coordinator itself
+  owns fresh keyword retrieval, canonical projection, exact-two terminal-zero
+  parent/product and optional Assistant dependencies in one `BEGIN IMMEDIATE`.
+  A process-lifetime file lock plus stable RLock rejects DB/sidecar hardlinks,
+  cached-handle replacement, case/path aliases, and a second process before
+  mutation; in-memory mode is server-settings-gated to tests.
+- Independent review follow-up evidence: focused `75 passed, 5 skipped`;
+  affected RAG V2/lock/safety/Assistant regression `665 passed, 10 skipped,
+  2172 deselected`. All skips require absent `PARAWORKS_TEST_POSTGRES_URL`; the
+  real PostgreSQL parent-mutation recovery gate is executable but unrun. No
+  external/provider/paid call, Docker action, or `.env` read occurred.
 - Before Task 14 begins, run the independent Task 13 implementation review. The
   remaining release gate is the URL-gated real PostgreSQL concurrency suite.

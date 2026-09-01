@@ -1,45 +1,94 @@
 from __future__ import annotations
 
 import os
-import sqlite3
+import stat as stat_module
 import threading
-from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import TypeVar
 
+from sqlalchemy import Engine, event, func, select
+from sqlalchemy.orm import Session
+
+from backend.app.agent_runtime.fingerprints import (
+    fingerprint_secret_bytes,
+    keyed_fingerprint,
+)
+from backend.app.agent_runtime.model_router import (
+    build_rag_answer_model_config_snapshot_hmac,
+)
 from backend.app.agent_runtime.rag_finalization import (
+    AssistantFinalizationRecord,
     AssistantProjectionTarget,
     CanonicalRagProjection,
+    PreparedRagFinalization,
     RagFinalProjection,
+    RagProjectionPending,
+    _apply_parent_final,
+    _build_result_hmac,
+    _canned_text,
+    _empty_answer_projection,
+    _empty_search_projection,
+    _hidden_membership_hmac,
+    _output_permission,
+    _pre_projection_cost_snapshot_hmac,
+    _same_retrieval_authority,
+    assistant_message_projection,
 )
-from backend.app.agent_runtime.rag_v2_identity import SecurityScope
-from backend.app.agents.rag_orchestrator_agent.v2_input import PreparedRagRequestText
+from backend.app.agent_runtime.rag_runtime_contracts import admission_source_window
+from backend.app.agent_runtime.rag_safety_identity import admission_identity
+from backend.app.agent_runtime.rag_v2_identity import (
+    exact_utf8_bytes,
+    security_scope_fingerprint,
+)
+from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
+    build_answer_output_schema_hmac,
+    build_answer_prompt_renderer_hmac,
+)
+from backend.app.assistant.evidence_persistence import (
+    AssistantEvidenceWriter,
+    _mint_assistant_exact_write_authority,
+)
+from backend.app.core.config import Settings
+from backend.app.models import (
+    AgentRun,
+    AgentRunCostComponent,
+    AssistantConversation,
+    AssistantMessage,
+    AssistantMessageEvidenceDependency,
+    RagServingCorpusGeneration,
+)
+from backend.app.rag.evidence_projection import (
+    CanonicalEvidenceProjector,
+    ProjectionFence,
+    build_model_influence_set_hmac,
+    build_v1_selected_evidence_projection_hmac,
+)
+from backend.app.rag.keyword_retriever import KeywordEvidenceRetriever
+from backend.app.rag.retrieval import (
+    RetrievalRequest,
+    RetrievalResult,
+    build_query_embedding_model_config_snapshot_hmac,
+    rank_evidence_slots,
+)
+from backend.app.rag.search_store import SqlAlchemyKeywordSearchStore
 
-_T = TypeVar('_T')
+_ZERO = Decimal('0.000000')
 _SQLITE_RAG_SMOKE_MUTEX = threading.RLock()
-_PROCESS_LOCKS: dict[Path, object] = {}
-_DATABASE_IDENTITIES: dict[tuple[int, int], Path] = {}
+
+
+@dataclass(slots=True)
+class _ProcessLock:
+    handle: object
+    database_identity: tuple[int, int]
+    lock_identity: tuple[int, int]
+
+
+_PROCESS_LOCKS: dict[Path, _ProcessLock] = {}
 
 
 class SQLiteRagSmokeUnavailable(RuntimeError):  # noqa: N818 - approved API name
     pass
-
-
-@dataclass(frozen=True, slots=True)
-class SQLiteRagSmokeOperationResult:
-    parent_agent_run_id: int
-    projection: RagFinalProjection
-
-    def __post_init__(self) -> None:
-        if (
-            type(self.parent_agent_run_id) is not int
-            or self.parent_agent_run_id <= 0
-            or not isinstance(self.projection, CanonicalRagProjection)
-            and self.projection.__class__.__name__ != 'AssistantFinalizationRecord'
-        ):
-            raise ValueError('SQLite smoke operation result is invalid')
 
 
 def sqlite_rag_smoke_mutex() -> threading.RLock:
@@ -48,232 +97,701 @@ def sqlite_rag_smoke_mutex() -> threading.RLock:
 
 
 class SQLiteRagSmokeCoordinator:
-    """Single-process provider-free smoke; never emulates PostgreSQL authority."""
+    """Own the provider-free SQLite retrieval and final product transaction."""
 
     def __init__(
         self,
         *,
-        connection: sqlite3.Connection,
+        engine: Engine,
         database_path: Path | str | None,
-        configured_backend: str,
-        provider_dispatch_count: int,
-        production_mode: bool,
-        automated_test: bool = True,
-        keyword_operation: Callable[..., SQLiteRagSmokeOperationResult] | None = None,
+        settings: Settings,
     ) -> None:
         if (
-            not isinstance(connection, sqlite3.Connection)
-            or configured_backend != 'keyword'
-            or type(provider_dispatch_count) is not int
-            or provider_dispatch_count != 0
-            or type(production_mode) is not bool
-            or production_mode
+            not isinstance(engine, Engine)
+            or engine.dialect.name != 'sqlite'
+            or type(settings) is not Settings
+            or settings.rag_retrieval_backend != 'keyword'
+            or settings.rag_use_pgvector_search
+            or settings.paraworks_env == 'production'
         ):
             raise SQLiteRagSmokeUnavailable(
                 'SQLite RAG smoke requires keyword, provider-free, non-production mode'
             )
-        self._connection = connection
-        self._keyword_operation = keyword_operation
-        self._path = self._validated_path(database_path, automated_test)
+        self._engine = engine
+        self._settings = settings
+        self._secret, self._key_version = fingerprint_secret_bytes(settings)
+        self._path = self._validated_path(database_path, settings)
+        self._validate_engine_path()
         if self._path is not None:
-            self._validate_connection_path(self._path)
             self._acquire_process_lock(self._path)
-
-    def run_atomic(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
-        if not callable(operation):
-            raise TypeError('SQLite smoke operation must be callable')
-        with _SQLITE_RAG_SMOKE_MUTEX:
-            if self._connection.in_transaction:
-                raise SQLiteRagSmokeUnavailable(
-                    'SQLite smoke requires sole transaction ownership'
-                )
-            try:
-                self._connection.execute('BEGIN IMMEDIATE')
-                result = operation(self._connection)
-                if not self._connection.in_transaction:
-                    raise SQLiteRagSmokeUnavailable(
-                        'SQLite smoke operation escaped its transaction'
-                    )
-                self._connection.commit()
-                return result
-            except Exception:
-                self._connection.rollback()
-                raise
 
     def run_keyword(
         self,
-        request: PreparedRagRequestText,
+        prepared: PreparedRagFinalization,
         *,
-        scope: SecurityScope,
         assistant_target: AssistantProjectionTarget | None = None,
     ) -> RagFinalProjection:
         if (
-            type(request) is not PreparedRagRequestText
-            or type(scope) is not SecurityScope
+            type(prepared) is not PreparedRagFinalization
+            or prepared.query_embedding_result is not None
+            or prepared.retrieval_result.configured_backend != 'keyword'
             or (
                 assistant_target is not None
                 and type(assistant_target) is not AssistantProjectionTarget
             )
-            or not callable(self._keyword_operation)
         ):
-            raise SQLiteRagSmokeUnavailable(
-                'SQLite keyword smoke finalizer is unavailable'
-            )
-        result = self.run_atomic(
-            lambda db: self._checked_keyword_operation(
-                db,
-                request=request,
-                scope=scope,
-                assistant_target=assistant_target,
-            )
-        )
-        return result.projection
+            raise SQLiteRagSmokeUnavailable('SQLite keyword smoke finalizer is unavailable')
+        with _SQLITE_RAG_SMOKE_MUTEX:
+            self._revalidate_file_authority()
+            connection = self._engine.connect()
+            db: Session | None = None
+            try:
+                connection.exec_driver_sql('BEGIN IMMEDIATE')
+                db = Session(bind=connection, join_transaction_mode='control_fully')
+                result = self._finalize(db, prepared, assistant_target)
+                self._assert_final_invariants(db, result)
+                connection.commit()
+                return result
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                if db is not None:
+                    db.close()
+                connection.close()
 
-    def _checked_keyword_operation(
+    def _finalize(
         self,
-        db: sqlite3.Connection,
-        *,
-        request: PreparedRagRequestText,
-        scope: SecurityScope,
+        db: Session,
+        prepared: PreparedRagFinalization,
         assistant_target: AssistantProjectionTarget | None,
-    ) -> SQLiteRagSmokeOperationResult:
-        result = self._keyword_operation(
-            db,
-            request=request,
-            scope=scope,
-            assistant_target=assistant_target,
+    ) -> RagFinalProjection:
+        generation = db.get(RagServingCorpusGeneration, 1)
+        if generation is None:
+            raise SQLiteRagSmokeUnavailable('SQLite smoke serving generation is unavailable')
+        scope_fingerprint = security_scope_fingerprint(
+            prepared.security_scope, settings=self._settings
         )
-        if type(result) is not SQLiteRagSmokeOperationResult:
-            raise SQLiteRagSmokeUnavailable(
-                'SQLite smoke operation did not return committed authority'
-            )
-        self._assert_final_invariants(db, result)
-        return result
+        request = RetrievalRequest(
+            retrieval_query_text=prepared.prepared_text.retrieval_query_text,
+            security_scope=prepared.security_scope,
+            security_scope_fingerprint=scope_fingerprint,
+            query_embedding_result=None,
+            candidate_scan_limit=50,
+            visible_limit=5 if prepared.product_kind == 'search' else 8,
+            relevance_policy_version='rag-retrieval-policy:v2.0',
+        )
+        fresh = KeywordEvidenceRetriever(
+            store=SqlAlchemyKeywordSearchStore(db=db, settings=self._settings),
+            settings=self._settings,
+        ).invoke(request)
+        drifted = not _same_retrieval_authority(fresh, prepared.retrieval_result)
+        parent, children, pending = self._create_parent_and_costs(
+            db,
+            prepared=prepared,
+            scope_fingerprint=scope_fingerprint,
+            corpus_generation=generation.corpus_generation,
+        )
+        projection = self._project(
+            db,
+            pending=pending,
+            prepared=prepared,
+            fresh=fresh,
+            current_corpus_generation=generation.corpus_generation,
+            drifted=drifted,
+        )
+        _apply_parent_final(parent, projection, secret=self._secret)
+        db.flush([parent, *children])
+        if assistant_target is None:
+            return projection
+        return self._append_assistant(
+            db,
+            parent=parent,
+            projection=projection,
+            target=assistant_target,
+            prepared=prepared,
+        )
+
+    def _create_parent_and_costs(
+        self,
+        db: Session,
+        *,
+        prepared: PreparedRagFinalization,
+        scope_fingerprint: str,
+        corpus_generation: int,
+    ) -> tuple[AgentRun, tuple[AgentRunCostComponent, AgentRunCostComponent], RagProjectionPending]:
+        surface = self._surface(prepared)
+        admission_hmac = admission_identity(
+            {
+                'answer_provider_policy_snapshot_hmac': None,
+                'configured_backend': 'keyword',
+                'current_text_hmac': prepared.prepared_text.current_text_hmac,
+                'cutover_stage': surface,
+                'graph_version': 'company-memory-rag-answer-v2.0',
+                'mode': 'enforce',
+                'query_context_version_bytes': exact_utf8_bytes(
+                    prepared.prepared_text.query_context_version
+                ),
+                'query_embedding_provider_policy_snapshot_hmac': None,
+                'retrieval_policy_version': 'rag-retrieval-policy:v2.0',
+                'retrieval_query_hmac': prepared.prepared_text.retrieval_query_hmac,
+                'security_scope_fingerprint': scope_fingerprint,
+                'surface': surface,
+            },
+            secret=self._secret,
+        )
+        fence_hmac = keyed_fingerprint(
+            {'admission_hmac': admission_hmac, 'corpus_generation': corpus_generation},
+            secret=self._secret,
+            schema_version='sqlite-rag-smoke-projection-fence:v1',
+            policy_version='rag-run:v2',
+        )
+        parent = AgentRun(
+            agent_name='rag_orchestrator_agent',
+            prompt_version='rag-answer:v2',
+            status='running',
+            source_window=admission_source_window(
+                mode='enforce', surface=surface, backend='keyword'
+            ),
+            cache_key='rag-v2-admission:' + admission_hmac,
+            model_name='rag-v2-admission',
+            generation_provider=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            estimated_cost_usd=0.0,
+            permission_level='restricted',
+            metadata_={},
+            run_contract_version='rag-run:v2',
+            run_record_phase='cost_finalized_pending_projection',
+            total_charged_cost_usd=_ZERO,
+            projection_owner_fence_hmac=fence_hmac,
+            completed_at=None,
+        )
+        db.add(parent)
+        db.flush([parent])
+        children = (
+            self._terminal_zero_child(parent.id, component='query_embedding'),
+            self._terminal_zero_child(parent.id, component='answer_generation'),
+        )
+        db.add_all(children)
+        db.flush(children)
+        cost_hmac = _pre_projection_cost_snapshot_hmac(
+            agent_run_id=parent.id, children=children, secret=self._secret
+        )
+        parent.metadata_ = {
+            'configured_backend': 'keyword',
+            'current_text_hmac': prepared.prepared_text.current_text_hmac,
+            'query_context_version': prepared.prepared_text.query_context_version,
+            'retrieval_query_hmac': prepared.prepared_text.retrieval_query_hmac,
+            'runtime_cost_snapshot_hmac': cost_hmac,
+            'security_scope_fingerprint': scope_fingerprint,
+            'surface': surface,
+        }
+        pending = RagProjectionPending(
+            parent_agent_run_id=parent.id,
+            projection_owner_fence_hmac=fence_hmac,
+            security_scope_fingerprint=scope_fingerprint,
+            prepared_corpus_generation=(
+                prepared.prepared_model_influence.prepared_corpus_generation
+                if prepared.prepared_model_influence is not None
+                else corpus_generation
+            ),
+            prepared_vector_index_generation=None,
+            terminal_cost_snapshot_hmac=cost_hmac,
+        )
+        return parent, children, pending
 
     @staticmethod
-    def _assert_final_invariants(
-        db: sqlite3.Connection,
-        result: SQLiteRagSmokeOperationResult,
-    ) -> None:
-        parent = db.execute(
-            'SELECT status,run_contract_version,run_record_phase,'
-            'total_charged_cost_usd,projection_owner_fence_hmac '
-            'FROM agent_runs WHERE id = ?',
-            (result.parent_agent_run_id,),
-        ).fetchone()
+    def _surface(prepared: PreparedRagFinalization) -> str:
+        if prepared.product_kind == 'search':
+            return 'search'
+        if prepared.prepared_text.query_context_version == 'assistant-context:v1':
+            return 'assistant'
+        return 'ask'
+
+    def _terminal_zero_child(
+        self, parent_id: int, *, component: str
+    ) -> AgentRunCostComponent:
+        query = component == 'query_embedding'
+        return AgentRunCostComponent(
+            agent_run_id=parent_id,
+            component=component,
+            component_ordinal=0 if query else 1,
+            dispatch_state='terminal',
+            dispatch_fence_hmac=None,
+            process_instance_hmac=None,
+            attempted=False,
+            dispatch_count=0,
+            reserved_input_tokens=0,
+            reserved_output_tokens=0,
+            actual_input_tokens=None,
+            actual_output_tokens=None,
+            reserved_cost_usd=_ZERO,
+            charged_cost_usd=_ZERO,
+            charge_basis='zero',
+            overrun=False,
+            provider='openai',
+            model=(self._settings.openai_embedding_model if query else 'gpt-5.4-mini-2026-03-17'),
+            authorized_model_config_version=(
+                'rag-query-embedding-config:v1' if query else 'rag-answer-model-config:v1'
+            ),
+            authorized_model_config_snapshot_hmac=(
+                build_query_embedding_model_config_snapshot_hmac(self._settings)
+                if query
+                else build_rag_answer_model_config_snapshot_hmac(
+                    self._settings,
+                    output_schema_hmac=build_answer_output_schema_hmac(
+                        self._settings
+                    ),
+                    prompt_renderer_hmac=build_answer_prompt_renderer_hmac(
+                        self._settings
+                    ),
+                )
+            ),
+            authorized_cost_policy_version=(
+                'rag-query-embedding-cost:v1' if query else 'rag-answer-cost:v1'
+            ),
+            authorized_token_estimator_version=(
+                'openai-cl100k-text-embedding-3-small:v1'
+                if query
+                else 'openai-o200k-rag-answer:v1'
+            ),
+            authorized_policy_snapshot_hmac=keyed_fingerprint(
+                {'component': component, 'provider_dispatch_count': 0},
+                secret=self._secret,
+                schema_version='sqlite-rag-smoke-provider-policy:v1',
+                policy_version='rag-run:v2',
+            ),
+            terminal_outcome=None,
+        )
+
+    def _project(
+        self,
+        db: Session,
+        *,
+        pending: RagProjectionPending,
+        prepared: PreparedRagFinalization,
+        fresh: RetrievalResult,
+        current_corpus_generation: int,
+        drifted: bool,
+    ) -> CanonicalRagProjection:
+        fresh_slots = rank_evidence_slots(fresh.visible)
+        fresh_hidden = _hidden_membership_hmac(fresh, secret=self._secret)
+        prepared_hidden = _hidden_membership_hmac(
+            prepared.retrieval_result, secret=self._secret
+        )
+        fence = ProjectionFence(
+            prepared_corpus_generation=pending.prepared_corpus_generation,
+            prepared_index_generation=None,
+            current_corpus_generation=current_corpus_generation,
+            current_index_generation=None,
+            prepared_hidden_membership_hmac=prepared_hidden,
+            current_hidden_membership_hmac=fresh_hidden,
+        )
+        projector = CanonicalEvidenceProjector(db=db, settings=self._settings)
+        dependencies = ()
+        if prepared.product_kind == 'search':
+            if drifted:
+                evidence = _empty_search_projection(self._settings)
+                outcome = 'evidence_unavailable'
+            else:
+                evidence = projector.project_search(
+                    fresh_slots[:5], scope=prepared.security_scope, fence=fence
+                )
+                outcome = 'search_projected'
+            answer_text = None
+        elif (
+            not drifted
+            and prepared.validated_answer is not None
+            and prepared.validated_answer.blocks
+            and prepared.prepared_model_influence is not None
+        ):
+            selected = prepared.validated_answer.selected_slot_ids
+            evidence = projector.project_selected(
+                fresh_slots,
+                selected_slot_ids=selected,
+                scope=prepared.security_scope,
+                fence=fence,
+            )
+            dependencies = projector.finalize_model_influence_dependencies(
+                prepared.prepared_model_influence,
+                selected,
+                scope=prepared.security_scope,
+                fence=fence,
+            )
+            empty_hmac = build_v1_selected_evidence_projection_hmac(
+                citation_hmacs=(),
+                source_ids=(),
+                source_links=(),
+                source_snippets=(),
+                settings=self._settings,
+            )
+            if dependencies and evidence.projection_hmac != empty_hmac:
+                outcome = 'supported'
+                answer_text = prepared.validated_answer.assembled_answer
+            else:
+                outcome = 'evidence_unavailable'
+                answer_text = _canned_text('rag-canned-evidence-unavailable:v1')
+                evidence = _empty_answer_projection(self._settings)
+                dependencies = ()
+        else:
+            outcome = 'evidence_unavailable' if drifted else prepared.tentative_outcome
+            answer_text = _canned_text(
+                'rag-canned-evidence-unavailable:v1'
+                if drifted
+                else prepared.canned_message_identity
+            )
+            evidence = _empty_answer_projection(self._settings)
+        result_hmac = _build_result_hmac(
+            pending=pending,
+            prepared=prepared,
+            outcome=outcome,
+            evidence=evidence,
+            dependencies=dependencies,
+            hidden_hmac=fresh_hidden,
+            effective_backend=fresh.effective_backend,
+            secret=self._secret,
+            settings=self._settings,
+        )
+        return CanonicalRagProjection(
+            outcome=outcome,
+            answer_text=answer_text,
+            evidence=evidence,
+            model_influence=dependencies,
+            hidden_match_count=(0 if outcome == 'evidence_unavailable' else fresh.hidden_match_count),
+            effective_backend=fresh.effective_backend,
+            result_hmac=result_hmac,
+        )
+
+    def _append_assistant(
+        self,
+        db: Session,
+        *,
+        parent: AgentRun,
+        projection: CanonicalRagProjection,
+        target: AssistantProjectionTarget,
+        prepared: PreparedRagFinalization,
+    ) -> AssistantFinalizationRecord:
+        conversation = db.get(AssistantConversation, target.conversation_id)
+        user_message = db.get(AssistantMessage, target.user_message_id)
+        if (
+            conversation is None
+            or user_message is None
+            or conversation.user_id != target.owner_user_id
+            or user_message.conversation_id != conversation.id
+            or user_message.role != 'user'
+        ):
+            raise SQLiteRagSmokeUnavailable('assistant projection target changed')
+        canned = (
+            None
+            if projection.model_influence
+            else (
+                'rag-canned-evidence-unavailable:v1'
+                if projection.outcome == 'evidence_unavailable'
+                else 'rag-canned-no-evidence:v1'
+            )
+        )
+        message_projection = assistant_message_projection(
+            projection,
+            metadata={'status': projection.outcome},
+            canned_message_identity=canned,
+            assembled_answer_hmac=(
+                prepared.validated_answer.assembled_answer_hmac
+                if projection.model_influence and prepared.validated_answer is not None
+                else None
+            ),
+            permission_level=_output_permission(projection),
+            permission_notice=(
+                'evidence_unavailable' if projection.outcome == 'evidence_unavailable' else None
+            ),
+        )
+        authority = _mint_assistant_exact_write_authority(
+            parent_agent_run_id=parent.id,
+            conversation_id=conversation.id,
+            projection=message_projection,
+            parent_result_hmac=parent.metadata_.get('rag_result_hmac'),
+        )
+        writer = AssistantEvidenceWriter(
+            fingerprint_secret=self._secret,
+            fingerprint_key_version=self._key_version,
+            settings=self._settings,
+        )
+        reserved_message_id = (db.scalar(select(func.max(AssistantMessage.id))) or 0) + 1
+
+        def seed_sqlite_exact_insert(session, flush_context, instances) -> None:
+            del flush_context, instances
+            for candidate in session.new:
+                if (
+                    type(candidate) is AssistantMessage
+                    and candidate.linked_agent_run_id == parent.id
+                    and candidate.assistant_message_content_hmac is None
+                ):
+                    candidate.id = reserved_message_id
+                    candidate.assistant_message_content_hmac = keyed_fingerprint(
+                        {
+                            'agent_name_bytes': exact_utf8_bytes(
+                                'rag_orchestrator_agent'
+                            ),
+                            'assistant_message_id': reserved_message_id,
+                            'content_bytes': exact_utf8_bytes(candidate.content),
+                            'content_origin': candidate.content_origin,
+                            'content_origin_hmac': candidate.content_origin_hmac,
+                            'content_write_mode': 'rag_v2_exact',
+                            'conversation_id': conversation.id,
+                            'linked_agent_run_id': parent.id,
+                            'message_role': 'assistant',
+                            'prompt_version_bytes': exact_utf8_bytes('rag-answer:v2'),
+                            'rag_result_hmac': projection.result_hmac,
+                        },
+                        secret=self._secret,
+                        schema_version='assistant-message-content-hmac:v1',
+                        policy_version='assistant-evidence:v1',
+                    )
+                    if projection.model_influence:
+                        candidate.model_influence_set_hmac = (
+                            build_model_influence_set_hmac(
+                                dependencies=projection.model_influence,
+                                settings=self._settings,
+                            )
+                        )
+                        candidate.dependency_set_hmac = '0' * 64
+
+        event.listen(db, 'before_flush', seed_sqlite_exact_insert)
+        try:
+            message = writer.append_final(
+                db=db,
+                conversation=conversation,
+                projection=message_projection,
+                authority=authority,
+            )
+        finally:
+            event.remove(db, 'before_flush', seed_sqlite_exact_insert)
+        if projection.model_influence and message.dependency_set_hmac == '0' * 64:
+            raise SQLiteRagSmokeUnavailable(
+                'SQLite assistant dependency identity was not finalized'
+            )
+        return AssistantFinalizationRecord(
+            assistant_message_id=message.id,
+            parent_agent_run_id=parent.id,
+            application_outcome=projection.outcome,
+            finalization_kind='substantive' if projection.model_influence else 'canned_safe',
+        )
+
+    @staticmethod
+    def _assert_final_invariants(db: Session, result: RagFinalProjection) -> None:
+        parent_id = (
+            result.parent_agent_run_id
+            if type(result) is AssistantFinalizationRecord
+            else db.scalar(select(AgentRun.id).order_by(AgentRun.id.desc()))
+        )
+        parent = db.get(AgentRun, parent_id)
         children = tuple(
-            db.execute(
-                'SELECT component,component_ordinal,dispatch_state,attempted,'
-                'dispatch_count,charged_cost_usd FROM agent_run_cost_components '
-                'WHERE agent_run_id = ? ORDER BY component_ordinal',
-                (result.parent_agent_run_id,),
+            db.scalars(
+                select(AgentRunCostComponent)
+                .where(AgentRunCostComponent.agent_run_id == parent_id)
+                .order_by(AgentRunCostComponent.component_ordinal)
             )
         )
         if (
             parent is None
-            or parent[0] != 'complete'
-            or parent[1] != 'rag-run:v2'
-            or parent[2] != 'final'
-            or Decimal(str(parent[3])) != Decimal('0.000000')
-            or parent[4] is not None
-            or tuple((row[0], row[1]) for row in children)
+            or parent.status != 'complete'
+            or parent.run_contract_version != 'rag-run:v2'
+            or parent.run_record_phase != 'final'
+            or Decimal(parent.total_charged_cost_usd) != _ZERO
+            or parent.projection_owner_fence_hmac is not None
+            or tuple((row.component, row.component_ordinal) for row in children)
             != (('query_embedding', 0), ('answer_generation', 1))
             or any(
-                row[2] != 'terminal'
-                or row[3] != 0
-                or row[4] != 0
-                or Decimal(str(row[5])) != Decimal('0.000000')
+                row.dispatch_state != 'terminal'
+                or row.attempted is not False
+                or row.dispatch_count != 0
+                or row.reserved_input_tokens != 0
+                or row.reserved_output_tokens != 0
+                or row.actual_input_tokens is not None
+                or row.actual_output_tokens is not None
+                or Decimal(row.reserved_cost_usd) != _ZERO
+                or Decimal(row.charged_cost_usd) != _ZERO
+                or row.charge_basis != 'zero'
+                or row.overrun is not False
+                or row.dispatch_fence_hmac is not None
+                or row.process_instance_hmac is not None
+                or row.terminal_outcome is not None
                 for row in children
             )
         ):
-            raise SQLiteRagSmokeUnavailable(
-                'SQLite smoke exact-two final invariant failed'
+            raise SQLiteRagSmokeUnavailable('SQLite smoke exact-two final invariant failed')
+        if type(result) is AssistantFinalizationRecord:
+            message = db.get(AssistantMessage, result.assistant_message_id)
+            dependencies = tuple(
+                db.scalars(
+                    select(AssistantMessageEvidenceDependency)
+                    .where(
+                        AssistantMessageEvidenceDependency.assistant_message_id
+                        == result.assistant_message_id
+                    )
+                    .order_by(
+                        AssistantMessageEvidenceDependency.candidate_ordinal
+                    )
+                )
             )
-        residue = db.execute(
-            "SELECT count(*) FROM agent_runs WHERE run_contract_version = 'rag-run:v2' "
-            "AND run_record_phase = 'cost_finalized_pending_projection'"
-        ).fetchone()
-        if residue is None or residue[0] != 0:
-            raise SQLiteRagSmokeUnavailable(
-                'SQLite smoke cannot commit pending projection residue'
-            )
-
-    def _validate_connection_path(self, database_path: Path) -> None:
-        try:
-            rows = tuple(self._connection.execute('PRAGMA database_list'))
-            main = next(row for row in rows if row[1] == 'main')
-            actual = Path(main[2]).absolute()
+            substantive = result.finalization_kind == 'substantive'
             if (
-                not main[2]
-                or actual.resolve(strict=True)
-                != database_path.resolve(strict=True)
-                or actual.stat().st_dev != database_path.stat().st_dev
-                or actual.stat().st_ino != database_path.stat().st_ino
+                message is None
+                or message.role != 'assistant'
+                or message.content_write_mode != 'rag_v2_exact'
+                or message.linked_agent_run_id != parent_id
+                or message.agent_run_id != parent_id
+                or message.rag_result_hmac != parent.metadata_.get('rag_result_hmac')
+                or message.metadata_.get('status') != result.application_outcome
+                or parent.metadata_.get('outcome') != result.application_outcome
+                or message.serving_dependency_count != len(dependencies)
+                or substantive != bool(dependencies)
+                or tuple(row.candidate_ordinal for row in dependencies)
+                != tuple(range(len(dependencies)))
+                or any(
+                    row.assistant_message_id != message.id
+                    or row.dependency_set_hmac != message.dependency_set_hmac
+                    for row in dependencies
+                )
             ):
                 raise SQLiteRagSmokeUnavailable(
-                    'SQLite smoke connection/path identity mismatch'
+                    'SQLite smoke assistant linkage invariant failed'
                 )
-        except SQLiteRagSmokeUnavailable:
-            raise
-        except (OSError, sqlite3.Error, StopIteration) as exc:
+        elif parent.metadata_.get('rag_result_hmac') != result.result_hmac:
             raise SQLiteRagSmokeUnavailable(
-                'SQLite smoke connection identity is unavailable'
-            ) from exc
+                'SQLite smoke direct result linkage invariant failed'
+            )
+        pending = db.scalar(
+            select(AgentRun.id)
+            .where(
+                AgentRun.run_contract_version == 'rag-run:v2',
+                AgentRun.run_record_phase == 'cost_finalized_pending_projection',
+            )
+            .limit(1)
+        )
+        if pending is not None:
+            raise SQLiteRagSmokeUnavailable('SQLite smoke cannot commit pending projection residue')
+
+    def _validate_engine_path(self) -> None:
+        configured = self._engine.url.database
+        if self._path is None:
+            if configured not in {None, '', ':memory:'}:
+                raise SQLiteRagSmokeUnavailable('SQLite smoke engine/path identity mismatch')
+            return
+        if configured is None:
+            raise SQLiteRagSmokeUnavailable('SQLite smoke engine/path identity mismatch')
+        actual = Path(configured).absolute()
+        try:
+            if actual != self._path or actual.resolve(strict=True) != self._path:
+                raise SQLiteRagSmokeUnavailable('SQLite smoke engine/path identity mismatch')
+        except OSError as exc:
+            raise SQLiteRagSmokeUnavailable('SQLite smoke engine identity is unavailable') from exc
 
     @staticmethod
     def _validated_path(
-        database_path: Path | str | None, automated_test: bool
+        database_path: Path | str | None,
+        settings: Settings,
     ) -> Path | None:
         if database_path is None or str(database_path) == ':memory:':
-            if automated_test is not True:
-                raise SQLiteRagSmokeUnavailable(
-                    'in-memory SQLite is automated-test-only'
-                )
+            if settings.paraworks_env != 'test':
+                raise SQLiteRagSmokeUnavailable('in-memory SQLite is automated-test-only')
             return None
-        path = Path(database_path)
-        absolute = path.absolute()
+        raw = Path(database_path)
+        if not raw.is_absolute() or any(part in {'.', '..'} for part in raw.parts):
+            raise SQLiteRagSmokeUnavailable('SQLite smoke database path identity is ambiguous')
+        absolute = raw.absolute()
         try:
-            if path.is_symlink() or absolute.is_symlink():
-                raise SQLiteRagSmokeUnavailable(
-                    'SQLite smoke database path cannot be a symlink'
-                )
-            if path.exists() and absolute.resolve(strict=True) != absolute:
-                raise SQLiteRagSmokeUnavailable(
-                    'SQLite smoke database path identity is ambiguous'
-                )
+            if (
+                raw.is_symlink()
+                or str(absolute.resolve(strict=True)) != str(absolute)
+            ):
+                raise SQLiteRagSmokeUnavailable('SQLite smoke database path identity is ambiguous')
+            SQLiteRagSmokeCoordinator._require_single_link_regular(absolute, label='database')
+        except SQLiteRagSmokeUnavailable:
+            raise
         except OSError as exc:
-            raise SQLiteRagSmokeUnavailable(
-                'SQLite smoke database path is unavailable'
-            ) from exc
+            raise SQLiteRagSmokeUnavailable('SQLite smoke database path is unavailable') from exc
         return absolute
 
     @staticmethod
-    def _acquire_process_lock(database_path: Path) -> None:
-        lock_path = database_path.with_name(database_path.name + '.rag-smoke-process.lock')
-        if lock_path in _PROCESS_LOCKS:
-            return
-        try:
-            stat = database_path.stat()
-            identity = (stat.st_dev, stat.st_ino)
-        except OSError as exc:
+    def _require_single_link_regular(path: Path, *, label: str) -> os.stat_result:
+        value = path.lstat()
+        if not stat_module.S_ISREG(value.st_mode):
+            raise SQLiteRagSmokeUnavailable(f'SQLite smoke {label} must be a regular file')
+        if getattr(value, 'st_file_attributes', 0) & 0x400:
             raise SQLiteRagSmokeUnavailable(
-                'SQLite smoke database identity is unavailable'
-            ) from exc
-        existing_path = _DATABASE_IDENTITIES.get(identity)
-        if existing_path is not None and existing_path != database_path:
-            raise SQLiteRagSmokeUnavailable(
-                'SQLite smoke hardlink/path identity mismatch'
+                f'SQLite smoke {label} reparse identity is unavailable'
             )
+        if value.st_nlink != 1:
+            raise SQLiteRagSmokeUnavailable(
+                f'SQLite smoke {label} hardlink identity is unavailable'
+            )
+        return value
+
+    def _revalidate_file_authority(self) -> None:
+        if self._path is None:
+            return
+        lock_path = self._lock_path(self._path)
+        record = _PROCESS_LOCKS.get(lock_path)
+        if record is None:
+            raise SQLiteRagSmokeUnavailable('SQLite smoke process lock authority is unavailable')
+        database_stat = self._require_single_link_regular(self._path, label='database')
+        lock_stat = self._require_single_link_regular(lock_path, label='lock')
+        try:
+            handle_stat = os.fstat(record.handle.fileno())
+        except (AttributeError, OSError, ValueError) as exc:
+            raise SQLiteRagSmokeUnavailable('SQLite smoke process lock authority is unavailable') from exc
+        if (
+            (database_stat.st_dev, database_stat.st_ino) != record.database_identity
+            or (lock_stat.st_dev, lock_stat.st_ino) != record.lock_identity
+            or (handle_stat.st_dev, handle_stat.st_ino) != record.lock_identity
+        ):
+            raise SQLiteRagSmokeUnavailable('SQLite smoke file authority identity changed')
+
+    @staticmethod
+    def _lock_path(database_path: Path) -> Path:
+        return database_path.with_name(database_path.name + '.rag-smoke-process.lock')
+
+    @classmethod
+    def _acquire_process_lock(cls, database_path: Path) -> None:
+        database_stat = cls._require_single_link_regular(database_path, label='database')
+        lock_path = cls._lock_path(database_path)
+        if lock_path in _PROCESS_LOCKS:
+            record = _PROCESS_LOCKS[lock_path]
+            lock_stat = cls._require_single_link_regular(lock_path, label='lock')
+            try:
+                handle_stat = os.fstat(record.handle.fileno())
+            except (AttributeError, OSError, ValueError) as exc:
+                raise SQLiteRagSmokeUnavailable(
+                    'SQLite smoke process lock authority is unavailable'
+                ) from exc
+            if (
+                (database_stat.st_dev, database_stat.st_ino)
+                != record.database_identity
+                or (lock_stat.st_dev, lock_stat.st_ino) != record.lock_identity
+                or (handle_stat.st_dev, handle_stat.st_ino)
+                != record.lock_identity
+            ):
+                raise SQLiteRagSmokeUnavailable(
+                    'SQLite smoke file authority identity changed'
+                )
+            return
         flags = os.O_RDWR | os.O_CREAT
         if hasattr(os, 'O_NOFOLLOW'):
             flags |= os.O_NOFOLLOW
+        handle = None
         try:
             descriptor = os.open(lock_path, flags, 0o600)
             handle = os.fdopen(descriptor, 'a+b', buffering=0)
+            lock_stat = cls._require_single_link_regular(lock_path, label='lock')
+            handle_stat = os.fstat(handle.fileno())
+            if (lock_stat.st_dev, lock_stat.st_ino) != (handle_stat.st_dev, handle_stat.st_ino):
+                raise SQLiteRagSmokeUnavailable('SQLite smoke lock file identity mismatch')
             if os.name == 'nt':
                 import msvcrt
 
-                if os.path.getsize(lock_path) == 0:
+                if lock_stat.st_size == 0:
                     handle.write(b'0')
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
@@ -281,9 +799,16 @@ class SQLiteRagSmokeCoordinator:
                 import fcntl
 
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _PROCESS_LOCKS[lock_path] = _ProcessLock(
+                handle=handle,
+                database_identity=(database_stat.st_dev, database_stat.st_ino),
+                lock_identity=(lock_stat.st_dev, lock_stat.st_ino),
+            )
+        except SQLiteRagSmokeUnavailable:
+            if handle is not None:
+                handle.close()
+            raise
         except (OSError, ValueError) as exc:
-            raise SQLiteRagSmokeUnavailable(
-                'SQLite smoke process lock is unavailable'
-            ) from exc
-        _PROCESS_LOCKS[lock_path] = handle
-        _DATABASE_IDENTITIES[identity] = database_path
+            if handle is not None:
+                handle.close()
+            raise SQLiteRagSmokeUnavailable('SQLite smoke process lock is unavailable') from exc

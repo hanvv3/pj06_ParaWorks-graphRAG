@@ -783,11 +783,19 @@ def test_pending_projection_recovery_requires_exact_owner_fence(tmp_path: Path):
         ledger.recover_incomplete_run(
             run_id=132,
             projection_owner_fence_hmac='0' * 64,
+            expected_runtime_cost_snapshot_hmac=final.runtime_cost_snapshot_hmac,
+        )
+    with pytest.raises(RagCostLedgerError, match='cost snapshot'):
+        ledger.recover_incomplete_run(
+            run_id=132,
+            projection_owner_fence_hmac=final.projection_owner_fence_hmac,
+            expected_runtime_cost_snapshot_hmac='0' * 64,
         )
 
     terminal = ledger.recover_incomplete_run(
         run_id=132,
         projection_owner_fence_hmac=final.projection_owner_fence_hmac,
+        expected_runtime_cost_snapshot_hmac=final.runtime_cost_snapshot_hmac,
     )
     assert terminal.outcome == 'persistence_failed'
     assert terminal.run_record_phase == 'final'

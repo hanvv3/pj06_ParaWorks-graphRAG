@@ -1110,6 +1110,52 @@ class RagProviderSafetyService:
             if after != expected_binding:
                 raise RagProviderSafetyError('provider safety binding changed')
 
+    @contextmanager
+    def finalization_barrier(
+        self,
+        connection: Connection,
+        requirements: tuple[
+            tuple[AuthorizedProviderPolicySnapshot, RagProviderSafetyBinding], ...
+        ],
+        *,
+        order: RagLockOrderCoordinator,
+        sidecar_capability: RagLockOrderCapability,
+        safety_capability: RagLockOrderCapability,
+    ) -> Iterator[None]:
+        """Fresh-lock phase-2 safety rows while retaining the stable sidecar."""
+        order.require(sidecar_capability, stage='provider_stable_sidecar')
+        order.require(safety_capability, stage='provider_safety_rows')
+        if (
+            type(requirements) is not tuple
+            or not requirements
+            or any(
+                type(snapshot) is not AuthorizedProviderPolicySnapshot
+                or type(binding) is not RagProviderSafetyBinding
+                or binding.policy_snapshot != snapshot
+                for snapshot, binding in requirements
+            )
+        ):
+            raise RagProviderSafetyError(
+                'phase-2 provider safety requirements are invalid'
+            )
+        with self._authority.locked(), self._registered_advisory(connection):
+            body = self._read_unlocked()
+            self._match_db_whole_set(connection, body, for_update=True)
+            fresh = tuple(
+                self._binding(connection, body, snapshot.component, snapshot)
+                for snapshot, _ in requirements
+            )
+            if fresh != tuple(binding for _, binding in requirements):
+                raise RagProviderSafetyError('provider safety binding changed')
+            yield
+            after_body = self._read_unlocked()
+            after = tuple(
+                self._binding(connection, after_body, snapshot.component, snapshot)
+                for snapshot, _ in requirements
+            )
+            if after != fresh:
+                raise RagProviderSafetyError('provider safety binding changed')
+
     def _blocker_agent_run_hmac(self, agent_run_id: int) -> str:
         return rag_identity_hmac(
             {'agent_run_id': agent_run_id},

@@ -74,6 +74,16 @@ class RagCostLedgerError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class PendingProjectionRecoverySnapshot:
+    """Fresh, read-only phase-1 identity used before recovery lock acquisition."""
+
+    agent_run_id: int
+    projection_owner_fence_hmac: str
+    runtime_cost_snapshot_hmac: str
+    paid_work_performed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _RagCostLedgerAuthority:
     session: Session
     identity_secret: bytes = field(repr=False)
@@ -658,6 +668,7 @@ class RagCostLedger:
             .where(AgentRunCostComponent.agent_run_id == run_id)
             .order_by(AgentRunCostComponent.component_ordinal)
             .with_for_update()
+            .execution_options(populate_existing=True)
         ))
         if (
             parent is None
@@ -1349,6 +1360,7 @@ class RagCostLedger:
             .where(AgentRunCostComponent.agent_run_id == run_id)
             .order_by(AgentRunCostComponent.component_ordinal)
             .with_for_update()
+            .execution_options(populate_existing=True)
         ))
         if (
             parent is None
@@ -1500,6 +1512,7 @@ class RagCostLedger:
         *,
         run_id: int,
         projection_owner_fence_hmac: str | None = None,
+        expected_runtime_cost_snapshot_hmac: str | None = None,
         dead_process_attestation_hmac: str | None = None,
         completed_at: datetime | None = None,
     ) -> RagRunTerminal:
@@ -1509,6 +1522,14 @@ class RagCostLedger:
             raise RagCostLedgerError('incomplete RAG run is unavailable')
         pending_projection = parent.run_record_phase == 'cost_finalized_pending_projection'
         if pending_projection:
+            current_runtime_hmac = self._runtime_cost_identity(
+                agent_run_id=parent.id,
+                components=[self._row_runtime_component(row) for row in rows],
+                parent_outcome=None,
+                parent_run_record_phase='cost_finalized_pending_projection',
+                parent_status='running',
+                snapshot_stage='pre_projection',
+            )
             if (
                 type(projection_owner_fence_hmac) is not str
                 or not hmac.compare_digest(
@@ -1517,7 +1538,19 @@ class RagCostLedger:
                 )
             ):
                 raise RagCostLedgerError('projection owner fence is stale')
-            if any(row.dispatch_state not in {'terminal', 'abandoned_unknown'} for row in rows):
+            if (
+                type(expected_runtime_cost_snapshot_hmac) is not str
+                or not hmac.compare_digest(
+                    parent.metadata_.get('runtime_cost_snapshot_hmac', ''),
+                    expected_runtime_cost_snapshot_hmac,
+                )
+                or not hmac.compare_digest(
+                    current_runtime_hmac,
+                    expected_runtime_cost_snapshot_hmac,
+                )
+            ):
+                raise RagCostLedgerError('pending projection cost snapshot changed')
+            if any(row.dispatch_state != 'terminal' for row in rows):
                 raise RagCostLedgerError('pending projection children are incomplete')
             outcome = 'persistence_failed'
         else:
@@ -1586,6 +1619,53 @@ class RagCostLedger:
             admission_only=not pending_projection,
         )
 
+    def pending_projection_recovery_snapshot(
+        self, run_id: int
+    ) -> PendingProjectionRecoverySnapshot:
+        """Read exact phase-1 identities; recovery later CASes them under row locks."""
+        self._session.expire_all()
+        parent = self._session.get(AgentRun, run_id)
+        rows = tuple(
+            self._session.scalars(
+                select(AgentRunCostComponent)
+                .where(AgentRunCostComponent.agent_run_id == run_id)
+                .order_by(AgentRunCostComponent.component_ordinal)
+                .execution_options(populate_existing=True)
+            )
+        )
+        fence = None if parent is None else parent.projection_owner_fence_hmac
+        runtime_hmac = (
+            None
+            if parent is None
+            else parent.metadata_.get('runtime_cost_snapshot_hmac')
+        )
+        if (
+            parent is None
+            or parent.status != 'running'
+            or parent.run_record_phase != 'cost_finalized_pending_projection'
+            or tuple(row.component for row in rows) != _COMPONENT_ORDER
+            or any(row.dispatch_state != 'terminal' for row in rows)
+            or type(fence) is not str
+            or type(runtime_hmac) is not str
+        ):
+            raise RagCostLedgerError('pending projection recovery is unavailable')
+        current_runtime_hmac = self._runtime_cost_identity(
+            agent_run_id=parent.id,
+            components=[self._row_runtime_component(row) for row in rows],
+            parent_outcome=None,
+            parent_run_record_phase='cost_finalized_pending_projection',
+            parent_status='running',
+            snapshot_stage='pre_projection',
+        )
+        if not hmac.compare_digest(current_runtime_hmac, runtime_hmac):
+            raise RagCostLedgerError('pending projection cost snapshot changed')
+        return PendingProjectionRecoverySnapshot(
+            agent_run_id=run_id,
+            projection_owner_fence_hmac=fence,
+            runtime_cost_snapshot_hmac=runtime_hmac,
+            paid_work_performed=any(row.attempted for row in rows),
+        )
+
     def _locked_run(
         self,
         run_id: int,
@@ -1596,6 +1676,7 @@ class RagCostLedger:
             .where(AgentRunCostComponent.agent_run_id == run_id)
             .order_by(AgentRunCostComponent.component_ordinal)
             .with_for_update()
+            .execution_options(populate_existing=True)
         ))
         if (
             parent is None

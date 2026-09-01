@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import RLock
@@ -153,6 +153,42 @@ class RagEvidenceSendBarrier:
             locked = True
             self._freshness.require_current(expected_identity_hmac)
             return operation()
+        finally:
+            try:
+                if locked:
+                    release_advisory_lock(
+                        connection,
+                        self._registered_lock,  # type: ignore[arg-type]
+                        shared=True,
+                    )
+            finally:
+                connection.close()  # type: ignore[attr-defined]
+
+    @contextmanager
+    def finalization_barrier(
+        self,
+        *,
+        order: RagLockOrderCoordinator,
+        evidence_capability: RagLockOrderCapability,
+        c5_capability: RagLockOrderCapability,
+    ):
+        """Hold the exact shared evidence barrier through final projection commit."""
+        order.require(evidence_capability, stage='evidence_shared_barrier')
+        order.require(c5_capability, stage='c5_key_corpus')
+        if self._connection_factory is None:
+            with self._mutex:
+                yield
+            return
+        connection = self._connection_factory()
+        locked = False
+        try:
+            acquire_advisory_lock(
+                connection,
+                self._registered_lock,  # type: ignore[arg-type]
+                shared=True,
+            )
+            locked = True
+            yield
         finally:
             try:
                 if locked:

@@ -22,11 +22,19 @@ from backend.app.agent_runtime.provider_send_fence import (
 from backend.app.agent_runtime.rag_advisory_locks import (
     RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
     RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+    acquire_advisory_lock,
     load_registered_advisory_capability,
     rag_projection_owner_lock_id,
     register_advisory_identity_db,
+    release_advisory_lock,
 )
 from backend.app.agent_runtime.rag_cost_ledger import _assemble_rag_cost_ledger
+from backend.app.agent_runtime.rag_finalization import (
+    RagFinalizationError,
+    _assemble_paid_rag_phase2_authority,
+    _assemble_projection_owner_recovery_authority,
+    _assemble_provider_free_rag_phase2_authority,
+)
 from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
 from backend.app.agent_runtime.rag_provider_transport import (
     RagProviderTransportError,
@@ -36,6 +44,7 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
     _issue_classified_provider_observation as StrictProviderOutcome,
 )
 from backend.app.core.config import get_settings
+from backend.app.models import AgentRun
 from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import StrictProviderUsage
 from backend.tests.test_rag_v2_costs import (
@@ -191,6 +200,153 @@ def test_postgres_reviewed_intercomponent_recovery_accepts_terminal_zero_sibling
     )
     assert terminal.run_record_phase == 'admission_only'
     assert terminal.total_charged_cost_usd == Decimal('0.000001')
+
+
+def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
+    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+):
+    engine, service = postgres_cost_authority
+    run_id = (uuid4().int % (2**31 - 1)) + 1
+    with engine.begin() as connection:
+        register_advisory_identity_db(
+            connection,
+            RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+            identity_namespace='static',
+        )
+        register_advisory_identity_db(
+            connection,
+            rag_projection_owner_lock_id(run_id),
+            identity_namespace='dynamic',
+        )
+    with engine.connect() as connection:
+        evidence_capability = load_registered_advisory_capability(
+            connection,
+            RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+            identity_namespace='static',
+        )
+    with engine.connect() as connection:
+        owner_capability = load_registered_advisory_capability(
+            connection,
+            rag_projection_owner_lock_id(run_id),
+            identity_namespace='dynamic',
+        )
+    ledger = _assemble_rag_cost_ledger(
+        Session(engine),
+        identity_secret=b'task-12-test-identity-secret',
+        cost_policy=_TEST_COST_POLICY,
+        provider_safety=service,
+        provider_connection_factory=engine.connect,
+        designated_environment_id='test',
+        designated_host_id='pytest-postgres-recovery',
+        projection_lock_capability_factory=lambda _run_id: owner_capability,
+    )
+    _admit(ledger, run_id)
+    safety_requirements = []
+    final = None
+    for component, reserve, usage, actual in (
+        (
+            'query_embedding',
+            '0.000010',
+            StrictProviderUsage(20, 0, 20),
+            Decimal('0.000001'),
+        ),
+        (
+            'answer_generation',
+            '0.002000',
+            StrictProviderUsage(1, 10, 11),
+            Decimal('0.000046'),
+        ),
+    ):
+        grant = ledger.claim_component(
+            run_id=run_id,
+            component=component,
+            prepared=_budget(component, reserve),
+        )
+        safety_requirements.append(
+            (
+                ledger._admission_snapshots[(run_id, component)],
+                ledger._grant_bindings[(run_id, component)],
+            )
+        )
+        ledger.consume_committed_grant(grant)
+        final = ledger.finalize_component(
+            grant=grant,
+            observation=StrictProviderOutcome(
+                component=component,
+                classification='validated_success',
+                terminal_outcome='component_succeeded',
+                provider_dispatch_started=True,
+                provider_response_received=True,
+                strict_usage=usage,
+                actual_cost_usd=actual,
+                safety_action='unchanged',
+            ),
+        )
+    assert final is not None
+    assert final.projection_owner_fence_hmac is not None
+
+    def load_fence(_run_id: int) -> str:
+        with Session(engine) as session:
+            parent = session.get(AgentRun, run_id)
+            assert parent is not None
+            assert parent.projection_owner_fence_hmac is not None
+            return parent.projection_owner_fence_hmac
+
+    evidence_barrier = _assemble_rag_evidence_barrier(
+        load_current_identity=lambda: 'a' * 64,
+        connection_factory=engine.connect,
+        registered_lock=evidence_capability,
+    )
+    provider_free = _assemble_provider_free_rag_phase2_authority(
+        owner_connection_factory=engine.connect,
+        owner_capability_factory=lambda _run_id: owner_capability,
+        load_current_owner_fence=load_fence,
+        evidence_barrier=evidence_barrier,
+    )
+    paid = _assemble_paid_rag_phase2_authority(
+        provider_safety=service,
+        safety_connection_factory=engine.connect,
+        safety_requirements=tuple(safety_requirements),
+        owner_connection_factory=engine.connect,
+        owner_capability_factory=lambda _run_id: owner_capability,
+        load_current_owner_fence=load_fence,
+        evidence_barrier=evidence_barrier,
+        load_current_readiness=lambda: RagServingIndexReadiness(
+            ready=True,
+            corpus_generation=1,
+            vector_index_generation=1,
+            expected_document_count=0,
+            live_vector_count=0,
+            tombstone_count=0,
+            mismatch_count_capped_at_20=0,
+            embedding_model='text-embedding-3-small',
+            embedding_dimensions=1536,
+            index_policy_version='rag-v2-serving-index:v1',
+            readiness_snapshot_hmac='4' * 64,
+        ),
+    )
+    recovery = _assemble_projection_owner_recovery_authority(
+        ledger=ledger,
+        provider_free=provider_free,
+        paid=paid,
+    )
+    live_owner = engine.connect()
+    try:
+        acquire_advisory_lock(live_owner, owner_capability, shared=False)
+        with pytest.raises(RagFinalizationError, match='still live'):
+            recovery.recover(run_id)
+        with Session(engine) as probe:
+            parent = probe.get(AgentRun, run_id)
+            assert parent is not None and parent.status == 'running'
+        release_advisory_lock(live_owner, owner_capability, shared=False)
+        terminal = recovery.recover(run_id)
+        assert terminal.outcome == 'persistence_failed'
+        with Session(engine) as probe:
+            parent = probe.get(AgentRun, run_id)
+            assert parent is not None and parent.status == 'failed'
+            assert parent.run_record_phase == 'final'
+    finally:
+        live_owner.close()
 
 
 def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(

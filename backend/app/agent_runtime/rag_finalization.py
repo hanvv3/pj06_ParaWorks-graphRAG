@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal, Protocol, TypeAlias, cast
@@ -14,12 +14,32 @@ from backend.app.agent_runtime.fingerprints import (
     fingerprint_secret_bytes,
     keyed_fingerprint,
 )
+from backend.app.agent_runtime.provider_send_fence import RagEvidenceSendBarrier
 from backend.app.agent_runtime.provider_usage import (
     AssistantPersistedOutcome,
     RagCannedMessageIdentity,
     RagResultOutcome,
 )
-from backend.app.agent_runtime.rag_runtime_contracts import terminal_source_window
+from backend.app.agent_runtime.rag_advisory_locks import (
+    RegisteredAdvisoryLock,
+    begin_rag_lock_order,
+    rag_projection_owner_lock_id,
+    release_advisory_lock,
+    try_acquire_advisory_lock,
+)
+from backend.app.agent_runtime.rag_cost_ledger import (
+    PendingProjectionRecoverySnapshot,
+    RagCostLedger,
+)
+from backend.app.agent_runtime.rag_provider_safety import (
+    RagProviderSafetyError,
+    RagProviderSafetyService,
+)
+from backend.app.agent_runtime.rag_runtime_contracts import (
+    AuthorizedProviderPolicySnapshot,
+    RagProviderSafetyBinding,
+    terminal_source_window,
+)
 from backend.app.agent_runtime.rag_safety_identity import (
     FinalProductIdentityInput,
     final_product_identity,
@@ -40,6 +60,7 @@ from backend.app.agents.rag_orchestrator_agent.v2_input import PreparedRagReques
 from backend.app.assistant.evidence_persistence import (
     AssistantEvidenceWriter,
     AssistantMessageProjection,
+    _mint_assistant_exact_write_authority,
 )
 from backend.app.core.config import Settings
 from backend.app.models import (
@@ -52,12 +73,14 @@ from backend.app.rag.evidence_projection import (
     CanonicalEvidenceProjector,
     ModelInfluenceDependencySnapshot,
     PreparedModelInfluenceObservation,
+    PreparedModelInfluenceSet,
     ProjectionFence,
     V1EvidenceProjection,
     build_model_influence_set_hmac,
     build_v1_search_result_set_projection_hmac,
     build_v1_selected_evidence_projection_hmac,
 )
+from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import (
     EvidenceSlot,
     EvidenceSlotId,
@@ -65,6 +88,7 @@ from backend.app.rag.retrieval import (
     RetrievalRequest,
     RetrievalResult,
     rank_evidence_slots,
+    validate_query_embedding_call_result,
 )
 from backend.app.rag.serving_locks import ServingProjectionReadCoordinator
 
@@ -73,30 +97,495 @@ class RagFinalizationError(RuntimeError):
     """No immutable product was committed; callers must not synthesize one."""
 
 
+_PHASE2_AUTHORITY_SEAL = object()
 _RECOVERY_AUTHORITY_SEAL = object()
 
 
-class _ProjectionOwnerRecoveryAuthority:
-    __slots__ = ('_recover', '_seal')
+@dataclass(frozen=True, slots=True)
+class _ProviderFreePhase2Assembly:
+    owner_connection_factory: Callable[[], object] = field(repr=False)
+    owner_capability_factory: Callable[[int], RegisteredAdvisoryLock] = field(
+        repr=False
+    )
+    load_current_owner_fence: Callable[[int], str] = field(repr=False)
+    evidence_barrier: RagEvidenceSendBarrier = field(repr=False)
+    _seal: object = field(repr=False, compare=False)
 
-    def __init__(self, recover: Callable[[int], object], seal: object) -> None:
-        if seal is not _RECOVERY_AUTHORITY_SEAL or not callable(recover):
+
+@dataclass(frozen=True, slots=True)
+class _PaidPhase2Assembly:
+    provider_safety: RagProviderSafetyService = field(repr=False)
+    safety_connection_factory: Callable[[], object] = field(repr=False)
+    safety_requirements: tuple[
+        tuple[AuthorizedProviderPolicySnapshot, RagProviderSafetyBinding], ...
+    ] = field(repr=False)
+    owner_connection_factory: Callable[[], object] = field(repr=False)
+    owner_capability_factory: Callable[[int], RegisteredAdvisoryLock] = field(
+        repr=False
+    )
+    load_current_owner_fence: Callable[[int], str] = field(repr=False)
+    evidence_barrier: RagEvidenceSendBarrier = field(repr=False)
+    load_current_readiness: Callable[[], RagServingIndexReadiness] = field(
+        repr=False
+    )
+    _seal: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectionOwnerRecoveryAssembly:
+    ledger: RagCostLedger = field(repr=False)
+    provider_free: ProviderFreeRagPhase2Authority = field(repr=False)
+    paid: PaidRagPhase2Authority = field(repr=False)
+    _seal: object = field(repr=False, compare=False)
+
+
+class ProviderFreeRagPhase2Authority:
+    """Concrete zero-provider owner/evidence authority; never reads safety."""
+
+    __slots__ = ('_assembly',)
+
+    def __init__(self, assembly: object) -> None:
+        if (
+            type(assembly) is not _ProviderFreePhase2Assembly
+            or assembly._seal is not _PHASE2_AUTHORITY_SEAL
+            or not callable(assembly.owner_connection_factory)
+            or not callable(assembly.owner_capability_factory)
+            or not callable(assembly.load_current_owner_fence)
+            or type(assembly.evidence_barrier) is not RagEvidenceSendBarrier
+        ):
+            raise TypeError('provider-free phase-2 authority is unavailable')
+        self._assembly = assembly
+
+    @contextmanager
+    def acquire(
+        self,
+        pending: RagProjectionPending,
+        prepared: PreparedRagFinalization,
+        *,
+        branch: str,
+    ):
+        if (
+            branch != 'provider_free'
+            or prepared.query_embedding_result is not None
+            or prepared.model_influence_observations
+        ):
+            raise RagFinalizationError('provider-free phase-2 branch is invalid')
+        assembly = self._assembly
+        order = begin_rag_lock_order('ordinary')
+        # Provider-free work dispatches no paid component. Advance the shared
+        # order without touching provider sidecar or safety storage.
+        order.acquire('provider_stable_sidecar')
+        order.acquire('provider_safety_rows')
+        owner_order = order.acquire('projection_owner')
+        owner_capability = assembly.owner_capability_factory(
+            pending.parent_agent_run_id
+        )
+        if (
+            type(owner_capability) is not RegisteredAdvisoryLock
+            or not owner_capability.matches(
+                rag_projection_owner_lock_id(pending.parent_agent_run_id),
+                identity_namespace='dynamic',
+            )
+        ):
+            raise RagFinalizationError('projection-owner capability is invalid')
+        owner_connection = assembly.owner_connection_factory()
+        locked = False
+        try:
+            order.require(owner_order, stage='projection_owner')
+            locked = try_acquire_advisory_lock(
+                owner_connection, owner_capability, shared=False
+            )
+            if not locked:
+                raise RagFinalizationError('projection owner is still live')
+            if (
+                assembly.load_current_owner_fence(pending.parent_agent_run_id)
+                != pending.projection_owner_fence_hmac
+            ):
+                raise RagFinalizationError('projection-owner fence changed')
+            evidence_order = order.acquire('evidence_shared_barrier')
+            c5_order = order.acquire('c5_key_corpus')
+            order.acquire('agent_run_cost')
+            order.acquire('optional_assistant')
+            order.finish()
+            with assembly.evidence_barrier.finalization_barrier(
+                order=order,
+                evidence_capability=evidence_order,
+                c5_capability=c5_order,
+            ):
+                yield
+        finally:
+            try:
+                if locked:
+                    release_advisory_lock(
+                        owner_connection, owner_capability, shared=False
+                    )
+            finally:
+                owner_connection.close()  # type: ignore[attr-defined]
+
+    @contextmanager
+    def acquire_recovery(self, snapshot: PendingProjectionRecoverySnapshot):
+        if (
+            type(snapshot) is not PendingProjectionRecoverySnapshot
+            or snapshot.paid_work_performed
+        ):
+            raise RagFinalizationError(
+                'provider-free projection recovery authority is invalid'
+            )
+        assembly = self._assembly
+        order = begin_rag_lock_order('ordinary')
+        order.acquire('provider_stable_sidecar')
+        order.acquire('provider_safety_rows')
+        owner_order = order.acquire('projection_owner')
+        owner_capability = assembly.owner_capability_factory(
+            snapshot.agent_run_id
+        )
+        if (
+            type(owner_capability) is not RegisteredAdvisoryLock
+            or not owner_capability.matches(
+                rag_projection_owner_lock_id(snapshot.agent_run_id),
+                identity_namespace='dynamic',
+            )
+        ):
+            raise RagFinalizationError('projection-owner capability is invalid')
+        owner_connection = assembly.owner_connection_factory()
+        locked = False
+        try:
+            order.require(owner_order, stage='projection_owner')
+            locked = try_acquire_advisory_lock(
+                owner_connection, owner_capability, shared=False
+            )
+            if not locked:
+                raise RagFinalizationError('projection owner is still live')
+            if (
+                assembly.load_current_owner_fence(snapshot.agent_run_id)
+                != snapshot.projection_owner_fence_hmac
+            ):
+                raise RagFinalizationError('projection-owner fence changed')
+            evidence_order = order.acquire('evidence_shared_barrier')
+            c5_order = order.acquire('c5_key_corpus')
+            order.acquire('agent_run_cost')
+            order.acquire('optional_assistant')
+            order.finish()
+            with assembly.evidence_barrier.finalization_barrier(
+                order=order,
+                evidence_capability=evidence_order,
+                c5_capability=c5_order,
+            ):
+                yield
+        finally:
+            try:
+                if locked:
+                    release_advisory_lock(
+                        owner_connection, owner_capability, shared=False
+                    )
+            finally:
+                owner_connection.close()  # type: ignore[attr-defined]
+
+
+class PaidRagPhase2Authority:
+    """Concrete retained-sidecar safety/readiness/owner phase-2 authority."""
+
+    __slots__ = ('_assembly', '_current_readiness')
+
+    def __init__(self, assembly: object) -> None:
+        if (
+            type(assembly) is not _PaidPhase2Assembly
+            or assembly._seal is not _PHASE2_AUTHORITY_SEAL
+            or type(assembly.provider_safety) is not RagProviderSafetyService
+            or not callable(assembly.safety_connection_factory)
+            or not callable(assembly.owner_connection_factory)
+            or not callable(assembly.owner_capability_factory)
+            or not callable(assembly.load_current_owner_fence)
+            or type(assembly.evidence_barrier) is not RagEvidenceSendBarrier
+            or not callable(assembly.load_current_readiness)
+        ):
+            raise TypeError('paid phase-2 authority is unavailable')
+        self._assembly = assembly
+        self._current_readiness: RagServingIndexReadiness | None = None
+
+    @property
+    def current_readiness_hmac(self) -> str | None:
+        value = self._current_readiness
+        return value.readiness_snapshot_hmac if value is not None else None
+
+    @contextmanager
+    def acquire(
+        self,
+        pending: RagProjectionPending,
+        prepared: PreparedRagFinalization,
+        *,
+        branch: str,
+    ):
+        if branch not in {'paid_embedding_only', 'paid_prepared'}:
+            raise RagFinalizationError('paid phase-2 branch is invalid')
+        assembly = self._assembly
+        order = begin_rag_lock_order('ordinary')
+        sidecar_order = order.acquire('provider_stable_sidecar')
+        safety_order = order.acquire('provider_safety_rows')
+        safety_connection = assembly.safety_connection_factory()
+        try:
+            with assembly.provider_safety.finalization_barrier(
+                safety_connection,  # type: ignore[arg-type]
+                assembly.safety_requirements,
+                order=order,
+                sidecar_capability=sidecar_order,
+                safety_capability=safety_order,
+            ):
+                owner_order = order.acquire('projection_owner')
+                owner_capability = assembly.owner_capability_factory(
+                    pending.parent_agent_run_id
+                )
+                if (
+                    type(owner_capability) is not RegisteredAdvisoryLock
+                    or not owner_capability.matches(
+                        rag_projection_owner_lock_id(
+                            pending.parent_agent_run_id
+                        ),
+                        identity_namespace='dynamic',
+                    )
+                ):
+                    raise RagFinalizationError(
+                        'projection-owner capability is invalid'
+                    )
+                owner_connection = assembly.owner_connection_factory()
+                locked = False
+                try:
+                    order.require(owner_order, stage='projection_owner')
+                    locked = try_acquire_advisory_lock(
+                        owner_connection, owner_capability, shared=False
+                    )
+                    if not locked:
+                        raise RagFinalizationError(
+                            'projection owner is still live'
+                        )
+                    if (
+                        assembly.load_current_owner_fence(
+                            pending.parent_agent_run_id
+                        )
+                        != pending.projection_owner_fence_hmac
+                    ):
+                        raise RagFinalizationError(
+                            'projection-owner fence changed'
+                        )
+                    readiness = assembly.load_current_readiness()
+                    if type(readiness) is not RagServingIndexReadiness:
+                        raise RagFinalizationError(
+                            'phase-2 index readiness is unavailable'
+                        )
+                    self._current_readiness = readiness
+                    prepared_embedding = (
+                        prepared.query_embedding_result.prepared
+                        if prepared.query_embedding_result is not None
+                        else None
+                    )
+                    if prepared_embedding is not None and (
+                        readiness.ready is not True
+                        or readiness.corpus_generation
+                        != prepared_embedding.corpus_generation
+                        or readiness.vector_index_generation
+                        != prepared_embedding.vector_index_generation
+                        or readiness.readiness_snapshot_hmac
+                        != prepared_embedding.readiness_snapshot_hmac
+                    ):
+                        raise RagFinalizationError(
+                            'phase-2 index readiness changed'
+                        )
+                    evidence_order = order.acquire('evidence_shared_barrier')
+                    c5_order = order.acquire('c5_key_corpus')
+                    order.acquire('agent_run_cost')
+                    order.acquire('optional_assistant')
+                    order.finish()
+                    with assembly.evidence_barrier.finalization_barrier(
+                        order=order,
+                        evidence_capability=evidence_order,
+                        c5_capability=c5_order,
+                    ):
+                        yield
+                finally:
+                    try:
+                        if locked:
+                            release_advisory_lock(
+                                owner_connection,
+                                owner_capability,
+                                shared=False,
+                            )
+                    finally:
+                        owner_connection.close()  # type: ignore[attr-defined]
+        except RagProviderSafetyError as exc:
+            raise RagFinalizationError('phase-2 provider safety changed') from exc
+        finally:
+            safety_connection.close()  # type: ignore[attr-defined]
+
+    @contextmanager
+    def acquire_recovery(self, snapshot: PendingProjectionRecoverySnapshot):
+        if (
+            type(snapshot) is not PendingProjectionRecoverySnapshot
+            or snapshot.paid_work_performed is not True
+        ):
+            raise RagFinalizationError('paid projection recovery authority is invalid')
+        assembly = self._assembly
+        order = begin_rag_lock_order('ordinary')
+        sidecar_order = order.acquire('provider_stable_sidecar')
+        safety_order = order.acquire('provider_safety_rows')
+        safety_connection = assembly.safety_connection_factory()
+        try:
+            with assembly.provider_safety.finalization_barrier(
+                safety_connection,  # type: ignore[arg-type]
+                assembly.safety_requirements,
+                order=order,
+                sidecar_capability=sidecar_order,
+                safety_capability=safety_order,
+            ):
+                owner_order = order.acquire('projection_owner')
+                owner_capability = assembly.owner_capability_factory(
+                    snapshot.agent_run_id
+                )
+                if (
+                    type(owner_capability) is not RegisteredAdvisoryLock
+                    or not owner_capability.matches(
+                        rag_projection_owner_lock_id(snapshot.agent_run_id),
+                        identity_namespace='dynamic',
+                    )
+                ):
+                    raise RagFinalizationError(
+                        'projection-owner capability is invalid'
+                    )
+                owner_connection = assembly.owner_connection_factory()
+                locked = False
+                try:
+                    order.require(owner_order, stage='projection_owner')
+                    locked = try_acquire_advisory_lock(
+                        owner_connection, owner_capability, shared=False
+                    )
+                    if not locked:
+                        raise RagFinalizationError(
+                            'projection owner is still live'
+                        )
+                    if (
+                        assembly.load_current_owner_fence(snapshot.agent_run_id)
+                        != snapshot.projection_owner_fence_hmac
+                    ):
+                        raise RagFinalizationError(
+                            'projection-owner fence changed'
+                        )
+                    evidence_order = order.acquire('evidence_shared_barrier')
+                    c5_order = order.acquire('c5_key_corpus')
+                    order.acquire('agent_run_cost')
+                    order.acquire('optional_assistant')
+                    order.finish()
+                    with assembly.evidence_barrier.finalization_barrier(
+                        order=order,
+                        evidence_capability=evidence_order,
+                        c5_capability=c5_order,
+                    ):
+                        yield
+                finally:
+                    try:
+                        if locked:
+                            release_advisory_lock(
+                                owner_connection,
+                                owner_capability,
+                                shared=False,
+                            )
+                    finally:
+                        owner_connection.close()  # type: ignore[attr-defined]
+        except RagProviderSafetyError as exc:
+            raise RagFinalizationError(
+                'phase-2 provider safety changed'
+            ) from exc
+        finally:
+            safety_connection.close()  # type: ignore[attr-defined]
+
+
+def _assemble_provider_free_rag_phase2_authority(
+    *,
+    owner_connection_factory: Callable[[], object],
+    owner_capability_factory: Callable[[int], RegisteredAdvisoryLock],
+    load_current_owner_fence: Callable[[int], str],
+    evidence_barrier: RagEvidenceSendBarrier,
+) -> ProviderFreeRagPhase2Authority:
+    return ProviderFreeRagPhase2Authority(_ProviderFreePhase2Assembly(
+        owner_connection_factory=owner_connection_factory,
+        owner_capability_factory=owner_capability_factory,
+        load_current_owner_fence=load_current_owner_fence,
+        evidence_barrier=evidence_barrier,
+        _seal=_PHASE2_AUTHORITY_SEAL,
+    ))
+
+
+def _assemble_paid_rag_phase2_authority(
+    *,
+    provider_safety: RagProviderSafetyService,
+    safety_connection_factory: Callable[[], object],
+    safety_requirements: tuple[
+        tuple[AuthorizedProviderPolicySnapshot, RagProviderSafetyBinding], ...
+    ],
+    owner_connection_factory: Callable[[], object],
+    owner_capability_factory: Callable[[int], RegisteredAdvisoryLock],
+    load_current_owner_fence: Callable[[int], str],
+    evidence_barrier: RagEvidenceSendBarrier,
+    load_current_readiness: Callable[[], RagServingIndexReadiness],
+) -> PaidRagPhase2Authority:
+    return PaidRagPhase2Authority(_PaidPhase2Assembly(
+        provider_safety=provider_safety,
+        safety_connection_factory=safety_connection_factory,
+        safety_requirements=safety_requirements,
+        owner_connection_factory=owner_connection_factory,
+        owner_capability_factory=owner_capability_factory,
+        load_current_owner_fence=load_current_owner_fence,
+        evidence_barrier=evidence_barrier,
+        load_current_readiness=load_current_readiness,
+        _seal=_PHASE2_AUTHORITY_SEAL,
+    ))
+
+
+class RagProjectionOwnerRecoveryAuthority:
+    """Concrete no-redispatch recovery across safety, owner, C.5 and cost CAS."""
+
+    __slots__ = ('_assembly',)
+
+    def __init__(self, assembly: object) -> None:
+        if (
+            type(assembly) is not _ProjectionOwnerRecoveryAssembly
+            or assembly._seal is not _RECOVERY_AUTHORITY_SEAL
+            or type(assembly.ledger) is not RagCostLedger
+            or type(assembly.provider_free) is not ProviderFreeRagPhase2Authority
+            or type(assembly.paid) is not PaidRagPhase2Authority
+        ):
             raise TypeError('projection-owner recovery authority is unavailable')
-        self._recover = recover
-        self._seal = seal
+        self._assembly = assembly
 
     def recover(self, run_id: int) -> object:
-        if self._seal is not _RECOVERY_AUTHORITY_SEAL:
-            raise RagFinalizationError('projection-owner recovery authority is stale')
-        return self._recover(run_id)
+        if type(run_id) is not int or run_id <= 0:
+            raise RagFinalizationError('projection-owner recovery run is invalid')
+        assembly = self._assembly
+        snapshot = assembly.ledger.pending_projection_recovery_snapshot(run_id)
+        phase2 = assembly.paid if snapshot.paid_work_performed else assembly.provider_free
+        with phase2.acquire_recovery(snapshot):
+            return assembly.ledger.recover_incomplete_run(
+                run_id=run_id,
+                projection_owner_fence_hmac=(
+                    snapshot.projection_owner_fence_hmac
+                ),
+                expected_runtime_cost_snapshot_hmac=(
+                    snapshot.runtime_cost_snapshot_hmac
+                ),
+            )
 
 
 def _assemble_projection_owner_recovery_authority(
-    recover_after_exact_lock_reacquire: Callable[[int], object],
-) -> _ProjectionOwnerRecoveryAuthority:
-    """Assembly-only seam; callback must own sidecar/safety/owner/C.5 ordering."""
-    return _ProjectionOwnerRecoveryAuthority(
-        recover_after_exact_lock_reacquire, _RECOVERY_AUTHORITY_SEAL
+    *,
+    ledger: RagCostLedger,
+    provider_free: ProviderFreeRagPhase2Authority,
+    paid: PaidRagPhase2Authority,
+) -> RagProjectionOwnerRecoveryAuthority:
+    return RagProjectionOwnerRecoveryAuthority(
+        _ProjectionOwnerRecoveryAssembly(
+            ledger=ledger,
+            provider_free=provider_free,
+            paid=paid,
+            _seal=_RECOVERY_AUTHORITY_SEAL,
+        )
     )
 
 
@@ -186,6 +675,7 @@ class PreparedRagFinalization:
     selected_slot_ids: tuple[EvidenceSlotId, ...]
     validated_answer: ValidatedAnswerBlocks | None
     canned_message_identity: RagCannedMessageIdentity | None
+    prepared_model_influence: PreparedModelInfluenceSet | None = None
     rendered_input_hmac: str | None = None
     answer_model_config_snapshot_hmac: str | None = None
 
@@ -213,8 +703,21 @@ class PreparedRagFinalization:
         if self.model_influence_observations and (
             not _lower_hmac(self.rendered_input_hmac)
             or not _lower_hmac(self.answer_model_config_snapshot_hmac)
+            or type(self.prepared_model_influence) is not PreparedModelInfluenceSet
+            or self.prepared_model_influence.observations
+            != self.model_influence_observations
+            or self.prepared_model_influence.rendered_input_hmac
+            != self.rendered_input_hmac
+            or not _lower_hmac(
+                self.prepared_model_influence.aggregate_observation_hmac
+            )
         ):
-            raise ValueError('prepared answer invocation identity is incomplete')
+            raise ValueError('prepared model influence authority is incomplete')
+        if (
+            not self.model_influence_observations
+            and self.prepared_model_influence is not None
+        ):
+            raise ValueError('prepared model influence authority is unexpected')
         if self.validated_answer is not None and (
             self.validated_answer.selected_slot_ids != self.selected_slot_ids
             or not self.model_influence_observations
@@ -223,6 +726,13 @@ class PreparedRagFinalization:
 
 
 class RagFinalizationTransactionPort(Protocol):
+    def acquire_phase2(
+        self,
+        pending: RagProjectionPending,
+        prepared: PreparedRagFinalization,
+        *,
+        branch: str,
+    ): ...
     def begin(self): ...
     def validate_pending(self, pending: RagProjectionPending) -> None: ...
     def current_generations(self) -> tuple[int, int | None]: ...
@@ -257,7 +767,10 @@ class RagFinalizationService:
         pending: RagProjectionPending,
         prepared: PreparedRagFinalization,
     ) -> CanonicalRagProjection:
-        return cast(CanonicalRagProjection, self._finalize(pending, prepared, None))
+        return cast(
+            CanonicalRagProjection,
+            self._finalize(pending, prepared, None, branch='paid_prepared'),
+        )
 
     def finalize_assistant(
         self,
@@ -267,7 +780,7 @@ class RagFinalizationService:
     ) -> AssistantFinalizationRecord:
         return cast(
             AssistantFinalizationRecord,
-            self._finalize(pending, prepared, target),
+            self._finalize(pending, prepared, target, branch='paid_prepared'),
         )
 
     def finalize_provider_free_safe(
@@ -283,7 +796,9 @@ class RagFinalizationService:
             or prepared.validated_answer is not None
         ):
             raise RagFinalizationError('provider-free finalization has provider state')
-        return self._finalize(pending, prepared, assistant_target)
+        return self._finalize(
+            pending, prepared, assistant_target, branch='provider_free'
+        )
 
     def finalize_paid_embedding_only_safe(
         self,
@@ -298,7 +813,9 @@ class RagFinalizationService:
             or prepared.validated_answer is not None
         ):
             raise RagFinalizationError('paid embedding finalization lacks its receipt')
-        return self._finalize(pending, prepared, assistant_target)
+        return self._finalize(
+            pending, prepared, assistant_target, branch='paid_embedding_only'
+        )
 
     def finalize_pre_generation_evidence_changed(
         self,
@@ -314,7 +831,17 @@ class RagFinalizationService:
             or prepared.selected_slot_ids
         ):
             raise RagFinalizationError('evidence-changed finalization identity is invalid')
-        return self._finalize(pending, prepared, assistant_target, force_drift=True)
+        return self._finalize(
+            pending,
+            prepared,
+            assistant_target,
+            branch=(
+                'paid_prepared'
+                if prepared.query_embedding_result is not None
+                else 'provider_free'
+            ),
+            force_drift=True,
+        )
 
     def finalize_inter_component_failure(self, *args, **kwargs):
         finalizer = getattr(self._boundary, 'finalize_inter_component_failure', None)
@@ -334,6 +861,7 @@ class RagFinalizationService:
         prepared: PreparedRagFinalization,
         assistant_target: AssistantProjectionTarget | None,
         *,
+        branch: Literal['provider_free', 'paid_embedding_only', 'paid_prepared'],
         force_drift: bool = False,
     ) -> RagFinalProjection:
         if type(pending) is not RagProjectionPending:
@@ -348,34 +876,46 @@ class RagFinalizationService:
             prepared.security_scope, settings=self._settings
         ) != pending.security_scope_fingerprint:
             raise RagFinalizationError('prepared security scope changed')
+        request = RetrievalRequest(
+            retrieval_query_text=prepared.prepared_text.retrieval_query_text,
+            security_scope=prepared.security_scope,
+            security_scope_fingerprint=pending.security_scope_fingerprint,
+            query_embedding_result=prepared.query_embedding_result,
+            candidate_scan_limit=50,
+            visible_limit=5 if prepared.product_kind == 'search' else 8,
+            relevance_policy_version='rag-retrieval-policy:v2.0',
+        )
+        if prepared.query_embedding_result is not None:
+            try:
+                validated_embedding = validate_query_embedding_call_result(
+                    request,
+                    settings=self._settings,
+                )
+            except (TypeError, ValueError) as exc:
+                raise RagFinalizationError(
+                    'paid query embedding carrier is invalid'
+                ) from exc
+            if validated_embedding is not prepared.query_embedding_result:
+                raise RagFinalizationError(
+                    'paid query embedding carrier is invalid'
+                )
         committed: RagFinalProjection | None = None
         try:
-            with self._boundary.begin():
+            with self._boundary.acquire_phase2(
+                pending, prepared, branch=branch
+            ), self._boundary.begin():
                 acquire_prefix = getattr(
                     self._boundary, 'acquire_projection_prefix', None
                 )
                 if callable(acquire_prefix):
                     acquire_prefix()
-                self._boundary.validate_pending(pending)
-                validate_prepared = getattr(
-                    self._boundary, 'validate_prepared', None
+                current_corpus, current_index = (
+                    self._boundary.current_generations()
                 )
-                if callable(validate_prepared):
-                    validate_prepared(pending, prepared)
-                current_corpus, current_index = self._boundary.current_generations()
                 current_index_authority = (
                     current_index
                     if prepared.retrieval_result.configured_backend == 'pgvector'
                     else None
-                )
-                request = RetrievalRequest(
-                    retrieval_query_text=prepared.prepared_text.retrieval_query_text,
-                    security_scope=prepared.security_scope,
-                    security_scope_fingerprint=pending.security_scope_fingerprint,
-                    query_embedding_result=prepared.query_embedding_result,
-                    candidate_scan_limit=50,
-                    visible_limit=5 if prepared.product_kind == 'search' else 8,
-                    relevance_policy_version='rag-retrieval-policy:v2.0',
                 )
                 fresh = self._boundary.retrieve_fresh(request)
                 drifted = force_drift or (
@@ -390,6 +930,20 @@ class RagFinalizationService:
                     prepared, fresh, drifted=drifted
                 )
                 projection = _canonical(candidate)
+                self._boundary.validate_pending(pending)
+                validate_prepared = getattr(
+                    self._boundary, 'validate_prepared', None
+                )
+                if callable(validate_prepared):
+                    validate_prepared(pending, prepared)
+                validate_branch_costs = getattr(
+                    self._boundary, 'validate_branch_costs', None
+                )
+                if not callable(validate_branch_costs):
+                    raise RagFinalizationError(
+                        'branch-specific cost authority is unavailable'
+                    )
+                validate_branch_costs(prepared, branch=branch)
                 if assistant_target is None:
                     self._boundary.finalize_parent(pending, projection)
                     committed = projection
@@ -426,20 +980,33 @@ class SqlAlchemyRagFinalizationBoundary:
         settings: Settings,
         retriever: object,
         assistant_writer: AssistantEvidenceWriter | None = None,
-        recovery_authority: _ProjectionOwnerRecoveryAuthority | None = None,
+        recovery_authority: RagProjectionOwnerRecoveryAuthority | None = None,
+        phase2_authority: object | None = None,
     ) -> None:
         if db.get_bind().dialect.name != 'postgresql':
             raise TypeError('production RAG finalization requires PostgreSQL')
         if not callable(getattr(retriever, 'invoke', None)):
             raise TypeError('RAG finalization retriever is unavailable')
+        if type(phase2_authority) not in {
+            ProviderFreeRagPhase2Authority,
+            PaidRagPhase2Authority,
+        }:
+            raise TypeError('concrete RAG phase-2 authority is required')
         self._db = db
         self._settings = settings
         self._retriever = retriever
         self._writer = assistant_writer
+        if (
+            recovery_authority is not None
+            and type(recovery_authority) is not RagProjectionOwnerRecoveryAuthority
+        ):
+            raise TypeError('concrete projection-owner recovery is required')
         self._recovery_authority = recovery_authority
+        self._phase2_authority = phase2_authority
         self._prefix: AbstractContextManager | None = None
         self._prefix_generations: tuple[int, int | None] | None = None
         self._pending_parent: AgentRun | None = None
+        self._pending_children: tuple[AgentRunCostComponent, ...] = ()
         self._pending: RagProjectionPending | None = None
         self._assembled_answer_hmac: str | None = None
         self._committed = False
@@ -447,6 +1014,19 @@ class SqlAlchemyRagFinalizationBoundary:
 
     def begin(self) -> AbstractContextManager:
         return _SessionFinalizationTransaction(self)
+
+    def acquire_phase2(
+        self,
+        pending: RagProjectionPending,
+        prepared: PreparedRagFinalization,
+        *,
+        branch: str,
+    ) -> AbstractContextManager:
+        acquire = getattr(self._phase2_authority, 'acquire', None)
+        if not callable(acquire):
+            raise RagFinalizationError('phase-2 finalization authority is unavailable')
+        self._pending = pending
+        return acquire(pending, prepared, branch=branch)
 
     def acquire_projection_prefix(self) -> None:
         if self._prefix is not None:
@@ -499,10 +1079,7 @@ class SqlAlchemyRagFinalizationBoundary:
             != pending.terminal_cost_snapshot_hmac
             or tuple(value.component for value in children)
             != ('query_embedding', 'answer_generation')
-            or any(
-                value.dispatch_state not in {'terminal', 'abandoned_unknown'}
-                for value in children
-            )
+            or any(value.dispatch_state != 'terminal' for value in children)
             or sum(
                 (Decimal(value.charged_cost_usd) for value in children),
                 Decimal('0.000000'),
@@ -511,7 +1088,58 @@ class SqlAlchemyRagFinalizationBoundary:
         ):
             raise RagFinalizationError('pending RAG projection changed')
         self._pending_parent = parent
+        self._pending_children = children
         self._pending = pending
+
+    def validate_branch_costs(
+        self,
+        prepared: PreparedRagFinalization,
+        *,
+        branch: str,
+    ) -> None:
+        children = self._pending_children
+        if tuple(value.component for value in children) != (
+            'query_embedding',
+            'answer_generation',
+        ):
+            raise RagFinalizationError('exact-two RAG cost authority is unavailable')
+        query, answer = children
+        if branch == 'provider_free':
+            if not all(_exact_terminal_zero(value) for value in children):
+                raise RagFinalizationError('provider-free cost shape is invalid')
+            return
+        embedding = prepared.query_embedding_result
+        if embedding is None:
+            if not _exact_terminal_zero(query):
+                raise RagFinalizationError('query embedding cost shape is invalid')
+        elif not _exact_paid_embedding_cost(query, embedding):
+            raise RagFinalizationError('paid embedding cost shape is invalid')
+        if branch == 'paid_embedding_only':
+            if embedding is None or not _exact_terminal_zero(answer):
+                raise RagFinalizationError(
+                    'paid embedding-only cost shape is invalid'
+                )
+            return
+        if branch != 'paid_prepared':
+            raise RagFinalizationError('RAG finalization cost branch is invalid')
+        generated = bool(prepared.model_influence_observations)
+        if generated:
+            if (
+                answer.dispatch_state != 'terminal'
+                or answer.attempted is not True
+                or answer.dispatch_count != 1
+                or answer.charge_basis != 'actual'
+                or answer.actual_input_tokens is None
+                or answer.actual_output_tokens is None
+                or not _lower_hmac(answer.dispatch_fence_hmac)
+                or not _lower_hmac(answer.process_instance_hmac)
+                or answer.terminal_outcome != 'component_succeeded'
+                or answer.authorized_model_config_snapshot_hmac
+                != prepared.answer_model_config_snapshot_hmac
+            ):
+                raise RagFinalizationError('answer generation cost shape is invalid')
+        elif not _exact_terminal_zero(answer):
+            raise RagFinalizationError('answer generation cost shape is invalid')
 
     def current_generations(self) -> tuple[int, int | None]:
         if self._prefix_generations is None:
@@ -541,6 +1169,15 @@ class SqlAlchemyRagFinalizationBoundary:
             or metadata.get('configured_backend')
             != prepared.retrieval_result.configured_backend
             or metadata.get('surface') != expected_surface
+            or metadata.get('rendered_input_hmac') != prepared.rendered_input_hmac
+            or metadata.get('answer_model_config_snapshot_hmac')
+            != prepared.answer_model_config_snapshot_hmac
+            or metadata.get('prepared_model_influence_observation_hmac')
+            != (
+                prepared.prepared_model_influence.aggregate_observation_hmac
+                if prepared.prepared_model_influence is not None
+                else None
+            )
         ):
             raise RagFinalizationError('prepared RAG carrier changed')
 
@@ -584,10 +1221,12 @@ class SqlAlchemyRagFinalizationBoundary:
                 else None
             ),
             current_readiness_hmac=(
-                prepared.query_embedding_result.prepared.readiness_snapshot_hmac
+                getattr(
+                    self._phase2_authority,
+                    'current_readiness_hmac',
+                    None,
+                )
                 if prepared.query_embedding_result is not None
-                and current_index
-                == prepared.query_embedding_result.prepared.vector_index_generation
                 else None
             ),
             prepared_hidden_membership_hmac=prepared_hidden_hmac,
@@ -621,8 +1260,8 @@ class SqlAlchemyRagFinalizationBoundary:
                 scope=prepared.security_scope,
                 fence=fence,
             )
-            dependencies = projector.finalize_prepared_observations(
-                prepared.model_influence_observations,
+            dependencies = projector.finalize_model_influence_dependencies(
+                prepared.prepared_model_influence,
                 selected,
                 scope=prepared.security_scope,
                 fence=fence,
@@ -662,7 +1301,7 @@ class SqlAlchemyRagFinalizationBoundary:
             evidence = _empty_answer_projection(self._settings)
             dependencies = ()
         result_hmac = _build_result_hmac(
-            pending_parent=self._pending_parent,
+            pending=self._pending,
             prepared=prepared,
             outcome=outcome,
             evidence=evidence,
@@ -728,28 +1367,36 @@ class SqlAlchemyRagFinalizationBoundary:
                 else 'rag-canned-no-evidence:v1'
             )
         )
+        message_projection = assistant_message_projection(
+            projection,
+            metadata={'status': projection.outcome},
+            canned_message_identity=canned,
+            assembled_answer_hmac=(
+                self._assembled_answer_hmac
+                if projection.model_influence
+                else None
+            ),
+            permission_level=_output_permission(projection),
+            permission_notice=(
+                'evidence_unavailable'
+                if projection.outcome == 'evidence_unavailable'
+                else None
+            ),
+        )
+        self.finalize_parent(pending, projection)
+        parent = self._require_parent(pending)
+        authority = _mint_assistant_exact_write_authority(
+            parent_agent_run_id=parent.id,
+            conversation_id=conversation.id,
+            projection=message_projection,
+            parent_result_hmac=parent.metadata_.get('rag_result_hmac'),
+        )
         message = self._writer.append_final(
             db=self._db,
             conversation=conversation,
-            projection=assistant_message_projection(
-                projection,
-                metadata={'status': projection.outcome},
-                canned_message_identity=canned,
-                assembled_answer_hmac=(
-                    self._assembled_answer_hmac
-                    if projection.model_influence
-                    else None
-                ),
-                permission_level=_output_permission(projection),
-                permission_notice=(
-                    'evidence_unavailable'
-                    if projection.outcome == 'evidence_unavailable'
-                    else None
-                ),
-            ),
-            pending=pending,
+            projection=message_projection,
+            authority=authority,
         )
-        self.finalize_parent(pending, projection)
         return AssistantFinalizationRecord(
             assistant_message_id=message.id,
             parent_agent_run_id=pending.parent_agent_run_id,
@@ -768,10 +1415,13 @@ class SqlAlchemyRagFinalizationBoundary:
     def recover_dead_projection_owner(self, run_id: int):
         if type(run_id) is not int or run_id <= 0:
             raise ValueError('projection-owner recovery run id is invalid')
-        if type(self._recovery_authority) is not _ProjectionOwnerRecoveryAuthority:
+        if (
+            type(self._recovery_authority)
+            is not RagProjectionOwnerRecoveryAuthority
+        ):
             raise RagFinalizationError('projection-owner recovery is unavailable')
-        # No time/process-probe input exists here: the assembly callback may run
-        # only after nonblocking reacquisition of the exact session advisory lock.
+        # No time/process probe or provider retry is accepted. The concrete
+        # authority owns nonblocking owner reacquisition and the cost CAS.
         return self._recovery_authority.recover(run_id)
 
     def _require_parent(self, pending: RagProjectionPending) -> AgentRun:
@@ -881,7 +1531,7 @@ def _canned_text(identity: RagCannedMessageIdentity | None) -> str:
 
 def _build_result_hmac(
     *,
-    pending_parent: AgentRun | None,
+    pending: RagProjectionPending,
     prepared: PreparedRagFinalization,
     outcome: RagResultOutcome,
     evidence: V1EvidenceProjection,
@@ -891,9 +1541,6 @@ def _build_result_hmac(
     secret: bytes,
     settings: Settings,
 ) -> str:
-    if pending_parent is None:
-        raise RagFinalizationError('RAG result parent is unavailable')
-    metadata = pending_parent.metadata_ or {}
     search = prepared.product_kind == 'search'
     substantive = bool(dependencies)
     answer_prepared = (
@@ -965,13 +1612,8 @@ def _build_result_hmac(
             policy_version='rag-permission-policy:v1',
         ),
         'prepared_model_influence_observation_hmac': (
-            keyed_fingerprint(
-                [value.observation_hmac for value in prepared.model_influence_observations],
-                secret=secret,
-                schema_version='rag-prepared-observation-list:v1',
-                policy_version='rag-answer:v2',
-            )
-            if prepared.model_influence_observations
+            prepared.prepared_model_influence.aggregate_observation_hmac
+            if prepared.prepared_model_influence is not None
             else None
         ),
         'prompt_version': None if search else 'rag-answer:v2',
@@ -979,12 +1621,21 @@ def _build_result_hmac(
         'retrieval_policy_version': 'rag-retrieval-policy:v2.0',
         'retrieval_query_context_version': prepared.prepared_text.query_context_version,
         'retrieval_query_hmac': prepared.prepared_text.retrieval_query_hmac,
-        'security_scope_fingerprint': metadata.get('security_scope_fingerprint'),
+        'security_scope_fingerprint': pending.security_scope_fingerprint,
         'selected_evidence_projection_hmac': selected_hmac,
         'search_result_set_projection_hmac': (
             evidence.projection_hmac if search else None
         ),
-        'surface': 'search' if search else metadata.get('surface', 'ask'),
+        'surface': (
+            'search'
+            if search
+            else (
+                'assistant'
+                if prepared.prepared_text.query_context_version
+                == 'assistant-context:v1'
+                else 'ask'
+            )
+        ),
     }
     return keyed_fingerprint(
         payload,
@@ -1110,7 +1761,6 @@ def assistant_message_projection(
         assembled_answer_hmac=assembled_answer_hmac,
         canned_message_identity=canned_message_identity,
         result_hmac=projection.result_hmac,
-        write_mode='rag_v2_exact',
         model_influence=projection.model_influence,
     )
 
@@ -1184,4 +1834,47 @@ def _pre_projection_cost_snapshot_hmac(
             'total_reserved_cost_usd': format(total_reserved, '.6f'),
         },
         secret=secret,
+    )
+
+
+def _exact_terminal_zero(row: AgentRunCostComponent) -> bool:
+    return bool(
+        row.dispatch_state == 'terminal'
+        and row.attempted is False
+        and row.dispatch_count == 0
+        and row.reserved_input_tokens == 0
+        and row.reserved_output_tokens == 0
+        and row.actual_input_tokens is None
+        and row.actual_output_tokens is None
+        and Decimal(row.reserved_cost_usd) == Decimal('0.000000')
+        and Decimal(row.charged_cost_usd) == Decimal('0.000000')
+        and row.charge_basis == 'zero'
+        and row.overrun is False
+        and row.dispatch_fence_hmac is None
+        and row.process_instance_hmac is None
+        and row.terminal_outcome is None
+    )
+
+
+def _exact_paid_embedding_cost(
+    row: AgentRunCostComponent,
+    result: QueryEmbeddingCallResult,
+) -> bool:
+    prepared = result.prepared
+    return bool(
+        row.dispatch_state == 'terminal'
+        and row.attempted is True
+        and row.dispatch_count == 1
+        and row.actual_input_tokens == result.validated_input_tokens
+        and row.actual_output_tokens == 0
+        and Decimal(row.charged_cost_usd) == result.actual_cost_usd
+        and row.charge_basis == 'actual'
+        and row.overrun is False
+        and row.dispatch_fence_hmac == prepared.attempt_fence_hmac
+        and _lower_hmac(row.process_instance_hmac)
+        and row.terminal_outcome == 'component_succeeded'
+        and row.authorized_model_config_snapshot_hmac
+        == prepared.model_config_snapshot_hmac
+        and row.authorized_policy_snapshot_hmac
+        == prepared.provider_policy_snapshot_hmac
     )
