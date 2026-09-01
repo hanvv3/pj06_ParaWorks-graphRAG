@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import logging
 import sys
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,9 @@ from backend.app.agent_runtime.provider_send_fence import (
     _assemble_rag_evidence_barrier,
 )
 from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
+from backend.app.agent_runtime.rag_postgres_binding import (
+    RagPostgresAdvisoryCleanupError,
+)
 from backend.app.agent_runtime.rag_provider_transport import (
     RagProviderDispatchAuthority,
     RagProviderTransportError,
@@ -381,6 +385,114 @@ def test_runtime_poison_after_prepare_refuses_send_and_closes_claim_at_zero(
     assert all(child.attempted is False for child in children)
     assert all(child.dispatch_count == 0 for child in children)
     assert all(child.charged_cost_usd == 0 for child in children)
+
+
+def test_provider_advisory_cleanup_before_send_is_exact_terminal_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seen: list[object] = []
+    ledger = _transport_ledger(tmp_path, _Client(seen))
+    query_budget = _admit_transport(ledger, 312)
+    grant = ledger.claim_component(
+        run_id=312,
+        component='query_embedding',
+        prepared=query_budget,
+    )
+    authority = _authority(ledger)
+    prepared = authority.prepare(
+        grant=grant,
+        prepared=_prepared_query(query_budget),
+    )
+
+    @contextmanager
+    def refuse_before_owner(*_args, **_kwargs):
+        raise RagPostgresAdvisoryCleanupError(
+            'RAG PostgreSQL advisory cleanup failed'
+        )
+        yield
+
+    monkeypatch.setattr(
+        type(ledger),
+        'projection_owner_barrier',
+        refuse_before_owner,
+    )
+
+    with pytest.raises(RagProviderTransportError, match='transport failed'):
+        authority.dispatch(grant=grant, prepared=prepared)
+
+    ledger._session.expire_all()
+    parent = ledger._session.get(AgentRun, 312)
+    children = tuple(
+        ledger._session.query(AgentRunCostComponent)
+        .filter(AgentRunCostComponent.agent_run_id == 312)
+        .order_by(AgentRunCostComponent.component_ordinal)
+    )
+    assert seen == []
+    assert parent is not None
+    assert parent.status == 'failed'
+    assert parent.metadata_['outcome'] == 'provider_safety_unavailable'
+    assert len(children) == 2
+    assert all(child.dispatch_state == 'terminal' for child in children)
+    assert all(child.attempted is False for child in children)
+    assert all(child.dispatch_count == 0 for child in children)
+    assert all(child.charged_cost_usd == 0 for child in children)
+
+
+def test_provider_advisory_cleanup_after_send_preserves_attempted_unknown_cost(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seen: list[object] = []
+    ledger = _transport_ledger(tmp_path, _Client(seen))
+    query_budget = _admit_transport(ledger, 313)
+    grant = ledger.claim_component(
+        run_id=313,
+        component='query_embedding',
+        prepared=query_budget,
+    )
+    authority = _authority(ledger)
+    prepared = authority.prepare(
+        grant=grant,
+        prepared=_prepared_query(query_budget),
+    )
+
+    @contextmanager
+    def fail_cleanup_after_send(*_args, **_kwargs):
+        yield
+        raise RagPostgresAdvisoryCleanupError(
+            'RAG PostgreSQL advisory cleanup failed'
+        )
+
+    monkeypatch.setattr(
+        type(ledger.provider_safety_authority),
+        'dispatch_barrier',
+        fail_cleanup_after_send,
+    )
+
+    with pytest.raises(RagProviderTransportError, match='transport failed'):
+        authority.dispatch(grant=grant, prepared=prepared)
+
+    ledger._session.expire_all()
+    parent = ledger._session.get(AgentRun, 313)
+    children = tuple(
+        ledger._session.query(AgentRunCostComponent)
+        .filter(AgentRunCostComponent.agent_run_id == 313)
+        .order_by(AgentRunCostComponent.component_ordinal)
+    )
+    query_child = children[0]
+    assert len(seen) == 1
+    assert grant.consumed is True
+    assert parent is not None
+    assert parent.status == 'running'
+    assert query_child.component == 'query_embedding'
+    assert query_child.dispatch_state == 'dispatching'
+    assert query_child.attempted is True
+    assert query_child.dispatch_count == 1
+    assert query_child.charge_basis == 'reserved'
+    assert query_child.charged_cost_usd == query_child.reserved_cost_usd
+    assert query_child.terminal_outcome is None
+    assert children[1].dispatch_state == 'not_attempted'
 
 
 def test_request_identity_binds_rendered_input_and_dispatch_fence(tmp_path: Path):

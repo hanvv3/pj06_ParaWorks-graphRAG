@@ -24,6 +24,9 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     acquire_advisory_lock,
     release_advisory_lock,
 )
+from backend.app.agent_runtime.rag_postgres_binding import (
+    RagPostgresAdvisoryTransport,
+)
 from backend.app.agent_runtime.rag_runtime_contracts import (
     AuthorizedProviderPolicySnapshot,
     RagProviderSafetyBinding,
@@ -296,6 +299,7 @@ class RagProviderSafetyService:
         identity_secret: bytes,
         designated_environment_id: str,
         advisory_capability: RegisteredAdvisoryLock | None = None,
+        advisory_transport: RagPostgresAdvisoryTransport | None = None,
     ) -> None:
         if type(identity_secret) is not bytes or not identity_secret:
             raise ValueError('provider safety signer is required')
@@ -315,6 +319,18 @@ class RagProviderSafetyService:
         ):
             raise ValueError('provider safety advisory capability identity is invalid')
         self._advisory_capability = advisory_capability
+        if advisory_transport is not None and (
+            type(advisory_transport) is not RagPostgresAdvisoryTransport
+            or advisory_capability is None
+        ):
+            raise ValueError('provider safety advisory transport is invalid')
+        self._advisory_transport = advisory_transport
+
+    @property
+    def advisory_transport_authority(
+        self,
+    ) -> RagPostgresAdvisoryTransport | None:
+        return self._advisory_transport
 
     @staticmethod
     def validate_disabled_path(path: str | Path) -> None:
@@ -454,6 +470,14 @@ class RagProviderSafetyService:
             raise RagProviderSafetyError(
                 'registered provider safety advisory capability is required'
             )
+        if self._advisory_transport is not None:
+            with self._advisory_transport.advisory_connection(
+                connection,
+                self._advisory_capability,
+                shared=False,
+            ):
+                yield
+            return
         acquire_advisory_lock(connection, self._advisory_capability, shared=False)
         try:
             yield

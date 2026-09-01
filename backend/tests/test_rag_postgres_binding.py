@@ -93,6 +93,213 @@ def test_binding_api_requires_explicit_dedicated_engine_and_bootstrap_capability
     )
 
 
+def test_provider_advisory_transport_uses_fresh_dedicated_engine_without_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = create_engine('sqlite+pysqlite:///:memory:')
+    dedicated_one = create_engine(
+        'sqlite+pysqlite:///:memory:',
+        poolclass=NullPool,
+    )
+    dedicated_two = create_engine(
+        'sqlite+pysqlite:///:memory:',
+        poolclass=NullPool,
+    )
+    for engine in (application, dedicated_one, dedicated_two):
+        engine.dialect.name = 'postgresql'
+    engines = iter((application, dedicated_one, dedicated_two))
+    monkeypatch.setattr(
+        initialization,
+        'create_engine',
+        lambda *_args, **_kwargs: next(engines),
+    )
+    runtime = initialization.initialize_database_runtime(
+        'postgresql+psycopg://authority-role@localhost/authority-database'
+    )
+    bootstrap = runtime.rag_postgres_bootstrap
+    assert bootstrap is not None
+    identity = _identity()
+    server = binding_module.RagPostgresWritableServerIdentity(
+        server_address='127.0.0.1',
+        server_port=5432,
+        postmaster_start_time='2026-09-01T00:00:00Z',
+    )
+    monkeypatch.setattr(binding_module, '_session_identity', lambda _session: identity)
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_session_server_identity',
+        lambda _session: server,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_server_identity',
+        lambda _connection: server,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+    transport = binding_module._bind_rag_postgres_advisory_transport(
+        Session(application),
+        trusted_bootstrap=bootstrap,
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+
+    with transport() as first:
+        first_engine = first.engine
+    with transport() as second:
+        second_engine = second.engine
+
+    assert first_engine is dedicated_one
+    assert second_engine is dedicated_two
+    assert first_engine is not second_engine
+    assert transport.runtime_health_authority is bootstrap._runtime_effect_authority(
+        application
+    )
+
+
+def test_cost_ledger_rejects_provider_transport_from_another_application_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from backend.app.agent_runtime.rag_cost_ledger import _assemble_rag_cost_ledger
+    from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
+    from backend.app.agent_runtime.rag_provider_safety import (
+        RagProviderSafetyService,
+    )
+
+    application, dedicated = _fake_postgres_engines()
+    other_application = create_engine('sqlite+pysqlite:///:memory:')
+    other_application.dialect.name = 'postgresql'
+    identity = _identity()
+    monkeypatch.setattr(binding_module, '_session_identity', lambda _session: identity)
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        RegisteredAdvisoryLock,
+        'matches',
+        lambda *_args, **_kwargs: True,
+    )
+    transport = binding_module._bind_rag_postgres_advisory_transport(
+        Session(application),
+        trusted_bootstrap=_trusted_bootstrap(
+            monkeypatch,
+            application,
+            dedicated,
+        ),
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    safety = RagProviderSafetyService(
+        latch_path=tmp_path / 'different-engine.json',
+        identity_secret=b'provider-advisory-consumer-secret',
+        designated_environment_id='test',
+        advisory_capability=object.__new__(RegisteredAdvisoryLock),
+        advisory_transport=transport,
+    )
+    policy = RagCostPolicy(
+        settings=Settings(_env_file=None),
+        answer_output_schema_hmac='a' * 64,
+        answer_prompt_renderer_hmac='b' * 64,
+    )
+
+    with pytest.raises(ValueError, match='advisory transport'):
+        _assemble_rag_cost_ledger(
+            Session(other_application),
+            identity_secret=b'provider-advisory-consumer-secret',
+            cost_policy=policy,
+            provider_safety=safety,
+            provider_connection_factory=transport,
+            designated_environment_id='test',
+            designated_host_id='pytest-host',
+            runtime_health=transport.runtime_health_authority,
+        )
+
+    other_application.dispose()
+    application.dispose()
+
+
+def test_provider_advisory_cleanup_uncertainty_poisons_before_escape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated = _fake_postgres_engines()
+    session = Session(application)
+    identity = _identity()
+    monkeypatch.setattr(binding_module, '_session_identity', lambda _session: identity)
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+    bootstrap = _trusted_bootstrap(monkeypatch, application, dedicated)
+    transport = binding_module._bind_rag_postgres_advisory_transport(
+        session,
+        trusted_bootstrap=bootstrap,
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    capability = object.__new__(RegisteredAdvisoryLock)
+    monkeypatch.setattr(
+        binding_module,
+        'acquire_advisory_lock',
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        'release_advisory_lock',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError('sensitive unlock failure')
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        Connection,
+        'invalidate',
+        lambda _self: (_ for _ in ()).throw(
+            RuntimeError('sensitive invalidate failure')
+        ),
+    )
+    monkeypatch.setattr(
+        Connection,
+        'close',
+        lambda _self: (_ for _ in ()).throw(
+            RuntimeError('sensitive close failure')
+        ),
+    )
+
+    with (
+        pytest.raises(TypeError, match='advisory cleanup') as captured,
+        transport.advisory(capability, shared=False),
+    ):
+        pass
+
+    snapshot = transport.runtime_health_authority.snapshot
+    assert snapshot.healthy is False
+    assert snapshot.failure_count == 1
+    assert 'sensitive' not in repr(captured.value)
+    assert 'sensitive' not in repr(snapshot)
+    with pytest.raises(TypeError, match='runtime health'), transport():
+        raise AssertionError('poisoned transport must not connect')
+
+
 def test_identity_probe_is_least_privilege_and_has_no_control_file_dependency():
     assert 'pg_control_system' not in str(binding_module._IDENTITY_SQL)
 
@@ -153,6 +360,150 @@ def test_binding_rejects_different_authoritative_writable_server(
 
     session.close()
     application.dispose()
+
+
+@pytest.mark.parametrize(
+    'consumer',
+    ('provider_safety', 'projection_owner', 'evidence'),
+)
+def test_each_paid_advisory_consumer_fail_stops_on_unlock_and_close_uncertainty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    consumer: str,
+) -> None:
+    from backend.app.agent_runtime.provider_send_fence import (
+        _assemble_rag_evidence_barrier,
+    )
+    from backend.app.agent_runtime.rag_advisory_locks import begin_rag_lock_order
+    from backend.app.agent_runtime.rag_cost_ledger import _assemble_rag_cost_ledger
+    from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
+    from backend.app.agent_runtime.rag_provider_safety import (
+        RagProviderSafetyService,
+    )
+
+    application, dedicated = _fake_postgres_engines()
+    session = Session(application)
+    identity = _identity()
+    monkeypatch.setattr(binding_module, '_session_identity', lambda _session: identity)
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        RegisteredAdvisoryLock,
+        'matches',
+        lambda *_args, **_kwargs: True,
+    )
+    transport = binding_module._bind_rag_postgres_advisory_transport(
+        session,
+        trusted_bootstrap=_trusted_bootstrap(
+            monkeypatch,
+            application,
+            dedicated,
+        ),
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    capability = object.__new__(RegisteredAdvisoryLock)
+    safety = RagProviderSafetyService(
+        latch_path=tmp_path / f'{consumer}.json',
+        identity_secret=b'provider-advisory-consumer-secret',
+        designated_environment_id='test',
+        advisory_capability=capability,
+        advisory_transport=transport,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        'acquire_advisory_lock',
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        'release_advisory_lock',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError('sensitive unlock detail')
+        ),
+    )
+    cleanup_calls: list[str] = []
+
+    def fail_invalidate(_connection: Connection) -> None:
+        cleanup_calls.append('invalidate')
+        raise RuntimeError('sensitive invalidate detail')
+
+    def fail_close(_connection: Connection) -> None:
+        cleanup_calls.append('close')
+        raise RuntimeError('sensitive close detail')
+
+    monkeypatch.setattr(Connection, 'invalidate', fail_invalidate)
+    monkeypatch.setattr(Connection, 'close', fail_close)
+    yielded: list[str] = []
+
+    with pytest.raises(TypeError, match='advisory cleanup') as captured:
+        if consumer == 'provider_safety':
+            with (
+                transport() as connection,
+                safety._registered_advisory(connection),
+            ):
+                yielded.append(consumer)
+        elif consumer == 'evidence':
+            barrier = _assemble_rag_evidence_barrier(
+                load_current_identity=lambda: 'a' * 64,
+                connection_factory=transport,
+                registered_lock=capability,
+                advisory_transport=transport,
+            )
+            order = begin_rag_lock_order('ordinary')
+            order.acquire('provider_stable_sidecar')
+            order.acquire('provider_safety_rows')
+            order.acquire('projection_owner')
+            evidence_capability = order.acquire('evidence_shared_barrier')
+            c5_capability = order.acquire('c5_key_corpus')
+            barrier._run(
+                expected_identity_hmac='a' * 64,
+                operation=lambda: yielded.append(consumer),
+                order=order,
+                evidence_capability=evidence_capability,
+                c5_capability=c5_capability,
+            )
+        else:
+            policy = RagCostPolicy(
+                settings=Settings(_env_file=None),
+                answer_output_schema_hmac='a' * 64,
+                answer_prompt_renderer_hmac='b' * 64,
+            )
+            ledger = _assemble_rag_cost_ledger(
+                session,
+                identity_secret=b'provider-advisory-consumer-secret',
+                cost_policy=policy,
+                provider_safety=safety,
+                provider_connection_factory=transport,
+                designated_environment_id='test',
+                designated_host_id='pytest-host',
+                projection_lock_capability_factory=lambda _run_id: capability,
+                runtime_health=transport.runtime_health_authority,
+            )
+            order = begin_rag_lock_order('ordinary')
+            order.acquire('provider_stable_sidecar')
+            order.acquire('provider_safety_rows')
+            owner_capability = order.acquire('projection_owner')
+            with ledger.projection_owner_barrier(
+                1,
+                order=order,
+                order_capability=owner_capability,
+            ):
+                yielded.append(consumer)
+
+    assert yielded == [consumer]
+    assert cleanup_calls == ['invalidate', 'close']
+    snapshot = transport.runtime_health_authority.snapshot
+    assert snapshot.healthy is False
+    assert snapshot.failure_count == 1
+    assert 'sensitive' not in str(captured.value)
 
 
 @pytest.mark.parametrize(

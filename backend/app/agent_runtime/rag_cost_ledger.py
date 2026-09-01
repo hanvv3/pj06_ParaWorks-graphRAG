@@ -24,6 +24,9 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     release_advisory_lock,
 )
 from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
+from backend.app.agent_runtime.rag_postgres_binding import (
+    RagPostgresAdvisoryTransport,
+)
 from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
 from backend.app.agent_runtime.rag_runtime_contracts import (
     ADMISSION_SOURCE_WINDOWS,
@@ -263,6 +266,20 @@ class RagCostLedger:
             or designated_host_id != designated_host_id.strip()
         ):
             raise ValueError('cost-ledger authorities are unavailable')
+        bind = session.get_bind()
+        application_engine = bind.engine if isinstance(bind, Connection) else bind
+        if bind.dialect.name == 'postgresql' and (
+            type(provider_connection_factory) is not RagPostgresAdvisoryTransport
+            or provider_connection_factory.application_engine_authority
+            is not application_engine
+            or provider_connection_factory.runtime_health_authority
+            is not runtime_health
+            or provider_safety.advisory_transport_authority
+            is not provider_connection_factory
+        ):
+            raise ValueError(
+                'cost-ledger PostgreSQL advisory transport is unavailable'
+            )
         self._session = session
         self._secret = identity_secret
         self._after_commit = after_commit
@@ -1311,7 +1328,19 @@ class RagCostLedger:
             or not capability.matches(identity, identity_namespace='dynamic')
         ):
             raise RagCostLedgerError('projection owner capability is invalid')
-        connection = self._provider_connection_factory()
+        connection_context = self._provider_connection_factory()
+        if type(self._provider_connection_factory) is RagPostgresAdvisoryTransport:
+            with (
+                connection_context as connection,
+                self._provider_connection_factory.advisory_connection(
+                    connection,
+                    capability,
+                    shared=False,
+                ),
+            ):
+                yield
+            return
+        connection = connection_context
         locked = False
         try:
             acquire_advisory_lock(connection, capability, shared=False)

@@ -21,6 +21,9 @@ from backend.app.agent_runtime.provider_usage import (
 )
 from backend.app.agent_runtime.rag_advisory_locks import begin_rag_lock_order
 from backend.app.agent_runtime.rag_cost_ledger import RagCostLedger, RagCostLedgerError
+from backend.app.agent_runtime.rag_postgres_binding import (
+    RagPostgresAdvisoryTransport,
+)
 from backend.app.agent_runtime.rag_provider_safety import (
     RagProviderSafetyError,
     RagProviderSafetyService,
@@ -325,6 +328,9 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
     )
     from backend.app.agent_runtime.rag_cost_ledger import _assemble_rag_cost_ledger
     from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
+    from backend.app.agent_runtime.rag_postgres_binding import (
+        _bind_rag_postgres_advisory_transport,
+    )
     from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
         build_answer_output_schema_hmac,
         build_answer_prompt_renderer_hmac,
@@ -349,8 +355,28 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
         )
     runtime_health = RagPostgresDatabaseBootstrap._runtime_effect_authority(engine)
 
-    def load_static_capability(identity: object):
-        with engine.connect() as connection:
+    application_connection_factory = engine.connect
+
+    def load_application_capability(identity: object):
+        with application_connection_factory() as connection:
+            return load_registered_advisory_capability(
+                connection,
+                identity,
+                identity_namespace='static',
+            )
+
+    bootstrap_capability = load_application_capability(
+        RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID
+    )
+    session = SessionLocal()
+    provider_connection_factory = _bind_rag_postgres_advisory_transport(
+        session,
+        trusted_bootstrap=RagPostgresDatabaseBootstrap,
+        bootstrap_capability=bootstrap_capability,
+    )
+
+    def load_provider_capability(identity: object):
+        with provider_connection_factory() as connection:
             return load_registered_advisory_capability(
                 connection,
                 identity,
@@ -358,14 +384,16 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
             )
 
     paid_capabilities = {
-        identity['lock_name']: load_static_capability(identity)
-        for identity in (
-            RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
-            RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
-            RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID,
-            RAG_C5_KEY_CORPUS_AUTHORITY_LOCK_ID,
-            RAG_AGENT_RUN_COST_AUTHORITY_LOCK_ID,
-        )
+        RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID['lock_name']: bootstrap_capability,
+        **{
+            identity['lock_name']: load_provider_capability(identity)
+            for identity in (
+                RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+                RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+                RAG_C5_KEY_CORPUS_AUTHORITY_LOCK_ID,
+                RAG_AGENT_RUN_COST_AUTHORITY_LOCK_ID,
+            )
+        },
     }
     provider_advisory = paid_capabilities['provider_safety_authority']
     evidence_advisory = paid_capabilities['evidence_provider_send']
@@ -374,6 +402,7 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
         identity_secret=identity_secret,
         designated_environment_id=settings.paraworks_env,
         advisory_capability=provider_advisory,
+        advisory_transport=provider_connection_factory,
     )
     cost_policy = RagCostPolicy(
         settings=settings,
@@ -382,20 +411,19 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
     )
 
     def load_projection_capability(agent_run_id: int):
-        with engine.connect() as connection:
+        with provider_connection_factory() as connection:
             return load_registered_advisory_capability(
                 connection,
                 rag_projection_owner_lock_id(agent_run_id),
                 identity_namespace='dynamic',
             )
 
-    session = SessionLocal()
     store = _assemble_rag_cost_ledger(
         session,
         identity_secret=identity_secret,
         cost_policy=cost_policy,
         provider_safety=provider_safety,
-        provider_connection_factory=engine.connect,
+        provider_connection_factory=provider_connection_factory,
         designated_environment_id=settings.paraworks_env,
         designated_host_id=socket.gethostname(),
         projection_lock_capability_factory=load_projection_capability,
@@ -410,8 +438,9 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
         load_current_identity=lambda: (
             load_current_readiness().readiness_snapshot_hmac
         ),
-        connection_factory=engine.connect,
+        connection_factory=provider_connection_factory,
         registered_lock=evidence_advisory,
+        advisory_transport=provider_connection_factory,
     )
     routed_model = build_rag_answer_model_route(settings=settings)
     answer_model = StructuredRagAnswerModel(
@@ -421,7 +450,7 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
     return _assemble_rag_provider_dispatch_authority(
         store=store,
         provider_safety=provider_safety,
-        provider_connection_factory=engine.connect,
+        provider_connection_factory=provider_connection_factory,
         evidence_barrier=evidence_barrier,
         identity_secret=identity_secret,
         timeout_seconds=30,
@@ -484,6 +513,15 @@ class RagProviderDispatchAuthority:
             or runtime_health is not store.runtime_health_authority
         ):
             raise TypeError('provider dispatch authority is unavailable')
+        if type(provider_connection_factory) is RagPostgresAdvisoryTransport and (
+            provider_connection_factory.runtime_health_authority
+            is not runtime_health
+            or provider_safety.advisory_transport_authority
+            is not provider_connection_factory
+            or evidence_barrier.advisory_transport_authority
+            is not provider_connection_factory
+        ):
+            raise TypeError('provider advisory transport authority changed')
         self._store = store
         self._safety = provider_safety
         self._connection_factory = provider_connection_factory

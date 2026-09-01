@@ -120,6 +120,123 @@ def test_paid_assembler_rejects_sqlite_before_artifact_or_provider_creation(
     assert not latch.exists()
 
 
+def test_direct_paid_assembler_shares_one_exact_provider_connection_factory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import backend.app.agent_runtime.model_router as router_module
+    import backend.app.agent_runtime.provider_send_fence as fence_module
+    import backend.app.agent_runtime.rag_advisory_locks as lock_module
+    import backend.app.agent_runtime.rag_cost_ledger as ledger_module
+    import backend.app.agent_runtime.rag_postgres_binding as binding_module
+    import backend.app.agent_runtime.rag_provider_transport as transport_module
+    import backend.app.db.session as db_session
+
+    trusted_bootstrap = db_session.RagPostgresDatabaseBootstrap
+    assert trusted_bootstrap is not None
+    runtime_health = trusted_bootstrap._runtime_effect_authority(db_session.engine)
+    class FakeEngine:
+        dialect = SimpleNamespace(name='postgresql')
+
+        def connect(self):
+            return nullcontext(object())
+
+    fake_engine = FakeEngine()
+    monkeypatch.setattr(db_session, 'engine', fake_engine)
+    monkeypatch.setattr(db_session, 'SessionLocal', lambda: object())
+    monkeypatch.setattr(
+        type(trusted_bootstrap),
+        '_runtime_effect_authority',
+        lambda self, application_engine: runtime_health,
+    )
+    monkeypatch.setattr(
+        lock_module,
+        'load_registered_advisory_capability',
+        lambda *_args, **_kwargs: object(),
+    )
+    class ProviderTransport:
+        def __call__(self):
+            return nullcontext(object())
+
+    provider_transport = ProviderTransport()
+    monkeypatch.setattr(
+        binding_module,
+        '_bind_rag_postgres_advisory_transport',
+        lambda *_args, **_kwargs: provider_transport,
+        raising=False,
+    )
+    safety = object()
+    safety_assemblies = []
+
+    def assemble_safety(**kwargs):
+        safety_assemblies.append(kwargs)
+        return safety
+
+    monkeypatch.setattr(
+        transport_module,
+        'RagProviderSafetyService',
+        assemble_safety,
+    )
+    provider_factories = []
+    store = object()
+
+    def assemble_ledger(_session, **kwargs):
+        provider_factories.append(kwargs['provider_connection_factory'])
+        assert kwargs['provider_connection_factory'] is provider_transport
+        assert kwargs['runtime_health'] is runtime_health
+        return store
+
+    monkeypatch.setattr(ledger_module, '_assemble_rag_cost_ledger', assemble_ledger)
+    barrier = object()
+    barrier_assemblies = []
+
+    def assemble_barrier(**kwargs):
+        barrier_assemblies.append(kwargs)
+        return barrier
+
+    monkeypatch.setattr(
+        fence_module,
+        '_assemble_rag_evidence_barrier',
+        assemble_barrier,
+    )
+    monkeypatch.setattr(router_module, 'build_rag_answer_model_route', lambda **_kwargs: object())
+    monkeypatch.setattr(transport_module, 'StructuredRagAnswerModel', lambda **_kwargs: None)
+    provider_client = SimpleNamespace(send=lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        transport_module,
+        '_DirectOpenAIProviderClient',
+        lambda *_args, **_kwargs: provider_client,
+    )
+    assembled = object()
+
+    def assemble_dispatch(**kwargs):
+        assert kwargs['store'] is store
+        assert kwargs['provider_safety'] is safety
+        assert kwargs['evidence_barrier'] is barrier
+        assert kwargs['runtime_health'] is runtime_health
+        assert kwargs['provider_connection_factory'] is provider_factories[0]
+        return assembled
+
+    monkeypatch.setattr(
+        transport_module,
+        '_assemble_rag_provider_dispatch_authority',
+        assemble_dispatch,
+    )
+
+    result = transport_module._assemble_direct_openai_rag_provider_dispatch_authority(
+        settings=Settings(
+            _env_file=None,
+            paraworks_provider_safety_latch_path=str(tmp_path / 'provider-safety.json'),
+            openai_api_key='test-key-never-used',
+        )
+    )
+
+    assert result is assembled
+    assert len(provider_factories) == 1
+    assert safety_assemblies[0]['advisory_transport'] is provider_transport
+    assert barrier_assemblies[0]['advisory_transport'] is provider_transport
+
+
 def test_sqlite_smoke_assembly_is_explicit_and_provider_free(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -167,6 +284,7 @@ def test_paid_assembler_requires_every_committed_static_capability_before_client
     missing_lock_name: str,
 ):
     import backend.app.agent_runtime.rag_advisory_locks as lock_module
+    import backend.app.agent_runtime.rag_postgres_binding as binding_module
     import backend.app.agent_runtime.rag_provider_transport as transport_module
     import backend.app.db.session as db_session
 
@@ -194,6 +312,16 @@ def test_paid_assembler_requires_every_committed_static_capability_before_client
         lock_module,
         'load_registered_advisory_capability',
         load_registered,
+    )
+
+    class ProviderTransport:
+        def __call__(self):
+            return nullcontext(object())
+
+    monkeypatch.setattr(
+        binding_module,
+        '_bind_rag_postgres_advisory_transport',
+        lambda *_args, **_kwargs: ProviderTransport(),
     )
     provider_clients = []
 

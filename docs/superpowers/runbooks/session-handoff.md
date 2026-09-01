@@ -4074,3 +4074,28 @@ tests passed with 53 tests; ruff passed.
   `762 passed, 16 skipped, 2144 deselected`. Real PostgreSQL tests are absent-
   URL skipped locally; no live external action was performed. Task 14 remains
   blocked pending independent rereview.
+
+## 2026-09-01 Deliverable D Core Task 13 eleventh rereview candidate
+
+- Tenth rereview was `NOT CLEAN`: direct paid assembly used distinct bound-
+  method objects, three provider advisory families were not owned by one
+  cleanup-poisoning dedicated transport, and cleanup/poison waiters lacked
+  cancellation-safe FIFO ordering.
+- The current candidate captures one application factory, binds one sealed
+  bootstrap-issued provider advisory transport, and passes that exact object to
+  safety, cost, projection-owner, evidence, and provider dispatch. Each use is
+  a fresh `NullPool` physical connection checked against the same logical and
+  writable-server identity and the same process-wide runtime health.
+- Provider-safety, projection-owner, and evidence unlock uncertainty now
+  poison before escape and physically discard the connection. Before dispatch,
+  the ledger becomes exact-two terminal-zero with zero client sends. After the
+  grant is consumed, it retains attempted/reserved/dispatching evidence for
+  non-retry recovery instead of inventing a safe zero result.
+- Cleanup and poison use one FIFO exclusive ticket queue. Cancelled waiters are
+  removed with `notify_all`; nested same-owner cleanup cannot overtake an older
+  foreign ticket; ordinary healthy shared effects continue to overlap.
+- Fresh gates: focused `202 passed`; PostgreSQL-specific collection `50 passed,
+  13 skipped`; broad affected `795 passed, 16 skipped, 2128 deselected`.
+  `PARAWORKS_TEST_POSTGRES_URL` is absent, so real PostgreSQL behavior is still
+  unrun. Treat this as a rereview candidate only; do not start Task 14 unless an
+  independent review returns `CLEAN`.

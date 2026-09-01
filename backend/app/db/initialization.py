@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+from collections import deque
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -60,6 +61,13 @@ class _PostgresRuntimeHealthLease:
     _seal: object = field(default=None, repr=False, compare=False)
 
 
+@dataclass(frozen=True, slots=True)
+class _PostgresRuntimeExclusiveTicket:
+    sequence: int
+    owner_thread_id: int
+    purpose: Literal['cleanup', 'poison']
+
+
 class TrustedPostgresRuntimeHealth:
     """Process-local fail-stop admission shared by one DB runtime."""
 
@@ -70,6 +78,8 @@ class TrustedPostgresRuntimeHealth:
         '_epoch',
         '_exclusive_depth',
         '_exclusive_owner',
+        '_exclusive_ticket_sequence',
+        '_exclusive_tickets',
         '_exclusive_waiters',
         '_failure_count',
         '_first_failure_monotonic_ns',
@@ -92,6 +102,8 @@ class TrustedPostgresRuntimeHealth:
         self._effect_depths: dict[int, int] = {}
         self._exclusive_owner: int | None = None
         self._exclusive_depth = 0
+        self._exclusive_ticket_sequence = 0
+        self._exclusive_tickets: deque[_PostgresRuntimeExclusiveTicket] = deque()
         self._exclusive_waiters = 0
         self._poison_requested = False
         self._seal = _seal
@@ -153,7 +165,7 @@ class TrustedPostgresRuntimeHealth:
                 self._require_effect_lease(lease)
                 self._effect_depths[thread_id] = depth + 1
                 return
-            while self._exclusive_owner is not None or self._exclusive_waiters:
+            while self._exclusive_owner is not None or self._exclusive_tickets:
                 self._condition.wait()
             self._require_effect_lease(lease)
             self._active_effects += 1
@@ -205,15 +217,26 @@ class TrustedPostgresRuntimeHealth:
                 self._poison_requested = True
                 self._condition.notify_all()
                 return
-            self._exclusive_waiters += 1
+            ticket = self._enqueue_exclusive_ticket(
+                thread_id=thread_id,
+                purpose='poison',
+            )
             try:
-                while self._active_effects or self._exclusive_owner is not None:
+                while self._healthy and (
+                    not self._is_head_exclusive_ticket(ticket)
+                    or self._active_effects
+                    or self._exclusive_owner is not None
+                ):
                     self._condition.wait()
-                if self._healthy:
-                    self._apply_poison()
-            finally:
-                self._exclusive_waiters -= 1
+                if not self._healthy:
+                    self._cancel_exclusive_ticket(ticket)
+                    return
+                self._claim_head_exclusive_ticket(ticket)
+                self._apply_poison()
                 self._condition.notify_all()
+            except BaseException:
+                self._cancel_exclusive_ticket(ticket)
+                raise
 
     def _apply_poison(self) -> None:
         if not self._healthy:
@@ -241,16 +264,29 @@ class TrustedPostgresRuntimeHealth:
                     'cleanup cannot run inside a PostgreSQL runtime effect'
                 )
             if self._exclusive_owner == thread_id:
+                if self._exclusive_tickets:
+                    raise RuntimeError(
+                        'cleanup reentrancy cannot bypass queued authority'
+                    )
                 self._exclusive_depth += 1
                 return
-            self._exclusive_waiters += 1
+            ticket = self._enqueue_exclusive_ticket(
+                thread_id=thread_id,
+                purpose='cleanup',
+            )
             try:
-                while self._active_effects or self._exclusive_owner is not None:
+                while (
+                    not self._is_head_exclusive_ticket(ticket)
+                    or self._active_effects
+                    or self._exclusive_owner is not None
+                ):
                     self._condition.wait()
+                self._claim_head_exclusive_ticket(ticket)
                 self._exclusive_owner = thread_id
                 self._exclusive_depth = 1
-            finally:
-                self._exclusive_waiters -= 1
+            except BaseException:
+                self._cancel_exclusive_ticket(ticket)
+                raise
 
     def _exit_cleanup(self) -> None:
         thread_id = get_ident()
@@ -261,6 +297,59 @@ class TrustedPostgresRuntimeHealth:
             if self._exclusive_depth == 0:
                 self._exclusive_owner = None
                 self._condition.notify_all()
+
+    def _enqueue_exclusive_ticket(
+        self,
+        *,
+        thread_id: int,
+        purpose: Literal['cleanup', 'poison'],
+    ) -> _PostgresRuntimeExclusiveTicket:
+        self._exclusive_ticket_sequence += 1
+        ticket = _PostgresRuntimeExclusiveTicket(
+            sequence=self._exclusive_ticket_sequence,
+            owner_thread_id=thread_id,
+            purpose=purpose,
+        )
+        self._exclusive_tickets.append(ticket)
+        self._exclusive_waiters += 1
+        return ticket
+
+    def _is_head_exclusive_ticket(
+        self,
+        ticket: _PostgresRuntimeExclusiveTicket,
+    ) -> bool:
+        return bool(self._exclusive_tickets) and self._exclusive_tickets[0] is ticket
+
+    def _claim_head_exclusive_ticket(
+        self,
+        ticket: _PostgresRuntimeExclusiveTicket,
+    ) -> None:
+        if not self._is_head_exclusive_ticket(ticket):
+            raise RuntimeError('PostgreSQL cleanup authority ticket changed')
+        self._exclusive_tickets.popleft()
+        self._exclusive_waiters -= 1
+        if self._exclusive_waiters < 0:
+            raise RuntimeError('PostgreSQL cleanup waiter count underflow')
+
+    def _cancel_exclusive_ticket(
+        self,
+        ticket: _PostgresRuntimeExclusiveTicket,
+    ) -> None:
+        queued_ticket = next(
+            (
+                queued
+                for queued in self._exclusive_tickets
+                if queued is ticket
+            ),
+            None,
+        )
+        if queued_ticket is None:
+            return
+        self._exclusive_tickets.remove(queued_ticket)
+        self._exclusive_waiters -= 1
+        if self._exclusive_waiters < 0:
+            raise RuntimeError('PostgreSQL cleanup waiter count underflow')
+        self._condition.notify_all()
 
 
 @dataclass(frozen=True, slots=True, repr=False)

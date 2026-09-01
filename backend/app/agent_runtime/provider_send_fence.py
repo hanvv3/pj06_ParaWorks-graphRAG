@@ -16,6 +16,7 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     release_advisory_lock,
 )
 from backend.app.agent_runtime.rag_postgres_binding import (
+    RagPostgresAdvisoryTransport,
     RagPostgresDatabaseAuthority,
 )
 from backend.app.agent_runtime.rag_safety_identity import identities_match
@@ -56,6 +57,7 @@ class _EvidenceBarrierAssembly:
     connection_factory: Callable[[], object] | None = field(repr=False)
     registered_lock: RegisteredAdvisoryLock | None = field(repr=False)
     postgres_database: RagPostgresDatabaseAuthority | None = field(repr=False)
+    advisory_transport: RagPostgresAdvisoryTransport | None = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -65,6 +67,7 @@ def _assemble_rag_evidence_barrier(
     connection_factory: Callable[[], object] | None = None,
     registered_lock: RegisteredAdvisoryLock | None = None,
     postgres_database: RagPostgresDatabaseAuthority | None = None,
+    advisory_transport: RagPostgresAdvisoryTransport | None = None,
 ) -> RagEvidenceSendBarrier:
     if postgres_database is not None:
         if (
@@ -82,6 +85,7 @@ def _assemble_rag_evidence_barrier(
         connection_factory=connection_factory,
         registered_lock=registered_lock,
         postgres_database=postgres_database,
+        advisory_transport=advisory_transport,
         _seal=_EVIDENCE_ASSEMBLY_SEAL,
     ))
 
@@ -124,6 +128,7 @@ class RagEvidenceSendBarrier:
         '_mutex',
         '_postgres_database',
         '_registered_lock',
+        '_advisory_transport',
     )
 
     def __init__(self, authority: object) -> None:
@@ -136,6 +141,7 @@ class RagEvidenceSendBarrier:
         connection_factory = authority.connection_factory
         registered_lock = authority.registered_lock
         postgres_database = authority.postgres_database
+        advisory_transport = authority.advisory_transport
         if type(freshness) is not RagEvidenceFreshnessAuthority:
             raise TypeError('evidence freshness authority is unavailable')
         if (connection_factory is None) != (registered_lock is None):
@@ -150,10 +156,17 @@ class RagEvidenceSendBarrier:
             or connection_factory is None
         ):
             raise ValueError('PostgreSQL evidence database authority is invalid')
+        if advisory_transport is not None and (
+            type(advisory_transport) is not RagPostgresAdvisoryTransport
+            or connection_factory is not advisory_transport
+            or postgres_database is not None
+        ):
+            raise ValueError('PostgreSQL evidence advisory transport is invalid')
         self._freshness = freshness
         self._connection_factory = connection_factory
         self._registered_lock = registered_lock
         self._postgres_database = postgres_database
+        self._advisory_transport = advisory_transport
         self._mutex = RLock()
 
     def snapshot_identity(self) -> str:
@@ -177,6 +190,12 @@ class RagEvidenceSendBarrier:
         ):
             raise TypeError('PostgreSQL evidence database authority changed')
 
+    @property
+    def advisory_transport_authority(
+        self,
+    ) -> RagPostgresAdvisoryTransport | None:
+        return self._advisory_transport
+
     def _run(
         self,
         *,
@@ -194,7 +213,19 @@ class RagEvidenceSendBarrier:
             with self._mutex:
                 self._freshness.require_current(expected_identity_hmac)
                 return operation()
-        connection = self._connection_factory()
+        connection_context = self._connection_factory()
+        if self._advisory_transport is not None:
+            with (
+                connection_context as connection,
+                self._advisory_transport.advisory_connection(
+                    connection,
+                    self._registered_lock,  # type: ignore[arg-type]
+                    shared=True,
+                ),
+            ):
+                self._freshness.require_current(expected_identity_hmac)
+                return operation()
+        connection = connection_context
         locked = False
         try:
             acquire_advisory_lock(
@@ -229,7 +260,19 @@ class RagEvidenceSendBarrier:
             with self._mutex:
                 yield
             return
-        connection = self._connection_factory()
+        connection_context = self._connection_factory()
+        if self._advisory_transport is not None:
+            with (
+                connection_context as connection,
+                self._advisory_transport.advisory_connection(
+                    connection,
+                    self._registered_lock,  # type: ignore[arg-type]
+                    shared=True,
+                ),
+            ):
+                yield
+            return
+        connection = connection_context
         locked = False
         try:
             acquire_advisory_lock(

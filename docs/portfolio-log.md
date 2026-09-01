@@ -5699,3 +5699,30 @@ Cost/security note:
 - Fresh verification is focused `219 passed, 10 skipped` and broad affected
   `762 passed, 16 skipped, 2144 deselected`. The skips are the executable real-
   PostgreSQL gates left unrun because the URL is absent.
+
+## 2026-09-01 Deliverable D Core Task 13 eleventh rereview candidate
+
+- The tenth independent review kept Task 13 open on three paid-runtime edges:
+  production assembly recreated `Engine.connect` bound methods, provider
+  advisory locks could use pooled untracked connections, and cleanup/poison
+  waiters were neither cancellation-safe nor FIFO.
+- Production paid assembly now captures one exact factory and replaces it with
+  one sealed bootstrap-bound advisory transport. That transport issues a fresh
+  `NullPool` Engine per physical use, validates the exact database and writable
+  server, and is shared by provider safety, projection-owner, evidence, cost,
+  and dispatch authorities under the same runtime-health latch.
+- Unlock uncertainty in any of the three provider advisory families requests a
+  sanitized fail-stop before control escapes. Invalidate, close, and dispose
+  uncertainty cannot return a possibly locked connection to the application
+  pool. A pre-send failure closes exact-two cost children at terminal zero with
+  no client call; a failure after grant consumption preserves the attempted,
+  reserved, unknown-dispatch identity for recovery and never claims zero or
+  safe retry.
+- Cleanup and poison now share one FIFO ticket queue. Cancellation removes the
+  exact ticket and wakes all waiters; a same-owner nested cleanup cannot bypass
+  an older foreign waiter, while healthy shared effects remain concurrent.
+- Candidate verification is focused `202 passed`, PostgreSQL-gate collection
+  `50 passed, 13 skipped`, and broad affected `795 passed, 16 skipped, 2128
+  deselected`. `PARAWORKS_TEST_POSTGRES_URL` is absent, so real PostgreSQL
+  acceptance remains unrun. This is not `CLEAN`; Task 14 remains blocked. No
+  provider, network, Docker, paid call, or `.env` access occurred.

@@ -15,6 +15,8 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID,
     RegisteredAdvisoryLock,
     _require_registered_capability,
+    acquire_advisory_lock,
+    release_advisory_lock,
 )
 from backend.app.db.initialization import (
     TrustedPostgresEngineBootstrap,
@@ -23,6 +25,7 @@ from backend.app.db.initialization import (
 )
 
 _POSTGRES_DATABASE_AUTHORITY_SEAL = object()
+_POSTGRES_ADVISORY_TRANSPORT_SEAL = object()
 _OPERATION_LEASE_SEAL = object()
 _IDENTITY_SQL = text(
     "SELECT current_database(), current_schema(), current_schemas(false), "
@@ -46,6 +49,10 @@ class RagPostgresDatabaseCleanupFailure:
         'rag_postgres_transport_cleanup_failed'
     )
     transport_fail_stopped: Literal[True] = True
+
+
+class RagPostgresAdvisoryCleanupError(TypeError):
+    """Sanitized fail-stop for uncertain provider advisory cleanup."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +120,166 @@ class _PostgresDatabaseAssembly:
     server_identity: RagPostgresWritableServerIdentity
     runtime_health: TrustedPostgresRuntimeHealth = field(repr=False)
     _seal: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _PostgresAdvisoryTransportAssembly:
+    application_engine: Engine = field(repr=False)
+    trusted_bootstrap: TrustedPostgresEngineBootstrap = field(repr=False)
+    bootstrap_capability: RegisteredAdvisoryLock = field(repr=False)
+    identity: RagPostgresDatabaseIdentity
+    server_identity: RagPostgresWritableServerIdentity
+    runtime_health: TrustedPostgresRuntimeHealth = field(repr=False)
+    _seal: object = field(repr=False, compare=False)
+
+
+class RagPostgresAdvisoryTransport:
+    """Bootstrap-bound one-physical-use advisory connection transport."""
+
+    __slots__ = ('_active_connections', '_assembly', '_lock')
+
+    def __init__(self, assembly: object) -> None:
+        if (
+            type(assembly) is not _PostgresAdvisoryTransportAssembly
+            or assembly._seal is not _POSTGRES_ADVISORY_TRANSPORT_SEAL
+            or not isinstance(assembly.application_engine, Engine)
+            or assembly.application_engine.dialect.name != 'postgresql'
+            or type(assembly.trusted_bootstrap)
+            is not TrustedPostgresEngineBootstrap
+            or type(assembly.bootstrap_capability) is not RegisteredAdvisoryLock
+            or type(assembly.identity) is not RagPostgresDatabaseIdentity
+            or type(assembly.server_identity)
+            is not RagPostgresWritableServerIdentity
+            or type(assembly.runtime_health) is not TrustedPostgresRuntimeHealth
+        ):
+            raise TypeError('RAG PostgreSQL advisory transport is unavailable')
+        self._assembly = assembly
+        self._active_connections: set[Connection] = set()
+        self._lock = RLock()
+
+    @property
+    def runtime_health_authority(self) -> TrustedPostgresRuntimeHealth:
+        return self._assembly.runtime_health
+
+    @property
+    def application_engine_authority(self) -> Engine:
+        return self._assembly.application_engine
+
+    @contextmanager
+    def __call__(self):
+        """Yield one dedicated connection and physically discard it exactly once."""
+        health = self._assembly.runtime_health
+        with health._effect('rag_provider_advisory_connection'):
+            dedicated_engine: Engine | None = None
+            connection: Connection | None = None
+            primary: BaseException | None = None
+            cleanup_failed = False
+            try:
+                issued = self._assembly.trusted_bootstrap._issue(
+                    self._assembly.application_engine
+                )
+                if issued.runtime_health is not health:
+                    raise TypeError('RAG PostgreSQL advisory health changed')
+                dedicated_engine = issued.engine
+                connection = dedicated_engine.connect()
+                if connection.engine is not dedicated_engine:
+                    raise TypeError('RAG PostgreSQL advisory connection changed')
+                if _connection_identity(connection) != self._assembly.identity:
+                    raise TypeError('RAG PostgreSQL advisory database changed')
+                if (
+                    _connection_server_identity(connection)
+                    != self._assembly.server_identity
+                ):
+                    raise TypeError('RAG PostgreSQL advisory server changed')
+                _require_bootstrap_capability(
+                    connection,
+                    self._assembly.bootstrap_capability,
+                )
+                with self._lock:
+                    self._active_connections.add(connection)
+                yield connection
+            except BaseException as exc:
+                primary = exc
+            finally:
+                if connection is not None:
+                    with self._lock:
+                        self._active_connections.discard(connection)
+                    if primary is not None and not connection.closed:
+                        try:
+                            connection.invalidate()
+                        except BaseException:
+                            cleanup_failed = True
+                    try:
+                        connection.close()
+                    except BaseException:
+                        cleanup_failed = True
+                if dedicated_engine is not None:
+                    try:
+                        dedicated_engine.dispose()
+                    except BaseException:
+                        cleanup_failed = True
+                if cleanup_failed:
+                    health._poison()
+            if primary is not None:
+                raise primary
+            if cleanup_failed:
+                raise RagPostgresAdvisoryCleanupError(
+                    'RAG PostgreSQL advisory cleanup failed'
+                )
+
+    @contextmanager
+    def advisory(self, capability: RegisteredAdvisoryLock, *, shared: bool):
+        if type(capability) is not RegisteredAdvisoryLock or type(shared) is not bool:
+            raise TypeError('registered advisory transport capability is required')
+        with (
+            self() as connection,
+            self.advisory_connection(
+                connection,
+                capability,
+                shared=shared,
+            ),
+        ):
+            yield connection
+
+    @contextmanager
+    def advisory_connection(
+        self,
+        connection: Connection,
+        capability: RegisteredAdvisoryLock,
+        *,
+        shared: bool,
+    ):
+        if type(capability) is not RegisteredAdvisoryLock or type(shared) is not bool:
+            raise TypeError('registered advisory transport capability is required')
+        with self._lock:
+            if connection not in self._active_connections:
+                raise TypeError('provider advisory connection authority changed')
+        primary: BaseException | None = None
+        cleanup_failed = False
+        locked = False
+        try:
+            acquire_advisory_lock(connection, capability, shared=shared)
+            locked = True
+            yield
+        except BaseException as exc:
+            primary = exc
+        finally:
+            if locked:
+                try:
+                    release_advisory_lock(
+                        connection,
+                        capability,
+                        shared=shared,
+                    )
+                except BaseException:
+                    cleanup_failed = True
+                    self._assembly.runtime_health._poison()
+        if primary is not None:
+            raise primary
+        if cleanup_failed:
+            raise RagPostgresAdvisoryCleanupError(
+                'RAG PostgreSQL advisory cleanup failed'
+            )
 
 
 class RagPostgresDatabaseAuthority:
@@ -552,6 +719,48 @@ def _bind_rag_postgres_database(
         if dedicated_engine is not None:
             dedicated_engine.dispose()
         raise
+
+
+def _bind_rag_postgres_advisory_transport(
+    session: Session,
+    *,
+    trusted_bootstrap: TrustedPostgresEngineBootstrap,
+    bootstrap_capability: RegisteredAdvisoryLock,
+) -> RagPostgresAdvisoryTransport:
+    """Bind per-use NullPool advisory connections to one trusted DB runtime."""
+    if not isinstance(session, Session):
+        raise TypeError('RAG PostgreSQL advisory session is required')
+    bind = session.get_bind()
+    if session.in_transaction() or (
+        isinstance(bind, Connection)
+        and (bind.in_transaction() or bind.in_nested_transaction())
+    ):
+        raise TypeError('fresh PostgreSQL advisory binding is required')
+    engine = bind.engine if isinstance(bind, Connection) else bind
+    if not isinstance(engine, Engine) or engine.dialect.name != 'postgresql':
+        raise TypeError('RAG PostgreSQL advisory transport requires PostgreSQL')
+    if type(trusted_bootstrap) is not TrustedPostgresEngineBootstrap:
+        raise TypeError('trusted PostgreSQL Engine bootstrap is required')
+    if type(bootstrap_capability) is not RegisteredAdvisoryLock:
+        raise TypeError('RAG PostgreSQL bootstrap capability is required')
+    try:
+        identity = _session_identity(session)
+        server_identity = _session_server_identity(session)
+        _require_bootstrap_capability(session, bootstrap_capability)
+    finally:
+        session.rollback()
+    runtime_health = trusted_bootstrap._runtime_effect_authority(engine)
+    return RagPostgresAdvisoryTransport(
+        _PostgresAdvisoryTransportAssembly(
+            application_engine=engine,
+            trusted_bootstrap=trusted_bootstrap,
+            bootstrap_capability=bootstrap_capability,
+            identity=identity,
+            server_identity=server_identity,
+            runtime_health=runtime_health,
+            _seal=_POSTGRES_ADVISORY_TRANSPORT_SEAL,
+        )
+    )
 
 
 def _require_bootstrap_capability(

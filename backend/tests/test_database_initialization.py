@@ -7,7 +7,8 @@ import sys
 import traceback
 from collections.abc import Generator
 from pathlib import Path
-from threading import Event, Thread
+from queue import Queue
+from threading import Condition, Event, Thread, current_thread, get_ident
 from typing import Any
 
 import pytest
@@ -33,6 +34,79 @@ from sqlalchemy.pool import NullPool
 
 from backend.app.db import initialization
 from backend.app.db import session as database_session
+
+
+class _RuntimeWaitCancelled(BaseException):
+    pass
+
+
+class _ControlledCondition(Condition):
+    """Deterministically cancel or reorder selected health-latch waiters."""
+
+    def __init__(self, lock: object) -> None:
+        super().__init__(lock)  # type: ignore[arg-type]
+        self.cancel_gates: dict[str, tuple[Event, type[BaseException]]] = {}
+        self.return_gates: dict[str, Event] = {}
+        self.wait_counts: dict[str, int] = {}
+        self.wait_events: dict[tuple[str, int], Event] = {}
+
+    def watch(self, thread_name: str, occurrence: int = 1) -> Event:
+        event = Event()
+        self.wait_events[(thread_name, occurrence)] = event
+        return event
+
+    def cancel(
+        self,
+        thread_name: str,
+        gate: Event,
+        error_type: type[BaseException],
+    ) -> None:
+        self.cancel_gates[thread_name] = (gate, error_type)
+
+    def gate_return(self, thread_name: str, gate: Event) -> None:
+        self.return_gates[thread_name] = gate
+
+    def wait(self, timeout: float | None = None) -> bool:
+        thread_name = current_thread().name
+        occurrence = self.wait_counts.get(thread_name, 0) + 1
+        self.wait_counts[thread_name] = occurrence
+        event = self.wait_events.get((thread_name, occurrence))
+        if event is not None:
+            event.set()
+
+        cancellation = self.cancel_gates.get(thread_name)
+        if cancellation is not None:
+            gate, error_type = cancellation
+            state = self._release_save()
+            try:
+                if not gate.wait(timeout=5):
+                    raise AssertionError('cancellation gate timed out')
+            finally:
+                self._acquire_restore(state)
+            raise error_type()
+
+        notified = super().wait(timeout)
+        return_gate = self.return_gates.get(thread_name)
+        if return_gate is not None and not return_gate.is_set():
+            state = self._release_save()
+            try:
+                if not return_gate.wait(timeout=5):
+                    raise AssertionError('condition return gate timed out')
+            finally:
+                self._acquire_restore(state)
+        return notified
+
+
+def _controlled_runtime_health() -> tuple[
+    initialization.TrustedPostgresRuntimeHealth,
+    _ControlledCondition,
+]:
+    health = initialization.TrustedPostgresRuntimeHealth(
+        _seal=initialization._POSTGRES_RUNTIME_HEALTH_SEAL
+    )
+    condition = _ControlledCondition(health._lock)
+    health._condition = condition
+    return health, condition
 
 
 def test_initialize_database_runtime_preserves_exact_options_without_connect(
@@ -128,6 +202,280 @@ def test_runtime_health_poison_inside_effect_is_latched_before_escape() -> None:
         effect('future-effect'),
     ):
         raise AssertionError('poisoned effect must not run')
+
+
+def test_cancelled_cleanup_waiter_wakes_a_blocked_shared_effect() -> None:
+    health, condition = _controlled_runtime_health()
+    active_entered = Event()
+    release_active = Event()
+    follower_entered = Event()
+    cancel_cleanup = Event()
+    cleanup_waiting = condition.watch('cancelled-cleanup')
+    follower_waiting = condition.watch('blocked-follower')
+    condition.cancel(
+        'cancelled-cleanup',
+        cancel_cleanup,
+        _RuntimeWaitCancelled,
+    )
+    cancellations: Queue[BaseException] = Queue()
+
+    def active_effect() -> None:
+        with health._effect('active-effect'):
+            active_entered.set()
+            assert release_active.wait(timeout=5)
+
+    def cancelled_cleanup() -> None:
+        try:
+            with health._cleanup_boundary():
+                raise AssertionError('cancelled cleanup must not acquire')
+        except BaseException as error:
+            cancellations.put(error)
+
+    def blocked_follower() -> None:
+        with health._effect('blocked-follower'):
+            follower_entered.set()
+
+    active = Thread(target=active_effect, name='active-effect')
+    cleanup = Thread(target=cancelled_cleanup, name='cancelled-cleanup')
+    follower = Thread(target=blocked_follower, name='blocked-follower')
+    active.start()
+    assert active_entered.wait(timeout=2)
+    cleanup.start()
+    assert cleanup_waiting.wait(timeout=2)
+    follower.start()
+    assert follower_waiting.wait(timeout=2)
+
+    try:
+        cancel_cleanup.set()
+        cleanup.join(timeout=2)
+        assert cleanup.is_alive() is False
+        assert isinstance(cancellations.get_nowait(), _RuntimeWaitCancelled)
+        assert follower_entered.wait(timeout=2)
+        assert health._active_effects == 1
+        assert health._exclusive_waiters == 0
+    finally:
+        release_active.set()
+        cancel_cleanup.set()
+        active.join(timeout=5)
+        cleanup.join(timeout=5)
+        follower.join(timeout=5)
+    assert active.is_alive() is False
+    assert follower.is_alive() is False
+
+
+def test_cleanup_and_poison_exclusive_tickets_are_fifo_under_late_wakeups() -> None:
+    health, condition = _controlled_runtime_health()
+    active_entered = Event()
+    release_active = Event()
+    cleanup_one_return = Event()
+    cleanup_three_return = Event()
+    cleanup_one_entered = Event()
+    cleanup_three_entered = Event()
+    release_cleanup_one = Event()
+    release_cleanup_three = Event()
+    poison_finished = Event()
+    cleanup_one_waiting = condition.watch('cleanup-one')
+    poison_waiting = condition.watch('poison-two')
+    poison_waiting_again = condition.watch('poison-two', 2)
+    cleanup_three_waiting = condition.watch('cleanup-three')
+    condition.gate_return('cleanup-one', cleanup_one_return)
+    condition.gate_return('cleanup-three', cleanup_three_return)
+    order: list[str] = []
+
+    def active_effect() -> None:
+        with health._effect('fifo-active-effect'):
+            active_entered.set()
+            assert release_active.wait(timeout=5)
+
+    def cleanup_one() -> None:
+        with health._cleanup_boundary():
+            order.append('cleanup-one')
+            cleanup_one_entered.set()
+            assert release_cleanup_one.wait(timeout=5)
+
+    def poison_two() -> None:
+        health._poison()
+        order.append('poison-two')
+        poison_finished.set()
+
+    def cleanup_three() -> None:
+        with health._cleanup_boundary():
+            order.append('cleanup-three')
+            cleanup_three_entered.set()
+            assert release_cleanup_three.wait(timeout=5)
+
+    threads = (
+        Thread(target=active_effect, name='fifo-active-effect'),
+        Thread(target=cleanup_one, name='cleanup-one'),
+        Thread(target=poison_two, name='poison-two'),
+        Thread(target=cleanup_three, name='cleanup-three'),
+    )
+    threads[0].start()
+    assert active_entered.wait(timeout=2)
+    threads[1].start()
+    assert cleanup_one_waiting.wait(timeout=2)
+    threads[2].start()
+    assert poison_waiting.wait(timeout=2)
+    threads[3].start()
+    assert cleanup_three_waiting.wait(timeout=2)
+
+    try:
+        release_active.set()
+        assert poison_waiting_again.wait(timeout=2)
+        assert poison_finished.is_set() is False
+
+        cleanup_one_return.set()
+        assert cleanup_one_entered.wait(timeout=2)
+        assert order == ['cleanup-one']
+        release_cleanup_one.set()
+
+        assert poison_finished.wait(timeout=2)
+        assert order == ['cleanup-one', 'poison-two']
+        cleanup_three_return.set()
+        assert cleanup_three_entered.wait(timeout=2)
+        assert order == ['cleanup-one', 'poison-two', 'cleanup-three']
+    finally:
+        release_active.set()
+        cleanup_one_return.set()
+        cleanup_three_return.set()
+        release_cleanup_one.set()
+        release_cleanup_three.set()
+        for thread in threads:
+            thread.join(timeout=5)
+    assert all(thread.is_alive() is False for thread in threads)
+    assert health.snapshot.healthy is False
+
+
+@pytest.mark.parametrize('operation', ('cleanup', 'poison'))
+@pytest.mark.parametrize('blocker', ('active_effect', 'cleanup_owner'))
+def test_cancelled_exclusive_wait_preserves_health_latch_state(
+    operation: str,
+    blocker: str,
+) -> None:
+    health, condition = _controlled_runtime_health()
+    worker_name = f'cancel-{operation}-behind-{blocker}'
+    cancel = Event()
+    cancel.set()
+    waiting = condition.watch(worker_name)
+    condition.cancel(worker_name, cancel, KeyboardInterrupt)
+    failures: Queue[BaseException] = Queue()
+
+    def waiter() -> None:
+        try:
+            if operation == 'cleanup':
+                with health._cleanup_boundary():
+                    raise AssertionError('cancelled cleanup must not acquire')
+            else:
+                health._poison()
+        except BaseException as error:
+            failures.put(error)
+
+    worker = Thread(target=waiter, name=worker_name)
+    if blocker == 'active_effect':
+        boundary = health._effect('cancellation-blocker')
+    else:
+        boundary = health._cleanup_boundary()
+
+    with boundary:
+        worker.start()
+        assert waiting.wait(timeout=2)
+        worker.join(timeout=2)
+        assert worker.is_alive() is False
+        assert isinstance(failures.get_nowait(), KeyboardInterrupt)
+        assert health._exclusive_waiters == 0
+        assert health._poison_requested is False
+        assert health.snapshot.healthy is True
+        if blocker == 'active_effect':
+            assert health._active_effects == 1
+            assert health._effect_depths == {get_ident(): 1}
+            assert health._exclusive_owner is None
+            assert health._exclusive_depth == 0
+        else:
+            assert health._active_effects == 0
+            assert health._effect_depths == {}
+            assert health._exclusive_owner == get_ident()
+            assert health._exclusive_depth == 1
+
+    assert health._active_effects == 0
+    assert health._effect_depths == {}
+    assert health._exclusive_owner is None
+    assert health._exclusive_depth == 0
+    assert health._exclusive_waiters == 0
+
+
+def test_cancelled_shared_effect_wait_preserves_cleanup_owner_state() -> None:
+    health, condition = _controlled_runtime_health()
+    cancel = Event()
+    cancel.set()
+    waiting = condition.watch('cancel-shared-effect')
+    condition.cancel('cancel-shared-effect', cancel, KeyboardInterrupt)
+    failures: Queue[BaseException] = Queue()
+
+    def waiter() -> None:
+        try:
+            with health._effect('cancel-shared-effect'):
+                raise AssertionError('cancelled effect must not acquire')
+        except BaseException as error:
+            failures.put(error)
+
+    worker = Thread(target=waiter, name='cancel-shared-effect')
+    with health._cleanup_boundary():
+        worker.start()
+        assert waiting.wait(timeout=2)
+        worker.join(timeout=2)
+        assert worker.is_alive() is False
+        assert isinstance(failures.get_nowait(), KeyboardInterrupt)
+        assert health._active_effects == 0
+        assert health._effect_depths == {}
+        assert health._exclusive_owner == get_ident()
+        assert health._exclusive_depth == 1
+        assert health._exclusive_waiters == 0
+
+    assert health._exclusive_owner is None
+    assert health._exclusive_depth == 0
+    with health._effect('still-healthy'):
+        assert health.snapshot.healthy is True
+
+
+def test_nested_cleanup_does_not_bypass_an_older_foreign_waiter() -> None:
+    health, condition = _controlled_runtime_health()
+    foreign_waiting = condition.watch('older-foreign-cleanup')
+    foreign_entered = Event()
+    release_foreign = Event()
+    nested_failure: RuntimeError | None = None
+    nested_acquired = False
+
+    def foreign_cleanup() -> None:
+        with health._cleanup_boundary():
+            foreign_entered.set()
+            assert release_foreign.wait(timeout=5)
+
+    foreign = Thread(target=foreign_cleanup, name='older-foreign-cleanup')
+    with health._cleanup_boundary():
+        with health._cleanup_boundary():
+            assert health._exclusive_depth == 2
+        assert health._exclusive_depth == 1
+
+        foreign.start()
+        assert foreign_waiting.wait(timeout=2)
+        try:
+            with health._cleanup_boundary():
+                nested_acquired = True
+        except RuntimeError as error:
+            nested_failure = error
+
+    try:
+        assert foreign_entered.wait(timeout=2)
+    finally:
+        release_foreign.set()
+        foreign.join(timeout=5)
+    assert foreign.is_alive() is False
+    assert nested_acquired is False
+    assert nested_failure is not None
+    assert 'queued' in str(nested_failure)
+    assert health._exclusive_owner is None
+    assert health._exclusive_depth == 0
+    assert health._exclusive_waiters == 0
 
 
 def test_postgres_bootstrap_preserves_the_resolved_connection_policy(
