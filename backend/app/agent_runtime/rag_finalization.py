@@ -32,6 +32,9 @@ from backend.app.agent_runtime.rag_cost_ledger import (
     PendingProjectionRecoverySnapshot,
     RagCostLedger,
 )
+from backend.app.agent_runtime.rag_postgres_binding import (
+    RagPostgresDatabaseAuthority,
+)
 from backend.app.agent_runtime.rag_provider_safety import (
     RagProviderSafetyError,
     RagProviderSafetyService,
@@ -107,11 +110,11 @@ _ANSWER_SAFE_NO_EVIDENCE_OUTCOMES = frozenset({
     'no_match',
     'hidden_only',
     'safety_filter_empty',
-    'insufficient_evidence',
 })
 _RAG_PRODUCT_OUTCOMES = _ANSWER_SAFE_NO_EVIDENCE_OUTCOMES | {
     'supported',
     'search_projected',
+    'insufficient_evidence',
     'evidence_unavailable',
 }
 
@@ -124,6 +127,7 @@ class _ProviderFreePhase2Assembly:
     )
     load_current_owner_fence: Callable[[int], str] = field(repr=False)
     evidence_barrier: RagEvidenceSendBarrier = field(repr=False)
+    postgres_database: RagPostgresDatabaseAuthority | None = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -143,6 +147,7 @@ class _PaidPhase2Assembly:
     load_current_readiness: Callable[[], RagServingIndexReadiness] = field(
         repr=False
     )
+    postgres_database: RagPostgresDatabaseAuthority | None = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -152,6 +157,7 @@ class _ProjectionOwnerRecoveryAssembly:
     provider_free: ProviderFreeRagPhase2Authority = field(repr=False)
     paid: PaidRagPhase2Authority = field(repr=False)
     projection_read: ServingProjectionReadCoordinator = field(repr=False)
+    postgres_database: RagPostgresDatabaseAuthority | None = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -175,6 +181,19 @@ class ProviderFreeRagPhase2Authority:
     @property
     def evidence_barrier_is_postgresql(self) -> bool:
         return self._assembly.evidence_barrier.is_postgresql_backed
+
+    def _require_recovery_database(
+        self,
+        authority: RagPostgresDatabaseAuthority,
+        seal: object,
+    ) -> None:
+        if (
+            seal is not _RECOVERY_AUTHORITY_SEAL
+            or type(authority) is not RagPostgresDatabaseAuthority
+            or self._assembly.postgres_database is not authority
+        ):
+            raise TypeError('RAG recovery database authority changed')
+        self._assembly.evidence_barrier.require_postgres_database(authority)
 
     @contextmanager
     def acquire(
@@ -331,6 +350,19 @@ class PaidRagPhase2Authority:
     @property
     def evidence_barrier_is_postgresql(self) -> bool:
         return self._assembly.evidence_barrier.is_postgresql_backed
+
+    def _require_recovery_database(
+        self,
+        authority: RagPostgresDatabaseAuthority,
+        seal: object,
+    ) -> None:
+        if (
+            seal is not _RECOVERY_AUTHORITY_SEAL
+            or type(authority) is not RagPostgresDatabaseAuthority
+            or self._assembly.postgres_database is not authority
+        ):
+            raise TypeError('RAG recovery database authority changed')
+        self._assembly.evidence_barrier.require_postgres_database(authority)
 
     def _require_exact_requirement_components(
         self,
@@ -598,16 +630,27 @@ class PaidRagPhase2Authority:
 
 def _assemble_provider_free_rag_phase2_authority(
     *,
-    owner_connection_factory: Callable[[], object],
+    owner_connection_factory: Callable[[], object] | None,
     owner_capability_factory: Callable[[int], RegisteredAdvisoryLock],
     load_current_owner_fence: Callable[[int], str],
     evidence_barrier: RagEvidenceSendBarrier,
+    postgres_database: RagPostgresDatabaseAuthority | None = None,
 ) -> ProviderFreeRagPhase2Authority:
+    if postgres_database is not None:
+        if (
+            type(postgres_database) is not RagPostgresDatabaseAuthority
+            or owner_connection_factory is not None
+        ):
+            raise TypeError('provider-free PostgreSQL authority is invalid')
+        owner_connection_factory = postgres_database.connect
+    if not callable(owner_connection_factory):
+        raise TypeError('provider-free owner connection is unavailable')
     return ProviderFreeRagPhase2Authority(_ProviderFreePhase2Assembly(
         owner_connection_factory=owner_connection_factory,
         owner_capability_factory=owner_capability_factory,
         load_current_owner_fence=load_current_owner_fence,
         evidence_barrier=evidence_barrier,
+        postgres_database=postgres_database,
         _seal=_PHASE2_AUTHORITY_SEAL,
     ))
 
@@ -615,16 +658,30 @@ def _assemble_provider_free_rag_phase2_authority(
 def _assemble_paid_rag_phase2_authority(
     *,
     provider_safety: RagProviderSafetyService,
-    safety_connection_factory: Callable[[], object],
+    safety_connection_factory: Callable[[], object] | None,
     safety_requirements: tuple[
         tuple[AuthorizedProviderPolicySnapshot, RagProviderSafetyBinding], ...
     ],
-    owner_connection_factory: Callable[[], object],
+    owner_connection_factory: Callable[[], object] | None,
     owner_capability_factory: Callable[[int], RegisteredAdvisoryLock],
     load_current_owner_fence: Callable[[int], str],
     evidence_barrier: RagEvidenceSendBarrier,
     load_current_readiness: Callable[[], RagServingIndexReadiness],
+    postgres_database: RagPostgresDatabaseAuthority | None = None,
 ) -> PaidRagPhase2Authority:
+    if postgres_database is not None:
+        if (
+            type(postgres_database) is not RagPostgresDatabaseAuthority
+            or safety_connection_factory is not None
+            or owner_connection_factory is not None
+        ):
+            raise TypeError('paid PostgreSQL authority is invalid')
+        safety_connection_factory = postgres_database.connect
+        owner_connection_factory = postgres_database.connect
+    if not callable(safety_connection_factory) or not callable(
+        owner_connection_factory
+    ):
+        raise TypeError('paid PostgreSQL connections are unavailable')
     return PaidRagPhase2Authority(_PaidPhase2Assembly(
         provider_safety=provider_safety,
         safety_connection_factory=safety_connection_factory,
@@ -634,6 +691,7 @@ def _assemble_paid_rag_phase2_authority(
         load_current_owner_fence=load_current_owner_fence,
         evidence_barrier=evidence_barrier,
         load_current_readiness=load_current_readiness,
+        postgres_database=postgres_database,
         _seal=_PHASE2_AUTHORITY_SEAL,
     ))
 
@@ -678,6 +736,25 @@ class RagProjectionOwnerRecoveryAuthority:
                 ),
             )
 
+    def _require_boundary(
+        self,
+        db: Session,
+        phase2_authority: object,
+        seal: object,
+    ) -> None:
+        assembly = self._assembly
+        authority = assembly.postgres_database
+        if (
+            seal is not _RECOVERY_AUTHORITY_SEAL
+            or type(authority) is not RagPostgresDatabaseAuthority
+            or db is not assembly.ledger._session
+            or phase2_authority not in (assembly.provider_free, assembly.paid)
+        ):
+            raise TypeError('RAG recovery database authority changed')
+        authority.require_session(db)
+        assembly.provider_free._require_recovery_database(authority, seal)
+        assembly.paid._require_recovery_database(authority, seal)
+
 
 def _assemble_projection_owner_recovery_authority(
     *,
@@ -685,6 +762,7 @@ def _assemble_projection_owner_recovery_authority(
     provider_free: ProviderFreeRagPhase2Authority,
     paid: PaidRagPhase2Authority,
     projection_read: ServingProjectionReadCoordinator,
+    postgres_database: RagPostgresDatabaseAuthority | None = None,
 ) -> RagProjectionOwnerRecoveryAuthority:
     return RagProjectionOwnerRecoveryAuthority(
         _ProjectionOwnerRecoveryAssembly(
@@ -692,6 +770,7 @@ def _assemble_projection_owner_recovery_authority(
             provider_free=provider_free,
             paid=paid,
             projection_read=projection_read,
+            postgres_database=postgres_database,
             _seal=_RECOVERY_AUTHORITY_SEAL,
         )
     )
@@ -961,6 +1040,10 @@ class RagFinalizationService:
         *,
         evidence_changed: bool,
     ) -> None:
+        if prepared.tentative_outcome == 'insufficient_evidence':
+            raise RagFinalizationError(
+                'insufficient_evidence is post-generation only'
+            )
         try:
             _validate_prepared_product_contract(prepared)
         except ValueError as exc:
@@ -1149,6 +1232,17 @@ class SqlAlchemyRagFinalizationBoundary:
             and type(recovery_authority) is not RagProjectionOwnerRecoveryAuthority
         ):
             raise TypeError('concrete projection-owner recovery is required')
+        if recovery_authority is not None:
+            try:
+                recovery_authority._require_boundary(
+                    db,
+                    phase2_authority,
+                    _RECOVERY_AUTHORITY_SEAL,
+                )
+            except TypeError as exc:
+                raise TypeError(
+                    'PostgreSQL recovery database authority is invalid'
+                ) from exc
         self._recovery_authority = recovery_authority
         self._phase2_authority = phase2_authority
         self._prefix: AbstractContextManager | None = None
@@ -1261,12 +1355,20 @@ class SqlAlchemyRagFinalizationBoundary:
                 raise RagFinalizationError(
                     'paid phase-2 safety authority is unavailable'
                 )
+            expected_components = _expected_paid_components(
+                prepared,
+                branch=branch,
+            )
+            attempted_components = tuple(
+                value.component for value in children if value.attempted is True
+            )
+            if attempted_components != expected_components:
+                raise RagFinalizationError(
+                    'paid phase-2 attempted components are invalid'
+                )
             self._phase2_authority.validate_locked_cost_authority(
                 children,
-                expected_components=_expected_paid_components(
-                    prepared,
-                    branch=branch,
-                ),
+                expected_components=attempted_components,
             )
         if branch == 'provider_free':
             if not all(_exact_terminal_zero(value) for value in children):
@@ -1286,23 +1388,19 @@ class SqlAlchemyRagFinalizationBoundary:
             return
         if branch != 'paid_prepared':
             raise RagFinalizationError('RAG finalization cost branch is invalid')
-        generated = bool(prepared.model_influence_observations)
-        if generated:
-            if (
-                answer.dispatch_state != 'terminal'
-                or answer.attempted is not True
-                or answer.dispatch_count != 1
-                or answer.charge_basis != 'actual'
-                or answer.actual_input_tokens is None
-                or answer.actual_output_tokens is None
-                or not _lower_hmac(answer.dispatch_fence_hmac)
-                or not _lower_hmac(answer.process_instance_hmac)
-                or answer.terminal_outcome != 'component_succeeded'
-                or answer.authorized_model_config_snapshot_hmac
-                != prepared.answer_model_config_snapshot_hmac
-            ):
-                raise RagFinalizationError('answer generation cost shape is invalid')
-        elif not _exact_terminal_zero(answer):
+        if (
+            answer.dispatch_state != 'terminal'
+            or answer.attempted is not True
+            or answer.dispatch_count != 1
+            or answer.charge_basis != 'actual'
+            or answer.actual_input_tokens is None
+            or answer.actual_output_tokens is None
+            or not _lower_hmac(answer.dispatch_fence_hmac)
+            or not _lower_hmac(answer.process_instance_hmac)
+            or answer.terminal_outcome != 'component_succeeded'
+            or answer.authorized_model_config_snapshot_hmac
+            != prepared.answer_model_config_snapshot_hmac
+        ):
             raise RagFinalizationError('answer generation cost shape is invalid')
 
     def current_generations(self) -> tuple[int, int | None]:
@@ -1722,6 +1820,37 @@ def _validate_prepared_product_contract(
         ):
             raise ValueError('prepared supported product canned identity is invalid')
         return
+    if outcome == 'insufficient_evidence':
+        validated = prepared.validated_answer
+        reason = (
+            validated.insufficient_reason
+            if type(validated) is ValidatedAnswerBlocks
+            else None
+        )
+        if (
+            type(validated) is not ValidatedAnswerBlocks
+            or validated.blocks != ()
+            or type(reason) is not str
+            or not reason.strip()
+            or len(reason) > 400
+            or any(
+                ord(character) == 0
+                or 0xD800 <= ord(character) <= 0xDFFF
+                for character in reason
+            )
+            or validated.selected_slot_ids != ()
+            or validated.assembled_answer != ''
+            or validated.assembled_answer_hmac is not None
+            or validated.answer_block_audit_set_hmac is not None
+            or prepared.selected_slot_ids != ()
+            or not prepared.model_influence_observations
+            or prepared.canned_message_identity
+            != 'rag-canned-no-evidence:v1'
+        ):
+            raise ValueError(
+                'prepared insufficient product requires validated generation'
+            )
+        return
     if outcome == 'evidence_unavailable':
         expected = 'rag-canned-evidence-unavailable:v1'
     else:
@@ -2097,6 +2226,13 @@ def _expected_paid_components(
         return ('query_embedding',)
     if branch != 'paid_prepared':
         raise RagFinalizationError('paid phase-2 branch is invalid')
+    if (
+        not prepared.model_influence_observations
+        or type(prepared.validated_answer) is not ValidatedAnswerBlocks
+    ):
+        raise RagFinalizationError(
+            'paid-prepared requires attempted answer generation'
+        )
     return (
         ('query_embedding', 'answer_generation')
         if prepared.query_embedding_result is not None

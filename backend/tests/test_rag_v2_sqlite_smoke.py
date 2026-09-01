@@ -240,6 +240,32 @@ def test_fresh_retrieval_drift_commits_safe_outcome_with_zero_dispatch(
         assert db.scalar(select(func.count()).select_from(AgentRunCostComponent)) == 2
 
 
+def test_sqlite_rejects_insufficient_evidence_before_transaction_or_mutation(
+    tmp_path: Path,
+) -> None:
+    db_path = (tmp_path / 'insufficient.db').absolute()
+    engine = _engine(db_path)
+    Base.metadata.create_all(engine)
+    settings = _settings()
+    with Session(engine) as db:
+        _seed_sqlite_raw_projection(db)
+    prepared = _prepared_search(engine, settings=settings)
+    object.__setattr__(prepared, 'product_kind', 'answer')
+    object.__setattr__(prepared, 'tentative_outcome', 'insufficient_evidence')
+    object.__setattr__(prepared, 'canned_message_identity', 'rag-canned-no-evidence:v1')
+
+    with pytest.raises(SQLiteRagSmokeUnavailable, match='post-generation'):
+        SQLiteRagSmokeCoordinator(
+            engine=engine,
+            database_path=db_path,
+            settings=settings,
+        ).run_keyword(prepared)
+
+    with Session(engine) as db:
+        assert db.scalar(select(func.count()).select_from(AgentRun)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentRunCostComponent)) == 0
+
+
 def test_unsealed_substantive_answer_is_rejected_before_any_mutation(
     tmp_path: Path,
 ) -> None:

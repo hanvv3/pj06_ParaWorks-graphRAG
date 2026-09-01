@@ -3901,13 +3901,24 @@ tests passed with 53 tests; ruff passed.
   cached-handle replacement, case/path aliases, and a second process before
   mutation; caller-prebuilt substantive answer/model-influence objects are
   refused before connection/transaction/mutation.
-- The second independent review was `NOT CLEAN`; this candidate addresses its
-  paid safety/cost binding, PostgreSQL evidence capability, outcome allowlist,
-  actual C.5 canonical tail, shared SQLite mutex, and recovery-prefix findings.
+- The second and third independent reviews were `NOT CLEAN`; this candidate
+  addresses their paid safety/cost binding, PostgreSQL evidence capability,
+  outcome allowlist, actual C.5 canonical tail, shared SQLite mutex, and
+  recovery-prefix findings. In particular, `insufficient_evidence` is now
+  post-generation only and requires an actually attempted/charged answer child;
+  pre-generation provider-free, embedding-only, and SQLite paths refuse it.
+- Recovery is bound to one sealed exact PostgreSQL Session/Engine authority used
+  by both recovery branches for owner, evidence, and safety connections.
+  Boundary construction rejects cross-session, different-database, mutex-only,
+  and unrelated ordinary phase-2 bundles.
+- The old Python-lock recovery test was removed. The URL-gated replacement runs
+  the actual recovery authority/cost CAS in a second session, observes its
+  PostgreSQL lock wait behind a live C.5 mutation transaction, then verifies one
+  `persistence_failed` parent mutation and unchanged provider dispatch/usage.
   Do not describe Task 13 as closed until the next independent rereview returns
   `CLEAN`.
-- Candidate verification: focused `54 passed, 7 skipped`; provider-free affected
-  regression `735 passed, 12 skipped, 2088 deselected`. PostgreSQL finalization/
+- Candidate verification: focused `95 passed, 6 skipped`; broad affected
+  regression `700 passed, 11 skipped, 2161 deselected`. PostgreSQL finalization/
   mutation and recovery/mutation tests are collected but unrun because
   `PARAWORKS_TEST_POSTGRES_URL` is absent. No external provider/paid call or
   Docker action occurred.

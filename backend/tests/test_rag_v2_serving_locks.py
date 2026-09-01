@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from threading import Event, Lock, Thread
+from threading import Event, Thread
 from uuid import uuid4
 
 import pytest
@@ -206,74 +206,5 @@ def test_postgres_finalization_prefix_and_tail_serialize_c5_mutation() -> None:
             assert worker.is_alive() is False
             assert worker_failed == []
             assert mutation_acquired.is_set()
-        finally:
-            engine.dispose()
-
-
-@pytest.mark.skipif(
-    not os.environ.get('PARAWORKS_TEST_POSTGRES_URL'),
-    reason='disposable PostgreSQL C.5 interleaving database is not configured',
-)
-def test_postgres_recovery_prefix_waits_for_c5_mutation_before_cost_cas() -> None:
-    base_url = os.environ['PARAWORKS_TEST_POSTGRES_URL']
-    with lease_postgres_schema(
-        base_url,
-        run_id=uuid4().hex[:12],
-        scope_name='d13_recovery',
-    ) as lease:
-        engine = create_engine(lease.database_url)
-        Base.metadata.create_all(engine)
-        settings = _settings(lease.database_url)
-        session_local = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-        with session_local() as setup:
-            _seed_lock_prefix(setup, settings)
-
-        mutation_acquired = Event()
-        cost_cas_reached = Event()
-        observation_lock = Lock()
-        observed: list[str] = []
-        worker_failed: list[BaseException] = []
-
-        def recover() -> None:
-            try:
-                with session_local() as db, db.begin():
-                    coordinator = ServingProjectionReadCoordinator(
-                        db=db,
-                        settings=settings,
-                    )
-                    with coordinator.acquire():
-                        tail = coordinator.lock_canonical_tail(())
-                        coordinator.validate_tail_context(tail)
-                        with observation_lock:
-                            observed.append('cost_cas')
-                            cost_cas_reached.set()
-            except BaseException as exc:  # pragma: no cover - surfaced below
-                worker_failed.append(exc)
-                cost_cas_reached.set()
-
-        try:
-            with observation_lock:
-                with session_local() as db, db.begin():
-                    plan = build_serving_lock_plan(
-                        db,
-                        ['history_event:999998'],
-                    )
-                    with KeyedMutationGuard.generation_barrier(db):
-                        key_context = lock_runtime_state(db, mode='share')
-                        ServingMutationLockCoordinator(
-                            db=db,
-                            settings=settings,
-                        ).acquire(key_context=key_context, plan=plan)
-                        mutation_acquired.set()
-                        worker = Thread(target=recover, daemon=True)
-                        worker.start()
-                        assert mutation_acquired.is_set()
-                        assert cost_cas_reached.wait(0.25) is False
-                observed.append('mutation_released')
-            worker.join(timeout=5)
-            assert worker.is_alive() is False
-            assert worker_failed == []
-            assert cost_cas_reached.is_set()
-            assert observed == ['mutation_released', 'cost_cas']
         finally:
             engine.dispose()

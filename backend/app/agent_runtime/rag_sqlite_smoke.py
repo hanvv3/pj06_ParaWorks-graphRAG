@@ -133,6 +133,13 @@ class SQLiteRagSmokeCoordinator:
         assistant_target: AssistantProjectionTarget | None = None,
     ) -> RagFinalProjection:
         if (
+            type(prepared) is PreparedRagFinalization
+            and prepared.tentative_outcome == 'insufficient_evidence'
+        ):
+            raise SQLiteRagSmokeUnavailable(
+                'insufficient_evidence is post-generation only'
+            )
+        if (
             type(prepared) is not PreparedRagFinalization
             or prepared.query_embedding_result is not None
             or prepared.retrieval_result.configured_backend != 'keyword'

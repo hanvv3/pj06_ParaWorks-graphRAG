@@ -5524,9 +5524,24 @@ Cost/security note:
   prefix and an empty canonical tail before its cost CAS. SQLite refuses
   caller-prebuilt substantive model output and uses the identical never-replaced
   C.5 process RLock.
-- Candidate verification is `54 passed, 7 skipped` focused and `735 passed, 12
-  skipped, 2088 deselected` across the provider-free affected regression set.
-  The real PostgreSQL finalization/mutation and recovery/mutation interleavings
-  are executable but unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent.
-  This is not recorded as review `CLEAN`; independent rereview remains required.
-  No provider, network, Docker, or paid call occurred.
+- A third independent review identified two remaining lifecycle/cost gaps and
+  two recovery-proof gaps. The candidate now treats `insufficient_evidence` as
+  post-generation only, requires an actually attempted/charged answer child,
+  discards the raw model reason, and derives paid safety from the exact attempted
+  component set. Provider-free, embedding-only, and SQLite pre-generation paths
+  reject that outcome before mutation.
+- PostgreSQL recovery now carries a sealed exact Session/Engine authority shared
+  by provider-free and paid owner, evidence, and safety connections. Boundary
+  construction rejects a different Session, a mutex evidence barrier, a
+  different database authority, or an ordinary phase-2 authority outside the
+  recovery bundle.
+- The prior recovery/C.5 test was removed because a Python lock made it
+  tautological. Its replacement invokes the real recovery authority and cost CAS
+  in a second PostgreSQL session, observes a database `Lock` wait while a C.5
+  mutation transaction is live, then asserts one `persistence_failed` transition
+  with unchanged provider dispatch/token observations after release.
+- Current local verification is focused `95 passed, 6 skipped` and broad affected
+  `700 passed, 11 skipped, 2161 deselected`. The real PostgreSQL gate is
+  executable but unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent. This is
+  still a rereview candidate, not review `CLEAN`; Task 14 remains gated. No
+  provider, network, Docker, or paid call occurred.

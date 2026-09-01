@@ -15,6 +15,9 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     acquire_advisory_lock,
     release_advisory_lock,
 )
+from backend.app.agent_runtime.rag_postgres_binding import (
+    RagPostgresDatabaseAuthority,
+)
 from backend.app.agent_runtime.rag_safety_identity import identities_match
 
 
@@ -52,6 +55,7 @@ class _EvidenceBarrierAssembly:
     freshness: RagEvidenceFreshnessAuthority = field(repr=False)
     connection_factory: Callable[[], object] | None = field(repr=False)
     registered_lock: RegisteredAdvisoryLock | None = field(repr=False)
+    postgres_database: RagPostgresDatabaseAuthority | None = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -60,7 +64,15 @@ def _assemble_rag_evidence_barrier(
     load_current_identity: Callable[[], str],
     connection_factory: Callable[[], object] | None = None,
     registered_lock: RegisteredAdvisoryLock | None = None,
+    postgres_database: RagPostgresDatabaseAuthority | None = None,
 ) -> RagEvidenceSendBarrier:
+    if postgres_database is not None:
+        if (
+            type(postgres_database) is not RagPostgresDatabaseAuthority
+            or connection_factory is not None
+        ):
+            raise ValueError('PostgreSQL evidence database authority is invalid')
+        connection_factory = postgres_database.connect
     freshness = RagEvidenceFreshnessAuthority(_EvidenceFreshnessAssembly(
         load_current_identity=load_current_identity,
         _seal=_EVIDENCE_ASSEMBLY_SEAL,
@@ -69,6 +81,7 @@ def _assemble_rag_evidence_barrier(
         freshness=freshness,
         connection_factory=connection_factory,
         registered_lock=registered_lock,
+        postgres_database=postgres_database,
         _seal=_EVIDENCE_ASSEMBLY_SEAL,
     ))
 
@@ -105,7 +118,13 @@ class RagEvidenceFreshnessAuthority:
 class RagEvidenceSendBarrier:
     """Concrete fresh-evidence barrier with SQLite and dedicated PG paths."""
 
-    __slots__ = ('_connection_factory', '_freshness', '_mutex', '_registered_lock')
+    __slots__ = (
+        '_connection_factory',
+        '_freshness',
+        '_mutex',
+        '_postgres_database',
+        '_registered_lock',
+    )
 
     def __init__(self, authority: object) -> None:
         if (
@@ -116,6 +135,7 @@ class RagEvidenceSendBarrier:
         freshness = authority.freshness
         connection_factory = authority.connection_factory
         registered_lock = authority.registered_lock
+        postgres_database = authority.postgres_database
         if type(freshness) is not RagEvidenceFreshnessAuthority:
             raise TypeError('evidence freshness authority is unavailable')
         if (connection_factory is None) != (registered_lock is None):
@@ -125,9 +145,15 @@ class RagEvidenceSendBarrier:
             identity_namespace='static',
         ):
             raise ValueError('PostgreSQL evidence advisory capability is invalid')
+        if postgres_database is not None and (
+            type(postgres_database) is not RagPostgresDatabaseAuthority
+            or connection_factory is None
+        ):
+            raise ValueError('PostgreSQL evidence database authority is invalid')
         self._freshness = freshness
         self._connection_factory = connection_factory
         self._registered_lock = registered_lock
+        self._postgres_database = postgres_database
         self._mutex = RLock()
 
     def snapshot_identity(self) -> str:
@@ -140,6 +166,16 @@ class RagEvidenceSendBarrier:
             self._connection_factory is not None
             and type(self._registered_lock) is RegisteredAdvisoryLock
         )
+
+    def require_postgres_database(
+        self, authority: RagPostgresDatabaseAuthority
+    ) -> None:
+        if (
+            type(authority) is not RagPostgresDatabaseAuthority
+            or self._postgres_database is not authority
+            or not self.is_postgresql_backed
+        ):
+            raise TypeError('PostgreSQL evidence database authority changed')
 
     def _run(
         self,

@@ -2,20 +2,26 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
+from backend.app.agent_runtime.keyed_mutation_guard import (
+    KeyedMutationGuard,
+    lock_runtime_state,
+)
 from backend.app.agent_runtime.provider_send_fence import (
     _assemble_rag_evidence_barrier,
 )
@@ -31,9 +37,13 @@ from backend.app.agent_runtime.rag_advisory_locks import (
 from backend.app.agent_runtime.rag_cost_ledger import _assemble_rag_cost_ledger
 from backend.app.agent_runtime.rag_finalization import (
     RagFinalizationError,
+    SqlAlchemyRagFinalizationBoundary,
     _assemble_paid_rag_phase2_authority,
     _assemble_projection_owner_recovery_authority,
     _assemble_provider_free_rag_phase2_authority,
+)
+from backend.app.agent_runtime.rag_postgres_binding import (
+    _bind_rag_postgres_database,
 )
 from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
 from backend.app.agent_runtime.rag_provider_transport import (
@@ -44,10 +54,14 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
     _issue_classified_provider_observation as StrictProviderOutcome,
 )
 from backend.app.core.config import get_settings
-from backend.app.models import AgentRun
+from backend.app.models import AgentRun, AgentRunCostComponent
 from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import StrictProviderUsage
-from backend.app.rag.serving_locks import ServingProjectionReadCoordinator
+from backend.app.rag.serving_locks import (
+    ServingMutationLockCoordinator,
+    ServingProjectionReadCoordinator,
+    build_serving_lock_plan,
+)
 from backend.tests.test_rag_v2_costs import (
     _TEST_COST_POLICY,
     _admit,
@@ -294,22 +308,26 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
             assert parent.projection_owner_fence_hmac is not None
             return parent.projection_owner_fence_hmac
 
+    projection_settings = get_settings()
+    _seed_lock_prefix(ledger._session, projection_settings)
+    postgres_database = _bind_rag_postgres_database(ledger._session)
     evidence_barrier = _assemble_rag_evidence_barrier(
         load_current_identity=lambda: 'a' * 64,
-        connection_factory=engine.connect,
         registered_lock=evidence_capability,
+        postgres_database=postgres_database,
     )
     provider_free = _assemble_provider_free_rag_phase2_authority(
-        owner_connection_factory=engine.connect,
+        owner_connection_factory=None,
         owner_capability_factory=lambda _run_id: owner_capability,
         load_current_owner_fence=load_fence,
         evidence_barrier=evidence_barrier,
+        postgres_database=postgres_database,
     )
     paid = _assemble_paid_rag_phase2_authority(
         provider_safety=service,
-        safety_connection_factory=engine.connect,
+        safety_connection_factory=None,
         safety_requirements=tuple(safety_requirements),
-        owner_connection_factory=engine.connect,
+        owner_connection_factory=None,
         owner_capability_factory=lambda _run_id: owner_capability,
         load_current_owner_fence=load_fence,
         evidence_barrier=evidence_barrier,
@@ -326,9 +344,8 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
             index_policy_version='rag-v2-serving-index:v1',
             readiness_snapshot_hmac='4' * 64,
         ),
+        postgres_database=postgres_database,
     )
-    projection_settings = get_settings()
-    _seed_lock_prefix(ledger._session, projection_settings)
     recovery = _assemble_projection_owner_recovery_authority(
         ledger=ledger,
         provider_free=provider_free,
@@ -337,6 +354,7 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
             db=ledger._session,
             settings=projection_settings,
         ),
+        postgres_database=postgres_database,
     )
     live_owner = engine.connect()
     try:
@@ -347,14 +365,155 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
             parent = probe.get(AgentRun, run_id)
             assert parent is not None and parent.status == 'running'
         release_advisory_lock(live_owner, owner_capability, shared=False)
-        terminal = recovery.recover(run_id)
-        assert terminal.outcome == 'persistence_failed'
-        with Session(engine) as probe:
-            parent = probe.get(AgentRun, run_id)
-            assert parent is not None and parent.status == 'failed'
-            assert parent.run_record_phase == 'final'
     finally:
         live_owner.close()
+
+    ledger._session.close()
+    recovery_started = threading.Event()
+    recovery_finished = threading.Event()
+    recovery_pid: list[int] = []
+    recovery_result: list[object] = []
+    recovery_errors: list[BaseException] = []
+
+    def recover_after_mutation_lock() -> None:
+        recovery_session = Session(engine)
+        try:
+            recovery_ledger = _assemble_rag_cost_ledger(
+                recovery_session,
+                identity_secret=b'task-12-test-identity-secret',
+                cost_policy=_TEST_COST_POLICY,
+                provider_safety=service,
+                provider_connection_factory=engine.connect,
+                designated_environment_id='test',
+                designated_host_id='pytest-postgres-recovery-worker',
+                projection_lock_capability_factory=lambda _run_id: owner_capability,
+            )
+            worker_database = _bind_rag_postgres_database(recovery_session)
+            worker_barrier = _assemble_rag_evidence_barrier(
+                load_current_identity=lambda: 'a' * 64,
+                registered_lock=evidence_capability,
+                postgres_database=worker_database,
+            )
+            worker_provider_free = _assemble_provider_free_rag_phase2_authority(
+                owner_connection_factory=None,
+                owner_capability_factory=lambda _run_id: owner_capability,
+                load_current_owner_fence=load_fence,
+                evidence_barrier=worker_barrier,
+                postgres_database=worker_database,
+            )
+            worker_paid = _assemble_paid_rag_phase2_authority(
+                provider_safety=service,
+                safety_connection_factory=None,
+                safety_requirements=tuple(safety_requirements),
+                owner_connection_factory=None,
+                owner_capability_factory=lambda _run_id: owner_capability,
+                load_current_owner_fence=load_fence,
+                evidence_barrier=worker_barrier,
+                load_current_readiness=lambda: RagServingIndexReadiness(
+                    ready=True,
+                    corpus_generation=1,
+                    vector_index_generation=1,
+                    expected_document_count=0,
+                    live_vector_count=0,
+                    tombstone_count=0,
+                    mismatch_count_capped_at_20=0,
+                    embedding_model='text-embedding-3-small',
+                    embedding_dimensions=1536,
+                    index_policy_version='rag-v2-serving-index:v1',
+                    readiness_snapshot_hmac='4' * 64,
+                ),
+                postgres_database=worker_database,
+            )
+            worker_recovery = _assemble_projection_owner_recovery_authority(
+                ledger=recovery_ledger,
+                provider_free=worker_provider_free,
+                paid=worker_paid,
+                projection_read=ServingProjectionReadCoordinator(
+                    db=recovery_session,
+                    settings=projection_settings,
+                ),
+                postgres_database=worker_database,
+            )
+            SqlAlchemyRagFinalizationBoundary(
+                db=recovery_session,
+                settings=projection_settings,
+                retriever=SimpleNamespace(invoke=lambda request: request),
+                phase2_authority=worker_paid,
+                recovery_authority=worker_recovery,
+            )
+            recovery_pid.append(
+                recovery_session.scalar(text('SELECT pg_backend_pid()'))
+            )
+            recovery_started.set()
+            recovery_result.append(worker_recovery.recover(run_id))
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            recovery_errors.append(exc)
+        finally:
+            recovery_finished.set()
+            recovery_session.close()
+
+    worker: threading.Thread | None = None
+    with Session(engine) as mutation_session, mutation_session.begin():
+        plan = build_serving_lock_plan(
+            mutation_session,
+            ['history_event:999998'],
+        )
+        with KeyedMutationGuard.generation_barrier(mutation_session):
+            key_context = lock_runtime_state(mutation_session, mode='share')
+            ServingMutationLockCoordinator(
+                db=mutation_session,
+                settings=projection_settings,
+            ).acquire(key_context=key_context, plan=plan)
+            worker = threading.Thread(
+                target=recover_after_mutation_lock,
+                daemon=True,
+            )
+            worker.start()
+            assert recovery_started.wait(5)
+            deadline = time.monotonic() + 5
+            observed_database_lock = False
+            while time.monotonic() < deadline:
+                with engine.connect() as observer:
+                    wait_type = observer.scalar(
+                        text(
+                            'SELECT wait_event_type FROM pg_stat_activity '
+                            'WHERE pid = :pid'
+                        ),
+                        {'pid': recovery_pid[0]},
+                    )
+                if wait_type == 'Lock':
+                    observed_database_lock = True
+                    break
+                time.sleep(0.05)
+            assert observed_database_lock is True
+            assert recovery_finished.is_set() is False
+            with Session(engine) as probe:
+                parent = probe.get(AgentRun, run_id)
+                assert parent is not None
+                assert parent.status == 'running'
+                assert parent.run_record_phase == 'cost_finalized_pending_projection'
+
+    assert worker is not None
+    worker.join(timeout=10)
+    assert worker.is_alive() is False
+    assert recovery_errors == []
+    assert len(recovery_result) == 1
+    terminal = recovery_result[0]
+    assert terminal.outcome == 'persistence_failed'
+    with Session(engine) as probe:
+        parent = probe.get(AgentRun, run_id)
+        assert parent is not None and parent.status == 'failed'
+        assert parent.run_record_phase == 'final'
+        children = tuple(
+            probe.scalars(
+                select(AgentRunCostComponent)
+                .where(AgentRunCostComponent.agent_run_id == run_id)
+                .order_by(AgentRunCostComponent.component_ordinal)
+            )
+        )
+        assert tuple(value.dispatch_count for value in children) == (1, 1)
+        assert tuple(value.actual_input_tokens for value in children) == (20, 1)
+        assert tuple(value.actual_output_tokens for value in children) == (0, 10)
 
 
 def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
