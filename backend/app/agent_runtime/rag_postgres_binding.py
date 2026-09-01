@@ -32,6 +32,7 @@ _POSTGRES_ADVISORY_TRANSPORT_SEAL = object()
 _OPERATION_LEASE_SEAL = object()
 _CLEANUP_OWNER_SEAL = object()
 _EMERGENCY_CLEANUP_STATE_SEAL = object()
+_UNCONDITIONAL_TERMINAL_DRAIN_SEAL = object()
 _IDENTITY_SQL = text(
     "SELECT current_database(), current_schema(), current_schemas(false), "
     "current_setting('search_path'), current_user, "
@@ -563,7 +564,14 @@ class RagPostgresDatabaseAuthority:
                 try:
                     self._run_cleanup_state_machine(state)
                 except BaseException:
-                    self._force_terminal_cleanup_noexcept(state)
+                    with suppress(BaseException):
+                        self._force_terminal_cleanup_noexcept(state)
+                    with suppress(BaseException):
+                        _unconditional_terminal_drain(
+                            self,
+                            state,
+                            _seal=_UNCONDITIONAL_TERMINAL_DRAIN_SEAL,
+                        )
             if primary is not None:
                 raise primary.with_traceback(primary_traceback)
 
@@ -1363,6 +1371,91 @@ class RagPostgresDatabaseAuthority:
         ):
             raise TypeError('RAG PostgreSQL operation lease is required')
         return lease
+
+
+def _unconditional_terminal_drain(
+    authority: RagPostgresDatabaseAuthority,
+    state: _RagPostgresEmergencyCleanupState,
+    *,
+    _seal: object,
+) -> None:
+    """Non-throwing physical drain independent of patchable cleanup hooks."""
+    if _seal is not _UNCONDITIONAL_TERMINAL_DRAIN_SEAL:
+        return
+    with suppress(BaseException):
+        authority._assembly.trusted_bootstrap._drain_registered_application_checkout(
+            state.health_capability
+        )
+    session = authority._assembly.session
+    with suppress(BaseException):
+        if session.in_transaction():
+            session.rollback()
+    lease = state.lease
+    responsibility = state.connection_responsibility
+    connection = (
+        lease.application_connection
+        if lease is not None
+        else (
+            None
+            if responsibility is None
+            else responsibility.application_connection
+        )
+    )
+    original_bind = (
+        lease.original_session_bind
+        if lease is not None
+        else (
+            None if responsibility is None else responsibility.original_session_bind
+        )
+    )
+    owns_connection = (
+        lease.owns_application_connection
+        if lease is not None
+        else bool(
+            responsibility is not None
+            and responsibility.owns_application_connection
+        )
+    )
+    if connection is not None:
+        with suppress(BaseException):
+            if connection.in_transaction() or connection.in_nested_transaction():
+                connection.rollback()
+        if owns_connection:
+            with suppress(BaseException):
+                connection.invalidate()
+            with suppress(BaseException):
+                connection.close()
+    if original_bind is not None:
+        with suppress(BaseException):
+            session.bind = original_bind
+    with suppress(BaseException):
+        with authority._lifecycle_lock:
+            authority._active_leases = 0
+        authority._lease_context.set(None)
+    if state.close_on_exit:
+        connections: tuple[Connection, ...] = ()
+        with suppress(BaseException), authority._lifecycle_lock:
+            connections = tuple(authority._connections)
+            authority._connections.clear()
+            authority._state = 'closed'
+        for advisory_connection in connections:
+            with suppress(BaseException):
+                advisory_connection.invalidate()
+            with suppress(BaseException):
+                advisory_connection.close()
+        with suppress(BaseException):
+            if not authority._transport_disposal_complete:
+                try:
+                    authority._assembly.dedicated_engine.dispose()
+                finally:
+                    authority._transport_disposal_complete = True
+    with suppress(BaseException):
+        with authority._lifecycle_lock:
+            if authority._emergency_cleanup_state is state:
+                authority._emergency_cleanup_state = None
+            authority._cleanup_owner_capability = None
+            authority._active_leases = 0
+        state.active = False
 
 
 def _bind_rag_postgres_database(

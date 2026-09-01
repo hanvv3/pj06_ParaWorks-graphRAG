@@ -4214,3 +4214,31 @@ tests passed with 53 tests; ruff passed.
   passed, 16 skipped, 2128 deselected`. Real PostgreSQL remains URL-gated and
   unrun because the URL is absent. This is a candidate only; keep Task 14
   blocked until independent rereview returns `CLEAN`.
+
+## 2026-09-01 Deliverable D Core Task 13 seventeenth rereview candidate
+
+- Sixteenth rereview was `NOT CLEAN` on checkout tracker shutdown, atomic owner
+  publication, active/revoked registry continuity, and the health operation's
+  final invariant. The checkout registry now has a condition-guarded
+  `open/closing/closed` lifecycle. Closing preserves earlier armed/captured
+  ownership until drain and removes transactionally installed pool listeners;
+  listener cleanup uncertainty poisons admission and callbacks are inert after
+  closure.
+- Cleanup ticket claim publishes one frozen owner state containing the exact
+  capability, thread, generation, depth, and operation key. Failures after head
+  removal or before/after owner publication restore only the exact prior FIFO
+  and record. Plain cleanup claims use the same owner-state rule.
+- One private record registry holds `ACTIVE` and `REVOKED` phases. Revoke is an
+  in-place immutable phase replacement, and operation exit is the unpatchable
+  final owner: active/orphaned state is fail-stopped and exactly drained before
+  lease/authority retirement; a clean revoked tombstone is simply retired.
+- If both the normal state machine and normal fallback persistently raise, a
+  sealed bounded physical drain still restores the Session bind, ends the
+  transaction, closes application/advisory connections and the dedicated
+  transport, clears ContextVar/authority state, and preserves the durable result
+  or original validation, cancellation, or commit-unknown primary.
+- Fresh evidence: RED `14 failed` plus persistent-fallback RED `4 failed`;
+  targeted GREEN `23 passed`; initialization plus binding `244 passed`;
+  expanded focused `364 passed, 13 skipped`; broad affected `934 passed, 16
+  skipped, 2128 deselected`. Real PostgreSQL is absent-URL unrun. Candidate
+  only; keep Task 14 blocked until independent rereview returns `CLEAN`.

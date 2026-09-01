@@ -5857,3 +5857,33 @@ Cost/security note:
   passed, 16 skipped, 2128 deselected`. Real PostgreSQL is URL-gated and unrun
   because `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate only; no `CLEAN`
   claim and Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 seventeenth rereview candidate
+
+- The sixteenth independent rereview kept Task 13 open on four remaining
+  lifecycle/publication edges: checkout-listener revocation, split exclusive
+  owner state, separate active/revoked cleanup registries, and an operation exit
+  that did not own the final invariant when normal cleanup hooks persistently
+  failed.
+- The application checkout tracker now moves `open -> closing -> closed` under
+  its own condition. Closing rejects new arms while preserving existing armed
+  and captured responsibility, waits for its exact drain, then removes the
+  three pool listeners. Listener installation is transactional; after-effect
+  install failure is reconciled with `event.contains`, reverse removal is
+  retried, and any removal uncertainty fail-stops the shared runtime.
+- Cleanup ownership is one frozen `_PostgresExclusiveOwnerState`; ticket claim
+  creates the full capability/state before publication and restores the exact
+  prior FIFO on every injected seam. One immutable cleanup-record mapping uses
+  explicit `ACTIVE`/`REVOKED` phases plus an exact operation index, so revoke
+  never crosses a pop/install attestation gap.
+- Runtime operation exit directly inspects and drains the exact record, ticket,
+  owner, lease, and authority before retiring the lease. An orphaned `ACTIVE`
+  record unconditionally latches one-way unhealthy state without depending on
+  patchable cleanup hooks. A sealed outcome-preserving physical drain closes
+  the request authority even when both normal cleanup paths persistently fail.
+- RED was `14 failed` for the four review areas plus `4 failed` for persistent
+  dual-path cleanup. Targeted GREEN is `23 passed`; initialization plus binding
+  is `244 passed`; expanded focused is `364 passed, 13 skipped`; broad affected
+  is `934 passed, 16 skipped, 2128 deselected`. Real PostgreSQL remains
+  URL-gated and unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate
+  only; no `CLEAN` claim and Task 14 remains blocked.
