@@ -4326,3 +4326,54 @@ tests passed with 53 tests; ruff passed.
   initialization/binding `312 passed`; affected broad `1002 passed, 16
   skipped, 2128 deselected`. Real PostgreSQL is URL-gated and unrun because the
   URL is absent. Candidate only; Task 14 remains blocked pending rereview.
+
+## 2026-09-01 PAUSED — Deliverable D Core Task 13 twenty-second remediation start point
+
+- The user explicitly requested a documentation checkpoint and stop. The
+  implementation subagent was interrupted before Task 13's twenty-second RED
+  tests or production edits began.
+- Resume from branch `codex/rag-orchestrator-agent` in worktree
+  `.worktrees/review-hitl-v2-design` at commit `d15e9d0` (`fix: retain exact
+  rag listener ownership`). The tracked worktree was clean at pause time.
+- The twenty-first independent rereview was `NOT CLEAN` with exactly two P1
+  listener-lifecycle blockers. Task 14 must remain blocked.
+  1. Listener responsibility is retired inside bootstrap construction before
+     `initialize_database_runtime` has safely published the bootstrap and
+     `DatabaseRuntime`. A `CALL -> STORE_FAST/RETURN` interruption can leave a
+     completed registry/listener set without bootstrap, runtime, or quarantine
+     ownership.
+  2. `construction_failed()` can itself be interrupted around global/self lock
+     acquisition, state transition, or claim-map pop. This can strand
+     `INSTALLING`/`CLAIMING`, lose the popped responsibility, make a later
+     initialization wait forever, or incorrectly admit a new construction.
+- The next action is **actual implementation**, not planning: execute Task 13
+  twenty-second remediation with strict TDD.
+  1. Add an outer sealed publication responsibility before any listener side
+     effect and retain it through bootstrap storage, `DatabaseRuntime`
+     ownership publication, and function return. Internal bootstrap claim must
+     transfer into this already-published owner rather than retire the only
+     process responsibility.
+  2. Add deterministic faults after real bootstrap construction but before
+     caller assignment, after bootstrap storage but before runtime publication,
+     and after runtime construction but before return. Preserve the exact
+     primary and leave either no listener or one reachable bounded obligation.
+  3. Publish a sealed emergency tombstone before claim/cleanup can lose
+     ownership. Future registration must detect unresolved/poisoned
+     `INSTALLING`/`CLAIMING` state and return a bounded typed fail-stop instead
+     of waiting forever or adopting it. Later drain must remove only the exact
+     callbacks and preserve foreign construction state.
+  4. Run independent rereview again; only `CLEAN` may complete Task 13 and
+     unblock Task 14.
+- Last accepted candidate evidence at `d15e9d0`: new acceptance `11 passed`;
+  listener cohort `28 passed, 204 deselected`; initialization/binding `312
+  passed`; affected broad `1002 passed, 16 skipped, 2128 deselected`; Ruff,
+  compile/import, Alembic single head, diff, status, and secret scan green.
+- `PARAWORKS_TEST_POSTGRES_URL` was absent. Real PostgreSQL same-server,
+  non-superuser, concurrency, durability, and cleanup gates remain unrun and
+  must not be claimed. No `.env`, live provider, network, Docker, or paid calls
+  were used.
+- A completed forced-demo-SQLite whole-backend diagnostic produced `2820
+  passed, 121 skipped, 104 failed, 61 errors`. The 165 nonpasses were classified
+  as 149 real-PostgreSQL requirements, 6 PostgreSQL-only Task 13 assembly tests
+  invalid under forced SQLite, and 10 existing Slack/OAuth/config-sensitive
+  expectations. It is diagnostic context, not production-PostgreSQL evidence.

@@ -5991,3 +5991,21 @@ Cost/security note:
   deselected`. The 16 real PostgreSQL cases remain unrun because
   `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate only; no `CLEAN` claim and
   Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 paused after twenty-first rereview
+
+- Work is intentionally paused at clean commit `d15e9d0` on
+  `codex/rag-orchestrator-agent`; the twenty-second remediation has not changed
+  code or added RED tests yet.
+- Independent rereview remains `NOT CLEAN` on two P1 construction-publication
+  edges: bootstrap/runtime `CALL -> STORE/RETURN` can outlive the sole listener
+  responsibility, and interruption inside `construction_failed()` can strand
+  or lose `INSTALLING/CLAIMING` ownership.
+- Resume with actual TDD implementation of an outer process-owned publication
+  responsibility retained through `DatabaseRuntime` return plus a sealed,
+  bounded emergency tombstone/fail-stop path for construction cleanup. Task 14
+  stays blocked until a fresh independent `CLEAN` review.
+- Last green candidate evidence: listener acceptance `11 passed`,
+  initialization/binding `312 passed`, affected broad `1002 passed, 16
+  skipped, 2128 deselected`, with static/security/migration checks green. Real
+  PostgreSQL remains unrun because its URL is absent.
