@@ -21,12 +21,14 @@ from backend.app.agent_runtime.rag_advisory_locks import (
 from backend.app.db.initialization import (
     TrustedPostgresEngineBootstrap,
     TrustedPostgresRuntimeHealth,
+    _PostgresCleanupOwnerCapability,
     _PostgresRuntimeHealthLease,
 )
 
 _POSTGRES_DATABASE_AUTHORITY_SEAL = object()
 _POSTGRES_ADVISORY_TRANSPORT_SEAL = object()
 _OPERATION_LEASE_SEAL = object()
+_CLEANUP_OWNER_SEAL = object()
 _IDENTITY_SQL = text(
     "SELECT current_database(), current_schema(), current_schemas(false), "
     "current_setting('search_path'), current_user, "
@@ -130,6 +132,13 @@ class _PostgresAdvisoryTransportAssembly:
     identity: RagPostgresDatabaseIdentity
     server_identity: RagPostgresWritableServerIdentity
     runtime_health: TrustedPostgresRuntimeHealth = field(repr=False)
+    _seal: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _RagPostgresCleanupOwner:
+    authority: RagPostgresDatabaseAuthority = field(repr=False)
+    health_owner: _PostgresCleanupOwnerCapability = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -290,6 +299,7 @@ class RagPostgresDatabaseAuthority:
         '_assembly',
         '_connections',
         '_cleanup_failure',
+        '_cleanup_owner_capability',
         '_lease_context',
         '_lifecycle_lock',
         '_state',
@@ -320,6 +330,7 @@ class RagPostgresDatabaseAuthority:
         self._state: Literal['open', 'closing', 'closed'] = 'open'
         self._connections: set[Connection] = set()
         self._cleanup_failure: RagPostgresDatabaseCleanupFailure | None = None
+        self._cleanup_owner_capability: _RagPostgresCleanupOwner | None = None
         self._lease_context: ContextVar[_RagPostgresOperationLease | None] = (
             ContextVar(
                 f'rag_postgres_operation_lease_{id(self)}',
@@ -461,10 +472,13 @@ class RagPostgresDatabaseAuthority:
             try:
                 yield lease
             finally:
-                with health._cleanup_boundary():
-                    self._release_application_transaction(lease)
-                    if close_on_exit:
-                        self.close()
+                with health._cleanup_boundary() as health_owner:
+                    cleanup_owner = self._mint_cleanup_owner(health_owner)
+                    try:
+                        self._release_application_transaction(lease)
+                    finally:
+                        if close_on_exit:
+                            self._close_under_cleanup_owner(cleanup_owner)
 
     def _pin_application_transaction(
         self,
@@ -587,24 +601,60 @@ class RagPostgresDatabaseAuthority:
 
     def close(self) -> RagPostgresDatabaseCleanupFailure | None:
         """Stop new leases, then close idle request-owned transport once."""
-        with self._assembly.runtime_health._cleanup_boundary():
-            with self._lifecycle_lock:
-                if self._state == 'closed':
-                    return self._cleanup_failure
-                if self._active_leases:
-                    self._state = 'closing'
-                    raise RagPostgresDatabaseBusyError(
-                        'RAG PostgreSQL database authority has an active operation'
-                    )
-                self._state = 'closed'
-            failure = self._dispose_owned_transport()
-            with self._lifecycle_lock:
-                if failure is not None:
-                    self._cleanup_failure = failure
-                cleanup_failure = self._cleanup_failure
+        health = self._assembly.runtime_health
+        with health._cleanup_boundary() as health_owner:
+            return self._close_under_cleanup_owner(
+                self._mint_cleanup_owner(health_owner)
+            )
+
+    def _mint_cleanup_owner(
+        self,
+        health_owner: object,
+    ) -> _RagPostgresCleanupOwner:
+        health = self._assembly.runtime_health
+        health._require_cleanup_owner(health_owner, outermost=True)
+        cleanup_owner = _RagPostgresCleanupOwner(
+            authority=self,
+            health_owner=health_owner,
+            _seal=_CLEANUP_OWNER_SEAL,
+        )
+        with self._lifecycle_lock:
+            self._cleanup_owner_capability = cleanup_owner
+        return cleanup_owner
+
+    def _close_under_cleanup_owner(
+        self,
+        cleanup_owner: object,
+    ) -> RagPostgresDatabaseCleanupFailure | None:
+        health = self._assembly.runtime_health
+        if (
+            type(cleanup_owner) is not _RagPostgresCleanupOwner
+            or cleanup_owner._seal is not _CLEANUP_OWNER_SEAL
+            or cleanup_owner.authority is not self
+            or self._cleanup_owner_capability is not cleanup_owner
+        ):
+            raise TypeError('RAG PostgreSQL cleanup owner changed')
+        health._require_cleanup_owner(
+            cleanup_owner.health_owner,
+            outermost=True,
+        )
+        with self._lifecycle_lock:
+            if self._state == 'closed':
+                return self._cleanup_failure
+            if self._active_leases:
+                self._state = 'closing'
+                raise RagPostgresDatabaseBusyError(
+                    'RAG PostgreSQL database authority has an active operation'
+                )
+            self._state = 'closed'
+        failure = self._dispose_owned_transport()
+        with self._lifecycle_lock:
             if failure is not None:
-                self._assembly.runtime_health._poison()
-            return cleanup_failure
+                self._cleanup_failure = failure
+            cleanup_failure = self._cleanup_failure
+        if failure is not None:
+            health._poison()
+        return cleanup_failure
 
     def _record_cleanup_failure(self) -> None:
         with self._lifecycle_lock:

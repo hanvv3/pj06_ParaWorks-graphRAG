@@ -5726,3 +5726,26 @@ Cost/security note:
   deselected`. `PARAWORKS_TEST_POSTGRES_URL` is absent, so real PostgreSQL
   acceptance remains unrun. This is not `CLEAN`; Task 14 remains blocked. No
   provider, network, Docker, paid call, or `.env` access occurred.
+
+## 2026-09-01 Deliverable D Core Task 13 twelfth rereview candidate
+
+- The eleventh independent review kept Task 13 open on one cleanup ownership
+  race: `owned_operation()` already held the outer FIFO cleanup gate but called
+  public `close()`, which attempted to acquire a second ticket. A foreign
+  cleanup or poison waiter could therefore turn a committed result or primary
+  failure into `cleanup reentrancy cannot bypass queued authority` and skip
+  request-owned advisory disposal.
+- The health gate now issues one sealed cleanup-owner capability for the exact
+  gate, thread, generation, active depth, and current owner token. The database
+  authority wraps it with its own sealed identity. Transaction release and
+  request transport disposal continue under that owner without a second queue
+  acquisition; public `close()` still obtains a fresh FIFO ticket.
+- Forged, expired, cross-thread, cross-gate, and wrong-authority cleanup owners
+  fail before cleanup. A queued foreign waiter proceeds only after the outer
+  compound cleanup releases. Dispose uncertainty poisons under the same owner
+  before result/exception escape without deadlock, while success,
+  `KeyboardInterrupt`, validation, and commit-unknown primaries are preserved.
+- Candidate verification is expanded focused `187 passed, 11 skipped` and
+  broad affected `802 passed, 16 skipped, 2128 deselected`.
+  `PARAWORKS_TEST_POSTGRES_URL` remains absent, so real PostgreSQL acceptance is
+  unrun. This is not `CLEAN`; Task 14 remains blocked.

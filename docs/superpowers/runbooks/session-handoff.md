@@ -4099,3 +4099,24 @@ tests passed with 53 tests; ruff passed.
   `PARAWORKS_TEST_POSTGRES_URL` is absent, so real PostgreSQL behavior is still
   unrun. Treat this as a rereview candidate only; do not start Task 14 unless an
   independent review returns `CLEAN`.
+
+## 2026-09-01 Deliverable D Core Task 13 twelfth rereview candidate
+
+- Eleventh rereview was `NOT CLEAN` on one ownership edge. During
+  `owned_operation()` cleanup, public `close()` reacquired the FIFO gate. If a
+  foreign cleanup/poison ticket had queued after transaction release began,
+  this nested acquisition raised and could mask the durable product or primary
+  failure while leaving request advisory resources undisposed.
+- `_cleanup_boundary()` now yields a sealed exact owner capability bound to the
+  health gate, owner thread, ownership generation, active depth, and current
+  token. `RagPostgresDatabaseAuthority` adds its own exact authority wrapper.
+  Its internal close continues under that compound owner; only public close
+  obtains a new FIFO ticket.
+- Deterministic races cover foreign cleanup and poison waiters against success,
+  cancellation, validation, and commit-unknown. Separate dispose-failure races
+  prove one close/dispose attempt, poison-before-escape, primary preservation,
+  FIFO continuation, zero residual connections/tickets/depth, and rejection of
+  forged/expired/cross-thread/cross-gate/wrong-authority capabilities.
+- Fresh gates are expanded focused `187 passed, 11 skipped` and broad affected
+  `802 passed, 16 skipped, 2128 deselected`. Real PostgreSQL remains absent-URL
+  unrun. Keep Task 14 blocked until independent review returns `CLEAN`.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import threading
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1032,6 +1033,376 @@ def test_concurrent_close_cannot_release_an_active_operation_transport(
 
     authority.close()
     assert connection.closed is True
+    session.close()
+    application.dispose()
+
+
+class _CommitUnknownProbe(BaseException):
+    pass
+
+
+@pytest.mark.parametrize(
+    ('foreign_kind', 'primary'),
+    (
+        ('cleanup', None),
+        ('poison', KeyboardInterrupt('cancelled projection')),
+        ('cleanup', ValueError('validation primary')),
+        ('poison', _CommitUnknownProbe('commit state unknown')),
+    ),
+)
+def test_owned_operation_close_continues_under_outer_cleanup_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    foreign_kind: str,
+    primary: BaseException | None,
+) -> None:
+    application, dedicated = _fake_postgres_engines()
+    session = Session(application)
+    identity = _identity()
+    monkeypatch.setattr(binding_module, '_session_identity', lambda _session: identity)
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+    disposed: list[str] = []
+    event.listen(dedicated, 'engine_disposed', lambda *_args: disposed.append('dispose'))
+    authority = _bind_rag_postgres_database(
+        session,
+        trusted_bootstrap=_trusted_bootstrap(
+            monkeypatch,
+            application,
+            dedicated,
+        ),
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    health = authority.runtime_health_authority
+    release_entered = threading.Event()
+    resume_release = threading.Event()
+    foreign_enqueued = threading.Event()
+    foreign_finished = threading.Event()
+    order: list[str] = []
+    errors: list[BaseException] = []
+    products: list[str] = []
+    advisory_connections: list[Connection] = []
+    foreign_thread_ids: list[int] = []
+    invalidations = 0
+    closes = 0
+    original_release = type(authority)._release_application_transaction
+    original_enqueue = type(health)._enqueue_exclusive_ticket
+    original_invalidate = Connection.invalidate
+    original_close = Connection.close
+
+    def pause_release(self, lease) -> None:
+        release_entered.set()
+        assert resume_release.wait(timeout=5)
+        original_release(self, lease)
+
+    def observe_enqueue(self, *, thread_id: int, purpose: str):
+        ticket = original_enqueue(self, thread_id=thread_id, purpose=purpose)
+        if foreign_thread_ids and thread_id == foreign_thread_ids[0]:
+            foreign_enqueued.set()
+        return ticket
+
+    def count_invalidate(connection: Connection, *args, **kwargs):
+        nonlocal invalidations
+        if connection in advisory_connections:
+            invalidations += 1
+        return original_invalidate(connection, *args, **kwargs)
+
+    def count_close(connection: Connection, *args, **kwargs):
+        nonlocal closes
+        if connection in advisory_connections:
+            closes += 1
+        return original_close(connection, *args, **kwargs)
+
+    monkeypatch.setattr(
+        type(authority),
+        '_release_application_transaction',
+        pause_release,
+    )
+    monkeypatch.setattr(
+        type(health),
+        '_enqueue_exclusive_ticket',
+        observe_enqueue,
+    )
+    monkeypatch.setattr(Connection, 'invalidate', count_invalidate)
+    monkeypatch.setattr(Connection, 'close', count_close)
+
+    def run_owned_operation() -> None:
+        try:
+            with authority.owned_operation():
+                advisory_connections.append(authority.connect())
+                products.append('known_durable_result')
+                if primary is not None:
+                    raise primary
+        except BaseException as error:
+            errors.append(error)
+
+    def run_foreign() -> None:
+        foreign_thread_ids.append(threading.get_ident())
+        if foreign_kind == 'cleanup':
+            with health._cleanup_boundary():
+                order.append('foreign_cleanup')
+        else:
+            health._poison()
+            order.append('foreign_poison')
+        foreign_finished.set()
+
+    owner = threading.Thread(target=run_owned_operation)
+    foreign = threading.Thread(target=run_foreign)
+    owner.start()
+    assert release_entered.wait(timeout=2)
+    foreign.start()
+    assert foreign_enqueued.wait(timeout=2)
+    assert foreign_finished.is_set() is False
+    resume_release.set()
+    owner.join(timeout=5)
+    foreign.join(timeout=5)
+    assert owner.is_alive() is False
+    assert foreign.is_alive() is False
+
+    closed_before_fallback = authority.closed
+    disposed_before_fallback = len(disposed)
+    connection_closed_before_fallback = advisory_connections[0].closed
+    if not authority.closed:
+        authority.close()
+
+    assert products == ['known_durable_result']
+    if primary is None:
+        assert errors == []
+    else:
+        assert errors == [primary]
+    assert closed_before_fallback is True
+    assert disposed_before_fallback == 1
+    assert connection_closed_before_fallback is True
+    assert invalidations == 1
+    assert closes == 1
+    assert order == [f'foreign_{foreign_kind}']
+    assert health._exclusive_waiters == 0
+    assert health._exclusive_owner is None
+    assert health._exclusive_depth == 0
+    assert authority._connections == set()
+    if foreign_kind == 'poison':
+        assert health.snapshot.healthy is False
+        with (
+            pytest.raises(TypeError, match='runtime health'),
+            health._effect('future-admission'),
+        ):
+            raise AssertionError('poisoned runtime must reject admission')
+    session.close()
+    application.dispose()
+
+
+def test_cleanup_owner_capability_rejects_forged_expired_cross_thread_and_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated = _fake_postgres_engines()
+    session = Session(application)
+    identity = _identity()
+    monkeypatch.setattr(binding_module, '_session_identity', lambda _session: identity)
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+    authority = _bind_rag_postgres_database(
+        session,
+        trusted_bootstrap=_trusted_bootstrap(
+            monkeypatch,
+            application,
+            dedicated,
+        ),
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    health = authority.runtime_health_authority
+
+    with pytest.raises(TypeError, match='cleanup owner'):
+        authority._close_under_cleanup_owner(object())
+
+    cross_thread_errors: list[BaseException] = []
+    with health._cleanup_boundary() as health_owner:
+        owner = authority._mint_cleanup_owner(health_owner)
+
+        with (
+            health._cleanup_boundary(),
+            pytest.raises(TypeError, match='cleanup owner'),
+        ):
+            authority._close_under_cleanup_owner(owner)
+
+        copied_owner = replace(owner)
+        with pytest.raises(TypeError, match='cleanup owner'):
+            authority._close_under_cleanup_owner(copied_owner)
+
+        def cross_thread_close() -> None:
+            try:
+                authority._close_under_cleanup_owner(owner)
+            except BaseException as error:
+                cross_thread_errors.append(error)
+
+        thread = threading.Thread(target=cross_thread_close)
+        thread.start()
+        thread.join(timeout=5)
+        assert thread.is_alive() is False
+        assert len(cross_thread_errors) == 1
+        assert isinstance(cross_thread_errors[0], TypeError)
+
+        wrong_authority = replace(owner, authority=object())
+        with pytest.raises(TypeError, match='cleanup owner'):
+            authority._close_under_cleanup_owner(wrong_authority)
+
+    with pytest.raises(TypeError, match='cleanup owner'):
+        authority._close_under_cleanup_owner(owner)
+
+    foreign_health = initialization.TrustedPostgresRuntimeHealth(
+        _seal=initialization._POSTGRES_RUNTIME_HEALTH_SEAL
+    )
+    with (
+        foreign_health._cleanup_boundary() as foreign_owner,
+        pytest.raises(TypeError, match='cleanup owner'),
+    ):
+        authority._mint_cleanup_owner(foreign_owner)
+
+    authority.close()
+    session.close()
+    application.dispose()
+
+
+@pytest.mark.parametrize(
+    'primary',
+    (None, KeyboardInterrupt('cleanup cancellation primary')),
+)
+def test_owned_operation_cleanup_failure_poisons_before_escape_with_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+    primary: BaseException | None,
+) -> None:
+    application, dedicated = _fake_postgres_engines()
+    session = Session(application)
+    identity = _identity()
+    monkeypatch.setattr(binding_module, '_session_identity', lambda _session: identity)
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+    authority = _bind_rag_postgres_database(
+        session,
+        trusted_bootstrap=_trusted_bootstrap(
+            monkeypatch,
+            application,
+            dedicated,
+        ),
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    health = authority.runtime_health_authority
+    release_entered = threading.Event()
+    resume_release = threading.Event()
+    foreign_enqueued = threading.Event()
+    foreign_finished = threading.Event()
+    foreign_thread_ids: list[int] = []
+    errors: list[BaseException] = []
+    returned_health: list[bool] = []
+    advisory_connections: list[Connection] = []
+    order: list[str] = []
+    dispose_calls = 0
+    original_release = type(authority)._release_application_transaction
+    original_enqueue = type(health)._enqueue_exclusive_ticket
+
+    def pause_release(self, lease) -> None:
+        release_entered.set()
+        assert resume_release.wait(timeout=5)
+        original_release(self, lease)
+
+    def observe_enqueue(self, *, thread_id: int, purpose: str):
+        ticket = original_enqueue(self, thread_id=thread_id, purpose=purpose)
+        if foreign_thread_ids and thread_id == foreign_thread_ids[0]:
+            foreign_enqueued.set()
+        return ticket
+
+    def fail_dispose(*_args, **_kwargs) -> None:
+        nonlocal dispose_calls
+        dispose_calls += 1
+        order.append('dispose_failed')
+        raise RuntimeError('sensitive dedicated transport failure')
+
+    monkeypatch.setattr(
+        type(authority),
+        '_release_application_transaction',
+        pause_release,
+    )
+    monkeypatch.setattr(
+        type(health),
+        '_enqueue_exclusive_ticket',
+        observe_enqueue,
+    )
+    monkeypatch.setattr(dedicated, 'dispose', fail_dispose)
+
+    def run_owned_operation() -> None:
+        try:
+            with authority.owned_operation():
+                advisory_connections.append(authority.connect())
+                if primary is not None:
+                    raise primary
+            returned_health.append(health.snapshot.healthy)
+        except BaseException as error:
+            returned_health.append(health.snapshot.healthy)
+            errors.append(error)
+
+    def run_foreign_cleanup() -> None:
+        foreign_thread_ids.append(threading.get_ident())
+        with health._cleanup_boundary():
+            order.append('foreign_cleanup')
+        foreign_finished.set()
+
+    owner = threading.Thread(target=run_owned_operation)
+    foreign = threading.Thread(target=run_foreign_cleanup)
+    owner.start()
+    assert release_entered.wait(timeout=2)
+    foreign.start()
+    assert foreign_enqueued.wait(timeout=2)
+    resume_release.set()
+    owner.join(timeout=5)
+    foreign.join(timeout=5)
+    assert owner.is_alive() is False
+    assert foreign.is_alive() is False
+    assert foreign_finished.is_set() is True
+
+    if primary is None:
+        assert errors == []
+    else:
+        assert errors == [primary]
+    assert returned_health == [False]
+    assert order == ['dispose_failed', 'foreign_cleanup']
+    assert dispose_calls == 1
+    assert authority.closed is True
+    assert advisory_connections[0].closed is True
+    assert authority.cleanup_failure is not None
+    assert authority.cleanup_failure.code == 'rag_postgres_transport_cleanup_failed'
+    assert health.snapshot.healthy is False
+    assert health.snapshot.failure_count == 1
+    assert 'sensitive' not in repr(health.snapshot)
+    assert health._exclusive_waiters == 0
+    assert health._exclusive_owner is None
+    assert health._exclusive_depth == 0
+    with (
+        pytest.raises(TypeError, match='runtime health'),
+        health._effect('future-effect'),
+    ):
+        raise AssertionError('poisoned runtime must refuse future effects')
     session.close()
     application.dispose()
 

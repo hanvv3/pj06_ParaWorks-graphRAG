@@ -42,6 +42,7 @@ class PostgresRuntimeHealthUnavailableError(TypeError):
 _POSTGRES_BOOTSTRAP_SEAL = object()
 _POSTGRES_RUNTIME_HEALTH_SEAL = object()
 _POSTGRES_RUNTIME_HEALTH_LEASE_SEAL = object()
+_POSTGRES_CLEANUP_OWNER_SEAL = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,15 @@ class _PostgresRuntimeExclusiveTicket:
     purpose: Literal['cleanup', 'poison']
 
 
+@dataclass(slots=True, repr=False)
+class _PostgresCleanupOwnerCapability:
+    health: TrustedPostgresRuntimeHealth = field(repr=False)
+    owner_thread_id: int
+    generation: int
+    active: bool = field(default=True, repr=False)
+    _seal: object = field(default=None, repr=False, compare=False)
+
+
 class TrustedPostgresRuntimeHealth:
     """Process-local fail-stop admission shared by one DB runtime."""
 
@@ -77,10 +87,12 @@ class TrustedPostgresRuntimeHealth:
         '_effect_depths',
         '_epoch',
         '_exclusive_depth',
+        '_exclusive_generation',
         '_exclusive_owner',
         '_exclusive_ticket_sequence',
         '_exclusive_tickets',
         '_exclusive_waiters',
+        '_cleanup_owner_capability',
         '_failure_count',
         '_first_failure_monotonic_ns',
         '_healthy',
@@ -102,9 +114,11 @@ class TrustedPostgresRuntimeHealth:
         self._effect_depths: dict[int, int] = {}
         self._exclusive_owner: int | None = None
         self._exclusive_depth = 0
+        self._exclusive_generation = 0
         self._exclusive_ticket_sequence = 0
         self._exclusive_tickets: deque[_PostgresRuntimeExclusiveTicket] = deque()
         self._exclusive_waiters = 0
+        self._cleanup_owner_capability: _PostgresCleanupOwnerCapability | None = None
         self._poison_requested = False
         self._seal = _seal
 
@@ -250,13 +264,13 @@ class TrustedPostgresRuntimeHealth:
     @contextmanager
     def _cleanup_boundary(self):
         """Linearize cleanup success or poison before another admission."""
-        self._enter_cleanup()
+        capability = self._enter_cleanup()
         try:
-            yield
+            yield capability
         finally:
-            self._exit_cleanup()
+            self._exit_cleanup(capability)
 
-    def _enter_cleanup(self) -> None:
+    def _enter_cleanup(self) -> _PostgresCleanupOwnerCapability:
         thread_id = get_ident()
         with self._condition:
             if self._effect_depths.get(thread_id, 0):
@@ -269,7 +283,10 @@ class TrustedPostgresRuntimeHealth:
                         'cleanup reentrancy cannot bypass queued authority'
                     )
                 self._exclusive_depth += 1
-                return
+                capability = self._cleanup_owner_capability
+                if capability is None:
+                    raise RuntimeError('PostgreSQL cleanup owner is unavailable')
+                return capability
             ticket = self._enqueue_exclusive_ticket(
                 thread_id=thread_id,
                 purpose='cleanup',
@@ -284,19 +301,52 @@ class TrustedPostgresRuntimeHealth:
                 self._claim_head_exclusive_ticket(ticket)
                 self._exclusive_owner = thread_id
                 self._exclusive_depth = 1
+                self._exclusive_generation += 1
+                capability = _PostgresCleanupOwnerCapability(
+                    health=self,
+                    owner_thread_id=thread_id,
+                    generation=self._exclusive_generation,
+                    _seal=_POSTGRES_CLEANUP_OWNER_SEAL,
+                )
+                self._cleanup_owner_capability = capability
+                return capability
             except BaseException:
                 self._cancel_exclusive_ticket(ticket)
                 raise
 
-    def _exit_cleanup(self) -> None:
-        thread_id = get_ident()
+    def _exit_cleanup(
+        self,
+        capability: _PostgresCleanupOwnerCapability,
+    ) -> None:
         with self._condition:
-            if self._exclusive_owner != thread_id or self._exclusive_depth <= 0:
-                raise RuntimeError('PostgreSQL cleanup authority changed')
+            self._require_cleanup_owner(capability)
             self._exclusive_depth -= 1
             if self._exclusive_depth == 0:
+                capability.active = False
+                self._cleanup_owner_capability = None
                 self._exclusive_owner = None
                 self._condition.notify_all()
+
+    def _require_cleanup_owner(
+        self,
+        capability: object,
+        *,
+        outermost: bool = False,
+    ) -> None:
+        with self._condition:
+            if (
+                type(capability) is not _PostgresCleanupOwnerCapability
+                or capability._seal is not _POSTGRES_CLEANUP_OWNER_SEAL
+                or capability.health is not self
+                or not capability.active
+                or self._cleanup_owner_capability is not capability
+                or capability.owner_thread_id != get_ident()
+                or self._exclusive_owner != get_ident()
+                or self._exclusive_depth <= 0
+                or (outermost and self._exclusive_depth != 1)
+                or capability.generation != self._exclusive_generation
+            ):
+                raise TypeError('PostgreSQL cleanup owner capability changed')
 
     def _enqueue_exclusive_ticket(
         self,
