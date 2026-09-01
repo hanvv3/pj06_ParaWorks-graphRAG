@@ -5775,3 +5775,29 @@ Cost/security note:
   `858 passed, 16 skipped, 2128 deselected`. The real PostgreSQL cases remain
   URL-gated and were not run because `PARAWORKS_TEST_POSTGRES_URL` is absent.
   This is a rereview candidate only, not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 fourteenth rereview candidate
+
+- The thirteenth independent review found a pre-machine gap: the physical app
+  connection and transaction were pinned before emergency cleanup
+  responsibility was registered. A sibling poison or capability/state setup
+  fault in that gap could leave the Session transaction and connection live.
+- Runtime health now registers the exact operation lease itself, then mints an
+  authority-bound emergency responsibility before application checkout, bind,
+  transaction, provider, or database effects. State installation precedes the
+  compound health effect; pin, body, and connection snapshot remain inside
+  that uninterrupted shared effect. Cleanup starts only after the effect exits.
+- The attestation binds the exact process-local operation object, seal, epoch,
+  purpose, authority, active registry entry, cleanup ticket, and ownership
+  generation. Copies, inactive/changed leases, wrong purpose/epoch/seal,
+  cross-operation replay, and revoked capabilities fail. Revocation removes
+  only the exact ticket/generation, never another same-thread or foreign owner.
+- Cleanup uncertainty has a sealed unconditional poison/revoke fallback.
+  Persistent faults in the normal fail-stop or finish hooks cannot leave health
+  usable or the capability registered. Durable results and original validation,
+  cancellation, or commit-unknown primaries remain authoritative.
+- RED was `5 failed`. New targeted GREEN is `15 passed`; the previous cleanup
+  matrix remains `56 passed`; initialization plus binding is `180 passed`;
+  expanded focused is `303 passed, 13 skipped`; broad affected is `873 passed,
+  16 skipped, 2128 deselected`. Real PostgreSQL remains URL-gated and unrun
+  because the URL is absent. Candidate only, not `CLEAN`; Task 14 is blocked.

@@ -147,10 +147,16 @@ class _RagPostgresCleanupOwner:
 @dataclass(slots=True, repr=False)
 class _RagPostgresEmergencyCleanupState:
     authority: RagPostgresDatabaseAuthority = field(repr=False)
-    lease: _RagPostgresOperationLease = field(repr=False)
     health_capability: _PostgresEmergencyCleanupCapability = field(repr=False)
     close_on_exit: bool
     captured_connections: tuple[Connection, ...] = field(repr=False)
+    lease: _RagPostgresOperationLease | None = field(default=None, repr=False)
+    application_connection: Connection | None = field(default=None, repr=False)
+    original_session_bind: Engine | Connection | None = field(
+        default=None,
+        repr=False,
+    )
+    owns_application_connection: bool = False
     cleanup_uncertain: bool = False
     health_owner: _PostgresCleanupOwnerCapability | None = field(
         default=None,
@@ -496,34 +502,115 @@ class RagPostgresDatabaseAuthority:
     def _leased_operation(self, *, close_on_exit: bool):
         health = self._assembly.runtime_health
         with health._operation('rag_finalization_or_recovery') as health_lease:
-            lease = self._pin_application_transaction(health_lease)
-            emergency_capability = health._mint_emergency_cleanup_capability(
-                health_lease
-            )
+            setup_uncertain = False
+            try:
+                emergency_capability = (
+                    health._mint_emergency_cleanup_capability(
+                        health_lease,
+                        authority=self,
+                    )
+                )
+            except BaseException:
+                setup_uncertain = True
+                emergency_capability = (
+                    health._force_mint_emergency_cleanup_capability(
+                        health_lease,
+                        authority=self,
+                    )
+                )
+            try:
+                state = self._install_emergency_cleanup_state(
+                    emergency_capability,
+                    close_on_exit=close_on_exit,
+                )
+            except BaseException:
+                setup_uncertain = True
+                state = self._force_install_emergency_cleanup_state(
+                    emergency_capability,
+                    close_on_exit=close_on_exit,
+                )
+            if setup_uncertain:
+                self._mark_cleanup_uncertain(state)
+            primary: BaseException | None = None
+            primary_traceback = None
+            try:
+                with health._guard(health_lease):
+                    lease = self._pin_application_transaction(
+                        health_lease,
+                        state,
+                    )
+                    try:
+                        yield lease
+                    except BaseException as exc:
+                        primary = exc
+                        primary_traceback = exc.__traceback__
+                    finally:
+                        try:
+                            self._capture_emergency_connections(state)
+                        except BaseException:
+                            self._mark_cleanup_uncertain(state)
+            except BaseException as exc:
+                if primary is None:
+                    primary = exc
+                    primary_traceback = exc.__traceback__
+            finally:
+                self._run_cleanup_state_machine(state)
+            if primary is not None:
+                raise primary.with_traceback(primary_traceback)
+
+    def _install_emergency_cleanup_state(
+        self,
+        emergency_capability: _PostgresEmergencyCleanupCapability,
+        *,
+        close_on_exit: bool,
+    ) -> _RagPostgresEmergencyCleanupState:
+        state = _RagPostgresEmergencyCleanupState(
+            authority=self,
+            health_capability=emergency_capability,
+            close_on_exit=close_on_exit,
+            captured_connections=(),
+            _seal=_EMERGENCY_CLEANUP_STATE_SEAL,
+        )
+        with self._lifecycle_lock:
+            if self._emergency_cleanup_state is not None:
+                raise RuntimeError('RAG PostgreSQL cleanup state changed')
+            self._emergency_cleanup_state = state
+        return state
+
+    def _force_install_emergency_cleanup_state(
+        self,
+        emergency_capability: _PostgresEmergencyCleanupCapability,
+        *,
+        close_on_exit: bool,
+    ) -> _RagPostgresEmergencyCleanupState:
+        with self._lifecycle_lock:
+            current = self._emergency_cleanup_state
+            if current is not None:
+                if (
+                    type(current) is not _RagPostgresEmergencyCleanupState
+                    or current._seal is not _EMERGENCY_CLEANUP_STATE_SEAL
+                    or current.authority is not self
+                    or current.health_capability is not emergency_capability
+                ):
+                    raise TypeError('RAG PostgreSQL cleanup state changed')
+                return current
             state = _RagPostgresEmergencyCleanupState(
                 authority=self,
-                lease=lease,
                 health_capability=emergency_capability,
                 close_on_exit=close_on_exit,
                 captured_connections=(),
                 _seal=_EMERGENCY_CLEANUP_STATE_SEAL,
             )
-            with self._lifecycle_lock:
-                if self._emergency_cleanup_state is not None:
-                    raise RuntimeError('RAG PostgreSQL cleanup state changed')
-                self._emergency_cleanup_state = state
-            primary: BaseException | None = None
-            primary_traceback = None
-            try:
-                yield lease
-            except BaseException as exc:
-                primary = exc
-                primary_traceback = exc.__traceback__
-            with self._lifecycle_lock:
-                state.captured_connections = tuple(self._connections)
-            self._run_cleanup_state_machine(state)
-            if primary is not None:
-                raise primary.with_traceback(primary_traceback)
+            self._emergency_cleanup_state = state
+            return state
+
+    def _capture_emergency_connections(
+        self,
+        state: _RagPostgresEmergencyCleanupState,
+    ) -> None:
+        self._require_emergency_cleanup_state(state)
+        with self._lifecycle_lock:
+            state.captured_connections = tuple(self._connections)
 
     def _run_cleanup_state_machine(
         self,
@@ -535,7 +622,9 @@ class RagPostgresDatabaseAuthority:
         try:
             for _attempt in range(2):
                 try:
-                    state.health_owner = health._enter_cleanup()
+                    state.health_owner = health._enter_cleanup(
+                        emergency_capability=state.health_capability,
+                    )
                     break
                 except BaseException:
                     self._mark_cleanup_uncertain(state)
@@ -555,7 +644,8 @@ class RagPostgresDatabaseAuthority:
                         except BaseException:
                             self._mark_cleanup_uncertain(state)
             try:
-                self._release_application_transaction(state.lease)
+                if state.lease is not None:
+                    self._release_application_transaction(state.lease)
             except BaseException:
                 self._mark_cleanup_uncertain(state)
                 self._emergency_release_application_transaction(state)
@@ -581,9 +671,27 @@ class RagPostgresDatabaseAuthority:
             try:
                 health._finish_emergency_cleanup(state.health_capability)
             except BaseException:
-                self._mark_cleanup_uncertain(state)
-                with suppress(BaseException):
-                    health._finish_emergency_cleanup(state.health_capability)
+                if state.health_capability.active:
+                    self._mark_cleanup_uncertain(state)
+                    health._force_finish_emergency_cleanup(
+                        state.health_capability
+                    )
+                else:
+                    with self._lifecycle_lock:
+                        if self._cleanup_failure is None:
+                            self._cleanup_failure = (
+                                RagPostgresDatabaseCleanupFailure()
+                            )
+                    health._force_operation_fail_stop(
+                        state.health_capability.operation_lease,
+                        authority=self,
+                    )
+            finally:
+                if state.health_capability.active:
+                    with suppress(BaseException):
+                        health._force_finish_emergency_cleanup(
+                            state.health_capability
+                        )
             with self._lifecycle_lock:
                 if self._emergency_cleanup_state is state:
                     self._emergency_cleanup_state = None
@@ -621,27 +729,43 @@ class RagPostgresDatabaseAuthority:
         with self._lifecycle_lock:
             if self._cleanup_failure is None:
                 self._cleanup_failure = RagPostgresDatabaseCleanupFailure()
-        for _attempt in range(2):
-            try:
-                self._assembly.runtime_health._emergency_fail_stop(
-                    state.health_capability
-                )
-                return
-            except BaseException:
-                continue
+        try:
+            self._assembly.runtime_health._emergency_fail_stop(
+                state.health_capability
+            )
+        except BaseException:
+            pass
+        finally:
+            self._assembly.runtime_health._force_emergency_fail_stop(
+                state.health_capability
+            )
 
     def _emergency_release_application_transaction(
         self,
         state: _RagPostgresEmergencyCleanupState,
     ) -> None:
         self._require_emergency_cleanup_state(state)
-        lease = state.lease
         session = self._assembly.session
-        connection = lease.application_connection
+        lease = state.lease
+        connection = (
+            lease.application_connection
+            if lease is not None
+            else state.application_connection
+        )
+        original_bind = (
+            lease.original_session_bind
+            if lease is not None
+            else state.original_session_bind
+        )
+        owns_connection = (
+            lease.owns_application_connection
+            if lease is not None
+            else state.owns_application_connection
+        )
         failed = False
         with self._lifecycle_lock:
             current = self._lease_context.get()
-            if current is lease:
+            if lease is not None and current is lease:
                 token = lease._context_token
                 if token is not None:
                     try:
@@ -660,22 +784,31 @@ class RagPostgresDatabaseAuthority:
                 break
             except BaseException:
                 failed = True
-        for _attempt in range(2):
-            try:
-                if connection.in_transaction() or connection.in_nested_transaction():
-                    connection.rollback()
-                break
-            except BaseException:
-                failed = True
-                with suppress(BaseException):
-                    connection.invalidate()
-        for _attempt in range(2):
-            try:
-                session.bind = lease.original_session_bind
-                break
-            except BaseException:
-                failed = True
-        if lease.owns_application_connection and not connection.closed:
+        if connection is not None:
+            for _attempt in range(2):
+                try:
+                    if (
+                        connection.in_transaction()
+                        or connection.in_nested_transaction()
+                    ):
+                        connection.rollback()
+                    break
+                except BaseException:
+                    failed = True
+                    with suppress(BaseException):
+                        connection.invalidate()
+        if original_bind is not None:
+            for _attempt in range(2):
+                try:
+                    session.bind = original_bind
+                    break
+                except BaseException:
+                    failed = True
+        if (
+            connection is not None
+            and owns_connection
+            and not connection.closed
+        ):
             for _attempt in range(2):
                 try:
                     connection.close()
@@ -734,13 +867,14 @@ class RagPostgresDatabaseAuthority:
             or state.authority is not self
             or not state.active
             or self._emergency_cleanup_state is not state
-            or state.lease.authority is not self
+            or (state.lease is not None and state.lease.authority is not self)
             or state.health_capability.health is not health
         ):
             raise TypeError('RAG PostgreSQL emergency cleanup state changed')
         try:
             health._require_emergency_cleanup_capability(
-                state.health_capability
+                state.health_capability,
+                authority=self,
             )
         except BaseException as exc:
             raise TypeError(
@@ -750,6 +884,7 @@ class RagPostgresDatabaseAuthority:
     def _pin_application_transaction(
         self,
         health_lease: _PostgresRuntimeHealthLease,
+        cleanup_state: _RagPostgresEmergencyCleanupState | None = None,
     ) -> _RagPostgresOperationLease:
         with self._lifecycle_lock:
             if self._state != 'open':
@@ -760,6 +895,9 @@ class RagPostgresDatabaseAuthority:
             if session.in_transaction():
                 raise TypeError('fresh pinned PostgreSQL transaction is required')
             original_bind = session.get_bind()
+            if cleanup_state is not None:
+                self._require_emergency_cleanup_state(cleanup_state)
+                cleanup_state.original_session_bind = original_bind
             original_engine = (
                 original_bind.engine
                 if isinstance(original_bind, Connection)
@@ -773,6 +911,9 @@ class RagPostgresDatabaseAuthority:
                 if owns_connection
                 else original_bind
             )
+            if cleanup_state is not None:
+                cleanup_state.application_connection = connection
+                cleanup_state.owns_application_connection = owns_connection
             if connection.in_transaction() or connection.in_nested_transaction():
                 if owns_connection:
                     connection.close()
@@ -786,6 +927,8 @@ class RagPostgresDatabaseAuthority:
                 runtime_health_lease=health_lease,
                 _seal=_OPERATION_LEASE_SEAL,
             )
+            if cleanup_state is not None:
+                cleanup_state.lease = lease
         try:
             with self._assembly.runtime_health._guard(health_lease):
                 session.begin()
@@ -868,6 +1011,12 @@ class RagPostgresDatabaseAuthority:
 
     def close(self) -> RagPostgresDatabaseCleanupFailure | None:
         """Stop new leases, then close idle request-owned transport once."""
+        with self._lifecycle_lock:
+            if self._active_leases:
+                self._state = 'closing'
+                raise RagPostgresDatabaseBusyError(
+                    'RAG PostgreSQL database authority has an active operation'
+                )
         health = self._assembly.runtime_health
         with health._cleanup_boundary() as health_owner:
             return self._close_under_cleanup_owner(

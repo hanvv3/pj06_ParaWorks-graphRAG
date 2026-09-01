@@ -4145,3 +4145,27 @@ tests passed with 53 tests; ruff passed.
   passed`; expanded focused `288 passed, 13 skipped`; broad affected `858
   passed, 16 skipped, 2128 deselected`. Real PostgreSQL is absent-URL unrun.
   Candidate only: do not begin Task 14 until independent rereview is `CLEAN`.
+
+## 2026-09-01 Deliverable D Core Task 13 fourteenth rereview candidate
+
+- Thirteenth rereview was `NOT CLEAN` on two related edges: emergency cleanup
+  registration happened after the app pin, and persistent injected failures in
+  the normal poison/finish hooks could leave health usable and registry state
+  replayable.
+- Every runtime operation now has an exact process-local active-lease registry.
+  Its authority-bound emergency capability and not-yet-pinned cleanup state are
+  installed before checkout/bind/transaction. One shared health effect spans
+  pin, body, and connection snapshot; cleanup follows after that effect exits.
+- The capability attests exact lease identity, seal, epoch, purpose, authority,
+  ticket, and ownership generation. Copies and cross-operation replay fail.
+  Unconditional sealed poison and revoke paths remain available when the normal
+  hooks persistently raise, latch unhealthy before outcome escape, and remove
+  only the exact operation's queue/owner state.
+- The same-authority public close still returns `Busy` without entering the
+  shared gate. Unrelated cleanup waits for the active compound effect and then
+  continues in FIFO order. Existing provider, cost, recovery, C.5, and SQLite
+  contracts are unchanged.
+- Fresh gates: new target `15 passed`; previous cleanup matrix `56 passed`;
+  initialization plus binding `180 passed`; expanded focused `303 passed, 13
+  skipped`; broad affected `873 passed, 16 skipped, 2128 deselected`. Real
+  PostgreSQL is absent-URL unrun. Candidate only; Task 14 remains blocked.
