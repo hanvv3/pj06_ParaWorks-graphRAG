@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from threading import Condition, RLock, get_ident
 from time import monotonic_ns
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import make_url
@@ -43,7 +43,6 @@ _POSTGRES_BOOTSTRAP_SEAL = object()
 _POSTGRES_RUNTIME_HEALTH_SEAL = object()
 _POSTGRES_RUNTIME_HEALTH_LEASE_SEAL = object()
 _POSTGRES_CLEANUP_OWNER_SEAL = object()
-_POSTGRES_EMERGENCY_CLEANUP_SEAL = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,21 +78,20 @@ class _PostgresCleanupOwnerCapability:
     _seal: object = field(default=None, repr=False, compare=False)
 
 
-@dataclass(slots=True, repr=False)
+@dataclass(frozen=True, slots=True, repr=False, eq=False)
 class _PostgresEmergencyCleanupCapability:
-    health: TrustedPostgresRuntimeHealth = field(repr=False)
-    authority: object = field(repr=False)
-    operation_lease: _PostgresRuntimeHealthLease = field(repr=False)
+    """Opaque handle; all cleanup authority lives in the private registry."""
+
+
+class _PostgresEmergencyCleanupRecord(NamedTuple):
+    capability: _PostgresEmergencyCleanupCapability
+    authority: object
+    operation_lease: _PostgresRuntimeHealthLease
     operation_epoch: int
     operation_purpose: str
     owner_thread_id: int
-    cleanup_ticket: _PostgresRuntimeExclusiveTicket | None = field(
-        default=None,
-        repr=False,
-    )
-    cleanup_generation: int | None = field(default=None, repr=False)
-    active: bool = field(default=True, repr=False)
-    _seal: object = field(default=None, repr=False, compare=False)
+    cleanup_ticket: _PostgresRuntimeExclusiveTicket | None = None
+    cleanup_generation: int | None = None
 
 
 class TrustedPostgresRuntimeHealth:
@@ -147,7 +145,7 @@ class TrustedPostgresRuntimeHealth:
         self._cleanup_owner_capability: _PostgresCleanupOwnerCapability | None = None
         self._emergency_cleanup_capabilities: dict[
             int,
-            _PostgresEmergencyCleanupCapability,
+            _PostgresEmergencyCleanupRecord,
         ] = {}
         self._poison_requested = False
         self._seal = _seal
@@ -336,7 +334,10 @@ class TrustedPostgresRuntimeHealth:
                 purpose='cleanup',
             )
             if emergency_capability is not None:
-                emergency_capability.cleanup_ticket = ticket
+                self._update_emergency_cleanup_record(
+                    emergency_capability,
+                    cleanup_ticket=ticket,
+                )
             try:
                 while (
                     not self._is_head_exclusive_ticket(ticket)
@@ -349,8 +350,10 @@ class TrustedPostgresRuntimeHealth:
                 self._exclusive_depth = 1
                 self._exclusive_generation += 1
                 if emergency_capability is not None:
-                    emergency_capability.cleanup_generation = (
-                        self._exclusive_generation
+                    self._update_emergency_cleanup_record(
+                        emergency_capability,
+                        cleanup_ticket=None,
+                        cleanup_generation=self._exclusive_generation,
                     )
                 capability = _PostgresCleanupOwnerCapability(
                     health=self,
@@ -362,11 +365,15 @@ class TrustedPostgresRuntimeHealth:
                 return capability
             except BaseException:
                 self._cancel_exclusive_ticket(ticket)
-                if (
-                    emergency_capability is not None
-                    and emergency_capability.cleanup_ticket is ticket
-                ):
-                    emergency_capability.cleanup_ticket = None
+                if emergency_capability is not None:
+                    record = self._emergency_cleanup_record(
+                        emergency_capability,
+                    )
+                    if record.cleanup_ticket is ticket:
+                        self._update_emergency_cleanup_record(
+                            emergency_capability,
+                            cleanup_ticket=None,
+                        )
                 raise
 
     def _exit_cleanup(
@@ -429,10 +436,10 @@ class TrustedPostgresRuntimeHealth:
             )
             if existing is not None:
                 self._require_emergency_cleanup_capability(
-                    existing,
+                    existing.capability,
                     authority=authority,
                 )
-                return existing
+                return existing.capability
             return self._mint_emergency_cleanup_capability_locked(
                 operation_lease,
                 authority=authority,
@@ -451,16 +458,17 @@ class TrustedPostgresRuntimeHealth:
             or id(operation_lease) in self._emergency_cleanup_capabilities
         ):
             raise TypeError('PostgreSQL emergency cleanup capability changed')
-        capability = _PostgresEmergencyCleanupCapability(
-            health=self,
-            authority=authority,
-            operation_lease=operation_lease,
-            operation_epoch=operation_lease.epoch,
-            operation_purpose=operation_lease.purpose,
-            owner_thread_id=get_ident(),
-            _seal=_POSTGRES_EMERGENCY_CLEANUP_SEAL,
+        capability = _PostgresEmergencyCleanupCapability()
+        self._emergency_cleanup_capabilities[id(operation_lease)] = (
+            _PostgresEmergencyCleanupRecord(
+                capability=capability,
+                authority=authority,
+                operation_lease=operation_lease,
+                operation_epoch=operation_lease.epoch,
+                operation_purpose=operation_lease.purpose,
+                owner_thread_id=get_ident(),
+            )
         )
-        self._emergency_cleanup_capabilities[id(operation_lease)] = capability
         self._active_operation_authorities[id(operation_lease)] = authority
         return capability
 
@@ -492,15 +500,33 @@ class TrustedPostgresRuntimeHealth:
     ) -> None:
         """Fail-stop a still-current operation after its cleanup cap revoked."""
         with self._condition:
-            self._require_effect_lease(operation_lease)
-            if (
-                authority is None
-                or self._active_operation_authorities.get(id(operation_lease))
-                is not authority
-            ):
-                raise TypeError('PostgreSQL operation authority changed')
+            self._require_current_operation_attestation(
+                operation_lease,
+                authority=authority,
+            )
             self._force_fail_stop_locked()
             self._condition.notify_all()
+
+    def _require_current_operation_attestation(
+        self,
+        operation_lease: object,
+        *,
+        authority: object,
+    ) -> None:
+        """Validate exact operation ownership even after one-way poison."""
+        if (
+            type(operation_lease) is not _PostgresRuntimeHealthLease
+            or operation_lease._seal is not _POSTGRES_RUNTIME_HEALTH_LEASE_SEAL
+            or operation_lease.health is not self
+            or not operation_lease.active
+            or self._active_operation_leases.get(id(operation_lease))
+            is not operation_lease
+            or operation_lease.purpose != 'rag_finalization_or_recovery'
+            or authority is None
+            or self._active_operation_authorities.get(id(operation_lease))
+            is not authority
+        ):
+            raise TypeError('PostgreSQL operation authority changed')
 
     def _force_fail_stop_locked(self) -> None:
         if not self._healthy:
@@ -533,32 +559,30 @@ class TrustedPostgresRuntimeHealth:
         self,
         capability: _PostgresEmergencyCleanupCapability,
     ) -> None:
-        ticket = capability.cleanup_ticket
+        record = self._emergency_cleanup_record(capability)
+        ticket = record.cleanup_ticket
         if ticket is not None:
             self._cancel_exclusive_ticket(ticket)
-        generation = capability.cleanup_generation
+        generation = record.cleanup_generation
         owner = self._cleanup_owner_capability
         if (
             generation is not None
             and self._exclusive_generation == generation
-            and self._exclusive_owner == capability.owner_thread_id
+            and self._exclusive_owner == record.owner_thread_id
             and owner is not None
             and owner.generation == generation
-            and owner.owner_thread_id == capability.owner_thread_id
+            and owner.owner_thread_id == record.owner_thread_id
         ):
             owner.active = False
             self._cleanup_owner_capability = None
             self._exclusive_owner = None
             self._exclusive_depth = 0
-        capability.cleanup_ticket = None
-        capability.cleanup_generation = None
-        capability.active = False
         current = self._emergency_cleanup_capabilities.get(
-            id(capability.operation_lease)
+            id(record.operation_lease)
         )
-        if current is capability:
+        if current is record:
             self._emergency_cleanup_capabilities.pop(
-                id(capability.operation_lease),
+                id(record.operation_lease),
                 None,
             )
         self._condition.notify_all()
@@ -569,26 +593,83 @@ class TrustedPostgresRuntimeHealth:
         *,
         authority: object | None = None,
     ) -> None:
+        record = self._emergency_cleanup_record_or_none(capability)
         if (
             type(capability) is not _PostgresEmergencyCleanupCapability
-            or capability._seal is not _POSTGRES_EMERGENCY_CLEANUP_SEAL
-            or capability.health is not self
-            or (authority is not None and capability.authority is not authority)
-            or not capability.active
-            or capability.owner_thread_id != get_ident()
-            or self._emergency_cleanup_capabilities.get(
-                id(capability.operation_lease)
-            )
-            is not capability
-            or type(capability.operation_lease) is not _PostgresRuntimeHealthLease
-            or capability.operation_lease._seal
+            or record is None
+            or (authority is not None and record.authority is not authority)
+            or record.owner_thread_id != get_ident()
+            or type(record.operation_lease) is not _PostgresRuntimeHealthLease
+            or record.operation_lease._seal
             is not _POSTGRES_RUNTIME_HEALTH_LEASE_SEAL
-            or capability.operation_lease.health is not self
-            or not capability.operation_lease.active
-            or capability.operation_lease.epoch != capability.operation_epoch
-            or capability.operation_lease.purpose != capability.operation_purpose
+            or record.operation_lease.health is not self
+            or not record.operation_lease.active
+            or record.operation_lease.epoch != record.operation_epoch
+            or record.operation_lease.purpose != record.operation_purpose
+            or self._active_operation_leases.get(id(record.operation_lease))
+            is not record.operation_lease
+            or self._active_operation_authorities.get(id(record.operation_lease))
+            is not record.authority
         ):
             raise TypeError('PostgreSQL emergency cleanup capability changed')
+
+    def _emergency_cleanup_capability_is_active(
+        self,
+        capability: object,
+    ) -> bool:
+        with self._condition:
+            return self._emergency_cleanup_record_or_none(capability) is not None
+
+    def _emergency_cleanup_operation_lease(
+        self,
+        capability: object,
+    ) -> _PostgresRuntimeHealthLease:
+        with self._condition:
+            return self._emergency_cleanup_record(capability).operation_lease
+
+    def _emergency_cleanup_record_or_none(
+        self,
+        capability: object,
+    ) -> _PostgresEmergencyCleanupRecord | None:
+        if type(capability) is not _PostgresEmergencyCleanupCapability:
+            return None
+        for record in self._emergency_cleanup_capabilities.values():
+            if record.capability is capability:
+                return record
+        return None
+
+    def _emergency_cleanup_record(
+        self,
+        capability: object,
+    ) -> _PostgresEmergencyCleanupRecord:
+        record = self._emergency_cleanup_record_or_none(capability)
+        if record is None:
+            raise TypeError('PostgreSQL emergency cleanup capability changed')
+        return record
+
+    def _update_emergency_cleanup_record(
+        self,
+        capability: _PostgresEmergencyCleanupCapability,
+        *,
+        cleanup_ticket: _PostgresRuntimeExclusiveTicket | None | object = ...,
+        cleanup_generation: int | None | object = ...,
+    ) -> None:
+        record = self._emergency_cleanup_record(capability)
+        replacement = record._replace(
+            cleanup_ticket=(
+                record.cleanup_ticket
+                if cleanup_ticket is ...
+                else cleanup_ticket
+            ),
+            cleanup_generation=(
+                record.cleanup_generation
+                if cleanup_generation is ...
+                else cleanup_generation
+            ),
+        )
+        self._emergency_cleanup_capabilities[id(record.operation_lease)] = (
+            replacement
+        )
 
     def _enqueue_exclusive_ticket(
         self,

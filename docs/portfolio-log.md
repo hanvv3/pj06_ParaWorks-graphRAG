@@ -5801,3 +5801,31 @@ Cost/security note:
   expanded focused is `303 passed, 13 skipped`; broad affected is `873 passed,
   16 skipped, 2128 deselected`. Real PostgreSQL remains URL-gated and unrun
   because the URL is absent. Candidate only, not `CLEAN`; Task 14 is blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 fifteenth rereview candidate
+
+- The fourteenth independent rereview kept Task 13 open on three cleanup
+  publication/attestation edges. Physical checkout and lease publication had
+  separable state seams; the emergency capability itself carried mutable
+  cleanup targets; and a finish hook that raised after exact revocation could
+  replace an already-determined outcome when the runtime was already poisoned.
+- Checkout now publishes one frozen connection responsibility containing the
+  original bind, returned physical connection, and ownership bit. ContextVar,
+  active-count, and token publication is rollback-safe at every intermediate
+  boundary; no half-published lease can survive into cleanup.
+- The emergency capability is an opaque immutable identity with no ticket,
+  generation, authority, or operation fields. A private immutable registry
+  record is the sole source of those values and revocation clears only the
+  exact registered ticket/generation. Copies, mutation attempts, cross-thread,
+  cross-authority, and cross-operation replay cannot retarget cleanup.
+- An exact still-active operation attestation remains valid for idempotent
+  fail-stop after capability revocation even when an earlier cleanup fault has
+  already poisoned the health epoch. Cleanup/finish failures therefore remain
+  secondary to the durable result or original validation, cancellation, or
+  commit-unknown primary.
+- RED was `13 failed`. New target GREEN is `13 passed`; initialization plus
+  binding is `196 passed`; expanded focused is `316 passed, 13 skipped`; broad
+  affected is `886 passed, 16 skipped, 2128 deselected`. The skipped cases are
+  executable real-PostgreSQL gates left unrun because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a rereview candidate only,
+  not `CLEAN`; Task 14 remains blocked.

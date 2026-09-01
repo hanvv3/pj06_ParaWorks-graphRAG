@@ -4169,3 +4169,23 @@ tests passed with 53 tests; ruff passed.
   initialization plus binding `180 passed`; expanded focused `303 passed, 13
   skipped`; broad affected `873 passed, 16 skipped, 2128 deselected`. Real
   PostgreSQL is absent-URL unrun. Candidate only; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 fifteenth rereview candidate
+
+- Fourteenth rereview was `NOT CLEAN` on atomic checkout/lease publication,
+  mutable emergency-capability target data, and finish-after-revoke behavior
+  after a prior cleanup poison.
+- The current candidate publishes one frozen connection responsibility and
+  rolls ContextVar/count/token publication back as one unit. The public-facing
+  emergency handle is now an opaque immutable identity; only the private
+  immutable registry record owns the exact operation, authority, thread,
+  ticket, and generation used for cleanup/revocation.
+- If normal finish revokes successfully and then raises, exact active-operation
+  attestation can idempotently confirm one-way poison without requiring the old
+  healthy epoch. Durable output and original validation, `KeyboardInterrupt`,
+  or commit-unknown outcomes are preserved while all state is drained.
+- Fresh gates: RED `13 failed`; target `13 passed`; initialization plus binding
+  `196 passed`; expanded focused `316 passed, 13 skipped`; broad affected `886
+  passed, 16 skipped, 2128 deselected`. Real PostgreSQL is URL-gated and unrun
+  because the URL is absent. Keep Task 14 blocked pending independent rereview;
+  this entry does not claim `CLEAN`.

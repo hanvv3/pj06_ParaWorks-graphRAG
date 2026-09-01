@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -2053,7 +2053,11 @@ def test_emergency_cleanup_state_is_exact_thread_bound_and_expired(
     assert len(cross_thread_errors) == 1
     assert isinstance(cross_thread_errors[0], TypeError)
     assert state.active is False
-    assert state.health_capability.active is False
+    assert (
+        authority.runtime_health_authority
+        ._emergency_cleanup_capability_is_active(state.health_capability)
+        is False
+    )
     with pytest.raises(TypeError, match='emergency cleanup state'):
         authority._mark_cleanup_uncertain(state)
     session.close()
@@ -2451,7 +2455,12 @@ def test_persistent_normal_poison_and_finish_faults_use_sealed_fallback(
     assert session.in_transaction() is False
     assert tuple(health._emergency_cleanup_capabilities.values()) == ()
     assert len(captured_capabilities) >= 1
-    assert captured_capabilities[0].active is False
+    assert (
+        health._emergency_cleanup_capability_is_active(
+            captured_capabilities[0]
+        )
+        is False
+    )
     monkeypatch.setattr(
         type(health),
         '_emergency_fail_stop',
@@ -2618,7 +2627,7 @@ def test_emergency_capability_attests_exact_active_operation_and_revokes(
                 authority=object(),
             )
         health._force_finish_emergency_cleanup(capability)
-        assert capability.active is False
+        assert health._emergency_cleanup_capability_is_active(capability) is False
         assert tuple(health._emergency_cleanup_capabilities.values()) == ()
 
     capability = captured[0]
@@ -2704,7 +2713,7 @@ def test_finish_after_revoke_fault_uses_current_operation_attestation(
 
     assert returned == ['durable-product']
     assert len(captured) == 1
-    assert captured[0].active is False
+    assert health._emergency_cleanup_capability_is_active(captured[0]) is False
     assert health.snapshot.healthy is False
     assert health.snapshot.failure_count == 1
     assert tuple(health._emergency_cleanup_capabilities.values()) == ()
@@ -2712,5 +2721,189 @@ def test_finish_after_revoke_fault_uses_current_operation_attestation(
     assert authority.closed is True
     assert authority._active_leases == 0
     assert session.get_bind() is application
+    session.close()
+    application.dispose()
+
+
+@pytest.mark.parametrize(
+    'checkpoint',
+    ('after_connect', 'after_context', 'after_count', 'after_token'),
+)
+def test_pin_publication_fault_is_sanitized_and_fully_rolled_back(
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint: str,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    body_effects: list[str] = []
+    injected = False
+
+    def publication_checkpoint(self, current: str) -> None:
+        nonlocal injected
+        if current == checkpoint and not injected:
+            injected = True
+            raise _CleanupStateMachineFault('secret publication failure')
+
+    monkeypatch.setattr(
+        type(authority),
+        '_pin_publication_checkpoint',
+        publication_checkpoint,
+        raising=False,
+    )
+
+    with (
+        pytest.raises(TypeError, match='runtime health') as captured,
+        authority.owned_operation(),
+    ):
+        body_effects.append('must-not-run')
+
+    assert injected is True
+    assert 'secret' not in str(captured.value)
+    assert body_effects == []
+    assert health.snapshot.healthy is False
+    assert health.snapshot.failure_count == 1
+    assert authority.closed is True
+    assert authority._active_leases == 0
+    assert authority._lease_context.get() is None
+    assert session.get_bind() is application
+    assert session.in_transaction() is False
+    assert tuple(health._emergency_cleanup_capabilities.values()) == ()
+    session.close()
+    application.dispose()
+
+
+def test_emergency_capability_mutation_cannot_retarget_cleanup_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import FrozenInstanceError
+
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+
+    with health._operation('rag_finalization_or_recovery') as operation_lease:
+        capability = health._force_mint_emergency_cleanup_capability(
+            operation_lease,
+            authority=authority,
+        )
+        owner = health._enter_cleanup(
+            emergency_capability=capability,
+        )
+        with health._condition:
+            later = health._enqueue_exclusive_ticket(
+                thread_id=threading.get_ident(),
+                purpose='cleanup',
+            )
+        with pytest.raises((FrozenInstanceError, AttributeError, TypeError)):
+            capability.cleanup_ticket = later
+        with suppress(AttributeError, TypeError):
+            object.__setattr__(capability, 'cleanup_ticket', later)
+        health._force_finish_emergency_cleanup(capability)
+
+        assert owner.active is False
+        assert tuple(health._exclusive_tickets) == (later,)
+        assert health._exclusive_waiters == 1
+        with health._condition:
+            health._cancel_exclusive_ticket(later)
+
+    assert health._exclusive_owner is None
+    assert health._exclusive_depth == 0
+    session.close()
+    application.dispose()
+
+
+@pytest.mark.parametrize('cleanup_fault', ('release', 'close'))
+@pytest.mark.parametrize(
+    'primary',
+    (
+        None,
+        ValueError('finish matrix validation primary'),
+        KeyboardInterrupt('finish matrix cancellation primary'),
+        _CleanupBodyCommitUnknown('finish matrix commit unknown primary'),
+    ),
+)
+def test_prior_poison_then_finish_after_revoke_preserves_outcome_and_drain(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_fault: str,
+    primary: BaseException | None,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    original_finish = type(health)._finish_emergency_cleanup
+    original_release = type(authority)._release_application_transaction
+    original_close = type(authority)._close_under_cleanup_owner
+    injected_cleanup = False
+    captured_capabilities: list[object] = []
+    returned: list[str] = []
+    errors: list[BaseException] = []
+
+    def release_once(self, lease) -> None:
+        nonlocal injected_cleanup
+        if cleanup_fault == 'release' and not injected_cleanup:
+            injected_cleanup = True
+            raise _CleanupStateMachineFault('secret release fault')
+        original_release(self, lease)
+
+    def close_once(self, cleanup_owner):
+        nonlocal injected_cleanup
+        if cleanup_fault == 'close' and not injected_cleanup:
+            injected_cleanup = True
+            raise _CleanupStateMachineFault('secret close fault')
+        return original_close(self, cleanup_owner)
+
+    def finish_after(self, capability) -> None:
+        original_finish(self, capability)
+        captured_capabilities.append(capability)
+        raise _CleanupStateMachineFault('secret finish-after-revoke fault')
+
+    monkeypatch.setattr(
+        type(authority),
+        '_release_application_transaction',
+        release_once,
+    )
+    monkeypatch.setattr(
+        type(authority),
+        '_close_under_cleanup_owner',
+        close_once,
+    )
+    monkeypatch.setattr(
+        type(health),
+        '_finish_emergency_cleanup',
+        finish_after,
+    )
+
+    try:
+        with authority.owned_operation():
+            authority.connect()
+            if primary is not None:
+                raise primary
+            returned.append('durable-product')
+    except BaseException as exc:
+        errors.append(exc)
+
+    assert injected_cleanup is True
+    if primary is None:
+        assert returned == ['durable-product']
+        assert errors == []
+    else:
+        assert errors == [primary]
+    assert len(captured_capabilities) == 1
+    assert health.snapshot.healthy is False
+    assert health.snapshot.failure_count == 1
+    assert authority.closed is True
+    assert authority._active_leases == 0
+    assert authority._lease_context.get() is None
+    assert authority._emergency_cleanup_state is None
+    assert session.get_bind() is application
+    assert session.in_transaction() is False
+    assert tuple(health._emergency_cleanup_capabilities.values()) == ()
+    assert health._exclusive_owner is None
+    assert health._exclusive_depth == 0
+    assert health._exclusive_waiters == 0
     session.close()
     application.dispose()
