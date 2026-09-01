@@ -3969,3 +3969,28 @@ tests passed with 53 tests; ruff passed.
   custom-creator, connect-args, schema-split, pool-lifecycle and direct-recovery
   concurrency gates are URL-gated and unrun locally. Independent rereview is
   still required; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 sixth rereview candidate
+
+- One sealed request authority operation lease now spans ordinary phase-2 and
+  direct recovery from the fresh Session identity check through all advisory/
+  C.5 locks and the final commit, rollback, or cost CAS. Concurrent close marks
+  the authority draining and raises without touching live connections; new or
+  cross-thread leases are refused. The service/recovery owner always closes in
+  `finally`, including validation failure, cancellation, and commit-unknown.
+- `backend.app.db.initialization` is the trusted construction boundary for both
+  the application Engine and request-scoped dedicated `NullPool` Engines. Its
+  immutable policy snapshot preserves custom/dynamic creators, TLS/connect
+  args, dialect options, and initialization hooks. A bootstrap-issued sealed
+  attestation is mandatory; RAG binding does not accept caller-constructed
+  Engines and contains no URL reconstruction path.
+- PostgreSQL identity is least-privilege: database, schema, resolved/configured
+  search path, current role, and database OID, plus the bootstrap policy and
+  registered advisory capability. `pg_control_system()` is intentionally absent.
+  The executable intended-role gate documents only `CONNECT`, schema `USAGE`,
+  table DML, and sequence usage/read grants for a `NOSUPERUSER` role.
+- Current evidence: focused `111 passed, 11 skipped`; RAG-wide `733 passed, 17
+  skipped, 2144 deselected`. Real PostgreSQL close/C.5 recovery and non-superuser
+  role cases are executable but unrun because `PARAWORKS_TEST_POSTGRES_URL` is
+  absent. Do not claim `CLEAN` and do not start Task 14 before independent
+  rereview.

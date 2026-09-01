@@ -186,7 +186,7 @@ class ProviderFreeRagPhase2Authority:
         self,
         db: Session,
         seal: object,
-    ) -> None:
+    ) -> RagPostgresDatabaseAuthority:
         authority = self._assembly.postgres_database
         if (
             seal is not _PHASE2_AUTHORITY_SEAL
@@ -195,6 +195,7 @@ class ProviderFreeRagPhase2Authority:
             raise TypeError('provider-free phase-2 database authority changed')
         authority.require_session(db)
         self._assembly.evidence_barrier.require_postgres_database(authority)
+        return authority
 
     def _require_recovery_database(
         self,
@@ -369,7 +370,7 @@ class PaidRagPhase2Authority:
         self,
         db: Session,
         seal: object,
-    ) -> None:
+    ) -> RagPostgresDatabaseAuthority:
         authority = self._assembly.postgres_database
         if (
             seal is not _PHASE2_AUTHORITY_SEAL
@@ -378,6 +379,7 @@ class PaidRagPhase2Authority:
             raise TypeError('paid phase-2 database authority changed')
         authority.require_session(db)
         self._assembly.evidence_barrier.require_postgres_database(authority)
+        return authority
 
     def _require_recovery_database(
         self,
@@ -748,23 +750,34 @@ class RagProjectionOwnerRecoveryAuthority:
         if type(run_id) is not int or run_id <= 0:
             raise RagFinalizationError('projection-owner recovery run is invalid')
         assembly = self._assembly
-        self._require_active_database()
-        snapshot = assembly.ledger.pending_projection_recovery_snapshot(run_id)
-        phase2 = assembly.paid if snapshot.paid_work_performed else assembly.provider_free
-        with phase2.acquire_recovery(
-            snapshot
-        ), assembly.projection_read.acquire():
-            tail = assembly.projection_read.lock_canonical_tail(())
-            assembly.projection_read.validate_tail_context(tail)
-            return assembly.ledger.recover_incomplete_run(
-                run_id=run_id,
-                projection_owner_fence_hmac=(
-                    snapshot.projection_owner_fence_hmac
-                ),
-                expected_runtime_cost_snapshot_hmac=(
-                    snapshot.runtime_cost_snapshot_hmac
-                ),
-            )
+        authority = assembly.postgres_database
+        try:
+            with authority.operation_lease():
+                self._require_active_database()
+                snapshot = assembly.ledger.pending_projection_recovery_snapshot(
+                    run_id
+                )
+                phase2 = (
+                    assembly.paid
+                    if snapshot.paid_work_performed
+                    else assembly.provider_free
+                )
+                with phase2.acquire_recovery(
+                    snapshot
+                ), assembly.projection_read.acquire():
+                    tail = assembly.projection_read.lock_canonical_tail(())
+                    assembly.projection_read.validate_tail_context(tail)
+                    return assembly.ledger.recover_incomplete_run(
+                        run_id=run_id,
+                        projection_owner_fence_hmac=(
+                            snapshot.projection_owner_fence_hmac
+                        ),
+                        expected_runtime_cost_snapshot_hmac=(
+                            snapshot.runtime_cost_snapshot_hmac
+                        ),
+                    )
+        finally:
+            authority.close()
 
     def _require_boundary(
         self,
@@ -958,6 +971,8 @@ class PreparedRagFinalization:
 
 
 class RagFinalizationTransactionPort(Protocol):
+    def acquire_request_database_authority(self): ...
+    def close_request_database_authority(self) -> None: ...
     def acquire_phase2(
         self,
         pending: RagProjectionPending,
@@ -1001,7 +1016,14 @@ class RagFinalizationService:
     ) -> CanonicalRagProjection:
         return cast(
             CanonicalRagProjection,
-            self._finalize(pending, prepared, None, branch='paid_prepared'),
+            self._run_owned(
+                lambda: self._finalize(
+                    pending,
+                    prepared,
+                    None,
+                    branch='paid_prepared',
+                )
+            ),
         )
 
     def finalize_assistant(
@@ -1012,7 +1034,14 @@ class RagFinalizationService:
     ) -> AssistantFinalizationRecord:
         return cast(
             AssistantFinalizationRecord,
-            self._finalize(pending, prepared, target, branch='paid_prepared'),
+            self._run_owned(
+                lambda: self._finalize(
+                    pending,
+                    prepared,
+                    target,
+                    branch='paid_prepared',
+                )
+            ),
         )
 
     def finalize_provider_free_safe(
@@ -1022,16 +1051,21 @@ class RagFinalizationService:
         *,
         assistant_target: AssistantProjectionTarget | None = None,
     ) -> RagFinalProjection:
-        self._require_safe_surface_outcome(prepared, evidence_changed=False)
-        if (
-            prepared.query_embedding_result is not None
-            or prepared.model_influence_observations
-            or prepared.validated_answer is not None
-        ):
-            raise RagFinalizationError('provider-free finalization has provider state')
-        return self._finalize(
-            pending, prepared, assistant_target, branch='provider_free'
-        )
+        def operation():
+            self._require_safe_surface_outcome(prepared, evidence_changed=False)
+            if (
+                prepared.query_embedding_result is not None
+                or prepared.model_influence_observations
+                or prepared.validated_answer is not None
+            ):
+                raise RagFinalizationError(
+                    'provider-free finalization has provider state'
+                )
+            return self._finalize(
+                pending, prepared, assistant_target, branch='provider_free'
+            )
+
+        return self._run_owned(operation)
 
     def finalize_paid_embedding_only_safe(
         self,
@@ -1040,16 +1074,24 @@ class RagFinalizationService:
         *,
         assistant_target: AssistantProjectionTarget | None = None,
     ) -> RagFinalProjection:
-        self._require_safe_surface_outcome(prepared, evidence_changed=False)
-        if (
-            prepared.query_embedding_result is None
-            or prepared.model_influence_observations
-            or prepared.validated_answer is not None
-        ):
-            raise RagFinalizationError('paid embedding finalization lacks its receipt')
-        return self._finalize(
-            pending, prepared, assistant_target, branch='paid_embedding_only'
-        )
+        def operation():
+            self._require_safe_surface_outcome(prepared, evidence_changed=False)
+            if (
+                prepared.query_embedding_result is None
+                or prepared.model_influence_observations
+                or prepared.validated_answer is not None
+            ):
+                raise RagFinalizationError(
+                    'paid embedding finalization lacks its receipt'
+                )
+            return self._finalize(
+                pending,
+                prepared,
+                assistant_target,
+                branch='paid_embedding_only',
+            )
+
+        return self._run_owned(operation)
 
     def finalize_pre_generation_evidence_changed(
         self,
@@ -1058,25 +1100,51 @@ class RagFinalizationService:
         *,
         assistant_target: AssistantProjectionTarget | None = None,
     ) -> RagFinalProjection:
-        self._require_safe_surface_outcome(prepared, evidence_changed=True)
-        if (
-            prepared.canned_message_identity
-            != 'rag-canned-evidence-unavailable:v1'
-            or prepared.validated_answer is not None
-            or prepared.selected_slot_ids
-        ):
-            raise RagFinalizationError('evidence-changed finalization identity is invalid')
-        return self._finalize(
-            pending,
-            prepared,
-            assistant_target,
-            branch=(
-                'paid_embedding_only'
-                if prepared.query_embedding_result is not None
-                else 'provider_free'
-            ),
-            force_drift=True,
+        def operation():
+            self._require_safe_surface_outcome(prepared, evidence_changed=True)
+            if (
+                prepared.canned_message_identity
+                != 'rag-canned-evidence-unavailable:v1'
+                or prepared.validated_answer is not None
+                or prepared.selected_slot_ids
+            ):
+                raise RagFinalizationError(
+                    'evidence-changed finalization identity is invalid'
+                )
+            return self._finalize(
+                pending,
+                prepared,
+                assistant_target,
+                branch=(
+                    'paid_embedding_only'
+                    if prepared.query_embedding_result is not None
+                    else 'provider_free'
+                ),
+                force_drift=True,
+            )
+
+        return self._run_owned(operation)
+
+    def _run_owned(self, operation: Callable[[], RagFinalProjection]):
+        acquire = getattr(
+            self._boundary,
+            'acquire_request_database_authority',
+            None,
         )
+        close = getattr(
+            self._boundary,
+            'close_request_database_authority',
+            None,
+        )
+        if not callable(acquire) or not callable(close):
+            raise RagFinalizationError(
+                'request database authority owner is unavailable'
+            )
+        try:
+            with acquire():
+                return operation()
+        finally:
+            close()
 
     @staticmethod
     def _require_safe_surface_outcome(
@@ -1114,7 +1182,7 @@ class RagFinalizationService:
         finalizer = getattr(self._boundary, 'finalize_inter_component_failure', None)
         if not callable(finalizer):
             raise RagFinalizationError('inter-component finalizer is unavailable')
-        return finalizer(*args, **kwargs)
+        return self._run_owned(lambda: finalizer(*args, **kwargs))
 
     def recover_dead_projection_owner(self, run_id: int):
         recover = getattr(self._boundary, 'recover_dead_projection_owner', None)
@@ -1268,7 +1336,7 @@ class SqlAlchemyRagFinalizationBoundary:
                 'PostgreSQL evidence barrier requires registered DB authority'
             )
         try:
-            phase2_authority._require_boundary_database(
+            postgres_database = phase2_authority._require_boundary_database(
                 db,
                 _PHASE2_AUTHORITY_SEAL,
             )
@@ -1298,6 +1366,7 @@ class SqlAlchemyRagFinalizationBoundary:
                 ) from exc
         self._recovery_authority = recovery_authority
         self._phase2_authority = phase2_authority
+        self._postgres_database = postgres_database
         self._prefix: AbstractContextManager | None = None
         self._projection_coordinator: ServingProjectionReadCoordinator | None = None
         self._projection_tail: ServingProjectionTailLockedContext | None = None
@@ -1308,6 +1377,12 @@ class SqlAlchemyRagFinalizationBoundary:
         self._assembled_answer_hmac: str | None = None
         self._committed = False
         self._secret, _ = fingerprint_secret_bytes(settings)
+
+    def acquire_request_database_authority(self):
+        return self._postgres_database.operation_lease()
+
+    def close_request_database_authority(self) -> None:
+        self._postgres_database.close()
 
     def begin(self) -> AbstractContextManager:
         return _SessionFinalizationTransaction(self)

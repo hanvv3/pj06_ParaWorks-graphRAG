@@ -5583,3 +5583,34 @@ Cost/security note:
   `688 passed, 16 skipped`. PostgreSQL behavioral cases
   remain collected but unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent.
   This remains a rereview candidate, not `CLEAN`; Task 14 stays blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 sixth rereview candidate
+
+- The sixth rereview found that request-owned advisory transport could still be
+  closed while an ordinary finalization or direct recovery was between lock
+  acquisition and commit. `RagPostgresDatabaseAuthority` now grants one sealed
+  operation lease at a time, rejects new leases while active or draining, and
+  refuses concurrent close without invalidating any live advisory connection.
+  The finalization service and direct recovery own the lease across validation,
+  phase-2/C.5 locks, cost CAS, and application Session commit or rollback, then
+  close the authority in `finally`, including cancellation and commit-unknown
+  exits.
+- PostgreSQL advisory transport now comes from the database initialization
+  layer's trusted bootstrap. The application Engine and each request-scoped
+  `NullPool` Engine are created from the same snapshotted connection policy,
+  including `connect_args`, TLS objects, custom/dynamic creators, and Engine
+  initialization hooks. Binding accepts only the bootstrap-issued attestation;
+  it neither accepts an arbitrary `NullPool` Engine nor recreates credentials
+  from `Engine.url`. Runtime disposal revokes future issuance.
+- The identity probe no longer calls privileged `pg_control_system()`. It uses
+  database/schema/effective and configured search path/current role/database
+  OID plus the bootstrap policy capability and registered advisory identity.
+  The URL-gated intended-role test uses a `NOSUPERUSER` role with only database
+  `CONNECT`, schema `USAGE`, table `SELECT/INSERT/UPDATE/DELETE`, and sequence
+  `USAGE/SELECT` grants to assemble the ordinary finalization boundary.
+- Sixth-candidate verification is focused `111 passed, 11 skipped` and RAG-wide
+  `733 passed, 17 skipped, 2144 deselected`. The close-during-C.5 recovery and
+  intended non-superuser PostgreSQL cases are collected but unrun because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a rereview candidate, not
+  `CLEAN`; Task 14 remains blocked. No provider, network, Docker, paid, or
+  `.env` access occurred.

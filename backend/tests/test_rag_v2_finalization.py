@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
 from types import SimpleNamespace
@@ -313,6 +313,14 @@ class _Boundary:
         self.retrievals = 0
         self.final_parent = None
         self.fail_commit = False
+        self.authority_closes = 0
+
+    @contextmanager
+    def acquire_request_database_authority(self):
+        yield
+
+    def close_request_database_authority(self) -> None:
+        self.authority_closes += 1
 
     def begin(self):
         return self
@@ -367,6 +375,18 @@ class _OrderedBoundary(_Boundary):
     def __init__(self) -> None:
         super().__init__()
         self.events: list[str] = []
+
+    @contextmanager
+    def acquire_request_database_authority(self):
+        self.events.append('authority:lease')
+        try:
+            yield
+        finally:
+            self.events.append('authority:release')
+
+    def close_request_database_authority(self) -> None:
+        self.events.append('authority:close')
+        super().close_request_database_authority()
 
     def acquire_phase2(self, pending, prepared, *, branch):
         boundary = self
@@ -934,6 +954,16 @@ def _fake_database_authority(monkeypatch, *, session, active=None):
         'connect',
         lambda self: _ClosableConnection(),
     )
+    monkeypatch.setattr(
+        RagPostgresDatabaseAuthority,
+        'operation_lease',
+        lambda self: nullcontext(),
+    )
+    monkeypatch.setattr(
+        RagPostgresDatabaseAuthority,
+        'close',
+        lambda self: None,
+    )
     return authority
 
 
@@ -1211,6 +1241,7 @@ def test_phase2_and_canonical_locks_precede_agent_run_cost_tail() -> None:
     service.finalize_provider_free_safe(_pending(), _prepared())
 
     assert boundary.events == [
+        'authority:lease',
         'phase2:provider_free',
         'prefix',
         'generations',
@@ -1221,6 +1252,8 @@ def test_phase2_and_canonical_locks_precede_agent_run_cost_tail() -> None:
         'parent_final',
         'commit',
         'phase2:release',
+        'authority:release',
+        'authority:close',
     ]
 
 
@@ -1234,6 +1267,42 @@ def test_commit_failure_returns_no_projection_and_does_not_retry() -> None:
     with pytest.raises(RagFinalizationError, match='commit'):
         service.finalize_provider_free_safe(_pending(), _prepared())
     assert boundary.retrievals == 1
+    assert boundary.commits == 0
+    assert boundary.authority_closes == 1
+
+
+def test_request_database_authority_closes_on_base_exception() -> None:
+    boundary = _Boundary()
+
+    def interrupt_projection(*_args, **_kwargs):
+        raise KeyboardInterrupt('injected cancellation')
+
+    boundary.project = interrupt_projection
+    service = RagFinalizationService(
+        transaction_boundary=boundary,
+        settings=Settings(_env_file=None, agent_runtime_fingerprint_secret='secret'),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match='injected cancellation'):
+        service.finalize_provider_free_safe(_pending(), _prepared())
+
+    assert boundary.authority_closes == 1
+    assert boundary.commits == 0
+
+
+def test_request_database_authority_closes_on_pretransaction_validation_error() -> None:
+    boundary = _Boundary()
+    service = RagFinalizationService(
+        transaction_boundary=boundary,
+        settings=Settings(_env_file=None, agent_runtime_fingerprint_secret='secret'),
+    )
+    invalid = _post_generation_insufficient()
+
+    with pytest.raises(RagFinalizationError, match='post-generation only'):
+        service.finalize_provider_free_safe(_pending(), invalid)
+
+    assert boundary.authority_closes == 1
+    assert boundary.retrievals == 0
     assert boundary.commits == 0
 
 

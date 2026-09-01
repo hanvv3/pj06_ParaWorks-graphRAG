@@ -9,6 +9,11 @@ settings = get_settings()
 _runtime = initialize_database_runtime(settings.resolved_database_url())
 engine = _runtime.engine
 SessionLocal = _runtime.session_factory
+RagPostgresDatabaseBootstrap = getattr(
+    _runtime,
+    'rag_postgres_bootstrap',
+    None,
+)
 
 
 def get_db() -> Generator[Session, None, None]:

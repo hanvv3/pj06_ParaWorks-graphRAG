@@ -44,6 +44,7 @@ from backend.app.agent_runtime.rag_finalization import (
     _assemble_provider_free_rag_phase2_authority,
 )
 from backend.app.agent_runtime.rag_postgres_binding import (
+    RagPostgresDatabaseBusyError,
     _bind_rag_postgres_database,
 )
 from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
@@ -55,6 +56,11 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
     _issue_classified_provider_observation as StrictProviderOutcome,
 )
 from backend.app.core.config import get_settings
+from backend.app.db.initialization import (
+    DatabaseConnectionPolicy,
+    TrustedPostgresEngineBootstrap,
+    initialize_database_runtime,
+)
 from backend.app.models import AgentRun, AgentRunCostComponent
 from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import StrictProviderUsage
@@ -76,12 +82,18 @@ from backend.tests.test_rag_v2_provider_transport import (
 )
 from backend.tests.test_rag_v2_serving_locks import _seed_lock_prefix
 
+PostgresAuthorityFixture = tuple[
+    Engine,
+    RagProviderSafetyService,
+    TrustedPostgresEngineBootstrap,
+]
+
 
 @pytest.fixture
 def postgres_cost_authority(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> Iterator[tuple[Engine, RagProviderSafetyService]]:
+) -> Iterator[PostgresAuthorityFixture]:
     database_url = os.getenv('PARAWORKS_TEST_POSTGRES_URL')
     if not database_url:
         pytest.skip('disposable PostgreSQL cost-authority gate is not configured')
@@ -99,7 +111,9 @@ def postgres_cost_authority(
     monkeypatch.setenv('PARAWORKS_DATABASE_URL', isolated_url)
     get_settings.cache_clear()
     command.upgrade(Config('alembic.ini'), 'head')
-    engine = create_engine(isolated_url)
+    runtime = initialize_database_runtime(isolated_url)
+    engine = runtime.engine
+    assert runtime.rag_postgres_bootstrap is not None
     try:
         with engine.begin() as connection:
             register_advisory_identity_db(
@@ -133,9 +147,9 @@ def postgres_cost_authority(
                 ),
                 reviewed_transition_reference_hmac='9' * 64,
             )
-        yield engine, service
+        yield engine, service, runtime.rag_postgres_bootstrap
     finally:
-        engine.dispose()
+        runtime.dispose()
         get_settings.cache_clear()
         with admin.begin() as connection:
             connection.execute(text(f'DROP SCHEMA {schema_name} CASCADE'))
@@ -151,20 +165,22 @@ def _database_bootstrap_capability(engine: Engine):
         )
 
 
-def _database_authority(engine: Engine, session: Session):
-    bootstrap = _database_bootstrap_capability(engine)
-    dedicated_engine = create_engine(engine.url, poolclass=NullPool)
+def _database_authority(
+    engine: Engine,
+    session: Session,
+    bootstrap: TrustedPostgresEngineBootstrap,
+):
     return _bind_rag_postgres_database(
         session,
-        dedicated_engine=dedicated_engine,
-        bootstrap_capability=bootstrap,
+        trusted_bootstrap=bootstrap,
+        bootstrap_capability=_database_bootstrap_capability(engine),
     )
 
 
 def test_postgres_failed_component_closes_exact_sibling_and_parent(
-    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+    postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, service = postgres_cost_authority
+    engine, service, _ = postgres_cost_authority
     ledger = _assemble_rag_cost_ledger(
         Session(engine),
         identity_secret=b'task-12-test-identity-secret',
@@ -199,9 +215,9 @@ def test_postgres_failed_component_closes_exact_sibling_and_parent(
 
 
 def test_postgres_reviewed_intercomponent_recovery_accepts_terminal_zero_sibling(
-    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+    postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, service = postgres_cost_authority
+    engine, service, _ = postgres_cost_authority
     ledger = _assemble_rag_cost_ledger(
         Session(engine),
         identity_secret=b'task-12-test-identity-secret',
@@ -244,9 +260,9 @@ def test_postgres_reviewed_intercomponent_recovery_accepts_terminal_zero_sibling
 
 
 def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
-    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+    postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, service = postgres_cost_authority
+    engine, service, bootstrap = postgres_cost_authority
     run_id = (uuid4().int % (2**31 - 1)) + 1
     with engine.begin() as connection:
         register_advisory_identity_db(
@@ -335,7 +351,11 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
 
     projection_settings = get_settings()
     _seed_lock_prefix(ledger._session, projection_settings)
-    postgres_database = _database_authority(engine, ledger._session)
+    postgres_database = _database_authority(
+        engine,
+        ledger._session,
+        bootstrap,
+    )
     evidence_barrier = _assemble_rag_evidence_barrier(
         load_current_identity=lambda: 'a' * 64,
         registered_lock=evidence_capability,
@@ -397,6 +417,7 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
     recovery_started = threading.Event()
     recovery_finished = threading.Event()
     recovery_pid: list[int] = []
+    worker_databases: list[object] = []
     recovery_result: list[object] = []
     recovery_errors: list[BaseException] = []
 
@@ -413,7 +434,12 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
                 designated_host_id='pytest-postgres-recovery-worker',
                 projection_lock_capability_factory=lambda _run_id: owner_capability,
             )
-            worker_database = _database_authority(engine, recovery_session)
+            worker_database = _database_authority(
+                engine,
+                recovery_session,
+                bootstrap,
+            )
+            worker_databases.append(worker_database)
             worker_barrier = _assemble_rag_evidence_barrier(
                 load_current_identity=lambda: 'a' * 64,
                 registered_lock=evidence_capability,
@@ -507,6 +533,12 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
                 time.sleep(0.05)
             assert observed_database_lock is True
             assert recovery_finished.is_set() is False
+            with pytest.raises(
+                RagPostgresDatabaseBusyError,
+                match='active operation',
+            ):
+                worker_databases[0].close()
+            assert recovery_finished.is_set() is False
             with Session(engine) as probe:
                 parent = probe.get(AgentRun, run_id)
                 assert parent is not None
@@ -538,25 +570,17 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
 
 
 def test_postgres_database_authority_uses_dedicated_nullpool_without_app_reuse(
-    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+    postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, _ = postgres_cost_authority
+    engine, _, bootstrap = postgres_cost_authority
     session = Session(engine)
-    dedicated_engine = create_engine(engine.url, poolclass=NullPool)
-    disposed = 0
-
-    def record_dispose(*_args: object) -> None:
-        nonlocal disposed
-        disposed += 1
-
-    event.listen(dedicated_engine, 'engine_disposed', record_dispose)
     authority = _bind_rag_postgres_database(
         session,
-        dedicated_engine=dedicated_engine,
+        trusted_bootstrap=bootstrap,
         bootstrap_capability=_database_bootstrap_capability(engine),
     )
-    assert type(dedicated_engine.pool) is NullPool
     application_checkouts = 0
+    dedicated_disposals = 0
 
     def checkout(*_args: object) -> None:
         nonlocal application_checkouts
@@ -564,26 +588,34 @@ def test_postgres_database_authority_uses_dedicated_nullpool_without_app_reuse(
 
     event.listen(engine, 'checkout', checkout)
     try:
-        with authority.connect() as first:
-            assert first.scalar(text('SELECT current_database()'))
-        with authority.connect() as second:
-            assert second.scalar(text('SELECT current_database()'))
+        with authority.operation_lease():
+            with authority.connect() as first:
+                dedicated_engine = first.engine
+                assert type(dedicated_engine.pool) is NullPool
+                assert first.scalar(text('SELECT current_database()'))
+
+            def record_dispose(*_args: object) -> None:
+                nonlocal dedicated_disposals
+                dedicated_disposals += 1
+
+            event.listen(dedicated_engine, 'engine_disposed', record_dispose)
+            with authority.connect() as second:
+                assert second.scalar(text('SELECT current_database()'))
         assert application_checkouts == 0
     finally:
         event.remove(engine, 'checkout', checkout)
         authority.close()
         authority.close()
-        assert disposed == 1
+        assert dedicated_disposals == 1
         with pytest.raises(TypeError, match='closed'):
             authority.connect()
         session.close()
 
 
 def test_postgres_database_authority_preserves_injected_custom_creator_contract(
-    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+    postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, _ = postgres_cost_authority
-    session = Session(engine)
+    engine, _, _ = postgres_cost_authority
     args, kwargs = engine.dialect.create_connect_args(engine.url)
     application_name = f'rag-authority-{uuid4().hex}'
     creator_calls = 0
@@ -599,87 +631,206 @@ def test_postgres_database_authority_preserves_injected_custom_creator_contract(
         )
 
     invalid_url = engine.url.set(host='127.0.0.2', port=1)
-    dedicated_engine = create_engine(
+    runtime = initialize_database_runtime(
         invalid_url,
-        poolclass=NullPool,
-        creator=creator,
+        connection_policy=DatabaseConnectionPolicy(
+            engine_options={'creator': creator},
+        ),
     )
-    authority = _bind_rag_postgres_database(
-        session,
-        dedicated_engine=dedicated_engine,
-        bootstrap_capability=_database_bootstrap_capability(engine),
-    )
+    assert runtime.rag_postgres_bootstrap is not None
+    session = Session(runtime.engine)
+    authority = None
     try:
-        with authority.connect() as connection:
+        authority = _bind_rag_postgres_database(
+            session,
+            trusted_bootstrap=runtime.rag_postgres_bootstrap,
+            bootstrap_capability=_database_bootstrap_capability(runtime.engine),
+        )
+        with authority.operation_lease(), authority.connect() as connection:
             assert connection.scalar(
                 text("SELECT current_setting('application_name')")
             ) == application_name
         assert creator_calls >= 2
     finally:
-        authority.close()
+        if authority is not None:
+            authority.close()
         session.close()
+        runtime.dispose()
 
 
 def test_postgres_database_authority_preserves_injected_connect_args(
-    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+    postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, _ = postgres_cost_authority
-    session = Session(engine)
+    engine, _, _ = postgres_cost_authority
     application_name = f'rag-connect-args-{uuid4().hex}'
-    dedicated_engine = create_engine(
+    runtime = initialize_database_runtime(
         engine.url,
-        poolclass=NullPool,
-        connect_args={'application_name': application_name},
+        connection_policy=DatabaseConnectionPolicy(
+            engine_options={
+                'connect_args': {'application_name': application_name},
+            },
+        ),
     )
-    authority = _bind_rag_postgres_database(
-        session,
-        dedicated_engine=dedicated_engine,
-        bootstrap_capability=_database_bootstrap_capability(engine),
-    )
+    assert runtime.rag_postgres_bootstrap is not None
+    session = Session(runtime.engine)
+    authority = None
     try:
-        with authority.connect() as connection:
+        authority = _bind_rag_postgres_database(
+            session,
+            trusted_bootstrap=runtime.rag_postgres_bootstrap,
+            bootstrap_capability=_database_bootstrap_capability(runtime.engine),
+        )
+        with authority.operation_lease(), authority.connect() as connection:
             assert connection.scalar(
                 text("SELECT current_setting('application_name')")
             ) == application_name
     finally:
-        authority.close()
+        if authority is not None:
+            authority.close()
         session.close()
+        runtime.dispose()
 
 
-def test_postgres_database_authority_rejects_schema_split_during_binding(
-    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+def test_postgres_database_authority_rejects_weaker_same_database_bootstrap(
+    postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, _ = postgres_cost_authority
+    engine, _, bootstrap = postgres_cost_authority
     session = Session(engine)
-    query = dict(engine.url.query)
-    query['options'] = '-csearch_path=public'
-    dedicated_engine = create_engine(
-        engine.url.set(query=query),
-        poolclass=NullPool,
+    weaker_runtime = initialize_database_runtime(
+        engine.url,
+        connection_policy=DatabaseConnectionPolicy(
+            engine_options={
+                'connect_args': {'application_name': 'weaker-policy'},
+            },
+        ),
     )
-    disposed = 0
-
-    def record_dispose(*_args: object) -> None:
-        nonlocal disposed
-        disposed += 1
-
-    event.listen(dedicated_engine, 'engine_disposed', record_dispose)
+    assert weaker_runtime.rag_postgres_bootstrap is not None
+    assert weaker_runtime.rag_postgres_bootstrap is not bootstrap
     try:
-        with pytest.raises(TypeError, match='does not match session'):
+        with pytest.raises(TypeError, match='bootstrap authority changed'):
             _bind_rag_postgres_database(
                 session,
-                dedicated_engine=dedicated_engine,
+                trusted_bootstrap=weaker_runtime.rag_postgres_bootstrap,
                 bootstrap_capability=_database_bootstrap_capability(engine),
             )
-        assert disposed == 1
     finally:
         session.close()
+        weaker_runtime.dispose()
+
+
+def test_postgres_intended_non_superuser_role_can_bind_finalization_boundary(
+    postgres_cost_authority: PostgresAuthorityFixture,
+):
+    engine, _, _ = postgres_cost_authority
+    role_name = f'rag_task13_runtime_{uuid4().hex}'
+    run_id = (uuid4().int % (2**31 - 1)) + 1
+    with engine.begin() as connection:
+        database_name = connection.scalar(text('SELECT current_database()'))
+        schema_name = connection.scalar(text('SELECT current_schema()'))
+        quote = connection.dialect.identifier_preparer.quote
+        quoted_role = quote(role_name)
+        connection.execute(text(f'CREATE ROLE {quoted_role} NOLOGIN NOSUPERUSER'))
+        connection.execute(
+            text(f'GRANT CONNECT ON DATABASE {quote(database_name)} TO {quoted_role}')
+        )
+        connection.execute(
+            text(f'GRANT USAGE ON SCHEMA {quote(schema_name)} TO {quoted_role}')
+        )
+        connection.execute(
+            text(
+                f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA '
+                f'{quote(schema_name)} TO {quoted_role}'
+            )
+        )
+        connection.execute(
+            text(
+                f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA '
+                f'{quote(schema_name)} TO {quoted_role}'
+            )
+        )
+        register_advisory_identity_db(
+            connection,
+            RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+            identity_namespace='static',
+        )
+        register_advisory_identity_db(
+            connection,
+            rag_projection_owner_lock_id(run_id),
+            identity_namespace='dynamic',
+        )
+
+    def initialize_role(runtime_engine: Engine) -> None:
+        @event.listens_for(runtime_engine, 'connect')
+        def set_intended_role(dbapi_connection, _record) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute(f'SET ROLE "{role_name}"')
+            finally:
+                cursor.close()
+
+    runtime = initialize_database_runtime(
+        engine.url,
+        connection_policy=DatabaseConnectionPolicy(
+            initialize_engine=initialize_role,
+        ),
+    )
+    assert runtime.rag_postgres_bootstrap is not None
+    session = Session(runtime.engine)
+    authority = None
+    try:
+        assert session.scalar(text('SELECT current_user')) == role_name
+        assert session.scalar(text("SELECT current_setting('is_superuser')")) == 'off'
+        session.rollback()
+        authority = _database_authority(
+            runtime.engine,
+            session,
+            runtime.rag_postgres_bootstrap,
+        )
+        with runtime.engine.connect() as connection:
+            evidence_capability = load_registered_advisory_capability(
+                connection,
+                RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+                identity_namespace='static',
+            )
+            owner_capability = load_registered_advisory_capability(
+                connection,
+                rag_projection_owner_lock_id(run_id),
+                identity_namespace='dynamic',
+            )
+        barrier = _assemble_rag_evidence_barrier(
+            load_current_identity=lambda: 'a' * 64,
+            registered_lock=evidence_capability,
+            postgres_database=authority,
+        )
+        phase2 = _assemble_provider_free_rag_phase2_authority(
+            owner_connection_factory=None,
+            owner_capability_factory=lambda _run_id: owner_capability,
+            load_current_owner_fence=lambda _run_id: '2' * 64,
+            evidence_barrier=barrier,
+            postgres_database=authority,
+        )
+        boundary = SqlAlchemyRagFinalizationBoundary(
+            db=session,
+            settings=get_settings(),
+            retriever=SimpleNamespace(invoke=lambda request: request),
+            phase2_authority=phase2,
+        )
+        assert boundary.acquire_request_database_authority is not None
+    finally:
+        if authority is not None:
+            authority.close()
+        session.close()
+        runtime.dispose()
+        with engine.begin() as connection:
+            quoted_role = connection.dialect.identifier_preparer.quote(role_name)
+            connection.execute(text(f'DROP OWNED BY {quoted_role}'))
+            connection.execute(text(f'DROP ROLE {quoted_role}'))
 
 
 def test_postgres_boundary_rejects_same_engine_search_path_drift(
-    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+    postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, _ = postgres_cost_authority
+    engine, _, bootstrap = postgres_cost_authority
     with engine.begin() as connection:
         register_advisory_identity_db(
             connection,
@@ -694,7 +845,7 @@ def test_postgres_boundary_rejects_same_engine_search_path_drift(
         )
     application_connection = engine.connect()
     session = Session(bind=application_connection)
-    authority = _database_authority(engine, session)
+    authority = _database_authority(engine, session, bootstrap)
     barrier = _assemble_rag_evidence_barrier(
         load_current_identity=lambda: 'a' * 64,
         registered_lock=evidence_capability,
@@ -727,9 +878,9 @@ def test_postgres_boundary_rejects_same_engine_search_path_drift(
 
 
 def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
-    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+    postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, service = postgres_cost_authority
+    engine, service, _ = postgres_cost_authority
     run_id = 503
     with engine.begin() as connection:
         register_advisory_identity_db(
