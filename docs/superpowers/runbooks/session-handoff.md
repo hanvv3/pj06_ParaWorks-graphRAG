@@ -4308,3 +4308,21 @@ tests passed with 53 tests; ruff passed.
   `301 passed`; affected broad `991 passed, 16 skipped, 2128 deselected`.
   Real PostgreSQL is unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent.
   Candidate only; do not claim `CLEAN` or start Task 14 before rereview.
+
+## 2026-09-01 Deliverable D Core Task 13 twenty-first rereview candidate
+
+- Twentieth rereview was `NOT CLEAN` because attach-then-raise plus uncertain
+  containment could drop the current callback, and the split
+  `CLAIMED -> retire` transition could lose or mask construction ownership.
+- Listener ownership is now published as `ATTEMPTED` before every attach and
+  promoted to `INSTALLED` only after return. Cleanup conservatively retains
+  every attempted callback until exact removal or proven absence.
+- Claim uses a cleanup-eligible `CLAIMING` transition through bootstrap slot
+  publication, exact quarantine-map pop, and notification. Any retirement
+  failure preserves the original exception and exact cleanup responsibility;
+  `construction_failed` is idempotent and non-masking across all construction
+  states.
+- Evidence: RED `11 failed`; listener cohort `28 passed, 204 deselected`;
+  initialization/binding `312 passed`; affected broad `1002 passed, 16
+  skipped, 2128 deselected`. Real PostgreSQL is URL-gated and unrun because the
+  URL is absent. Candidate only; Task 14 remains blocked pending rereview.

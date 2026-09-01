@@ -3803,6 +3803,176 @@ def test_concurrent_listener_quarantine_drain_removes_each_callback_once(
     assert initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS == {}
 
 
+@pytest.mark.parametrize('fail_index', (1, 2, 3))
+@pytest.mark.parametrize('contains_failures', (1, 2))
+def test_attach_then_raise_retains_every_attempted_listener_until_proven_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    fail_index: int,
+    contains_failures: int,
+) -> None:
+    application = create_engine('sqlite+pysqlite:///:memory:')
+    application.dialect.name = 'postgresql'
+    primary = _CleanupStateMachineFault('secret attach then raise primary')
+    original_listen = initialization.event.listen
+    original_remove = initialization.event.remove
+    original_contains = initialization.event.contains
+    attempted: list[tuple[object, str, object]] = []
+    removed: list[tuple[object, str, object]] = []
+    failing_listener: tuple[object, str, object] | None = None
+    failing_contains_calls = 0
+
+    def create_once(*_args, **_kwargs):
+        return application
+
+    def attach_then_raise(target, identifier, callback) -> None:
+        nonlocal failing_listener
+        original_listen(target, identifier, callback)
+        listener = (target, identifier, callback)
+        attempted.append(listener)
+        if len(attempted) == fail_index:
+            failing_listener = listener
+            raise primary
+
+    def uncertain_contains(target, identifier, callback) -> bool:
+        nonlocal failing_contains_calls
+        listener = (target, identifier, callback)
+        if (
+            listener == failing_listener
+            and failing_contains_calls < contains_failures
+        ):
+            failing_contains_calls += 1
+            raise _CleanupStateMachineFault('secret contains uncertainty')
+        return original_contains(target, identifier, callback)
+
+    def persistent_remove(*_args, **_kwargs) -> None:
+        raise _CleanupStateMachineFault('secret listener remove uncertainty')
+
+    monkeypatch.setattr(initialization, 'create_engine', create_once)
+    monkeypatch.setattr(initialization.event, 'listen', attach_then_raise)
+    monkeypatch.setattr(initialization.event, 'contains', uncertain_contains)
+    monkeypatch.setattr(initialization.event, 'remove', persistent_remove)
+    try:
+        with pytest.raises(_CleanupStateMachineFault) as captured:
+            initialization.initialize_database_runtime(
+                'postgresql+psycopg://authority-role@localhost/authority-database'
+            )
+
+        assert captured.value is primary
+        assert len(attempted) == fail_index
+        assert len(initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS) == 1
+        responsibility = next(
+            iter(initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS.values())
+        )
+        assert responsibility.remaining_listeners == tuple(attempted)
+
+        def recording_remove(target, identifier, callback) -> None:
+            removed.append((target, identifier, callback))
+            original_remove(target, identifier, callback)
+
+        monkeypatch.setattr(initialization.event, 'contains', original_contains)
+        monkeypatch.setattr(initialization.event, 'remove', recording_remove)
+        initialization._drain_failed_checkout_listener_cleanups()
+
+        assert initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS == {}
+        assert len(removed) == fail_index
+        assert set(removed) == set(attempted)
+        for target, identifier, callback in attempted:
+            assert event.contains(target, identifier, callback) is False
+        assert {
+            identifier for _target, identifier, _callback in removed
+        }.isdisjoint({'checkout', 'checkin', 'invalidate'} - {
+            identifier for _target, identifier, _callback in attempted
+        })
+    finally:
+        monkeypatch.setattr(initialization.event, 'contains', original_contains)
+        monkeypatch.setattr(initialization.event, 'remove', original_remove)
+        initialization._drain_failed_checkout_listener_cleanups()
+
+
+@pytest.mark.parametrize(
+    ('retire_stage', 'standalone'),
+    (
+        ('before_retire_lock', False),
+        ('before_map_pop', False),
+        ('after_map_pop', False),
+        ('notify_retirement', False),
+        ('standalone_retire', True),
+    ),
+)
+def test_listener_claim_retirement_fault_preserves_primary_and_cleanup_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    retire_stage: str,
+    standalone: bool,
+) -> None:
+    application = create_engine('sqlite+pysqlite:///:memory:')
+    application.dialect.name = 'postgresql'
+    health = initialization.TrustedPostgresRuntimeHealth(
+        _seal=initialization._POSTGRES_RUNTIME_HEALTH_SEAL
+    )
+    primary = _CleanupStateMachineFault('secret listener retirement primary')
+    original_listen = initialization.event.listen
+    installed: list[tuple[object, str, object]] = []
+    runtime = None
+    registry = None
+
+    def create_once(*_args, **_kwargs):
+        return application
+
+    def observe_listen(target, identifier, callback) -> None:
+        original_listen(target, identifier, callback)
+        if identifier in {'checkout', 'checkin', 'invalidate'}:
+            installed.append((target, identifier, callback))
+
+    def fail_exact_retirement_stage(self, stage: str) -> None:
+        if stage == retire_stage:
+            raise primary
+
+    monkeypatch.setattr(initialization, 'create_engine', create_once)
+    monkeypatch.setattr(initialization.event, 'listen', observe_listen)
+    monkeypatch.setattr(
+        initialization._CheckoutListenerConstructionResponsibility,
+        '_retire_checkpoint',
+        fail_exact_retirement_stage,
+        raising=False,
+    )
+    caught: BaseException | None = None
+    try:
+        if standalone:
+            try:
+                registry = initialization._TrustedApplicationCheckoutRegistry(
+                    application,
+                    runtime_health=health,
+                )
+            except BaseException as exc:
+                caught = exc
+        else:
+            try:
+                runtime = initialization.initialize_database_runtime(
+                    'postgresql+psycopg://authority-role@localhost/authority-database'
+                )
+            except BaseException as exc:
+                caught = exc
+
+        assert caught is primary
+        assert all(
+            responsibility._state not in {'CLAIMING', 'CLAIMED'}
+            for responsibility in (
+                initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS.values()
+            )
+        )
+        assert len(initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS) <= 1
+        initialization._drain_failed_checkout_listener_cleanups()
+        assert initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS == {}
+        for target, identifier, callback in installed:
+            assert event.contains(target, identifier, callback) is False
+    finally:
+        if runtime is not None:
+            runtime.dispose()
+        if registry is not None:
+            registry.revoke()
+        initialization._drain_failed_checkout_listener_cleanups()
+
+
 def test_checkout_registry_remove_uncertainty_poison_is_sanitized_and_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -5971,3 +5971,23 @@ Cost/security note:
   PostgreSQL cases remain URL-gated and were not run because
   `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a rereview candidate only,
   not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 twenty-first rereview candidate
+
+- The twentieth independent rereview kept Task 13 open on two listener
+  ownership seams: an attach-then-raise callback could be omitted when
+  `event.contains` was also uncertain, and bootstrap claim could publish
+  `CLAIMED` before its separately fallible quarantine retirement completed.
+- Each listener is now owned as `ATTEMPTED` before `event.listen` and becomes
+  `INSTALLED` only after a successful return. Failure retains every attempted
+  listener until removal succeeds or `event.contains` explicitly proves it
+  absent; never-attempted listeners are excluded from cleanup.
+- Bootstrap and standalone handoff now remain cleanup-eligible as `CLAIMING`
+  through exact map retirement. Faults before or after pop/notification retain
+  the original `BaseException` and either finish exact callback cleanup or
+  leave one bounded `QUARANTINED` responsibility for the next initialization.
+- RED evidence was `11 failed`. Fresh focused initialization/binding is `312
+  passed`; affected broad verification is `1002 passed, 16 skipped, 2128
+  deselected`. The 16 real PostgreSQL cases remain unrun because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate only; no `CLEAN` claim and
+  Task 14 remains blocked.

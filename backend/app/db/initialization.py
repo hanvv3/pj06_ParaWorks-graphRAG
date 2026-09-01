@@ -1294,6 +1294,7 @@ class _CheckoutListenerConstructionResponsibility:
             'INSTALLING',
             'INSTALLED',
             'QUARANTINED',
+            'CLAIMING',
             'CLAIMED',
             'CLEAN',
         ] = 'NEW'
@@ -1324,8 +1325,8 @@ class _CheckoutListenerConstructionResponsibility:
                     self._state = 'INSTALLING'
                     _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
                     return
-                if existing._state in {'INSTALLING', 'INSTALLED'}:
-                    _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.wait()
+                if existing._state in {'INSTALLING', 'INSTALLED', 'CLAIMING'}:
+                    _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.wait(timeout=0.1)
                     continue
             if existing.drain_quarantine():
                 continue
@@ -1353,37 +1354,60 @@ class _CheckoutListenerConstructionResponsibility:
             self._state = 'INSTALLED'
 
     def claim_into_bootstrap(self, bootstrap: TrustedPostgresEngineBootstrap) -> None:
-        with self._lock:
-            if (
-                self._state != 'INSTALLED'
-                or self._owner is not bootstrap
-                or self._registry is None
-            ):
-                raise TypeError('PostgreSQL listener construction changed')
-            bootstrap._listener_handoff_checkpoint('after_registry_install')
-            bootstrap._checkout_registry = self._registry
-            bootstrap._listener_handoff_checkpoint('after_bootstrap_store')
-            self._state = 'CLAIMED'
-        self._retire_claimed()
+        try:
+            with self._lock:
+                if (
+                    self._state != 'INSTALLED'
+                    or self._owner is not bootstrap
+                    or self._registry is None
+                ):
+                    raise TypeError('PostgreSQL listener construction changed')
+                bootstrap._listener_handoff_checkpoint('after_registry_install')
+                bootstrap._checkout_registry = self._registry
+                bootstrap._listener_handoff_checkpoint('after_bootstrap_store')
+                self._state = 'CLAIMING'
+            self._complete_claim()
+        except BaseException:
+            self.construction_failed()
+            raise
 
     def claim_standalone(self, owner: object) -> None:
-        with self._lock:
-            if self._state != 'INSTALLED' or self._owner is not owner:
-                raise TypeError('PostgreSQL listener construction changed')
-            self._state = 'CLAIMED'
-        self._retire_claimed()
+        try:
+            with self._lock:
+                if self._state != 'INSTALLED' or self._owner is not owner:
+                    raise TypeError('PostgreSQL listener construction changed')
+                self._state = 'CLAIMING'
+            self._retire_checkpoint('standalone_retire')
+            self._complete_claim()
+        except BaseException:
+            self.construction_failed()
+            raise
 
     def construction_failed(self) -> None:
-        with self._lock:
-            if self._state in {'NEW', 'CLEAN'}:
-                return
-            if self._state == 'CLAIMED':
-                raise TypeError('PostgreSQL listener construction changed')
-            self._state = 'QUARANTINED'
-        with self._runtime_health._condition:
+        should_drain = False
+        try:
+            with _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION:
+                with self._lock:
+                    if self._state in {'NEW', 'CLEAN'}:
+                        return
+                    self._state = 'QUARANTINED'
+                current = _FAILED_CHECKOUT_LISTENER_CLEANUPS.get(id(self))
+                if current is None:
+                    if not _FAILED_CHECKOUT_LISTENER_CLEANUPS:
+                        _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
+                        should_drain = True
+                elif current is self:
+                    should_drain = True
+                with suppress(BaseException):
+                    _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.notify_all()
+        except BaseException:
+            should_drain = False
+        with suppress(BaseException), self._runtime_health._condition:
             self._runtime_health._force_fail_stop_locked()
             self._runtime_health._condition.notify_all()
-        self.drain_quarantine()
+        if should_drain:
+            with suppress(BaseException):
+                self.drain_quarantine()
 
     def drain_quarantine(self) -> bool:
         with self._lock:
@@ -1405,15 +1429,35 @@ class _CheckoutListenerConstructionResponsibility:
             _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.notify_all()
         return True
 
-    def _retire_claimed(self) -> None:
+    def _complete_claim(self) -> None:
+        self._retire_checkpoint('before_retire_lock')
         with _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION:
-            if (
-                self._state != 'CLAIMED'
-                or _FAILED_CHECKOUT_LISTENER_CLEANUPS.get(id(self)) is not self
-            ):
-                raise TypeError('PostgreSQL listener construction changed')
-            _FAILED_CHECKOUT_LISTENER_CLEANUPS.pop(id(self), None)
-            _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.notify_all()
+            try:
+                with self._lock:
+                    if (
+                        self._state != 'CLAIMING'
+                        or _FAILED_CHECKOUT_LISTENER_CLEANUPS.get(id(self))
+                        is not self
+                    ):
+                        raise TypeError('PostgreSQL listener construction changed')
+                self._retire_checkpoint('before_map_pop')
+                _FAILED_CHECKOUT_LISTENER_CLEANUPS.pop(id(self), None)
+                self._retire_checkpoint('after_map_pop')
+                _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.notify_all()
+                self._retire_checkpoint('notify_retirement')
+                with self._lock:
+                    self._state = 'CLAIMED'
+            except BaseException:
+                with self._lock:
+                    self._state = 'QUARANTINED'
+                if not _FAILED_CHECKOUT_LISTENER_CLEANUPS:
+                    _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
+                with suppress(BaseException):
+                    _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.notify_all()
+                raise
+
+    def _retire_checkpoint(self, _stage: str) -> None:
+        """Test seam for exact claim-to-bootstrap retirement boundaries."""
 
 
 def _drain_failed_checkout_listener_cleanups(
@@ -1443,6 +1487,7 @@ class _TrustedApplicationCheckoutRegistry:
         '_condition',
         '_engine',
         '_listeners',
+        '_listener_states',
         '_lock',
         '_pending',
         '_remaining_listeners',
@@ -1471,6 +1516,10 @@ class _TrustedApplicationCheckoutRegistry:
             tuple[object, object, int],
         ] = {}
         self._state: Literal['open', 'closing', 'closed'] = 'open'
+        self._listener_states: dict[
+            tuple[object, str, object],
+            Literal['ATTEMPTED', 'INSTALLED'],
+        ] = {}
 
         def on_checkout(
             _dbapi_connection: object,
@@ -1534,7 +1583,7 @@ class _TrustedApplicationCheckoutRegistry:
             (engine.pool, 'invalidate', on_return),
         )
         self._listeners = listeners
-        self._remaining_listeners = list(listeners)
+        self._remaining_listeners: list[tuple[object, str, object]] = []
         standalone_responsibility = _construction_responsibility is None
         responsibility = _construction_responsibility
         if responsibility is None:
@@ -1545,23 +1594,27 @@ class _TrustedApplicationCheckoutRegistry:
             )
             responsibility.register()
         responsibility.publish_registry(self)
-        installed: list[tuple[object, str, object]] = []
         try:
-            for target, identifier, callback in listeners:
+            for listener in listeners:
+                target, identifier, callback = listener
+                self._listener_states[listener] = 'ATTEMPTED'
+                self._remaining_listeners.append(listener)
                 event.listen(target, identifier, callback)
-                installed.append((target, identifier, callback))
+                self._listener_states[listener] = 'INSTALLED'
         except BaseException:
             with self._condition:
                 self._state = 'closing'
             confirmed = []
-            for listener in listeners:
+            for listener in tuple(self._remaining_listeners):
                 target, identifier, callback = listener
                 try:
                     is_installed = event.contains(target, identifier, callback)
                 except BaseException:
-                    is_installed = listener in installed
+                    is_installed = True
                 if is_installed:
                     confirmed.append(listener)
+                else:
+                    self._listener_states.pop(listener, None)
             self._remaining_listeners = list(confirmed)
             with self._condition:
                 self._state = 'closing'
@@ -1604,6 +1657,7 @@ class _TrustedApplicationCheckoutRegistry:
                     break
             if removed:
                 self._remaining_listeners.remove(listener)
+                self._listener_states.pop(listener, None)
         with self._condition:
             if not self._remaining_listeners:
                 self._state = 'closed'
@@ -1732,10 +1786,12 @@ class _TrustedApplicationCheckoutRegistry:
                     removed = False
                 if removed:
                     self._remaining_listeners.remove(listener)
+                    self._listener_states.pop(listener, None)
                 removal_error = exc
                 break
             else:
                 self._remaining_listeners.remove(listener)
+                self._listener_states.pop(listener, None)
         with self._condition:
             if not self._remaining_listeners:
                 self._state = 'closed'
