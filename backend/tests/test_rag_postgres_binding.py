@@ -2907,3 +2907,398 @@ def test_prior_poison_then_finish_after_revoke_preserves_outcome_and_drain(
     assert health._exclusive_waiters == 0
     session.close()
     application.dispose()
+
+
+def test_checkout_ownership_is_registered_below_engine_connect_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    original_connect = type(application).connect
+    captured_connections: list[Connection] = []
+    checkins: list[str] = []
+    checkout_proxies: list[object] = []
+
+    event.listen(application.pool, 'checkin', lambda *_args: checkins.append('checkin'))
+    event.listen(
+        application.pool,
+        'checkout',
+        lambda _dbapi, _record, proxy: checkout_proxies.append(proxy),
+    )
+
+    def connector_fault(self) -> Connection:
+        connection = original_connect(self)
+        if self is application:
+            captured_connections.append(connection)
+            raise _CleanupStateMachineFault('secret connector return fault')
+        return connection
+
+    monkeypatch.setattr(type(application), 'connect', connector_fault)
+
+    with (
+        pytest.raises(TypeError, match='runtime health') as captured,
+        authority.owned_operation(),
+    ):
+        raise AssertionError('body must not run')
+
+    assert 'secret' not in str(captured.value)
+    assert len(captured_connections) == 1
+    assert checkins == ['checkin']
+    assert len(checkout_proxies) == 1
+    assert checkout_proxies[0].is_valid is False
+    registry = authority._assembly.trusted_bootstrap._checkout_registry
+    assert registry._pending == {}
+    assert registry._captured == {}
+    assert health.snapshot.healthy is False
+    assert authority._active_leases == 0
+    assert authority._lease_context.get() is None
+    assert session.get_bind() is application
+    assert authority._emergency_cleanup_state is None
+    with (
+        pytest.raises(TypeError, match='fail-stopped'),
+        health._operation('later-effect'),
+    ):
+        pass
+    with suppress(BaseException):
+        captured_connections[0].close()
+    session.close()
+    application.dispose()
+
+
+@pytest.mark.parametrize(
+    'checkpoint',
+    (
+        'after_ticket_append',
+        'before_ticket_record',
+        'after_ticket_record',
+        'after_wait',
+        'after_claim',
+    ),
+)
+def test_emergency_cleanup_ticket_transition_rolls_back_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint: str,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    injected = False
+
+    def transition_checkpoint(self, current: str) -> None:
+        nonlocal injected
+        if current == checkpoint and not injected:
+            injected = True
+            raise _CleanupStateMachineFault('secret ticket transition fault')
+
+    monkeypatch.setattr(
+        type(health),
+        '_emergency_cleanup_transition_checkpoint',
+        transition_checkpoint,
+        raising=False,
+    )
+
+    with health._operation('rag_finalization_or_recovery') as operation_lease:
+        capability = health._force_mint_emergency_cleanup_capability(
+            operation_lease,
+            authority=authority,
+        )
+        foreign = None
+        with health._condition:
+            foreign = health._enqueue_exclusive_ticket(
+                thread_id=threading.get_ident() + 1,
+                purpose='cleanup',
+            )
+            health._cancel_exclusive_ticket(foreign)
+        with pytest.raises(_CleanupStateMachineFault):
+            health._enter_cleanup(emergency_capability=capability)
+        assert injected is True
+        assert tuple(health._exclusive_tickets) == ()
+        assert health._exclusive_waiters == 0
+        assert health._exclusive_owner is None
+        assert health._exclusive_depth == 0
+        record = health._emergency_cleanup_record(capability)
+        assert record.cleanup_ticket is None
+        assert record.cleanup_generation is None
+        health._force_finish_emergency_cleanup(capability)
+
+    session.close()
+    application.dispose()
+
+
+def test_generic_emergency_cleanup_record_updater_is_not_exposed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+
+    assert not hasattr(health, '_update_emergency_cleanup_record')
+
+    session.close()
+    application.dispose()
+
+
+def test_typed_cleanup_transitions_reject_cross_thread_and_cross_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    seal = initialization._POSTGRES_EMERGENCY_TRANSITION_SEAL
+    cross_thread_errors: list[BaseException] = []
+
+    with (
+        health._operation('rag_finalization_or_recovery') as first_lease,
+        health._operation('rag_finalization_or_recovery') as second_lease,
+    ):
+        first = health._force_mint_emergency_cleanup_capability(
+            first_lease,
+            authority=authority,
+        )
+        second = health._force_mint_emergency_cleanup_capability(
+            second_lease,
+            authority=authority,
+        )
+        before = (
+            tuple(health._exclusive_tickets),
+            health._emergency_cleanup_record(first),
+            health._emergency_cleanup_record(second),
+        )
+        with pytest.raises(TypeError, match='transition'):
+            health._begin_emergency_cleanup_ticket(first, _seal=object())
+        assert (
+            tuple(health._exclusive_tickets),
+            health._emergency_cleanup_record(first),
+            health._emergency_cleanup_record(second),
+        ) == before
+
+        def cross_thread_transition() -> None:
+            try:
+                health._begin_emergency_cleanup_ticket(first, _seal=seal)
+            except BaseException as exc:
+                cross_thread_errors.append(exc)
+
+        thread = threading.Thread(target=cross_thread_transition)
+        thread.start()
+        thread.join(timeout=5)
+        assert thread.is_alive() is False
+        assert len(cross_thread_errors) == 1
+        assert isinstance(cross_thread_errors[0], TypeError)
+        assert (
+            tuple(health._exclusive_tickets),
+            health._emergency_cleanup_record(first),
+            health._emergency_cleanup_record(second),
+        ) == before
+
+        ticket = health._begin_emergency_cleanup_ticket(first, _seal=seal)
+        queued = (
+            tuple(health._exclusive_tickets),
+            health._emergency_cleanup_record(first),
+            health._emergency_cleanup_record(second),
+        )
+        with pytest.raises(TypeError, match='ticket'):
+            health._claim_emergency_cleanup_ticket(second, ticket, _seal=seal)
+        assert (
+            tuple(health._exclusive_tickets),
+            health._emergency_cleanup_record(first),
+            health._emergency_cleanup_record(second),
+        ) == queued
+        health._rollback_emergency_cleanup_transition(first, ticket, _seal=seal)
+        health._force_finish_emergency_cleanup(first)
+        health._force_finish_emergency_cleanup(second)
+
+    assert tuple(health._exclusive_tickets) == ()
+    assert health._exclusive_waiters == 0
+    session.close()
+    application.dispose()
+
+
+def test_revoked_cleanup_disposition_ignores_mutable_state_lease_substitution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    original_finish = type(health)._finish_emergency_cleanup
+    wrong_context = health._operation('rag_finalization_or_recovery')
+    wrong_lease = wrong_context.__enter__()
+
+    def finish_after_revoke(self, capability) -> None:
+        original_finish(self, capability)
+        state = authority._emergency_cleanup_state
+        assert state is not None
+        if hasattr(state, 'runtime_health_lease'):
+            state.runtime_health_lease = wrong_lease
+        raise _CleanupStateMachineFault('secret finish-after-revoke fault')
+
+    monkeypatch.setattr(type(health), '_finish_emergency_cleanup', finish_after_revoke)
+    returned: list[str] = []
+    try:
+        with authority.owned_operation():
+            returned.append('durable-product')
+    finally:
+        wrong_context.__exit__(None, None, None)
+
+    assert returned == ['durable-product']
+    assert health.snapshot.healthy is False
+    assert health.snapshot.failure_count == 1
+    assert authority._emergency_cleanup_state is None
+    assert authority._active_leases == 0
+    assert authority._lease_context.get() is None
+    session.close()
+    application.dispose()
+
+
+@pytest.mark.parametrize('fault_point', ('active_probe', 'state_clear'))
+@pytest.mark.parametrize(
+    'primary',
+    (
+        None,
+        ValueError('terminal drain validation primary'),
+        KeyboardInterrupt('terminal drain cancellation primary'),
+        _CleanupBodyCommitUnknown('terminal drain commit unknown primary'),
+    ),
+)
+def test_terminal_drain_helper_fault_never_masks_body_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    fault_point: str,
+    primary: BaseException | None,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    injected = False
+    original_probe = type(health)._emergency_cleanup_capability_is_active
+
+    def probe_once(self, capability) -> bool:
+        nonlocal injected
+        if fault_point == 'active_probe' and not injected:
+            injected = True
+            raise _CleanupStateMachineFault('secret active probe fault')
+        return original_probe(self, capability)
+
+    def terminal_checkpoint(self, stage: str) -> None:
+        nonlocal injected
+        if fault_point == 'state_clear' and stage == 'before_state_clear' and not injected:
+            injected = True
+            raise _CleanupStateMachineFault('secret state clear fault')
+
+    monkeypatch.setattr(
+        type(health),
+        '_emergency_cleanup_capability_is_active',
+        probe_once,
+    )
+    monkeypatch.setattr(
+        type(authority),
+        '_terminal_cleanup_checkpoint',
+        terminal_checkpoint,
+        raising=False,
+    )
+    returned: list[str] = []
+    errors: list[BaseException] = []
+
+    try:
+        with authority.owned_operation():
+            if primary is not None:
+                raise primary
+            returned.append('durable-product')
+    except BaseException as exc:
+        errors.append(exc)
+
+    assert injected is True
+    if primary is None:
+        assert returned == ['durable-product']
+        assert errors == []
+    else:
+        assert errors == [primary]
+    assert health.snapshot.healthy is False
+    assert authority._emergency_cleanup_state is None
+    assert authority._active_leases == 0
+    assert authority._lease_context.get() is None
+    assert session.get_bind() is application
+    assert session.in_transaction() is False
+    assert tuple(health._emergency_cleanup_capabilities.values()) == ()
+    assert health._exclusive_owner is None
+    assert health._exclusive_depth == 0
+    assert health._exclusive_waiters == 0
+    session.close()
+    application.dispose()
+
+
+@pytest.mark.parametrize('fault_point', ('state_validate', 'terminal_finalize'))
+@pytest.mark.parametrize(
+    'primary',
+    (
+        None,
+        ValueError('outer drain validation primary'),
+        KeyboardInterrupt('outer drain cancellation primary'),
+        _CleanupBodyCommitUnknown('outer drain commit unknown primary'),
+    ),
+)
+def test_outer_cleanup_shell_is_nonthrowing_and_drains_exact_state(
+    monkeypatch: pytest.MonkeyPatch,
+    fault_point: str,
+    primary: BaseException | None,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    target = (
+        '_require_emergency_cleanup_state'
+        if fault_point == 'state_validate'
+        else '_finalize_terminal_cleanup_state'
+    )
+    original = getattr(type(authority), target)
+    injected = False
+
+    def fail_once(self, *args, **kwargs):
+        nonlocal injected
+        if (
+            fault_point == 'state_validate'
+            and args
+            and getattr(args[0], 'lease', None) is None
+        ):
+            return original(self, *args, **kwargs)
+        if not injected:
+            injected = True
+            raise _CleanupStateMachineFault('secret outer drain fault')
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(authority), target, fail_once)
+    returned: list[str] = []
+    errors: list[BaseException] = []
+
+    try:
+        with authority.owned_operation():
+            if primary is not None:
+                raise primary
+            returned.append('durable-product')
+    except BaseException as exc:
+        errors.append(exc)
+
+    assert injected is True
+    if primary is None:
+        assert returned == ['durable-product']
+        assert errors == []
+    else:
+        assert errors == [primary]
+    assert health.snapshot.healthy is False
+    assert authority._emergency_cleanup_state is None
+    assert authority._active_leases == 0
+    assert authority._lease_context.get() is None
+    assert session.get_bind() is application
+    assert session.in_transaction() is False
+    assert tuple(health._emergency_cleanup_capabilities.values()) == ()
+    assert health._exclusive_owner is None
+    assert health._exclusive_depth == 0
+    assert health._exclusive_waiters == 0
+    session.close()
+    application.dispose()

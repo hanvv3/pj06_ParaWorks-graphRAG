@@ -4189,3 +4189,28 @@ tests passed with 53 tests; ruff passed.
   passed, 16 skipped, 2128 deselected`. Real PostgreSQL is URL-gated and unrun
   because the URL is absent. Keep Task 14 blocked pending independent rereview;
   this entry does not claim `CLEAN`.
+
+## 2026-09-01 Deliverable D Core Task 13 sixteenth rereview candidate
+
+- Fifteenth rereview was `NOT CLEAN` on the last five emergency-cleanup
+  publication and disposition seams. The bootstrap now owns a permanent,
+  pool-local checkout tracker: it registers the exact operation capability
+  before physical checkout and the SQLAlchemy pool callback captures the proxy
+  before `Engine.connect()` can return. Return/capture faults invalidate and
+  close the proxy without requiring caller-bytecode assignment.
+- FIFO cleanup enqueue/record replacement, claim, and rollback are typed sealed
+  transitions executed under the shared health condition. There is no generic
+  emergency-record updater or mutable duplicate cleanup lease; the private
+  active/revoked registry is authoritative for exact operation, authority,
+  thread, ticket, generation, epoch, purpose, and seal.
+- The final bounded fallback is outcome-preserving and best-effort per resource.
+  It drains only the exact operation's lease, ContextVar, Session transaction
+  and bind, physical app/advisory connections, dedicated Engine, cleanup owner,
+  ticket, and capability. Any helper/probe/clear uncertainty poisons health
+  before escape without replacing a durable result or original primary.
+- Fresh evidence: RED `15 failed, 1 passed` (then strengthened) plus outer-shell
+  RED `8 failed`; targeted GREEN `25 passed`; initialization plus binding `220
+  passed`; expanded focused `341 passed, 13 skipped`; broad affected `911
+  passed, 16 skipped, 2128 deselected`. Real PostgreSQL remains URL-gated and
+  unrun because the URL is absent. This is a candidate only; keep Task 14
+  blocked until independent rereview returns `CLEAN`.

@@ -5829,3 +5829,31 @@ Cost/security note:
   executable real-PostgreSQL gates left unrun because
   `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a rereview candidate only,
   not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 sixteenth rereview candidate
+
+- The fifteenth independent rereview kept Task 13 open on five cleanup
+  authority seams: caller-bytecode checkout ownership, FIFO ticket/registry
+  publication, a generic emergency-record updater, duplicated mutable runtime
+  lease state, and terminal helper faults that could interrupt the final drain.
+- The trusted bootstrap now installs permanent pool checkout/checkin/invalidate
+  listeners. An exact emergency capability is armed before `Engine.connect()`;
+  the pool callback captures the physical proxy before control can return to
+  caller bytecode. Successful publication transfers that responsibility, while
+  a return-to-caller fault invalidates and physically closes the captured proxy.
+- Emergency cleanup enqueue, immutable-record replacement, claim, and rollback
+  are typed sealed transitions under one health condition. The registry record
+  is the sole source of operation, authority, owner, ticket, and generation;
+  revoked records remain exact operation tombstones until operation exit.
+- The terminal fallback independently drains the lease/ContextVar, Session
+  transaction and bind, application and advisory connections, dedicated
+  transport, exact cleanup owner, and registry disposition. Probe, state-clear,
+  or state-machine `BaseException` remains secondary to the durable result or
+  original validation, cancellation, or commit-unknown outcome.
+- RED was `15 failed, 1 passed` for the initial selector (the pass was
+  strengthened to remove pre-poisoning) plus `8 failed` for the outer cleanup
+  shell. New targeted GREEN is `25 passed`; initialization plus binding is `220
+  passed`; expanded focused is `341 passed, 13 skipped`; broad affected is `911
+  passed, 16 skipped, 2128 deselected`. Real PostgreSQL is URL-gated and unrun
+  because `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate only; no `CLEAN`
+  claim and Task 14 remains blocked.
