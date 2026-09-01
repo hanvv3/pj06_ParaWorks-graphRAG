@@ -516,6 +516,82 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
         assert tuple(value.actual_output_tokens for value in children) == (0, 10)
 
 
+def test_postgres_database_authority_uses_dedicated_nullpool_without_app_reuse(
+    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+):
+    engine, _ = postgres_cost_authority
+    session = Session(engine)
+    authority = _bind_rag_postgres_database(session)
+    assert type(authority._assembly.dedicated_engine.pool) is NullPool
+    application_checkouts = 0
+
+    def checkout(*_args: object) -> None:
+        nonlocal application_checkouts
+        application_checkouts += 1
+
+    event.listen(engine, 'checkout', checkout)
+    try:
+        with authority.connect() as first:
+            assert first.scalar(text('SELECT current_database()'))
+        with authority.connect() as second:
+            assert second.scalar(text('SELECT current_database()'))
+        assert application_checkouts == 0
+    finally:
+        event.remove(engine, 'checkout', checkout)
+        authority._assembly.dedicated_engine.dispose()
+        session.close()
+
+
+def test_postgres_boundary_rejects_same_engine_search_path_drift(
+    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+):
+    engine, _ = postgres_cost_authority
+    with engine.begin() as connection:
+        register_advisory_identity_db(
+            connection,
+            RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+            identity_namespace='static',
+        )
+    with engine.connect() as connection:
+        evidence_capability = load_registered_advisory_capability(
+            connection,
+            RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+            identity_namespace='static',
+        )
+    application_connection = engine.connect()
+    session = Session(bind=application_connection)
+    authority = _bind_rag_postgres_database(session)
+    barrier = _assemble_rag_evidence_barrier(
+        load_current_identity=lambda: 'a' * 64,
+        registered_lock=evidence_capability,
+        postgres_database=authority,
+    )
+    phase2 = _assemble_provider_free_rag_phase2_authority(
+        owner_connection_factory=None,
+        owner_capability_factory=lambda _run_id: (_ for _ in ()).throw(
+            AssertionError('owner lock must not be reached')
+        ),
+        load_current_owner_fence=lambda _run_id: '2' * 64,
+        evidence_barrier=barrier,
+        postgres_database=authority,
+    )
+    try:
+        session.execute(text('SET SESSION search_path TO public'))
+        session.commit()
+        with pytest.raises(TypeError, match='phase-2 database authority'):
+            SqlAlchemyRagFinalizationBoundary(
+                db=session,
+                settings=get_settings(),
+                retriever=SimpleNamespace(invoke=lambda request: request),
+                phase2_authority=phase2,
+            )
+    finally:
+        authority._assembly.dedicated_engine.dispose()
+        session.close()
+        application_connection.invalidate()
+        application_connection.close()
+
+
 def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
     postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
 ):

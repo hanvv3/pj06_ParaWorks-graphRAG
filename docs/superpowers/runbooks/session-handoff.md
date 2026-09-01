@@ -3924,3 +3924,21 @@ tests passed with 53 tests; ruff passed.
   Docker action occurred.
 - Task 14 must not begin before independent Task 13 rereview. The remaining
   release gate after a clean rereview is the real PostgreSQL concurrency suite.
+
+## 2026-09-01 Deliverable D Core Task 13 fourth rereview candidate
+
+- The fourth rereview found that exact PostgreSQL authority was required only
+  when recovery was present. Every ordinary PostgreSQL finalization boundary now
+  requires provider-free/paid phase-2 to share the exact sealed authority with
+  the boundary Session; missing authority and split Engine bundles fail before
+  locks or mutation.
+- The authority snapshots and freshly validates database, current schema,
+  resolved/configured search path, and current role on the bound Session and on
+  every owner/evidence/safety connection. Lock connections use an
+  authority-owned `NullPool` engine rather than the application pool. Unlock
+  uncertainty always invalidates and physically closes.
+- Focused verification is `116 passed, 8 skipped`; broad affected verification
+  is `709 passed, 15 skipped, 2153 deselected`. The real PostgreSQL schema-drift,
+  NullPool isolation, and concurrency tests are executable but unrun because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. Do not claim `CLEAN` or start Task 14
+  before independent rereview.

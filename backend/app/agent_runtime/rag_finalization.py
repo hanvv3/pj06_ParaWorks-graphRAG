@@ -182,6 +182,20 @@ class ProviderFreeRagPhase2Authority:
     def evidence_barrier_is_postgresql(self) -> bool:
         return self._assembly.evidence_barrier.is_postgresql_backed
 
+    def _require_boundary_database(
+        self,
+        db: Session,
+        seal: object,
+    ) -> None:
+        authority = self._assembly.postgres_database
+        if (
+            seal is not _PHASE2_AUTHORITY_SEAL
+            or type(authority) is not RagPostgresDatabaseAuthority
+        ):
+            raise TypeError('provider-free phase-2 database authority changed')
+        authority.require_session(db)
+        self._assembly.evidence_barrier.require_postgres_database(authority)
+
     def _require_recovery_database(
         self,
         authority: RagPostgresDatabaseAuthority,
@@ -350,6 +364,20 @@ class PaidRagPhase2Authority:
     @property
     def evidence_barrier_is_postgresql(self) -> bool:
         return self._assembly.evidence_barrier.is_postgresql_backed
+
+    def _require_boundary_database(
+        self,
+        db: Session,
+        seal: object,
+    ) -> None:
+        authority = self._assembly.postgres_database
+        if (
+            seal is not _PHASE2_AUTHORITY_SEAL
+            or type(authority) is not RagPostgresDatabaseAuthority
+        ):
+            raise TypeError('paid phase-2 database authority changed')
+        authority.require_session(db)
+        self._assembly.evidence_barrier.require_postgres_database(authority)
 
     def _require_recovery_database(
         self,
@@ -1223,6 +1251,15 @@ class SqlAlchemyRagFinalizationBoundary:
             raise TypeError(
                 'PostgreSQL evidence barrier requires registered DB authority'
             )
+        try:
+            phase2_authority._require_boundary_database(
+                db,
+                _PHASE2_AUTHORITY_SEAL,
+            )
+        except TypeError as exc:
+            raise TypeError(
+                'PostgreSQL phase-2 database authority is invalid'
+            ) from exc
         self._db = db
         self._settings = settings
         self._retriever = retriever

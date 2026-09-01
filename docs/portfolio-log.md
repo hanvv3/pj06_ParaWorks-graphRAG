@@ -5545,3 +5545,20 @@ Cost/security note:
   executable but unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent. This is
   still a rereview candidate, not review `CLEAN`; Task 14 remains gated. No
   provider, network, Docker, or paid call occurred.
+- A fourth rereview kept Task 13 open because the exact database authority was
+  recovery-only. The boundary now requires the same sealed authority for every
+  ordinary provider-free or paid phase-2 path, including calls without recovery;
+  legacy barrier factories and split application/phase-2 engines fail before a
+  lock or mutation.
+- That authority now snapshots `current_database()`, `current_schema()`, the
+  resolved and configured search path, and `current_user` from the exact bound
+  Session. It freshly compares every Session/owner/evidence/safety connection
+  before lock acquisition. Advisory connections come from an authority-owned
+  `NullPool` engine, so close is physical and never returns a session lock to the
+  application pool. Any unlock exception or unconfirmed result invalidates and
+  closes the connection.
+- Fourth-candidate verification is focused `116 passed, 8 skipped` and broad
+  affected `709 passed, 15 skipped, 2153 deselected`. Real PostgreSQL tests for
+  same-Engine search-path drift, dedicated-pool isolation, and the prior C.5
+  concurrency gate remain URL-gated and unrun locally. Independent rereview is
+  still required; Task 14 remains blocked.

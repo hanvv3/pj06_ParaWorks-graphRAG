@@ -21,6 +21,7 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     load_registered_advisory_capability,
     register_advisory_identity,
     register_advisory_identity_db,
+    release_advisory_lock,
 )
 from backend.app.db.base import Base
 from backend.app.models.rag_runtime import RagAdvisoryLockKey
@@ -168,3 +169,39 @@ def test_capability_load_requires_committed_exact_static_identity():
             {'lock_name': 'other', 'scope': 'database'},
             identity_namespace='static',
         )
+
+
+def test_unlock_driver_exception_invalidates_and_physically_closes() -> None:
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    identity = {'lock_name': 'provider_safety_authority', 'scope': 'database'}
+    with engine.begin() as connection:
+        register_advisory_identity_db(
+            connection, identity, identity_namespace='static'
+        )
+    with engine.connect() as connection:
+        capability = load_registered_advisory_capability(
+            connection, identity, identity_namespace='static'
+        )
+    engine.dispose()
+
+    class FailingUnlockConnection:
+        invalidated = False
+        closed = False
+
+        def exec_driver_sql(self, statement, parameters):
+            del statement, parameters
+            raise ConnectionError('unlock acknowledgement was lost')
+
+        def invalidate(self):
+            self.invalidated = True
+
+        def close(self):
+            self.closed = True
+
+    failing = FailingUnlockConnection()
+    with pytest.raises(ConnectionError, match='acknowledgement'):
+        release_advisory_lock(failing, capability, shared=False)
+
+    assert failing.invalidated is True
+    assert failing.closed is True

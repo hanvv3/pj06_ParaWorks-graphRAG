@@ -359,10 +359,20 @@ def release_advisory_lock(
     capability._require_authentic()
     key = capability.key
     fn = 'pg_advisory_unlock_shared' if shared else 'pg_advisory_unlock'
-    result = connection.exec_driver_sql(f'SELECT {fn}(%s, %s)', key)  # type: ignore[attr-defined]
+    try:
+        result = connection.exec_driver_sql(  # type: ignore[attr-defined]
+            f'SELECT {fn}(%s, %s)', key
+        )
+    except BaseException:
+        _invalidate_uncertain_advisory_connection(connection)
+        raise
     if result.scalar_one() is not True:
-        try:
-            connection.invalidate()  # type: ignore[attr-defined]
-        finally:
-            connection.close()  # type: ignore[attr-defined]
+        _invalidate_uncertain_advisory_connection(connection)
         raise RuntimeError('advisory unlock was not confirmed')
+
+
+def _invalidate_uncertain_advisory_connection(connection: object) -> None:
+    try:
+        connection.invalidate()  # type: ignore[attr-defined]
+    finally:
+        connection.close()  # type: ignore[attr-defined]

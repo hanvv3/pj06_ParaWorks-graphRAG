@@ -934,7 +934,7 @@ def test_postgresql_boundary_rejects_cross_session_recovery_authority() -> None:
         paid_barrier=barrier,
     )
 
-    with pytest.raises(TypeError, match='recovery database authority'):
+    with pytest.raises(TypeError, match='(phase-2|recovery) database authority'):
         _construct_boundary(db=boundary_db, phase2=phase2, recovery=recovery)
 
 
@@ -955,7 +955,7 @@ def test_postgresql_boundary_rejects_mutex_recovery_evidence_barrier(
     )
 
     ordinary = paid if mutex_side == 'provider_free' else provider_free
-    with pytest.raises(TypeError, match='recovery database authority'):
+    with pytest.raises(TypeError, match='(phase-2|recovery) database authority'):
         _construct_boundary(db=db, phase2=ordinary, recovery=recovery)
 
 
@@ -972,8 +972,41 @@ def test_postgresql_boundary_rejects_cross_database_recovery_connections() -> No
         safety_connection_factory=lambda: _ClosableConnection(other_engine),
     )
 
-    with pytest.raises(TypeError, match='recovery database authority'):
+    with pytest.raises(TypeError, match='(phase-2|recovery) database authority'):
         _construct_boundary(db=db, phase2=phase2, recovery=recovery)
+
+
+def test_postgresql_boundary_requires_database_authority_without_recovery() -> None:
+    engine = object()
+    db = _fake_postgres_session(engine=engine)
+    phase2 = _assemble_provider_free_rag_phase2_authority(
+        owner_connection_factory=lambda: _ClosableConnection(engine),
+        owner_capability_factory=_owner_capability,
+        load_current_owner_fence=lambda _run_id: '2' * 64,
+        evidence_barrier=_postgres_barrier(engine=engine),
+    )
+
+    with pytest.raises(TypeError, match='phase-2 database authority'):
+        _construct_boundary(db=db, phase2=phase2, recovery=None)
+
+
+def test_postgresql_boundary_rejects_split_engine_ordinary_phase2() -> None:
+    boundary_engine = object()
+    phase2_engine = object()
+    db = _fake_postgres_session(engine=boundary_engine)
+    phase2 = _assemble_paid_rag_phase2_authority(
+        provider_safety=object.__new__(RagProviderSafetyService),
+        safety_connection_factory=lambda: _ClosableConnection(phase2_engine),
+        safety_requirements=(),
+        owner_connection_factory=lambda: _ClosableConnection(phase2_engine),
+        owner_capability_factory=_owner_capability,
+        load_current_owner_fence=lambda _run_id: '2' * 64,
+        evidence_barrier=_postgres_barrier(engine=phase2_engine),
+        load_current_readiness=_readiness,
+    )
+
+    with pytest.raises(TypeError, match='phase-2 database authority'):
+        _construct_boundary(db=db, phase2=phase2, recovery=None)
 
 
 def test_evidence_barrier_rejects_wrong_registered_postgresql_capability() -> None:
