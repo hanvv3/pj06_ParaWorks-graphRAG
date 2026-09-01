@@ -17,7 +17,7 @@ from backend.app.agent_runtime.provider_send_fence import (
     FencedProviderSendPermit,
     ProviderAttemptGrant,
     ProviderSendFenceError,
-    run_shared_advisory_send_fence,
+    _run_shared_advisory_send_fence,
 )
 from backend.app.agent_runtime.review_v21_extraction import (
     ExtractionCallLedger,
@@ -286,7 +286,7 @@ def test_rag_shared_advisory_fence_uses_dedicated_connection_and_exact_unlock():
             events.append('close')
 
     connection = Connection()
-    value = run_shared_advisory_send_fence(
+    value = _run_shared_advisory_send_fence(
         connection_factory=lambda: connection,
         key=(10, -20),
         recheck=lambda: events.append('recheck'),
@@ -321,7 +321,7 @@ def test_rag_shared_advisory_fence_invalidates_and_closes_on_uncertain_unlock():
             events.append('close')
 
     with pytest.raises(ProviderSendFenceError, match='unlock'):
-        run_shared_advisory_send_fence(
+        _run_shared_advisory_send_fence(
             connection_factory=Connection,
             key=(1, 2),
             recheck=lambda: None,

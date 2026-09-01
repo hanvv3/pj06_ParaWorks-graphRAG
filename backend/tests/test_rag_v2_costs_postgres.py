@@ -14,14 +14,25 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import Session
 
+from backend.app.agent_runtime.provider_send_fence import (
+    _assemble_rag_evidence_barrier,
+)
 from backend.app.agent_runtime.rag_advisory_locks import (
+    RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
     RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
     load_registered_advisory_capability,
+    rag_projection_owner_lock_id,
     register_advisory_identity_db,
 )
-from backend.app.agent_runtime.rag_cost_ledger import RagCostLedger
+from backend.app.agent_runtime.rag_cost_ledger import _assemble_rag_cost_ledger
 from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
-from backend.app.agent_runtime.rag_runtime_contracts import StrictProviderOutcome
+from backend.app.agent_runtime.rag_provider_transport import (
+    RagProviderTransportError,
+    _assemble_rag_provider_dispatch_authority,
+)
+from backend.app.agent_runtime.rag_runtime_contracts import (
+    _issue_classified_provider_observation as StrictProviderOutcome,
+)
 from backend.app.core.config import get_settings
 from backend.app.rag.retrieval import StrictProviderUsage
 from backend.tests.test_rag_v2_costs import (
@@ -29,6 +40,11 @@ from backend.tests.test_rag_v2_costs import (
     _admit,
     _budget,
     _snapshot,
+)
+from backend.tests.test_rag_v2_provider_transport import (
+    _admit_transport,
+    _Client,
+    _prepared_query,
 )
 
 
@@ -96,7 +112,7 @@ def test_postgres_failed_component_closes_exact_sibling_and_parent(
     postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
 ):
     engine, service = postgres_cost_authority
-    ledger = RagCostLedger(
+    ledger = _assemble_rag_cost_ledger(
         Session(engine),
         identity_secret=b'task-12-test-identity-secret',
         cost_policy=_TEST_COST_POLICY,
@@ -114,7 +130,7 @@ def test_postgres_failed_component_closes_exact_sibling_and_parent(
     ledger.consume_committed_grant(grant)
     final = ledger.finalize_component(
         grant=grant,
-        outcome=StrictProviderOutcome(
+        observation=StrictProviderOutcome(
             component='query_embedding',
             classification='response_less_failure',
             terminal_outcome='retriever_unavailable',
@@ -133,7 +149,7 @@ def test_postgres_reviewed_intercomponent_recovery_accepts_terminal_zero_sibling
     postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
 ):
     engine, service = postgres_cost_authority
-    ledger = RagCostLedger(
+    ledger = _assemble_rag_cost_ledger(
         Session(engine),
         identity_secret=b'task-12-test-identity-secret',
         cost_policy=_TEST_COST_POLICY,
@@ -151,7 +167,7 @@ def test_postgres_reviewed_intercomponent_recovery_accepts_terminal_zero_sibling
     ledger.consume_committed_grant(grant)
     ledger.finalize_component(
         grant=grant,
-        outcome=StrictProviderOutcome(
+        observation=StrictProviderOutcome(
             component='query_embedding',
             classification='validated_success',
             terminal_outcome='component_succeeded',
@@ -172,3 +188,82 @@ def test_postgres_reviewed_intercomponent_recovery_accepts_terminal_zero_sibling
     )
     assert terminal.run_record_phase == 'admission_only'
     assert terminal.total_charged_cost_usd == Decimal('0.000001')
+
+
+def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
+    postgres_cost_authority: tuple[Engine, RagProviderSafetyService],
+):
+    engine, service = postgres_cost_authority
+    run_id = 503
+    with engine.begin() as connection:
+        register_advisory_identity_db(
+            connection,
+            RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+            identity_namespace='static',
+        )
+        register_advisory_identity_db(
+            connection,
+            rag_projection_owner_lock_id(run_id),
+            identity_namespace='dynamic',
+        )
+    with engine.connect() as connection:
+        evidence_lock = load_registered_advisory_capability(
+            connection,
+            RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+            identity_namespace='static',
+        )
+    with engine.connect() as connection:
+        projection_lock = load_registered_advisory_capability(
+            connection,
+            rag_projection_owner_lock_id(run_id),
+            identity_namespace='dynamic',
+        )
+    seen = []
+    ledger = _assemble_rag_cost_ledger(
+        Session(engine),
+        identity_secret=b'task-12-test-identity-secret',
+        cost_policy=_TEST_COST_POLICY,
+        provider_safety=service,
+        provider_connection_factory=engine.connect,
+        designated_environment_id='test',
+        designated_host_id='pytest-postgres-host',
+        projection_lock_capability_factory=lambda value: (
+            projection_lock if value == run_id else None
+        ),
+    )
+    query_budget = _admit_transport(ledger, run_id)
+    grant = ledger.claim_component(
+        run_id=run_id,
+        component='query_embedding',
+        prepared=query_budget,
+    )
+    authority = _assemble_rag_provider_dispatch_authority(
+        store=ledger,
+        provider_safety=service,
+        provider_connection_factory=engine.connect,
+        evidence_barrier=_assemble_rag_evidence_barrier(
+            load_current_identity=lambda: '2' * 64,
+            connection_factory=engine.connect,
+            registered_lock=evidence_lock,
+        ),
+        identity_secret=b'task-12-test-identity-secret',
+        timeout_seconds=30,
+        provider_client=_Client(seen),
+    )
+    prepared = authority.prepare(
+        grant=grant,
+        prepared=_prepared_query(query_budget),
+    )
+    ledger.recover_incomplete_run(
+        run_id=run_id,
+        dead_process_attestation_hmac=(
+            ledger._expected_dead_process_attestation_hmac(
+                run_id=run_id,
+                dead_process_instance_hmac=ledger.process_instance_hmac,
+            )
+        ),
+    )
+
+    with pytest.raises(RagProviderTransportError):
+        authority.dispatch(grant=grant, prepared=prepared)
+    assert seen == []

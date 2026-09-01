@@ -5,6 +5,7 @@ import secrets
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
@@ -31,7 +32,7 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
     RagProviderSafetyBinding,
     RagRunAdmission,
     RagRunTerminal,
-    StrictProviderOutcome,
+    _ClassifiedProviderObservation,
     admission_source_window,
     terminal_source_window,
 )
@@ -46,47 +47,70 @@ from backend.app.agent_runtime.rag_safety_identity import (
     runtime_cost_identity,
 )
 from backend.app.agent_runtime.rag_v2_identity import exact_utf8_bytes
+from backend.app.agents.rag_orchestrator_agent.v2_answer import (
+    PreparedAnswerInvocation,
+)
 from backend.app.models.agent_runs import AgentRun
+from backend.app.models.auto_review import AutoReviewRuntimeKeyState
 from backend.app.models.rag_runtime import AgentRunCostComponent
+from backend.app.models.rag_serving import (
+    RagLexicalServingProjection,
+    RagServingCorpusGeneration,
+)
 from backend.app.rag.retrieval import PreparedPaidCallBudget, RagPaidComponent
 
 _ZERO = Decimal('0.000000')
 _COMPONENT_ORDER = ('query_embedding', 'answer_generation')
-_PROVIDER_CLIENT_SEAL = object()
+_LEDGER_ASSEMBLY_SEAL = object()
 
 
 class RagCostLedgerError(RuntimeError):
     """A fail-closed durable cost authority refusal."""
 
 
-class _StoreOwnedProviderClient:
-    __slots__ = ('_client', '_seal')
+@dataclass(frozen=True, slots=True)
+class _RagCostLedgerAuthority:
+    session: Session
+    identity_secret: bytes = field(repr=False)
+    after_commit: Callable[[], None] | None = field(repr=False)
+    cost_policy: RagCostPolicy = field(repr=False)
+    provider_safety: RagProviderSafetyService = field(repr=False)
+    provider_connection_factory: Callable[[], Connection] = field(repr=False)
+    designated_environment_id: str
+    designated_host_id: str
+    projection_lock_capability_factory: (
+        Callable[[int], RegisteredAdvisoryLock] | None
+    ) = field(repr=False)
+    _seal: object = field(repr=False, compare=False)
 
-    def __init__(self, client: object, seal: object) -> None:
-        if seal is not _PROVIDER_CLIENT_SEAL or not callable(
-            getattr(client, 'send', None)
-        ):
-            raise TypeError('store-owned provider client is unavailable')
-        self._client = client
-        self._seal = seal
 
-    def send(
-        self,
-        request_bytes: bytes,
-        *,
-        timeout_seconds: int,
-        max_retries: int,
-        order: RagLockOrderCoordinator,
-        order_capability: RagLockOrderCapability,
-    ) -> object:
-        if self._seal is not _PROVIDER_CLIENT_SEAL:
-            raise RagCostLedgerError('provider client capability is invalid')
-        order.require(order_capability, stage='optional_assistant')
-        return self._client.send(
-            request_bytes,
-            timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-        )
+def _assemble_rag_cost_ledger(
+    session: Session,
+    *,
+    identity_secret: bytes,
+    cost_policy: RagCostPolicy,
+    provider_safety: RagProviderSafetyService,
+    provider_connection_factory: Callable[[], Connection],
+    designated_environment_id: str,
+    designated_host_id: str,
+    projection_lock_capability_factory: (
+        Callable[[int], RegisteredAdvisoryLock] | None
+    ) = None,
+    after_commit: Callable[[], None] | None = None,
+) -> RagCostLedger:
+    """Private composition seam used by the assembly root and deterministic tests."""
+    return RagCostLedger(_RagCostLedgerAuthority(
+        session=session,
+        identity_secret=identity_secret,
+        after_commit=after_commit,
+        cost_policy=cost_policy,
+        provider_safety=provider_safety,
+        provider_connection_factory=provider_connection_factory,
+        designated_environment_id=designated_environment_id,
+        designated_host_id=designated_host_id,
+        projection_lock_capability_factory=projection_lock_capability_factory,
+        _seal=_LEDGER_ASSEMBLY_SEAL,
+    ))
 
 
 def _make_grant(
@@ -160,22 +184,23 @@ class RagCostLedger:
     pricing or safety side effects.
     """
 
-    def __init__(
-        self,
-        session: Session,
-        *,
-        identity_secret: bytes,
-        after_commit: Callable[[], None] | None = None,
-        cost_policy: RagCostPolicy,
-        provider_safety: RagProviderSafetyService,
-        provider_connection_factory: Callable[[], Connection],
-        designated_environment_id: str,
-        designated_host_id: str,
-        projection_lock_capability_factory: (
-            Callable[[int], RegisteredAdvisoryLock] | None
-        ) = None,
-        provider_client: object | None = None,
-    ) -> None:
+    def __init__(self, authority: object) -> None:
+        if (
+            type(authority) is not _RagCostLedgerAuthority
+            or authority._seal is not _LEDGER_ASSEMBLY_SEAL
+        ):
+            raise TypeError('RAG cost ledger requires assembly-owned authority')
+        session = authority.session
+        identity_secret = authority.identity_secret
+        after_commit = authority.after_commit
+        cost_policy = authority.cost_policy
+        provider_safety = authority.provider_safety
+        provider_connection_factory = authority.provider_connection_factory
+        designated_environment_id = authority.designated_environment_id
+        designated_host_id = authority.designated_host_id
+        projection_lock_capability_factory = (
+            authority.projection_lock_capability_factory
+        )
         if type(identity_secret) is not bytes or not identity_secret:
             raise ValueError('cost-ledger identity secret is required')
         if (
@@ -200,11 +225,6 @@ class RagCostLedger:
             projection_lock_capability_factory
         )
         self._projection_mutex = threading.RLock()
-        self._provider_client = (
-            None
-            if provider_client is None
-            else _StoreOwnedProviderClient(provider_client, _PROVIDER_CLIENT_SEAL)
-        )
         self._active_grants: dict[tuple[int, str], object] = {}
         self._admission_snapshots: dict[
             tuple[int, str], AuthorizedProviderPolicySnapshot
@@ -247,11 +267,6 @@ class RagCostLedger:
     @property
     def provider_connection_factory(self) -> Callable[[], Connection]:
         return self._provider_connection_factory
-
-    def _transport_provider_client(self) -> _StoreOwnedProviderClient:
-        if type(self._provider_client) is not _StoreOwnedProviderClient:
-            raise RagCostLedgerError('provider client is not configured by the store')
-        return self._provider_client
 
     @property
     def process_instance_hmac(self) -> str:
@@ -546,6 +561,9 @@ class RagCostLedger:
             metadata_={
                 'configured_backend': configured_backend,
                 'current_text_hmac': current_text_hmac,
+                'cutover_stage': cutover_stage,
+                'mode': mode,
+                'query_context_version': query_context_version,
                 'retrieval_query_hmac': retrieval_query_hmac,
                 'runtime_cost_snapshot_hmac': runtime_hmac,
                 'security_scope_fingerprint': security_scope_fingerprint,
@@ -751,16 +769,161 @@ class RagCostLedger:
     ) -> None:
         """Consume a grant only under the executable AgentRun-cost order stage."""
         order.require(order_capability, stage='agent_run_cost')
+        try:
+            run_id = grant.agent_run_id
+            component = grant.component
+            dispatch_fence_hmac = grant.dispatch_fence_hmac
+        except Exception:
+            raise RagCostLedgerError('dispatch grant is invalid') from None
+        self._session.expire_all()
+        parent = self._session.get(
+            AgentRun,
+            run_id,
+            with_for_update=True,
+            populate_existing=True,
+        )
+        rows = tuple(self._session.scalars(
+            select(AgentRunCostComponent)
+            .where(AgentRunCostComponent.agent_run_id == run_id)
+            .order_by(AgentRunCostComponent.component_ordinal)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ))
+        selected = next(
+            (row for row in rows if row.component == component), None
+        )
+        if (
+            parent is None
+            or parent.run_contract_version != 'rag-run:v2'
+            or parent.status != 'running'
+            or parent.run_record_phase != 'admission'
+            or parent.projection_owner_fence_hmac is not None
+            or len(rows) != 2
+            or tuple(row.component for row in rows) != _COMPONENT_ORDER
+            or selected is None
+            or selected.dispatch_state != 'dispatching'
+            or selected.dispatch_count != 1
+            or selected.attempted is not True
+            or not hmac.compare_digest(
+                selected.dispatch_fence_hmac or '', dispatch_fence_hmac
+            )
+        ):
+            raise RagCostLedgerError('durable dispatch row changed before send')
         self.consume_committed_grant(grant)
+
+    def revalidate_c5_before_send(
+        self,
+        prepared: object,
+        *,
+        order: RagLockOrderCoordinator,
+        order_capability: RagLockOrderCapability,
+    ) -> None:
+        """Lock and exact-check C.5 key/corpus/projection rows before answer send."""
+        order.require(order_capability, stage='c5_key_corpus')
+        if type(prepared) is not PreparedAnswerInvocation:
+            return
+        key_state = self._session.scalar(
+            select(AutoReviewRuntimeKeyState)
+            .where(
+                AutoReviewRuntimeKeyState.component
+                == 'auto_review_trust_promotion'
+            )
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        corpus = self._session.scalar(
+            select(RagServingCorpusGeneration)
+            .where(RagServingCorpusGeneration.id == 1)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        if (
+            key_state is None
+            or corpus is None
+            or key_state.ready is not True
+            or key_state.generation < 1
+            or key_state.fingerprint_key_version
+            != corpus.fingerprint_key_version
+            or not hmac.compare_digest(
+                key_state.fingerprint_key_material_verifier,
+                corpus.fingerprint_key_material_verifier,
+            )
+            or corpus.embedding_model != 'text-embedding-3-small'
+            or corpus.embedding_dimensions != 1536
+            or corpus.index_policy_version != 'rag-v2-serving-index:v1'
+            or corpus.pgvector_cosine_policy_version
+            != 'pgvector-cosine-indexable:v1'
+        ):
+            raise RagCostLedgerError('C.5 serving authority changed before send')
+        observations = prepared.model_influence
+        if (
+            type(observations) is not tuple
+            or not 1 <= len(observations) <= 8
+            or len(observations) != len(prepared.evidence_slots)
+        ):
+            raise RagCostLedgerError('C.5 prepared evidence is unavailable')
+        bound = tuple(enumerate(zip(
+            prepared.evidence_slots, observations, strict=True
+        )))
+        for ordinal, (slot, observation) in sorted(
+            bound,
+            key=lambda value: (
+                value[1][1].lookup_identity.serving_kind,
+                value[1][1].lookup_identity.serving_document_id,
+                value[1][1].serving_identity_hmac,
+            ),
+        ):
+            row = self._session.scalar(
+                select(RagLexicalServingProjection)
+                .where(
+                    RagLexicalServingProjection.serving_identity_hmac
+                    == observation.serving_identity_hmac
+                )
+                .with_for_update(read=True)
+                .execution_options(populate_existing=True)
+            )
+            if (
+                row is None
+                or observation.ordinal != ordinal
+                or observation.slot_id != slot.slot_id
+                or observation.support_mode != slot.support_mode
+                or row.corpus_generation_id != 1
+                or row.corpus_generation != corpus.corpus_generation
+                or row.serving_document_id
+                != observation.lookup_identity.serving_document_id
+                or row.serving_kind
+                != observation.lookup_identity.serving_kind
+                or row.support_mode != observation.support_mode
+                or row.effective_permission != observation.effective_permission
+                or row.serving_version_fingerprint
+                != observation.serving_version_fingerprint
+                or row.model_content_hmac != observation.model_content_hmac
+                or row.canonical_citation_projection_hmac
+                != observation.canonical_citation_projection_hmac
+                or row.fingerprint_key_version
+                != key_state.fingerprint_key_version
+                or not hmac.compare_digest(
+                    row.fingerprint_key_material_verifier,
+                    key_state.fingerprint_key_material_verifier,
+                )
+            ):
+                raise RagCostLedgerError(
+                    'C.5 serving evidence changed before send'
+                )
 
     def finalize_component(
         self,
         *,
         grant: CommittedRagDispatchGrant,
-        outcome: StrictProviderOutcome,
+        observation: object,
     ) -> RagComponentFinal:
-        if type(outcome) is not StrictProviderOutcome or outcome.component != grant.component:
+        if (
+            type(observation) is not _ClassifiedProviderObservation
+            or observation.component != grant.component
+        ):
             raise ValueError('provider outcome is invalid')
+        observation._consume()
+        outcome = observation
         key = (grant.agent_run_id, grant.component)
         if self._active_grants.get(key) is not grant:
             raise RagCostLedgerError('dispatch grant is not active')
@@ -796,13 +959,20 @@ class RagCostLedger:
             )
             if actual != expected_actual:
                 raise ValueError('actual provider cost does not match authority')
-        if type(self._admission_budgets.get(key)) is not PreparedPaidCallBudget:
+        prepared_budget = self._admission_budgets.get(key)
+        if type(prepared_budget) is not PreparedPaidCallBudget:
             raise RagCostLedgerError('prepared provider budget is unavailable')
         overrun = (
             usage is not None
-            and self._cost_policy.usage_exceeds_authorized_cap(
-                outcome.component,
-                usage,
+            and expected_actual is not None
+            and (
+                usage.input_tokens > prepared_budget.estimated_input_tokens
+                or usage.output_tokens > prepared_budget.maximum_output_tokens
+                or expected_actual > prepared_budget.reserved_cost_usd
+                or self._cost_policy.usage_exceeds_authorized_cap(
+                    outcome.component,
+                    usage,
+                )
             )
         )
         if overrun != (outcome.classification == 'known_overrun'):
@@ -912,6 +1082,13 @@ class RagCostLedger:
             for sibling in siblings:
                 if sibling.dispatch_state == 'not_attempted':
                     self._make_terminal_zero(sibling)
+        else:
+            for sibling in siblings:
+                if (
+                    sibling.dispatch_state == 'not_attempted'
+                    and self._component_is_unused(parent, sibling.component)
+                ):
+                    self._make_terminal_zero(sibling)
         if all(item.dispatch_state in {'terminal', 'abandoned_unknown'} for item in siblings):
             if outcome.classification != 'validated_success':
                 self._active_grants.pop(key, None)
@@ -955,6 +1132,18 @@ class RagCostLedger:
         self._active_grants.pop(key, None)
         self._grant_bindings.pop(key, None)
         return self._component_final(parent, row)
+
+    @staticmethod
+    def _component_is_unused(parent: AgentRun, component: str) -> bool:
+        metadata = parent.metadata_
+        if component == 'query_embedding':
+            return metadata.get('configured_backend') == 'keyword'
+        if component == 'answer_generation':
+            return not (
+                metadata.get('mode') == 'enforce'
+                and metadata.get('surface') in {'ask', 'assistant'}
+            )
+        raise RagCostLedgerError('unknown RAG paid component')
 
     def _projection_owner_fence(
         self,
@@ -1039,7 +1228,7 @@ class RagCostLedger:
                 connection.close()
 
     @staticmethod
-    def _validate_outcome(outcome: StrictProviderOutcome) -> None:
+    def _validate_outcome(outcome: _ClassifiedProviderObservation) -> None:
         response_less_terminal = (
             'retriever_unavailable'
             if outcome.component == 'query_embedding'

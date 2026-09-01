@@ -177,6 +177,23 @@ class RagAnswerOutputValidator:
         except Exception:
             raise ValueError('RAG answer output is invalid') from None
 
+    def failure_classification(
+        self,
+        payload: object,
+        *,
+        slots: tuple[EvidenceSlot, ...],
+    ) -> Literal['structured_output_invalid', 'citation_validation_failed']:
+        """Classify a rejected payload without trusting caller-supplied flags."""
+        try:
+            self._validate(payload, slots=slots)
+        except Exception:
+            return (
+                'citation_validation_failed'
+                if _answer_structure_is_valid(payload)
+                else 'structured_output_invalid'
+            )
+        raise ValueError('RAG answer output is not invalid')
+
     def _validate(
         self,
         payload: object,
@@ -308,6 +325,47 @@ def _validate_bounded_text(value: object, *, maximum: int) -> None:
         if code_point == 0 or 0xD800 <= code_point <= 0xDFFF:
             raise ValueError
     value.encode('utf-8', errors='strict')
+
+
+def _answer_structure_is_valid(payload: object) -> bool:
+    try:
+        if type(payload) is not dict or not _exact_key_set(
+            payload, ('answer_blocks', 'insufficient_evidence_reason')
+        ):
+            return False
+        blocks = payload['answer_blocks']
+        reason = payload['insufficient_evidence_reason']
+        if type(blocks) is not list or len(blocks) > 8:
+            return False
+        if not blocks:
+            _validate_bounded_text(reason, maximum=400)
+            return True
+        if reason is not None:
+            return False
+        total_text = 0
+        for block in blocks:
+            if type(block) is not dict or not _exact_key_set(
+                block, ('text', 'evidence_slot_ids', 'support_mode')
+            ):
+                return False
+            _validate_bounded_text(block['text'], maximum=1200)
+            total_text += len(block['text'])
+            ids = block['evidence_slot_ids']
+            if (
+                total_text > 2400
+                or type(ids) is not list
+                or not 1 <= len(ids) <= 8
+                or any(type(value) is not str for value in ids)
+                or len(set(ids)) != len(ids)
+                or type(block['support_mode']) is not str
+                or block['support_mode'] not in {
+                    'trusted_fact', 'source_observation'
+                }
+            ):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def _exact_key_set(value: dict[object, object], expected: tuple[str, ...]) -> bool:

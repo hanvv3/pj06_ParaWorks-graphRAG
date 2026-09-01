@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TypeVar
@@ -15,6 +16,10 @@ from backend.app.agent_runtime.provider_send_fence import (
     ProviderSendFenceError,
     RagEvidenceSendBarrier,
 )
+from backend.app.agent_runtime.provider_usage import (
+    StrictChatUsageParser,
+    StrictEmbeddingUsageParser,
+)
 from backend.app.agent_runtime.rag_advisory_locks import begin_rag_lock_order
 from backend.app.agent_runtime.rag_cost_ledger import RagCostLedger, RagCostLedgerError
 from backend.app.agent_runtime.rag_provider_safety import (
@@ -25,27 +30,146 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
     AuthorizedProviderPolicySnapshot,
     CommittedRagDispatchGrant,
     RagProviderSafetyBinding,
+    _ClassifiedProviderObservation,
+    _issue_classified_provider_observation,
 )
 from backend.app.agent_runtime.rag_safety_identity import (
     rag_identity_hmac,
     require_lower_hmac,
 )
+from backend.app.agents.rag_orchestrator_agent.v2_answer import (
+    PreparedAnswerInvocation,
+)
+from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
+    ANSWER_OUTPUT_SCHEMA_PROVIDER_BYTES,
+    ANSWER_OUTPUT_SCHEMA_PROVIDER_FORMAT,
+    RagAnswerOutputValidator,
+)
+from backend.app.core.config import Settings
 from backend.app.rag.retrieval import (
     AnswerGenerationCostInput,
+    PreparedQueryEmbedding,
     QueryEmbeddingCostInput,
 )
 
 _T = TypeVar('_T')
 _PREPARED_SEAL = object()
+_DISPATCH_ASSEMBLY_SEAL = object()
+_PROVIDER_CLIENT_SEAL = object()
 
 
 class RagProviderTransportError(RuntimeError):
     """Body-blind provider transport refusal."""
 
 
+class _DirectOpenAIProviderClient:
+    """Exact direct-global OpenAI bindings owned only by runtime assembly."""
+
+    __slots__ = ('_answer_model', '_embedding_client')
+
+    def __init__(self, settings: Settings) -> None:
+        if type(settings) is not Settings or not settings.openai_api_key:
+            raise TypeError('direct OpenAI provider settings are unavailable')
+        import httpx
+        from openai import OpenAI
+
+        from backend.app.agent_runtime.model_router import (
+            build_rag_answer_model_route,
+        )
+
+        self._embedding_client = OpenAI(
+            api_key=settings.openai_api_key,
+            base_url='https://api.openai.com/v1',
+            timeout=30,
+            max_retries=0,
+            http_client=httpx.Client(trust_env=False),
+        )
+        self._answer_model = build_rag_answer_model_route(
+            settings=settings
+        ).model
+
+    def send(
+        self,
+        request_bytes: bytes,
+        *,
+        timeout_seconds: int,
+        max_retries: int,
+    ) -> object:
+        if (
+            type(request_bytes) is not bytes
+            or timeout_seconds != 30
+            or max_retries != 0
+        ):
+            raise RagProviderTransportError('provider request controls are invalid')
+        try:
+            body = json.loads(request_bytes.decode('utf-8'))
+        except Exception:
+            raise RagProviderTransportError('provider request is invalid') from None
+        if type(body) is not dict:
+            raise RagProviderTransportError('provider request is invalid')
+        if set(body) == {'dimensions', 'encoding_format', 'input', 'model'}:
+            if (
+                body.get('dimensions') != 1536
+                or body.get('encoding_format') != 'float'
+                or body.get('model') != 'text-embedding-3-small'
+                or type(body.get('input')) is not str
+                or not body['input']
+            ):
+                raise RagProviderTransportError('embedding request is invalid')
+            response = self._embedding_client.embeddings.create(**body)
+            return response.model_dump(mode='json')
+        expected_controls = {
+            'max_output_tokens': 512,
+            'model': 'gpt-5.4-mini-2026-03-17',
+            'reasoning': {'effort': 'none'},
+            'service_tier': 'default',
+            'store': False,
+            'stream': False,
+            'text': {'format': ANSWER_OUTPUT_SCHEMA_PROVIDER_FORMAT},
+            'tools': [],
+        }
+        if (
+            set(body) != {'input', *expected_controls}
+            or any(body.get(key) != value for key, value in expected_controls.items())
+            or type(body.get('input')) is not list
+        ):
+            raise RagProviderTransportError('answer request is invalid')
+        return self._answer_model.invoke(body['input'], config={'callbacks': []})
+
+
+class _StoreOwnedProviderClient:
+    __slots__ = ('_client', '_seal')
+
+    def __init__(self, client: object, seal: object) -> None:
+        if seal is not _PROVIDER_CLIENT_SEAL or not callable(
+            getattr(client, 'send', None)
+        ):
+            raise TypeError('store-owned provider client is unavailable')
+        self._client = client
+        self._seal = seal
+
+    def send(
+        self,
+        request_bytes: bytes,
+        *,
+        timeout_seconds: int,
+        max_retries: int,
+        order: object,
+        order_capability: object,
+    ) -> object:
+        if self._seal is not _PROVIDER_CLIENT_SEAL:
+            raise RagProviderTransportError('provider client capability is invalid')
+        order.require(order_capability, stage='optional_assistant')
+        return self._client.send(
+            request_bytes,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
+
+
 @dataclass(frozen=True, slots=True)
-class RagProviderRequest:
-    """Typed server input; callers never provide serialized provider bytes."""
+class _CanonicalProviderRequest:
+    """Assembly-derived request; never accepted from a public caller."""
 
     component: str
     provider: str
@@ -60,7 +184,7 @@ class RagProviderRequest:
         targets = {
             'query_embedding': ('/v1/embeddings', 'text-embedding-3-small'),
             'answer_generation': (
-                '/v1/chat/completions', 'gpt-5.4-mini-2026-03-17'
+                '/v1/responses', 'gpt-5.4-mini-2026-03-17'
             ),
         }
         try:
@@ -94,12 +218,71 @@ class _PreparedProviderDispatch:
 @dataclass(frozen=True, slots=True)
 class _PreparedState:
     grant: object
-    request: RagProviderRequest
+    request: _CanonicalProviderRequest
     request_bytes: bytes = field(repr=False)
     snapshot: AuthorizedProviderPolicySnapshot
     binding: RagProviderSafetyBinding
     evidence_identity_hmac: str
     query_identity_hmac: str
+    domain_prepared: PreparedQueryEmbedding | PreparedAnswerInvocation = field(
+        repr=False
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RagProviderDispatchAssembly:
+    store: RagCostLedger = field(repr=False)
+    provider_safety: RagProviderSafetyService = field(repr=False)
+    provider_connection_factory: Callable[[], Connection] = field(repr=False)
+    evidence_barrier: RagEvidenceSendBarrier = field(repr=False)
+    identity_secret: bytes = field(repr=False)
+    timeout_seconds: int
+    provider_client: object = field(repr=False)
+    _seal: object = field(repr=False, compare=False)
+
+
+def _assemble_rag_provider_dispatch_authority(
+    *,
+    store: RagCostLedger,
+    provider_safety: RagProviderSafetyService,
+    provider_connection_factory: Callable[[], Connection],
+    evidence_barrier: RagEvidenceSendBarrier,
+    identity_secret: bytes,
+    timeout_seconds: int,
+    provider_client: object,
+) -> RagProviderDispatchAuthority:
+    return RagProviderDispatchAuthority(_RagProviderDispatchAssembly(
+        store=store,
+        provider_safety=provider_safety,
+        provider_connection_factory=provider_connection_factory,
+        evidence_barrier=evidence_barrier,
+        identity_secret=identity_secret,
+        timeout_seconds=timeout_seconds,
+        provider_client=provider_client,
+        _seal=_DISPATCH_ASSEMBLY_SEAL,
+    ))
+
+
+def _assemble_direct_openai_rag_provider_dispatch_authority(
+    *,
+    store: RagCostLedger,
+    provider_safety: RagProviderSafetyService,
+    provider_connection_factory: Callable[[], Connection],
+    evidence_barrier: RagEvidenceSendBarrier,
+    identity_secret: bytes,
+    timeout_seconds: int,
+    settings: Settings,
+) -> RagProviderDispatchAuthority:
+    """Production assembly seam; caller never owns the provider binding."""
+    return _assemble_rag_provider_dispatch_authority(
+        store=store,
+        provider_safety=provider_safety,
+        provider_connection_factory=provider_connection_factory,
+        evidence_barrier=evidence_barrier,
+        identity_secret=identity_secret,
+        timeout_seconds=timeout_seconds,
+        provider_client=_DirectOpenAIProviderClient(settings),
+    )
 
 
 class RagProviderDispatchAuthority:
@@ -110,16 +293,19 @@ class RagProviderDispatchAuthority:
         '_secret', '_store', '_timeout_seconds',
     )
 
-    def __init__(
-        self,
-        *,
-        store: RagCostLedger,
-        provider_safety: RagProviderSafetyService,
-        provider_connection_factory: Callable[[], Connection],
-        evidence_barrier: RagEvidenceSendBarrier,
-        identity_secret: bytes,
-        timeout_seconds: int,
-    ) -> None:
+    def __init__(self, authority: object) -> None:
+        if (
+            type(authority) is not _RagProviderDispatchAssembly
+            or authority._seal is not _DISPATCH_ASSEMBLY_SEAL
+        ):
+            raise TypeError('provider dispatch requires assembly-owned authority')
+        store = authority.store
+        provider_safety = authority.provider_safety
+        provider_connection_factory = authority.provider_connection_factory
+        evidence_barrier = authority.evidence_barrier
+        identity_secret = authority.identity_secret
+        timeout_seconds = authority.timeout_seconds
+        provider_client = authority.provider_client
         if (
             type(store) is not RagCostLedger
             or type(provider_safety) is not RagProviderSafetyService
@@ -130,16 +316,16 @@ class RagProviderDispatchAuthority:
             or not identity_secret
             or type(timeout_seconds) is not int
             or timeout_seconds <= 0
+            or not callable(getattr(provider_client, 'send', None))
         ):
             raise TypeError('provider dispatch authority is unavailable')
         self._store = store
         self._safety = provider_safety
         self._connection_factory = provider_connection_factory
         self._barrier = evidence_barrier
-        try:
-            self._client = store._transport_provider_client()
-        except RagCostLedgerError as exc:
-            raise TypeError('provider dispatch authority is unavailable') from exc
+        self._client = _StoreOwnedProviderClient(
+            provider_client, _PROVIDER_CLIENT_SEAL
+        )
         self._secret = identity_secret
         self._timeout_seconds = timeout_seconds
         self._prepared: dict[int, _PreparedState] = {}
@@ -148,20 +334,31 @@ class RagProviderDispatchAuthority:
         self,
         *,
         grant: CommittedRagDispatchGrant,
-        request: RagProviderRequest,
+        prepared: PreparedQueryEmbedding | PreparedAnswerInvocation,
     ) -> _PreparedProviderDispatch:
-        if type(request) is not RagProviderRequest:
+        domain_prepared = prepared
+        if type(prepared) not in {PreparedQueryEmbedding, PreparedAnswerInvocation}:
             self._cancel_unconsumed_claim(
                 grant,
                 outcome='provider_safety_unavailable',
             )
-            raise TypeError('typed provider request is required')
+            raise TypeError('frozen provider invocation is required')
         try:
             snapshot, binding, budget, query_identity_hmac = (
                 self._store._transport_context(grant)
             )
         except RagCostLedgerError as exc:
             raise RagProviderTransportError('committed dispatch grant is unavailable') from exc
+        try:
+            request, body, expected_budget = self._canonical_request(prepared)
+        except (TypeError, ValueError):
+            self._cancel_unconsumed_claim(
+                grant,
+                outcome='provider_safety_unavailable',
+            )
+            raise RagProviderTransportError(
+                'provider request cost identity is invalid'
+            ) from None
         if (
             request.component != grant.component
             or request.provider != snapshot.provider
@@ -180,45 +377,6 @@ class RagProviderDispatchAuthority:
                 outcome='provider_safety_unavailable',
             )
             raise RagProviderTransportError('provider request authority is misaligned')
-        try:
-            if request.component == 'query_embedding':
-                expected_budget = self._store.cost_policy_authority.prepare_query_embedding(
-                    QueryEmbeddingCostInput(
-                        retrieval_query_utf8=request.rendered_input_utf8,
-                        model_config_snapshot_hmac=(
-                            request.model_config_snapshot_hmac
-                        ),
-                    )
-                )
-                body = {
-                    'input': request.rendered_input_utf8.decode('utf-8'),
-                    'model': request.model,
-                }
-            else:
-                expected_budget = self._store.cost_policy_authority.prepare_answer_generation(
-                    AnswerGenerationCostInput(
-                        exact_messages_json=request.rendered_input_utf8,
-                        exact_response_schema_json=request.response_schema_json,
-                        model_config_snapshot_hmac=(
-                            request.model_config_snapshot_hmac
-                        ),
-                    )
-                )
-                messages = json.loads(request.rendered_input_utf8)
-                body = {
-                    'messages': messages,
-                    'model': request.model,
-                    'response_format': json.loads(request.response_schema_json),
-                    'service_tier': request.service_tier,
-                }
-        except (TypeError, ValueError):
-            self._cancel_unconsumed_claim(
-                grant,
-                outcome='provider_safety_unavailable',
-            )
-            raise RagProviderTransportError(
-                'provider request cost identity is invalid'
-            ) from None
         if expected_budget != budget:
             self._cancel_unconsumed_claim(
                 grant,
@@ -244,12 +402,12 @@ class RagProviderDispatchAuthority:
             query_identity_hmac=query_identity_hmac,
             evidence_identity_hmac=evidence_identity_hmac,
         )
-        prepared = _PreparedProviderDispatch(
+        dispatch = _PreparedProviderDispatch(
             request_identity_hmac=identity,
             evidence_identity_hmac=evidence_identity_hmac,
             _seal=_PREPARED_SEAL,
         )
-        self._prepared[id(prepared)] = _PreparedState(
+        self._prepared[id(dispatch)] = _PreparedState(
             grant=grant,
             request=request,
             request_bytes=request_bytes,
@@ -257,8 +415,73 @@ class RagProviderDispatchAuthority:
             binding=binding,
             evidence_identity_hmac=evidence_identity_hmac,
             query_identity_hmac=query_identity_hmac,
+            domain_prepared=domain_prepared,
         )
-        return prepared
+        return dispatch
+
+    def _canonical_request(
+        self,
+        prepared: PreparedQueryEmbedding | PreparedAnswerInvocation,
+    ) -> tuple[_CanonicalProviderRequest, dict[str, object], object]:
+        if type(prepared) is PreparedQueryEmbedding:
+            expected_budget = self._store.cost_policy_authority.prepare_query_embedding(
+                QueryEmbeddingCostInput(
+                    retrieval_query_utf8=prepared.transient_query_utf8,
+                    model_config_snapshot_hmac=prepared.model_config_snapshot_hmac,
+                )
+            )
+            request = _CanonicalProviderRequest(
+                component='query_embedding',
+                provider='openai',
+                model='text-embedding-3-small',
+                endpoint='/v1/embeddings',
+                service_tier='default',
+                model_config_snapshot_hmac=prepared.model_config_snapshot_hmac,
+                rendered_input_utf8=prepared.transient_query_utf8,
+            )
+            body = {
+                'dimensions': 1536,
+                'encoding_format': 'float',
+                'input': prepared.transient_query_utf8.decode('utf-8'),
+                'model': 'text-embedding-3-small',
+            }
+            return request, body, expected_budget
+        messages_json = canonical_json_bytes([
+            {'content': content, 'ordinal': ordinal, 'role': role}
+            for ordinal, (role, content) in enumerate(prepared.messages, start=1)
+        ])
+        expected_budget = self._store.cost_policy_authority.prepare_answer_generation(
+            AnswerGenerationCostInput(
+                exact_messages_json=messages_json,
+                exact_response_schema_json=ANSWER_OUTPUT_SCHEMA_PROVIDER_BYTES,
+                model_config_snapshot_hmac=prepared.model_config_snapshot_hmac,
+            )
+        )
+        request = _CanonicalProviderRequest(
+            component='answer_generation',
+            provider='openai',
+            model='gpt-5.4-mini-2026-03-17',
+            endpoint='/v1/responses',
+            service_tier='default',
+            model_config_snapshot_hmac=prepared.model_config_snapshot_hmac,
+            rendered_input_utf8=messages_json,
+            response_schema_json=ANSWER_OUTPUT_SCHEMA_PROVIDER_BYTES,
+        )
+        body = {
+            'input': [
+                {'content': content, 'role': role}
+                for role, content in prepared.messages
+            ],
+            'max_output_tokens': 512,
+            'model': 'gpt-5.4-mini-2026-03-17',
+            'reasoning': {'effort': 'none'},
+            'service_tier': 'default',
+            'store': False,
+            'stream': False,
+            'text': {'format': ANSWER_OUTPUT_SCHEMA_PROVIDER_FORMAT},
+            'tools': [],
+        }
+        return request, body, expected_budget
 
     def _cancel_unconsumed_claim(
         self,
@@ -283,7 +506,7 @@ class RagProviderDispatchAuthority:
         *,
         grant: CommittedRagDispatchGrant,
         prepared: object,
-    ) -> _T:
+    ) -> _ClassifiedProviderObservation:
         state = self._prepared.get(id(prepared))
         if (
             type(prepared) is not _PreparedProviderDispatch
@@ -312,7 +535,12 @@ class RagProviderDispatchAuthority:
         sidecar_capability = order.acquire('provider_stable_sidecar')
         safety_capability = order.acquire('provider_safety_rows')
         try:
-            def send() -> _T:
+            def send() -> _ClassifiedProviderObservation:
+                self._store.revalidate_c5_before_send(
+                    state.domain_prepared,
+                    order=order,
+                    order_capability=c5_capability,
+                )
                 cost_capability = order.acquire('agent_run_cost')
                 self._store.consume_transport_grant(
                     grant,
@@ -322,14 +550,19 @@ class RagProviderDispatchAuthority:
                 assistant_capability = order.acquire('optional_assistant')
                 order.finish()
                 with tracing_context(enabled=False):
-                    result = self._client.send(
-                        state.request_bytes,
-                        timeout_seconds=self._timeout_seconds,
-                        max_retries=0,
-                        order=order,
-                        order_capability=assistant_capability,
-                    )
-                return result
+                    try:
+                        result = self._client.send(
+                            state.request_bytes,
+                            timeout_seconds=self._timeout_seconds,
+                            max_retries=0,
+                            order=order,
+                            order_capability=assistant_capability,
+                        )
+                    except Exception:
+                        return self._response_less_observation(
+                            state.request.component
+                        )
+                return self._classify_response(state, result)
 
             with (
                 self._connection_factory() as connection,
@@ -351,7 +584,7 @@ class RagProviderDispatchAuthority:
                 ):
                     evidence_capability = order.acquire('evidence_shared_barrier')
                     c5_capability = order.acquire('c5_key_corpus')
-                    return self._barrier.run(
+                    return self._barrier._run(
                         expected_identity_hmac=prepared.evidence_identity_hmac,
                         operation=send,
                         order=order,
@@ -387,10 +620,239 @@ class RagProviderDispatchAuthority:
             )
             raise RagProviderTransportError('provider transport failed') from None
 
+    def finalize(
+        self,
+        *,
+        grant: CommittedRagDispatchGrant,
+        observation: object,
+    ):
+        """Consume one transport-owned classified observation in the ledger."""
+        return self._store.finalize_component(
+            grant=grant,
+            observation=observation,
+        )
+
+    @staticmethod
+    def _response_less_observation(component: str) -> _ClassifiedProviderObservation:
+        return _issue_classified_provider_observation(
+            component=component,  # type: ignore[arg-type]
+            classification='response_less_failure',
+            terminal_outcome=(
+                'retriever_unavailable'
+                if component == 'query_embedding'
+                else 'model_provider_failed'
+            ),
+            provider_dispatch_started=True,
+            provider_response_received=False,
+            strict_usage=None,
+            actual_cost_usd=None,
+            safety_action='unchanged',
+        )
+
+    def _classify_response(
+        self,
+        state: _PreparedState,
+        response: object,
+    ) -> _ClassifiedProviderObservation:
+        if state.request.component == 'query_embedding':
+            return self._classify_embedding(state, response)
+        return self._classify_answer(state, response)
+
+    def _classify_embedding(
+        self,
+        state: _PreparedState,
+        response: object,
+    ) -> _ClassifiedProviderObservation:
+        usage = None
+        actual = None
+        usage_invalid = False
+        storage_invalid = False
+        try:
+            if type(response) is not dict:
+                raise ValueError
+            usage = StrictEmbeddingUsageParser().parse_usage(response.get('usage'))
+        except Exception:
+            usage_invalid = True
+        if usage is not None:
+            try:
+                actual = self._store.cost_policy_authority.charge_actual(
+                    'query_embedding', usage
+                )
+            except Exception:
+                storage_invalid = True
+        prepared = state.domain_prepared
+        assert type(prepared) is PreparedQueryEmbedding
+        if usage is not None and actual is not None and (
+            usage.input_tokens > prepared.budget.estimated_input_tokens
+            or self._store.cost_policy_authority.usage_exceeds_authorized_cap(
+                'query_embedding', usage
+            )
+        ):
+            return self._classified(
+                'query_embedding', 'known_overrun', 'provider_usage_overrun',
+                usage, actual, 'block_overrun'
+            )
+        data = response.get('data') if type(response) is dict else None
+        item = data[0] if type(data) is list and len(data) == 1 else None
+        identity_valid = (
+            type(response) is dict
+            and type(response.get('object')) is str
+            and response.get('object') == 'list'
+            and type(response.get('model')) is str
+            and response.get('model') == 'text-embedding-3-small'
+            and type(data) is list
+            and len(data) == 1
+            and type(item) is dict
+            and type(item.get('object')) is str
+            and item.get('object') == 'embedding'
+            and type(item.get('index')) is int
+            and item.get('index') == 0
+        )
+        if not identity_valid:
+            return self._classified(
+                'query_embedding', 'response_identity_invalid',
+                'provider_response_identity_invalid', usage, actual,
+                'block_remediation',
+            )
+        vector_valid = False
+        try:
+            vector = item['embedding']
+            vector_valid = (
+                type(vector) is list
+                and len(vector) == 1536
+                and all(type(value) is float and math.isfinite(value) for value in vector)
+            )
+        except Exception:
+            vector_valid = False
+        if not vector_valid:
+            return self._classified(
+                'query_embedding', 'embedding_payload_invalid',
+                'provider_embedding_payload_invalid', usage, actual,
+                'block_remediation',
+            )
+        if usage_invalid:
+            return self._classified(
+                'query_embedding', 'usage_contract_invalid',
+                'provider_safety_unavailable', None, None, 'block_remediation'
+            )
+        if storage_invalid:
+            return self._classified(
+                'query_embedding', 'usage_storage_invalid',
+                'provider_safety_unavailable', None, None, 'block_remediation'
+            )
+        return self._classified(
+            'query_embedding', 'validated_success', 'component_succeeded',
+            usage, actual, 'unchanged'
+        )
+
+    def _classify_answer(
+        self,
+        state: _PreparedState,
+        response: object,
+    ) -> _ClassifiedProviderObservation:
+        usage = None
+        actual = None
+        usage_invalid = False
+        storage_invalid = False
+        raw = response.get('raw') if type(response) is dict else None
+        try:
+            usage = StrictChatUsageParser().parse_message(raw)
+        except Exception:
+            usage_invalid = True
+        if usage is not None:
+            try:
+                actual = self._store.cost_policy_authority.charge_actual(
+                    'answer_generation', usage
+                )
+            except Exception:
+                storage_invalid = True
+        prepared = state.domain_prepared
+        assert type(prepared) is PreparedAnswerInvocation
+        if usage is not None and actual is not None and (
+            usage.input_tokens > prepared.budget.estimated_input_tokens
+            or usage.output_tokens > prepared.budget.maximum_output_tokens
+            or self._store.cost_policy_authority.usage_exceeds_authorized_cap(
+                'answer_generation', usage
+            )
+        ):
+            return self._classified(
+                'answer_generation', 'known_overrun', 'provider_usage_overrun',
+                usage, actual, 'block_overrun'
+            )
+        try:
+            metadata = raw.response_metadata
+            identity_valid = (
+                metadata.get('model') == 'gpt-5.4-mini-2026-03-17'
+                and metadata.get('object') == 'response'
+                and metadata.get('service_tier') == 'default'
+            )
+        except Exception:
+            identity_valid = False
+        if not identity_valid:
+            return self._classified(
+                'answer_generation', 'response_identity_invalid',
+                'provider_response_identity_invalid', usage, actual,
+                'block_remediation',
+            )
+        schema_valid = False
+        validation_failure = 'structured_output_invalid'
+        validator = RagAnswerOutputValidator(
+            signer=self._store.cost_policy_authority.sign_answer_artifact
+        )
+        try:
+            if response['parsing_error'] is not None:
+                raise ValueError
+            validator.validate(response['parsed'], slots=prepared.evidence_slots)
+            schema_valid = True
+        except Exception:
+            if type(response) is dict and response.get('parsing_error') is None:
+                validation_failure = validator.failure_classification(
+                    response.get('parsed'), slots=prepared.evidence_slots
+                )
+        if not schema_valid:
+            return self._classified(
+                'answer_generation', validation_failure,
+                validation_failure, usage, actual, 'unchanged'
+            )
+        if usage_invalid:
+            return self._classified(
+                'answer_generation', 'usage_contract_invalid',
+                'provider_safety_unavailable', None, None, 'block_remediation'
+            )
+        if storage_invalid:
+            return self._classified(
+                'answer_generation', 'usage_storage_invalid',
+                'provider_safety_unavailable', None, None, 'block_remediation'
+            )
+        return self._classified(
+            'answer_generation', 'validated_success', 'component_succeeded',
+            usage, actual, 'unchanged'
+        )
+
+    @staticmethod
+    def _classified(
+        component: str,
+        classification: str,
+        terminal_outcome: str,
+        usage: object,
+        actual: object,
+        safety_action: str,
+    ) -> _ClassifiedProviderObservation:
+        return _issue_classified_provider_observation(
+            component=component,  # type: ignore[arg-type]
+            classification=classification,  # type: ignore[arg-type]
+            terminal_outcome=terminal_outcome,  # type: ignore[arg-type]
+            provider_dispatch_started=True,
+            provider_response_received=True,
+            strict_usage=usage,  # type: ignore[arg-type]
+            actual_cost_usd=actual,  # type: ignore[arg-type]
+            safety_action=safety_action,  # type: ignore[arg-type]
+        )
+
     def _request_identity(
         self,
         *,
-        request: RagProviderRequest,
+        request: _CanonicalProviderRequest,
         request_bytes: bytes,
         grant: CommittedRagDispatchGrant,
         binding: RagProviderSafetyBinding,

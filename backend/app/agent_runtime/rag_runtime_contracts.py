@@ -124,8 +124,11 @@ class RagRunAdmission:
     runtime_cost_snapshot_hmac: str
 
 
+_CLASSIFIED_OBSERVATION_SEAL = object()
+
+
 @dataclass(frozen=True, slots=True)
-class StrictProviderOutcome:
+class _ClassifiedProviderObservation:
     component: RagPaidComponent
     classification: RagComponentClassification
     terminal_outcome: RagComponentTerminalOutcome
@@ -134,6 +137,46 @@ class StrictProviderOutcome:
     strict_usage: StrictProviderUsage | None
     actual_cost_usd: Decimal | None
     safety_action: RagProviderSafetyAction
+    _seal: object
+    _consumed: bool = False
+
+    def _consume(self) -> None:
+        if self._seal is not _CLASSIFIED_OBSERVATION_SEAL or self._consumed:
+            raise TypeError('classified provider observation is unavailable')
+        object.__setattr__(self, '_consumed', True)
+
+    def __copy__(self):
+        raise TypeError('classified provider observations cannot be copied')
+
+    def __deepcopy__(self, _memo: object):
+        raise TypeError('classified provider observations cannot be copied')
+
+    def __reduce_ex__(self, _protocol: int):
+        raise TypeError('classified provider observations cannot be serialized')
+
+
+def _issue_classified_provider_observation(
+    *,
+    component: RagPaidComponent,
+    classification: RagComponentClassification,
+    terminal_outcome: RagComponentTerminalOutcome,
+    provider_dispatch_started: bool,
+    provider_response_received: bool,
+    strict_usage: StrictProviderUsage | None,
+    actual_cost_usd: Decimal | None,
+    safety_action: RagProviderSafetyAction,
+) -> _ClassifiedProviderObservation:
+    return _ClassifiedProviderObservation(
+        component=component,
+        classification=classification,
+        terminal_outcome=terminal_outcome,
+        provider_dispatch_started=provider_dispatch_started,
+        provider_response_received=provider_response_received,
+        strict_usage=strict_usage,
+        actual_cost_usd=actual_cost_usd,
+        safety_action=safety_action,
+        _seal=_CLASSIFIED_OBSERVATION_SEAL,
+    )
 
 
 @dataclass(frozen=True, slots=True)

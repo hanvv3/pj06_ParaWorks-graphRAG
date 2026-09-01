@@ -2,6 +2,7 @@ import copy
 import sys
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from backend.app.agent_runtime.model_router import build_rag_answer_model_route
@@ -38,6 +39,12 @@ def test_rag_answer_route_binds_exact_openai_model_and_strict_schema(monkeypatch
     assert route.provider == 'openai'
     assert route.model_name == 'gpt-5.4-mini-2026-03-17'
     assert len(route.model_config_snapshot_hmac) == 64
+    sync_client = constructor_calls[0].pop('http_client')
+    async_client = constructor_calls[0].pop('http_async_client')
+    assert type(sync_client) is httpx.Client
+    assert type(async_client) is httpx.AsyncClient
+    assert sync_client._trust_env is False
+    assert async_client._trust_env is False
     assert constructor_calls == [
         {
             'model': 'gpt-5.4-mini-2026-03-17',

@@ -73,6 +73,7 @@ def build_rag_answer_model_route(*, settings: Settings) -> RoutedRagAnswerModel:
             output_schema_hmac=output_schema_hmac,
             prompt_renderer_hmac=renderer_hmac,
         )
+        import httpx
         from langchain_openai import ChatOpenAI
 
         raw_model = ChatOpenAI(
@@ -90,6 +91,8 @@ def build_rag_answer_model_route(*, settings: Settings) -> RoutedRagAnswerModel:
             verbose=False,
             cache=False,
             callbacks=[],
+            http_client=httpx.Client(trust_env=False),
+            http_async_client=httpx.AsyncClient(trust_env=False),
         )
         model = raw_model.with_structured_output(
             ANSWER_OUTPUT_SCHEMA_PROVIDER_FORMAT,

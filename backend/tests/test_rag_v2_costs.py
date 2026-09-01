@@ -7,10 +7,14 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from backend.app.agent_runtime.rag_cost_ledger import RagCostLedger, RagCostLedgerError
+from backend.app.agent_runtime.rag_cost_ledger import (
+    RagCostLedger,
+    RagCostLedgerError,
+    _assemble_rag_cost_ledger,
+)
 from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
 from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
 from backend.app.agent_runtime.rag_runtime_contracts import (
@@ -18,10 +22,13 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
     TERMINAL_SOURCE_WINDOWS,
     AuthorizedProviderPolicySnapshot,
     RagRunAdmission,
-    StrictProviderOutcome,
+)
+from backend.app.agent_runtime.rag_runtime_contracts import (
+    _issue_classified_provider_observation as StrictProviderOutcome,
 )
 from backend.app.db.base import Base
 from backend.app.models.agent_runs import AgentRun
+from backend.app.models.rag_runtime import AgentRunCostComponent
 from backend.app.rag.retrieval import PreparedPaidCallBudget, StrictProviderUsage
 from backend.tests.test_rag_v2_cost_policy import _policy
 
@@ -93,7 +100,9 @@ def _ledger(
     commits: list[str] | None = None,
     safety_events: list[object] | None = None,
     provider_client: object | None = None,
+    cost_policy: RagCostPolicy | None = None,
 ) -> RagCostLedger:
+    selected_policy = cost_policy or _TEST_COST_POLICY
     engine = create_engine(
         f'sqlite+pysqlite:///{(tmp_path / (uuid4().hex + ".db")).as_posix()}'
     )
@@ -107,21 +116,20 @@ def _ledger(
         service.bootstrap(
             connection,
             (
-                _snapshot('query_embedding', _TEST_COST_POLICY),
-                _snapshot('answer_generation', _TEST_COST_POLICY),
+                _snapshot('query_embedding', selected_policy),
+                _snapshot('answer_generation', selected_policy),
             ),
             reviewed_transition_reference_hmac='9' * 64,
         )
-    return RagCostLedger(
+    return _assemble_rag_cost_ledger(
         Session(engine),
         identity_secret=b'task-12-test-identity-secret',
         after_commit=(None if commits is None else lambda: commits.append('commit')),
-        cost_policy=_TEST_COST_POLICY,
+        cost_policy=selected_policy,
         provider_safety=service,
         provider_connection_factory=engine.connect,
         designated_environment_id='test',
         designated_host_id='pytest-host',
-        provider_client=provider_client,
     )
 
 
@@ -214,7 +222,7 @@ def test_claim_is_committed_before_opaque_one_use_grant_and_actual_replaces_rese
 
     final = ledger.finalize_component(
         grant=grant,
-        outcome=StrictProviderOutcome(
+        observation=StrictProviderOutcome(
             component='query_embedding',
             classification='validated_success',
             terminal_outcome='component_succeeded',
@@ -243,7 +251,7 @@ def test_response_less_uses_full_reserve_and_known_overrun_is_unclamped(
     query.consume_at_dispatch()
     response_less = ledger.finalize_component(
         grant=query,
-        outcome=StrictProviderOutcome(
+        observation=StrictProviderOutcome(
             component='query_embedding',
             classification='response_less_failure',
             terminal_outcome='retriever_unavailable',
@@ -267,7 +275,7 @@ def test_response_less_uses_full_reserve_and_known_overrun_is_unclamped(
     overrun_ledger.consume_committed_grant(query_ok)
     overrun_ledger.finalize_component(
         grant=query_ok,
-        outcome=StrictProviderOutcome(
+        observation=StrictProviderOutcome(
             component='query_embedding',
             classification='validated_success',
             terminal_outcome='component_succeeded',
@@ -286,7 +294,7 @@ def test_response_less_uses_full_reserve_and_known_overrun_is_unclamped(
     answer.consume_at_dispatch()
     overrun = overrun_ledger.finalize_component(
         grant=answer,
-        outcome=StrictProviderOutcome(
+        observation=StrictProviderOutcome(
             component='answer_generation',
             classification='known_overrun',
             terminal_outcome='provider_usage_overrun',
@@ -316,7 +324,7 @@ def test_failed_selected_component_closes_impossible_sibling_and_parent_final(
 
     final = ledger.finalize_component(
         grant=grant,
-        outcome=StrictProviderOutcome(
+        observation=StrictProviderOutcome(
             component='query_embedding',
             classification='response_less_failure',
             terminal_outcome='retriever_unavailable',
@@ -384,7 +392,7 @@ def test_unconsumed_forged_outcome_cannot_finalize_or_trigger_ignored_safety(
         safety_action='block_overrun',
     )
     with pytest.raises((RagCostLedgerError, ValueError)):
-        ledger.finalize_component(grant=grant, outcome=forged)
+        ledger.finalize_component(grant=grant, observation=forged)
     assert safety_events == []
 
 
@@ -457,7 +465,7 @@ def test_accounting_classification_matrix_is_policy_and_safety_owned(
 
     final = ledger.finalize_component(
         grant=grant,
-        outcome=StrictProviderOutcome(
+        observation=StrictProviderOutcome(
             component='query_embedding',
             classification=classification,
             terminal_outcome=terminal,
@@ -487,7 +495,7 @@ def test_known_overrun_must_be_real_before_safety_is_mutated(tmp_path: Path):
     with pytest.raises(ValueError, match='overrun classification'):
         ledger.finalize_component(
             grant=grant,
-            outcome=StrictProviderOutcome(
+            observation=StrictProviderOutcome(
                 component='query_embedding',
                 classification='known_overrun',
                 terminal_outcome='provider_usage_overrun',
@@ -507,7 +515,7 @@ def test_second_terminal_child_moves_parent_to_pending_projection_with_owner_fen
     _admit(ledger, 13)
     for component, reserve, usage, actual in (
         ('query_embedding', '0.000010', StrictProviderUsage(20, 0, 20), Decimal('0.000001')),
-        ('answer_generation', '0.002000', StrictProviderUsage(50, 10, 60), Decimal('0.000083')),
+        ('answer_generation', '0.002000', StrictProviderUsage(1, 10, 11), Decimal('0.000046')),
     ):
         grant = ledger.claim_component(
             run_id=13, component=component, prepared=_budget(component, reserve)
@@ -515,7 +523,7 @@ def test_second_terminal_child_moves_parent_to_pending_projection_with_owner_fen
         grant.consume_at_dispatch()
         final = ledger.finalize_component(
             grant=grant,
-            outcome=StrictProviderOutcome(
+            observation=StrictProviderOutcome(
                 component=component,
                 classification='validated_success',
                 terminal_outcome='component_succeeded',
@@ -527,6 +535,59 @@ def test_second_terminal_child_moves_parent_to_pending_projection_with_owner_fen
             ),
         )
     assert final.parent_run_record_phase == 'cost_finalized_pending_projection'
+
+
+def test_shadow_pgvector_success_closes_unused_answer_component_terminal_zero(
+    tmp_path: Path,
+):
+    ledger = _ledger(tmp_path)
+    ledger.create_admission(
+        agent_run_id=127,
+        surface='search',
+        mode='shadow',
+        cutover_stage='search',
+        configured_backend='pgvector',
+        query_context_version='direct-query:v1',
+        current_text_hmac='1' * 64,
+        retrieval_query_hmac='2' * 64,
+        security_scope_fingerprint='3' * 64,
+        admission_cache_identity_hmac=None,
+        source_window='rag-v2:admission:shadow:search:pgvector',
+        components=(
+            (_snapshot('query_embedding', _TEST_COST_POLICY), _budget('query_embedding', '0.000010')),
+            (_snapshot('answer_generation', _TEST_COST_POLICY), _budget('answer_generation', '0.002000')),
+        ),
+    )
+    grant = ledger.claim_component(
+        run_id=127,
+        component='query_embedding',
+        prepared=_budget('query_embedding', '0.000010'),
+    )
+    ledger.consume_committed_grant(grant)
+
+    final = ledger.finalize_component(
+        grant=grant,
+        observation=StrictProviderOutcome(
+            component='query_embedding',
+            classification='validated_success',
+            terminal_outcome='component_succeeded',
+            provider_dispatch_started=True,
+            provider_response_received=True,
+            strict_usage=StrictProviderUsage(20, 0, 20),
+            actual_cost_usd=Decimal('0.000001'),
+            safety_action='unchanged',
+        ),
+    )
+
+    children = tuple(ledger._session.scalars(
+        select(AgentRunCostComponent)
+        .where(AgentRunCostComponent.agent_run_id == 127)
+        .order_by(AgentRunCostComponent.component_ordinal)
+    ))
+    assert final.parent_run_record_phase == 'cost_finalized_pending_projection'
+    assert children[1].dispatch_state == 'terminal'
+    assert children[1].attempted is False
+    assert children[1].charged_cost_usd == Decimal('0.000000')
     assert final.projection_owner_fence_hmac is not None
 
 
@@ -566,7 +627,7 @@ def test_dead_dispatch_recovery_never_redispatches_and_preserves_prior_actual(
     ledger.consume_committed_grant(query)
     ledger.finalize_component(
         grant=query,
-        outcome=StrictProviderOutcome(
+        observation=StrictProviderOutcome(
             component='query_embedding',
             classification='validated_success',
             terminal_outcome='component_succeeded',
@@ -618,7 +679,7 @@ def test_reviewed_intercomponent_recovery_preserves_actual_and_zeroes_sibling(
     ledger.consume_committed_grant(query)
     ledger.finalize_component(
         grant=query,
-        outcome=StrictProviderOutcome(
+        observation=StrictProviderOutcome(
             component='query_embedding',
             classification='validated_success',
             terminal_outcome='component_succeeded',
@@ -651,7 +712,7 @@ def test_pending_projection_recovery_requires_exact_owner_fence(tmp_path: Path):
     final = None
     for component, reserve, usage, actual in (
         ('query_embedding', '0.000010', StrictProviderUsage(20, 0, 20), Decimal('0.000001')),
-        ('answer_generation', '0.002000', StrictProviderUsage(50, 10, 60), Decimal('0.000083')),
+        ('answer_generation', '0.002000', StrictProviderUsage(1, 10, 11), Decimal('0.000046')),
     ):
         grant = ledger.claim_component(
             run_id=132, component=component, prepared=_budget(component, reserve)
@@ -659,7 +720,7 @@ def test_pending_projection_recovery_requires_exact_owner_fence(tmp_path: Path):
         ledger.consume_committed_grant(grant)
         final = ledger.finalize_component(
             grant=grant,
-            outcome=StrictProviderOutcome(
+            observation=StrictProviderOutcome(
                 component=component,
                 classification='validated_success',
                 terminal_outcome='component_succeeded',
@@ -683,7 +744,7 @@ def test_pending_projection_recovery_requires_exact_owner_fence(tmp_path: Path):
     )
     assert terminal.outcome == 'persistence_failed'
     assert terminal.run_record_phase == 'final'
-    assert terminal.total_charged_cost_usd == Decimal('0.000084')
+    assert terminal.total_charged_cost_usd == Decimal('0.000047')
 
 
 @pytest.mark.parametrize(

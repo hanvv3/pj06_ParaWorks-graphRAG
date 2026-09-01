@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import datetime
 from threading import RLock
 from typing import Any, Generic, Protocol, TypeVar
@@ -36,6 +37,39 @@ class FencedProviderSendPermit(Protocol):
 
 
 _T = TypeVar('_T')
+_EVIDENCE_ASSEMBLY_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _EvidenceFreshnessAssembly:
+    load_current_identity: Callable[[], str] = field(repr=False)
+    _seal: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _EvidenceBarrierAssembly:
+    freshness: RagEvidenceFreshnessAuthority = field(repr=False)
+    connection_factory: Callable[[], object] | None = field(repr=False)
+    registered_lock: RegisteredAdvisoryLock | None = field(repr=False)
+    _seal: object = field(repr=False, compare=False)
+
+
+def _assemble_rag_evidence_barrier(
+    *,
+    load_current_identity: Callable[[], str],
+    connection_factory: Callable[[], object] | None = None,
+    registered_lock: RegisteredAdvisoryLock | None = None,
+) -> RagEvidenceSendBarrier:
+    freshness = RagEvidenceFreshnessAuthority(_EvidenceFreshnessAssembly(
+        load_current_identity=load_current_identity,
+        _seal=_EVIDENCE_ASSEMBLY_SEAL,
+    ))
+    return RagEvidenceSendBarrier(_EvidenceBarrierAssembly(
+        freshness=freshness,
+        connection_factory=connection_factory,
+        registered_lock=registered_lock,
+        _seal=_EVIDENCE_ASSEMBLY_SEAL,
+    ))
 
 
 class RagEvidenceFreshnessAuthority:
@@ -43,7 +77,13 @@ class RagEvidenceFreshnessAuthority:
 
     __slots__ = ('_load_current_identity',)
 
-    def __init__(self, load_current_identity: Callable[[], str]) -> None:
+    def __init__(self, authority: object) -> None:
+        if (
+            type(authority) is not _EvidenceFreshnessAssembly
+            or authority._seal is not _EVIDENCE_ASSEMBLY_SEAL
+        ):
+            raise TypeError('evidence freshness requires assembly authority')
+        load_current_identity = authority.load_current_identity
         if not callable(load_current_identity):
             raise TypeError('evidence freshness authority is unavailable')
         self._load_current_identity = load_current_identity
@@ -66,13 +106,15 @@ class RagEvidenceSendBarrier:
 
     __slots__ = ('_connection_factory', '_freshness', '_mutex', '_registered_lock')
 
-    def __init__(
-        self,
-        *,
-        freshness: RagEvidenceFreshnessAuthority,
-        connection_factory: Callable[[], object] | None = None,
-        registered_lock: RegisteredAdvisoryLock | None = None,
-    ) -> None:
+    def __init__(self, authority: object) -> None:
+        if (
+            type(authority) is not _EvidenceBarrierAssembly
+            or authority._seal is not _EVIDENCE_ASSEMBLY_SEAL
+        ):
+            raise TypeError('evidence barrier requires assembly authority')
+        freshness = authority.freshness
+        connection_factory = authority.connection_factory
+        registered_lock = authority.registered_lock
         if type(freshness) is not RagEvidenceFreshnessAuthority:
             raise TypeError('evidence freshness authority is unavailable')
         if (connection_factory is None) != (registered_lock is None):
@@ -85,7 +127,7 @@ class RagEvidenceSendBarrier:
     def snapshot_identity(self) -> str:
         return self._freshness.snapshot_identity()
 
-    def run(
+    def _run(
         self,
         *,
         expected_identity_hmac: str,
@@ -163,7 +205,7 @@ class ProviderAttemptGrant(Protocol, Generic[_T]):
     def authoritative_lease_expires_at(self) -> datetime: ...
 
 
-def run_shared_advisory_send_fence(
+def _run_shared_advisory_send_fence(
     *,
     connection_factory: Callable[[], object],
     key: tuple[int, int],
