@@ -3942,3 +3942,30 @@ tests passed with 53 tests; ruff passed.
   NullPool isolation, and concurrency tests are executable but unrun because
   `PARAWORKS_TEST_POSTGRES_URL` is absent. Do not claim `CLEAN` or start Task 14
   before independent rereview.
+
+## 2026-09-01 Deliverable D Core Task 13 fifth rereview candidate
+
+- Fifth rereview found that direct recovery could still be assembled without
+  independently proving the exact database authority, and that the authority
+  recreated a dedicated Engine from a URL without owning a complete shutdown
+  lifecycle.
+- Recovery assembly now requires and immediately checks the same live sealed
+  `RagPostgresDatabaseAuthority` across the cost-ledger Session, projection
+  coordinator, provider-free/paid owner factories, safety factory, and both
+  evidence barriers. `recover()` repeats this check before reading the pending
+  snapshot, so direct calls do not depend on finalization-boundary side effects.
+- Trusted bootstrap now injects the dedicated `NullPool` Engine and sealed
+  static projection-owner registry capability. No production URL clone exists.
+  Fresh probes bind database/schema/search paths/role/database OID/cluster
+  system identifier plus executable registry identity on the application
+  Session and every advisory connection.
+- `RagPostgresDatabaseAuthority.close()` owns the dedicated lifetime: it
+  invalidates/closes outstanding connections, disposes the Engine exactly once,
+  and refuses later Session/connection use. Construction validation failures
+  dispose the transferred Engine. Tests no longer access private assembly for
+  disposal.
+- Candidate verification is focused `114 passed, 11 skipped` and RAG-wide
+  `688 passed, 16 skipped`. Real PostgreSQL
+  custom-creator, connect-args, schema-split, pool-lifecycle and direct-recovery
+  concurrency gates are URL-gated and unrun locally. Independent rereview is
+  still required; Task 14 remains blocked.

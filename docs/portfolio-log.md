@@ -5562,3 +5562,24 @@ Cost/security note:
   same-Engine search-path drift, dedicated-pool isolation, and the prior C.5
   concurrency gate remain URL-gated and unrun locally. Independent rereview is
   still required; Task 14 remains blocked.
+- A fifth rereview kept Task 13 open on direct-recovery binding and advisory
+  connection ownership. Recovery assembly now requires the exact non-null
+  PostgreSQL authority itself and revalidates its ledger Session, projection
+  coordinator, both phase-2 branches, and both evidence barriers before the
+  first pending snapshot, without relying on prior boundary construction.
+- The database authority no longer reconstructs credentials or transport
+  settings from `Engine.url`. A trusted bootstrap must inject a distinct
+  `NullPool` Engine plus the sealed static projection-owner registry capability.
+  Binding and every later Session/connection use freshly compare database,
+  schema, effective/configured search path, role, database OID, PostgreSQL
+  cluster system identifier, and the executable registry capability.
+- The authority now owns an explicit idempotent lifecycle: close first
+  invalidates and physically closes every outstanding advisory connection,
+  then disposes the injected dedicated Engine exactly once. Failed identity or
+  bootstrap validation disposes the transferred Engine, and use after close is
+  refused. URL-gated tests cover custom creator, connect args, schema split,
+  pool isolation, and direct recovery without boundary assembly.
+- Fifth-candidate verification is focused `114 passed, 11 skipped` and RAG-wide
+  `688 passed, 16 skipped`. PostgreSQL behavioral cases
+  remain collected but unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent.
+  This remains a rereview candidate, not `CLEAN`; Task 14 stays blocked.

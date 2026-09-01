@@ -157,7 +157,7 @@ class _ProjectionOwnerRecoveryAssembly:
     provider_free: ProviderFreeRagPhase2Authority = field(repr=False)
     paid: PaidRagPhase2Authority = field(repr=False)
     projection_read: ServingProjectionReadCoordinator = field(repr=False)
-    postgres_database: RagPostgresDatabaseAuthority | None = field(repr=False)
+    postgres_database: RagPostgresDatabaseAuthority = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -742,11 +742,13 @@ class RagProjectionOwnerRecoveryAuthority:
         ):
             raise TypeError('projection-owner recovery authority is unavailable')
         self._assembly = assembly
+        self._require_active_database()
 
     def recover(self, run_id: int) -> object:
         if type(run_id) is not int or run_id <= 0:
             raise RagFinalizationError('projection-owner recovery run is invalid')
         assembly = self._assembly
+        self._require_active_database()
         snapshot = assembly.ledger.pending_projection_recovery_snapshot(run_id)
         phase2 = assembly.paid if snapshot.paid_work_performed else assembly.provider_free
         with phase2.acquire_recovery(
@@ -771,17 +773,31 @@ class RagProjectionOwnerRecoveryAuthority:
         seal: object,
     ) -> None:
         assembly = self._assembly
-        authority = assembly.postgres_database
         if (
             seal is not _RECOVERY_AUTHORITY_SEAL
-            or type(authority) is not RagPostgresDatabaseAuthority
             or db is not assembly.ledger._session
             or phase2_authority not in (assembly.provider_free, assembly.paid)
         ):
             raise TypeError('RAG recovery database authority changed')
-        authority.require_session(db)
-        assembly.provider_free._require_recovery_database(authority, seal)
-        assembly.paid._require_recovery_database(authority, seal)
+        self._require_active_database()
+
+    def _require_active_database(self) -> None:
+        assembly = self._assembly
+        authority = assembly.postgres_database
+        if (
+            type(authority) is not RagPostgresDatabaseAuthority
+            or assembly.projection_read._db is not assembly.ledger._session
+        ):
+            raise TypeError('RAG recovery database authority changed')
+        authority.require_session(assembly.ledger._session)
+        assembly.provider_free._require_recovery_database(
+            authority,
+            _RECOVERY_AUTHORITY_SEAL,
+        )
+        assembly.paid._require_recovery_database(
+            authority,
+            _RECOVERY_AUTHORITY_SEAL,
+        )
 
 
 def _assemble_projection_owner_recovery_authority(
@@ -790,7 +806,7 @@ def _assemble_projection_owner_recovery_authority(
     provider_free: ProviderFreeRagPhase2Authority,
     paid: PaidRagPhase2Authority,
     projection_read: ServingProjectionReadCoordinator,
-    postgres_database: RagPostgresDatabaseAuthority | None = None,
+    postgres_database: RagPostgresDatabaseAuthority,
 ) -> RagProjectionOwnerRecoveryAuthority:
     return RagProjectionOwnerRecoveryAuthority(
         _ProjectionOwnerRecoveryAssembly(

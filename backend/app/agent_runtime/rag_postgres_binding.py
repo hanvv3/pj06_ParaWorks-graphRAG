@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import RLock
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
+from backend.app.agent_runtime.rag_advisory_locks import (
+    RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID,
+    RegisteredAdvisoryLock,
+    _require_registered_capability,
+)
+
 _POSTGRES_DATABASE_AUTHORITY_SEAL = object()
 _IDENTITY_SQL = text(
     "SELECT current_database(), current_schema(), current_schemas(false), "
-    "current_setting('search_path'), current_user"
+    "current_setting('search_path'), current_user, "
+    "(SELECT oid FROM pg_database WHERE datname = current_database()), "
+    "(SELECT system_identifier::text FROM pg_control_system())"
 )
 
 
@@ -21,6 +30,8 @@ class RagPostgresDatabaseIdentity:
     effective_search_path: tuple[str, ...]
     search_path_setting: str
     current_role: str
+    database_oid: int
+    cluster_system_identifier: str
 
     def __post_init__(self) -> None:
         if (
@@ -29,6 +40,9 @@ class RagPostgresDatabaseIdentity:
             or not self.effective_search_path
             or not self.search_path_setting
             or not self.current_role
+            or type(self.database_oid) is not int
+            or self.database_oid <= 0
+            or not self.cluster_system_identifier
         ):
             raise TypeError('RAG PostgreSQL database identity is incomplete')
 
@@ -38,6 +52,7 @@ class _PostgresDatabaseAssembly:
     session: Session = field(repr=False)
     application_engine: Engine = field(repr=False)
     dedicated_engine: Engine = field(repr=False)
+    bootstrap_capability: RegisteredAdvisoryLock = field(repr=False)
     identity: RagPostgresDatabaseIdentity
     _seal: object = field(repr=False, compare=False)
 
@@ -45,7 +60,7 @@ class _PostgresDatabaseAssembly:
 class RagPostgresDatabaseAuthority:
     """Sealed exact-identity authority with physical-close lock connections."""
 
-    __slots__ = ('_assembly',)
+    __slots__ = ('_assembly', '_closed', '_connections', '_lifecycle_lock')
 
     def __init__(self, assembly: object) -> None:
         if (
@@ -58,58 +73,147 @@ class RagPostgresDatabaseAuthority:
             or assembly.application_engine.dialect.name != 'postgresql'
             or assembly.dedicated_engine.dialect.name != 'postgresql'
             or type(assembly.identity) is not RagPostgresDatabaseIdentity
+            or type(assembly.bootstrap_capability) is not RegisteredAdvisoryLock
         ):
             raise TypeError('RAG PostgreSQL database authority is unavailable')
         self._assembly = assembly
+        self._closed = False
+        self._connections: set[Connection] = set()
+        self._lifecycle_lock = RLock()
+
+    @property
+    def closed(self) -> bool:
+        with self._lifecycle_lock:
+            return self._closed
+
+    def __enter__(self) -> RagPostgresDatabaseAuthority:
+        with self._lifecycle_lock:
+            self._require_open()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
     def connect(self) -> Connection:
         """Open a never-pooled physical connection and validate DB identity."""
-        connection = self._assembly.dedicated_engine.connect()
-        try:
-            if connection.engine is not self._assembly.dedicated_engine:
-                raise TypeError('RAG PostgreSQL connection authority changed')
-            current = _connection_identity(connection)
-            if current != self._assembly.identity:
-                raise TypeError('RAG PostgreSQL connection identity changed')
-            return connection
-        except BaseException:
+        with self._lifecycle_lock:
+            self._require_open()
+            self._connections = {
+                connection
+                for connection in self._connections
+                if not connection.closed
+            }
+            connection = self._assembly.dedicated_engine.connect()
             try:
-                connection.invalidate()
-            finally:
-                connection.close()
-            raise
+                if connection.engine is not self._assembly.dedicated_engine:
+                    raise TypeError('RAG PostgreSQL connection authority changed')
+                current = _connection_identity(connection)
+                if current != self._assembly.identity:
+                    raise TypeError('RAG PostgreSQL connection identity changed')
+                _require_bootstrap_capability(
+                    connection,
+                    self._assembly.bootstrap_capability,
+                )
+                self._connections.add(connection)
+                return connection
+            except BaseException:
+                try:
+                    connection.invalidate()
+                finally:
+                    connection.close()
+                raise
 
     def require_session(self, session: Session) -> None:
-        if session is not self._assembly.session:
-            raise TypeError('RAG PostgreSQL session authority changed')
-        bind = session.get_bind()
-        engine = bind.engine if isinstance(bind, Connection) else bind
-        if engine is not self._assembly.application_engine:
-            raise TypeError('RAG PostgreSQL engine authority changed')
-        if _session_identity(session) != self._assembly.identity:
-            raise TypeError('RAG PostgreSQL session identity changed')
+        with self._lifecycle_lock:
+            self._require_open()
+            if session is not self._assembly.session:
+                raise TypeError('RAG PostgreSQL session authority changed')
+            bind = session.get_bind()
+            engine = bind.engine if isinstance(bind, Connection) else bind
+            if engine is not self._assembly.application_engine:
+                raise TypeError('RAG PostgreSQL engine authority changed')
+            if _session_identity(session) != self._assembly.identity:
+                raise TypeError('RAG PostgreSQL session identity changed')
+            try:
+                _require_bootstrap_capability(
+                    session,
+                    self._assembly.bootstrap_capability,
+                )
+            finally:
+                session.rollback()
+
+    def close(self) -> None:
+        """Close every owned lock connection, then dispose its engine once."""
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            connections = tuple(self._connections)
+            self._connections.clear()
+            failure: BaseException | None = None
+            for connection in connections:
+                if connection.closed:
+                    continue
+                try:
+                    connection.invalidate()
+                except BaseException as exc:
+                    failure = failure or exc
+                finally:
+                    try:
+                        connection.close()
+                    except BaseException as exc:
+                        failure = failure or exc
+            try:
+                self._assembly.dedicated_engine.dispose()
+            except BaseException as exc:
+                failure = failure or exc
+            if failure is not None:
+                raise failure
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise TypeError('RAG PostgreSQL database authority is closed')
 
 
-def _bind_rag_postgres_database(session: Session) -> RagPostgresDatabaseAuthority:
+def _bind_rag_postgres_database(
+    session: Session,
+    *,
+    dedicated_engine: Engine,
+    bootstrap_capability: RegisteredAdvisoryLock,
+) -> RagPostgresDatabaseAuthority:
     if not isinstance(session, Session):
         raise TypeError('RAG PostgreSQL session authority is required')
     bind = session.get_bind()
     engine = bind.engine if isinstance(bind, Connection) else bind
     if not isinstance(engine, Engine) or engine.dialect.name != 'postgresql':
         raise TypeError('RAG PostgreSQL database authority requires PostgreSQL')
-    identity = _session_identity(session)
-    dedicated_engine = create_engine(engine.url, poolclass=NullPool)
+    if (
+        not isinstance(dedicated_engine, Engine)
+        or dedicated_engine is engine
+        or dedicated_engine.dialect.name != 'postgresql'
+        or type(dedicated_engine.pool) is not NullPool
+    ):
+        raise TypeError('dedicated PostgreSQL NullPool engine is required')
+    if type(bootstrap_capability) is not RegisteredAdvisoryLock:
+        raise TypeError('RAG PostgreSQL bootstrap capability is required')
     try:
+        identity = _session_identity(session)
+        try:
+            _require_bootstrap_capability(session, bootstrap_capability)
+        finally:
+            session.rollback()
         with dedicated_engine.connect() as connection:
             if _connection_identity(connection) != identity:
                 raise TypeError(
                     'dedicated PostgreSQL database identity does not match session'
                 )
+            _require_bootstrap_capability(connection, bootstrap_capability)
         return RagPostgresDatabaseAuthority(
             _PostgresDatabaseAssembly(
                 session=session,
                 application_engine=engine,
                 dedicated_engine=dedicated_engine,
+                bootstrap_capability=bootstrap_capability,
                 identity=identity,
                 _seal=_POSTGRES_DATABASE_AUTHORITY_SEAL,
             )
@@ -117,6 +221,21 @@ def _bind_rag_postgres_database(session: Session) -> RagPostgresDatabaseAuthorit
     except BaseException:
         dedicated_engine.dispose()
         raise
+
+
+def _require_bootstrap_capability(
+    connection: object,
+    capability: RegisteredAdvisoryLock,
+) -> None:
+    if (
+        type(capability) is not RegisteredAdvisoryLock
+        or not capability.matches(
+            RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID,
+            identity_namespace='static',
+        )
+    ):
+        raise TypeError('RAG PostgreSQL bootstrap capability is invalid')
+    _require_registered_capability(connection, capability)
 
 
 def _session_identity(session: Session) -> RagPostgresDatabaseIdentity:
@@ -136,7 +255,7 @@ def _connection_identity(connection: Connection) -> RagPostgresDatabaseIdentity:
 
 def _identity_from_row(row: object) -> RagPostgresDatabaseIdentity:
     values = tuple(row)  # type: ignore[arg-type]
-    if len(values) != 5 or not isinstance(values[2], (list, tuple)):
+    if len(values) != 7 or not isinstance(values[2], (list, tuple)):
         raise TypeError('RAG PostgreSQL database identity is unavailable')
     return RagPostgresDatabaseIdentity(
         database_name=values[0],
@@ -144,4 +263,6 @@ def _identity_from_row(row: object) -> RagPostgresDatabaseIdentity:
         effective_search_path=tuple(values[2]),
         search_path_setting=values[3],
         current_role=values[4],
+        database_oid=values[5],
+        cluster_system_identifier=values[6],
     )

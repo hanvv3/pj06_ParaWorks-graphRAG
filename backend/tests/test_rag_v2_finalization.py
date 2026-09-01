@@ -23,7 +23,6 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     try_acquire_advisory_lock,
 )
 from backend.app.agent_runtime.rag_cost_ledger import (
-    PendingProjectionRecoverySnapshot,
     RagCostLedger,
 )
 from backend.app.agent_runtime.rag_finalization import (
@@ -38,6 +37,9 @@ from backend.app.agent_runtime.rag_finalization import (
     _assemble_projection_owner_recovery_authority,
     _assemble_provider_free_rag_phase2_authority,
     _pre_projection_cost_snapshot_hmac,
+)
+from backend.app.agent_runtime.rag_postgres_binding import (
+    RagPostgresDatabaseAuthority,
 )
 from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
 from backend.app.agent_runtime.rag_runtime_contracts import RagProviderSafetyBinding
@@ -856,30 +858,31 @@ def test_postgresql_boundary_rejects_mutex_only_evidence_barrier() -> None:
 def _recovery_bundle(
     session: object,
     *,
+    postgres_database,
     provider_free_barrier,
     paid_barrier,
-    owner_connection_factory=_ClosableConnection,
-    safety_connection_factory=_ClosableConnection,
 ):
     ledger = object.__new__(RagCostLedger)
     ledger._session = session
     projection_read = object.__new__(ServingProjectionReadCoordinator)
     projection_read._db = session
     provider_free = _assemble_provider_free_rag_phase2_authority(
-        owner_connection_factory=owner_connection_factory,
+        owner_connection_factory=None,
         owner_capability_factory=_owner_capability,
         load_current_owner_fence=lambda _run_id: '2' * 64,
         evidence_barrier=provider_free_barrier,
+        postgres_database=postgres_database,
     )
     paid = _assemble_paid_rag_phase2_authority(
         provider_safety=object.__new__(RagProviderSafetyService),
-        safety_connection_factory=safety_connection_factory,
+        safety_connection_factory=None,
         safety_requirements=(),
-        owner_connection_factory=owner_connection_factory,
+        owner_connection_factory=None,
         owner_capability_factory=_owner_capability,
         load_current_owner_fence=lambda _run_id: '2' * 64,
         evidence_barrier=paid_barrier,
         load_current_readiness=_readiness,
+        postgres_database=postgres_database,
     )
     return (
         _assemble_projection_owner_recovery_authority(
@@ -887,17 +890,18 @@ def _recovery_bundle(
             provider_free=provider_free,
             paid=paid,
             projection_read=projection_read,
+            postgres_database=postgres_database,
         ),
         provider_free,
         paid,
     )
 
 
-def _postgres_barrier(*, engine: object):
+def _postgres_barrier(*, postgres_database):
     return _assemble_rag_evidence_barrier(
         load_current_identity=lambda: 'a' * 64,
-        connection_factory=lambda: _ClosableConnection(engine),
         registered_lock=_evidence_capability(),
+        postgres_database=postgres_database,
     )
 
 
@@ -908,6 +912,61 @@ def _fake_postgres_session(*, engine: object):
             engine=engine,
         )
     )
+
+
+def _fake_database_authority(monkeypatch, *, session, active=None):
+    authority = object.__new__(RagPostgresDatabaseAuthority)
+    active = [True] if active is None else active
+
+    def require_session(self, candidate) -> None:
+        if not active[0]:
+            raise TypeError('RAG PostgreSQL database authority is closed')
+        if self is not authority or candidate is not session:
+            raise TypeError('RAG PostgreSQL session authority changed')
+
+    monkeypatch.setattr(
+        RagPostgresDatabaseAuthority,
+        'require_session',
+        require_session,
+    )
+    monkeypatch.setattr(
+        RagPostgresDatabaseAuthority,
+        'connect',
+        lambda self: _ClosableConnection(),
+    )
+    return authority
+
+
+def test_direct_recovery_reasserts_database_before_pending_snapshot(
+    monkeypatch,
+) -> None:
+    engine = object()
+    db = _fake_postgres_session(engine=engine)
+    active = [True]
+    authority = _fake_database_authority(
+        monkeypatch,
+        session=db,
+        active=active,
+    )
+    barrier = _postgres_barrier(postgres_database=authority)
+    recovery, _, _ = _recovery_bundle(
+        db,
+        postgres_database=authority,
+        provider_free_barrier=barrier,
+        paid_barrier=barrier,
+    )
+    snapshot_reads: list[int] = []
+    monkeypatch.setattr(
+        RagCostLedger,
+        'pending_projection_recovery_snapshot',
+        lambda self, run_id: snapshot_reads.append(run_id),
+    )
+    active[0] = False
+
+    with pytest.raises(TypeError, match='closed'):
+        recovery.recover(81)
+
+    assert snapshot_reads == []
 
 
 def _construct_boundary(*, db, phase2, recovery):
@@ -923,57 +982,76 @@ def _construct_boundary(*, db, phase2, recovery):
     )
 
 
-def test_postgresql_boundary_rejects_cross_session_recovery_authority() -> None:
+def test_postgresql_boundary_rejects_cross_session_recovery_authority(
+    monkeypatch,
+) -> None:
     engine = object()
     boundary_db = _fake_postgres_session(engine=engine)
     recovery_db = _fake_postgres_session(engine=engine)
-    barrier = _postgres_barrier(engine=engine)
+    authority = _fake_database_authority(monkeypatch, session=recovery_db)
+    barrier = _postgres_barrier(postgres_database=authority)
     recovery, phase2, _ = _recovery_bundle(
         recovery_db,
+        postgres_database=authority,
         provider_free_barrier=barrier,
         paid_barrier=barrier,
     )
 
-    with pytest.raises(TypeError, match='(phase-2|recovery) database authority'):
+    with pytest.raises(
+        TypeError,
+        match='(phase-2|recovery|evidence) database authority',
+    ):
         _construct_boundary(db=boundary_db, phase2=phase2, recovery=recovery)
 
 
 @pytest.mark.parametrize('mutex_side', ('provider_free', 'paid'))
 def test_postgresql_boundary_rejects_mutex_recovery_evidence_barrier(
     mutex_side: str,
+    monkeypatch,
 ) -> None:
     engine = object()
     db = _fake_postgres_session(engine=engine)
-    postgres = _postgres_barrier(engine=engine)
+    authority = _fake_database_authority(monkeypatch, session=db)
+    postgres = _postgres_barrier(postgres_database=authority)
     mutex = _assemble_rag_evidence_barrier(
         load_current_identity=lambda: 'a' * 64
     )
-    recovery, provider_free, paid = _recovery_bundle(
-        db,
-        provider_free_barrier=(mutex if mutex_side == 'provider_free' else postgres),
-        paid_barrier=(mutex if mutex_side == 'paid' else postgres),
-    )
+    with pytest.raises(
+        TypeError,
+        match='(phase-2|recovery|evidence) database authority',
+    ):
+        _recovery_bundle(
+            db,
+            postgres_database=authority,
+            provider_free_barrier=(
+                mutex if mutex_side == 'provider_free' else postgres
+            ),
+            paid_barrier=(mutex if mutex_side == 'paid' else postgres),
+        )
 
-    ordinary = paid if mutex_side == 'provider_free' else provider_free
-    with pytest.raises(TypeError, match='(phase-2|recovery) database authority'):
-        _construct_boundary(db=db, phase2=ordinary, recovery=recovery)
 
-
-def test_postgresql_boundary_rejects_cross_database_recovery_connections() -> None:
+def test_postgresql_boundary_rejects_cross_database_recovery_connections(
+    monkeypatch,
+) -> None:
     boundary_engine = object()
     other_engine = object()
     db = _fake_postgres_session(engine=boundary_engine)
-    barrier = _postgres_barrier(engine=other_engine)
-    recovery, phase2, _ = _recovery_bundle(
-        db,
-        provider_free_barrier=barrier,
-        paid_barrier=barrier,
-        owner_connection_factory=lambda: _ClosableConnection(other_engine),
-        safety_connection_factory=lambda: _ClosableConnection(other_engine),
+    authority = _fake_database_authority(monkeypatch, session=db)
+    barrier = _assemble_rag_evidence_barrier(
+        load_current_identity=lambda: 'a' * 64,
+        connection_factory=lambda: _ClosableConnection(other_engine),
+        registered_lock=_evidence_capability(),
     )
-
-    with pytest.raises(TypeError, match='(phase-2|recovery) database authority'):
-        _construct_boundary(db=db, phase2=phase2, recovery=recovery)
+    with pytest.raises(
+        TypeError,
+        match='(phase-2|recovery|evidence) database authority',
+    ):
+        _recovery_bundle(
+            db,
+            postgres_database=authority,
+            provider_free_barrier=barrier,
+            paid_barrier=barrier,
+        )
 
 
 def test_postgresql_boundary_requires_database_authority_without_recovery() -> None:
@@ -983,7 +1061,11 @@ def test_postgresql_boundary_requires_database_authority_without_recovery() -> N
         owner_connection_factory=lambda: _ClosableConnection(engine),
         owner_capability_factory=_owner_capability,
         load_current_owner_fence=lambda _run_id: '2' * 64,
-        evidence_barrier=_postgres_barrier(engine=engine),
+        evidence_barrier=_assemble_rag_evidence_barrier(
+            load_current_identity=lambda: 'a' * 64,
+            connection_factory=lambda: _ClosableConnection(engine),
+            registered_lock=_evidence_capability(),
+        ),
     )
 
     with pytest.raises(TypeError, match='phase-2 database authority'):
@@ -1001,7 +1083,11 @@ def test_postgresql_boundary_rejects_split_engine_ordinary_phase2() -> None:
         owner_connection_factory=lambda: _ClosableConnection(phase2_engine),
         owner_capability_factory=_owner_capability,
         load_current_owner_fence=lambda _run_id: '2' * 64,
-        evidence_barrier=_postgres_barrier(engine=phase2_engine),
+        evidence_barrier=_assemble_rag_evidence_barrier(
+            load_current_identity=lambda: 'a' * 64,
+            connection_factory=lambda: _ClosableConnection(phase2_engine),
+            registered_lock=_evidence_capability(),
+        ),
         load_current_readiness=_readiness,
     )
 
@@ -1407,59 +1493,18 @@ def test_assistant_finalization_rejects_search_product_before_transaction() -> N
     assert boundary.commits == 0
 
 
-def test_projection_recovery_uses_provider_free_owner_fence_and_cost_cas(
+def test_projection_recovery_refuses_unbound_authority_before_snapshot(
     monkeypatch,
 ) -> None:
-    seen: list[tuple[object, ...]] = []
-    snapshot = PendingProjectionRecoverySnapshot(
-        agent_run_id=17,
-        projection_owner_fence_hmac='2' * 64,
-        runtime_cost_snapshot_hmac='4' * 64,
-        paid_work_performed=False,
-    )
+    snapshot_reads: list[int] = []
     ledger = object.__new__(RagCostLedger)
     ledger._session = SimpleNamespace()
     projection_read = object.__new__(ServingProjectionReadCoordinator)
     projection_read._db = ledger._session
-
-    @contextmanager
-    def acquired_prefix(_self):
-        yield (5, 0)
-
-    monkeypatch.setattr(
-        ServingProjectionReadCoordinator,
-        'acquire',
-        acquired_prefix,
-    )
-    monkeypatch.setattr(
-        ServingProjectionReadCoordinator,
-        'lock_canonical_tail',
-        lambda self, document_ids: seen.append(
-            ('c5_tail', tuple(document_ids))
-        ) or object(),
-    )
-    monkeypatch.setattr(
-        ServingProjectionReadCoordinator,
-        'validate_tail_context',
-        lambda self, context: seen.append(('c5_tail_validated', context)),
-    )
     monkeypatch.setattr(
         RagCostLedger,
         'pending_projection_recovery_snapshot',
-        lambda self, run_id: snapshot,
-    )
-    monkeypatch.setattr(
-        RagCostLedger,
-        'recover_incomplete_run',
-        lambda self, **kwargs: seen.append(tuple(sorted(kwargs.items()))) or None,
-    )
-    monkeypatch.setattr(
-        'backend.app.agent_runtime.rag_finalization.try_acquire_advisory_lock',
-        lambda *args, **kwargs: True,
-    )
-    monkeypatch.setattr(
-        'backend.app.agent_runtime.rag_finalization.release_advisory_lock',
-        lambda *args, **kwargs: None,
+        lambda self, run_id: snapshot_reads.append(run_id),
     )
     provider_free = _assemble_provider_free_rag_phase2_authority(
         owner_connection_factory=_ClosableConnection,
@@ -1481,28 +1526,15 @@ def test_projection_recovery_uses_provider_free_owner_fence_and_cost_cas(
         ),
         load_current_readiness=_readiness,
     )
-    authority = _assemble_projection_owner_recovery_authority(
-        ledger=ledger,
-        provider_free=provider_free,
-        paid=paid,
-        projection_read=projection_read,
-    )
-    boundary = object.__new__(SqlAlchemyRagFinalizationBoundary)
-    boundary._recovery_authority = authority
-    assert boundary.recover_dead_projection_owner(17) is None
-    assert seen[0][0] == 'c5_tail'
-    assert seen[0][1] == ()
-    assert seen[1][0] == 'c5_tail_validated'
-    assert seen[2:] == [(
-            ('expected_runtime_cost_snapshot_hmac', '4' * 64),
-            ('projection_owner_fence_hmac', '2' * 64),
-            ('run_id', 17),
-        )]
-    import inspect
-
-    assert tuple(
-        inspect.signature(boundary.recover_dead_projection_owner).parameters
-    ) == ('run_id',)
+    with pytest.raises(TypeError, match='recovery database authority'):
+        _assemble_projection_owner_recovery_authority(
+            ledger=ledger,
+            provider_free=provider_free,
+            paid=paid,
+            projection_read=projection_read,
+            postgres_database=None,  # type: ignore[arg-type]
+        )
+    assert snapshot_reads == []
 
 
 @pytest.mark.skipif(
