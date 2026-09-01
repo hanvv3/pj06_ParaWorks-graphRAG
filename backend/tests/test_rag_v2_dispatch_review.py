@@ -28,6 +28,18 @@ def test_public_dispatch_boundary_has_no_raw_client_bytes_or_factory_hooks():
     assert 'provider_client' not in inspect.signature(
         production_assembler
     ).parameters
+    assert tuple(inspect.signature(production_assembler).parameters) == ('settings',)
+    source = inspect.getsource(production_assembler)
+    for owned_authority in (
+        'SessionLocal',
+        'RagProviderSafetyService',
+        '_assemble_rag_cost_ledger',
+        '_assemble_rag_evidence_barrier',
+        'RagV2ServingIndexReadinessService',
+        'load_registered_advisory_capability',
+        '_DirectOpenAIProviderClient',
+    ):
+        assert owned_authority in source
     assert not hasattr(transport_module, 'RagProviderRequest')
     assert not hasattr(contracts_module, 'StrictProviderOutcome')
     assert not hasattr(RagCostLedger, '_transport_provider_client')

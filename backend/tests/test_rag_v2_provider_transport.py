@@ -13,6 +13,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
+from backend.app.agent_runtime.model_router import RoutedRagAnswerModel
 from backend.app.agent_runtime.provider_send_fence import (
     _assemble_rag_evidence_barrier,
 )
@@ -22,10 +23,7 @@ from backend.app.agent_runtime.rag_provider_transport import (
     RagProviderTransportError,
     _assemble_rag_provider_dispatch_authority,
 )
-from backend.app.agents.rag_orchestrator_agent.v2_answer import (
-    PreparedAnswerInvocation,
-    render_answer_messages,
-)
+from backend.app.agents.rag_orchestrator_agent.v2_answer import StructuredRagAnswerModel
 from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
     ANSWER_OUTPUT_SCHEMA_PROVIDER_BYTES,
     ANSWER_OUTPUT_SCHEMA_PROVIDER_FORMAT,
@@ -40,18 +38,35 @@ from backend.app.models.rag_serving import (
     RagLexicalServingProjection,
     RagServingCorpusGeneration,
 )
+from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import (
     AnswerGenerationCostInput,
     PreparedQueryEmbedding,
     QueryEmbeddingCostInput,
     StrictProviderUsage,
+    build_query_embedding_attempt_fence_hmac,
+    build_query_embedding_model_config_snapshot_hmac,
+    build_query_embedding_provider_policy_snapshot_hmac,
+    build_query_embedding_retrieval_query_hmac_from_utf8,
+    rank_evidence_slots,
 )
-from backend.tests.test_rag_v2_answer_model import _slot_and_observation
 from backend.tests.test_rag_v2_costs import (
     _TEST_COST_POLICY,
     _budget,
     _ledger,
     _snapshot,
+)
+from backend.tests.test_rag_v2_projection import (
+    _candidate as _projection_candidate,
+)
+from backend.tests.test_rag_v2_projection import (
+    _prepare_rows as _prepare_projection_rows,
+)
+from backend.tests.test_rag_v2_projection import (
+    _projection as _canonical_projection,
+)
+from backend.tests.test_rag_v2_projection import (
+    _settings as _projection_settings,
 )
 
 
@@ -66,6 +81,11 @@ class _Client:
 
 
 _CLIENTS: dict[int, object] = {}
+_TEST_SETTINGS = Settings(
+    _env_file=None,
+    agent_runtime_fingerprint_secret='task-nine-fingerprint-secret',
+    agent_runtime_fingerprint_key_version='task-nine-v1',
+)
 
 
 def _transport_ledger(
@@ -80,26 +100,43 @@ def _transport_ledger(
 
 
 def _prepared_query(query_budget) -> PreparedQueryEmbedding:
+    query_utf8 = '민감한 근거'.encode()
+    query_hmac = build_query_embedding_retrieval_query_hmac_from_utf8(
+        query_utf8,
+        settings=_TEST_SETTINGS,
+    )
+    model_hmac = build_query_embedding_model_config_snapshot_hmac(_TEST_SETTINGS)
+    provider_hmac = build_query_embedding_provider_policy_snapshot_hmac(
+        _TEST_SETTINGS
+    )
     return PreparedQueryEmbedding(
-        retrieval_query_hmac='2' * 64,
-        transient_query_utf8='민감한 근거'.encode(),
+        retrieval_query_hmac=query_hmac,
+        transient_query_utf8=query_utf8,
         corpus_generation=1,
         vector_index_generation=1,
         readiness_snapshot_hmac='4' * 64,
-        model_config_snapshot_hmac=(
-            _TEST_COST_POLICY.query_embedding_model_config_snapshot_hmac
-        ),
-        provider_policy_snapshot_hmac=(
-            _TEST_COST_POLICY.authorized_policy_snapshot_hmac('query_embedding')
-        ),
+        model_config_snapshot_hmac=model_hmac,
+        provider_policy_snapshot_hmac=provider_hmac,
         estimated_input_tokens=query_budget.estimated_input_tokens,
         reserved_cost_usd=query_budget.reserved_cost_usd,
-        attempt_fence_hmac='5' * 64,
+        attempt_fence_hmac=build_query_embedding_attempt_fence_hmac(
+            retrieval_query_hmac=query_hmac,
+            corpus_generation=1,
+            vector_index_generation=1,
+            readiness_snapshot_hmac='4' * 64,
+            model_config_snapshot_hmac=model_hmac,
+            provider_policy_snapshot_hmac=provider_hmac,
+            budget=query_budget,
+            settings=_TEST_SETTINGS,
+        ),
         budget=query_budget,
     )
 
 
 def _admit_transport(ledger, run_id: int):
+    retrieval_query_hmac = build_query_embedding_retrieval_query_hmac_from_utf8(
+        '민감한 근거'.encode(), settings=_TEST_SETTINGS
+    )
     query_budget = _TEST_COST_POLICY.prepare_query_embedding(
         QueryEmbeddingCostInput(
             retrieval_query_utf8='민감한 근거'.encode(),
@@ -116,7 +153,7 @@ def _admit_transport(ledger, run_id: int):
         configured_backend='pgvector',
         query_context_version='direct-query:v1',
         current_text_hmac='1' * 64,
-        retrieval_query_hmac='2' * 64,
+        retrieval_query_hmac=retrieval_query_hmac,
         security_scope_fingerprint='3' * 64,
         admission_cache_identity_hmac=None,
         source_window='rag-v2:admission:enforce:ask:pgvector',
@@ -128,10 +165,39 @@ def _admit_transport(ledger, run_id: int):
             ),
         ),
     )
+    if ledger._session.get(RagServingCorpusGeneration, 1) is None:
+        ledger._session.add_all([
+            AutoReviewRuntimeKeyState(
+                component='auto_review_trust_promotion',
+                fingerprint_key_version='task-nine-v1',
+                fingerprint_key_material_verifier='b' * 64,
+                generation=1,
+                ready=True,
+            ),
+            RagServingCorpusGeneration(
+                id=1,
+                corpus_generation=1,
+                vector_index_generation=1,
+                embedding_model='text-embedding-3-small',
+                embedding_dimensions=1536,
+                index_policy_version='rag-v2-serving-index:v1',
+                pgvector_cosine_policy_version='pgvector-cosine-indexable:v1',
+                fingerprint_key_version='task-nine-v1',
+                fingerprint_key_material_verifier='b' * 64,
+            ),
+        ])
+        ledger._session.commit()
     return query_budget
 
 
-def _authority(ledger, *, current='2' * 64):
+def _authority(
+    ledger,
+    *,
+    current='2' * 64,
+    settings: Settings = _TEST_SETTINGS,
+    answer_model: StructuredRagAnswerModel | None = None,
+    readiness: object | None = None,
+):
     barrier = _assemble_rag_evidence_barrier(
         load_current_identity=(
             current
@@ -147,6 +213,25 @@ def _authority(ledger, *, current='2' * 64):
         identity_secret=b'task-12-test-identity-secret',
         timeout_seconds=30,
         provider_client=_CLIENTS.get(id(ledger)),
+        settings=settings,
+        answer_model=answer_model,
+        load_current_readiness=lambda: (
+            readiness()
+            if callable(readiness)
+            else readiness
+        ) or RagServingIndexReadiness(
+            ready=True,
+            corpus_generation=1,
+            vector_index_generation=1,
+            expected_document_count=0,
+            live_vector_count=0,
+            tombstone_count=0,
+            mismatch_count_capped_at_20=0,
+            embedding_model='text-embedding-3-small',
+            embedding_dimensions=1536,
+            index_policy_version='rag-v2-serving-index:v1',
+            readiness_snapshot_hmac='4' * 64,
+        ),
     )
 
 
@@ -195,7 +280,11 @@ def test_server_builds_canonical_request_and_consumes_store_owned_grant_once(
         'object': 'list',
         'model': 'text-embedding-3-small',
         'data': [
-            {'object': 'embedding', 'index': 0, 'embedding': [0.0] * 1536}
+            {
+                'object': 'embedding',
+                'index': 0,
+                'embedding': [1.0, *([0.0] * 1535)],
+            }
         ],
         'usage': {
             'prompt_tokens': query_budget.estimated_input_tokens,
@@ -266,7 +355,7 @@ def test_request_identity_binds_rendered_input_and_dispatch_fence(tmp_path: Path
     authority = _authority(ledger)
     frozen = _prepared_query(query_budget)
     left = authority.prepare(grant=grant, prepared=frozen)
-    with pytest.raises(RagProviderTransportError, match='cost identity drifted'):
+    with pytest.raises(RagProviderTransportError, match='invocation is invalid'):
         authority.prepare(
             grant=grant,
             prepared=replace(
@@ -279,6 +368,41 @@ def test_request_identity_binds_rendered_input_and_dispatch_fence(tmp_path: Path
     assert parent is not None
     assert parent.status == 'failed'
     assert parent.run_record_phase == 'final'
+
+
+def test_same_budget_altered_query_carrier_is_rejected_before_canonicalization(
+    tmp_path: Path,
+):
+    seen = []
+    ledger = _transport_ledger(tmp_path, _Client(seen))
+    query_budget = _admit_transport(ledger, 320)
+    grant = ledger.claim_component(
+        run_id=320,
+        component='query_embedding',
+        prepared=query_budget,
+    )
+    authority = _authority(ledger)
+    authentic = _prepared_query(query_budget)
+    altered_budget = _TEST_COST_POLICY.prepare_query_embedding(
+        QueryEmbeddingCostInput(
+            retrieval_query_utf8='민감한 증거'.encode(),
+            model_config_snapshot_hmac=authentic.model_config_snapshot_hmac,
+        )
+    )
+    assert altered_budget.estimated_input_tokens == query_budget.estimated_input_tokens
+    assert altered_budget.reserved_cost_usd == query_budget.reserved_cost_usd
+    altered = replace(
+        authentic,
+        transient_query_utf8='민감한 증거'.encode(),
+        estimated_input_tokens=altered_budget.estimated_input_tokens,
+        reserved_cost_usd=altered_budget.reserved_cost_usd,
+        budget=altered_budget,
+    )
+
+    with pytest.raises(RagProviderTransportError):
+        authority.prepare(grant=grant, prepared=altered)
+
+    assert seen == []
 
 
 def test_prepare_evidence_snapshot_failure_cancels_committed_claim(tmp_path: Path):
@@ -383,6 +507,33 @@ def test_transport_owns_embedding_classification_precedence_and_one_use(
     with pytest.raises(TypeError, match='unavailable'):
         authority.finalize(grant=grant, observation=observation)
     assert ledger.total_charged_cost(36) == overrun.charged_cost_usd
+
+
+def test_all_zero_embedding_is_not_cosine_indexable(tmp_path: Path):
+    budget = _TEST_COST_POLICY.prepare_query_embedding(
+        QueryEmbeddingCostInput(
+            retrieval_query_utf8='민감한 근거'.encode(),
+            model_config_snapshot_hmac=(
+                _TEST_COST_POLICY.query_embedding_model_config_snapshot_hmac
+            ),
+        )
+    )
+    response = {
+        'object': 'list',
+        'model': 'text-embedding-3-small',
+        'data': [{'object': 'embedding', 'index': 0, 'embedding': [0.0] * 1536}],
+        'usage': {
+            'prompt_tokens': budget.estimated_input_tokens,
+            'total_tokens': budget.estimated_input_tokens,
+        },
+    }
+    _, authority, grant, observation, _ = _dispatch_embedding_response(
+        tmp_path, 360, response
+    )
+
+    result = authority.finalize(grant=grant, observation=observation)
+
+    assert result.terminal_outcome == 'provider_embedding_payload_invalid'
 
 
 def test_embedding_item_identity_precedes_vector_and_usage_contract(
@@ -518,11 +669,7 @@ def test_dispatch_freshly_rechecks_durable_cost_row_before_provider_send(
 def _answer_transport_case(tmp_path: Path, run_id: int):
     seen = []
     client = _Client(seen)
-    policy_settings = Settings(
-        _env_file=None,
-        agent_runtime_fingerprint_secret='task-12-test-identity-secret',
-        agent_runtime_fingerprint_key_version='test-v1',
-    )
+    policy_settings = _projection_settings()
     policy = RagCostPolicy(
         settings=policy_settings,
         answer_output_schema_hmac=build_answer_output_schema_hmac(
@@ -535,21 +682,29 @@ def _answer_transport_case(tmp_path: Path, run_id: int):
     ledger = _transport_ledger(
         tmp_path, client, cost_policy=policy
     )
-    slot, observation = _slot_and_observation()
-    messages = render_answer_messages(question='질문', slots=(slot,))
-    messages_json = canonical_json_bytes([
-        {'content': content, 'ordinal': ordinal, 'role': role}
-        for ordinal, (role, content) in enumerate(messages, start=1)
-    ])
-    budget = policy.prepare_answer_generation(
-        AnswerGenerationCostInput(
-            exact_messages_json=messages_json,
-            exact_response_schema_json=ANSWER_OUTPUT_SCHEMA_PROVIDER_BYTES,
-            model_config_snapshot_hmac=(
-                policy.answer_model_config_snapshot_hmac
-            ),
-        )
+    projection = _canonical_projection(1)
+    slot = rank_evidence_slots((_projection_candidate(projection, 0.9),))[0]
+    _, prepared_influence = _prepare_projection_rows(
+        (projection,), rendered_input_hmac='d' * 64
     )
+    observation = prepared_influence.observations[0]
+    answer_model = StructuredRagAnswerModel(
+        routed_model=RoutedRagAnswerModel(
+            model=object(),
+            provider='openai',
+            model_name='gpt-5.4-mini-2026-03-17',
+            model_config_snapshot_hmac=policy.answer_model_config_snapshot_hmac,
+        ),
+        cost_policy=policy,
+    )
+    prepared_answer = answer_model.prepare(
+        question='질문',
+        slots=(slot,),
+        model_influence=(observation,),
+        answer_question_hmac='d' * 64,
+        retrieval_query_hmac='2' * 64,
+    )
+    budget = prepared_answer.budget
     ledger.create_admission(
         agent_run_id=run_id,
         surface='ask',
@@ -570,7 +725,7 @@ def _answer_transport_case(tmp_path: Path, run_id: int):
             (_snapshot('answer_generation', policy), budget),
         ),
     )
-    key_version = 'test-v1'
+    key_version = policy_settings.agent_runtime_fingerprint_key_version
     key_verifier = 'b' * 64
     ledger._session.add_all([
         AutoReviewRuntimeKeyState(
@@ -612,35 +767,16 @@ def _answer_transport_case(tmp_path: Path, run_id: int):
         ),
     ])
     ledger._session.commit()
-    prepared_answer = PreparedAnswerInvocation(
-        messages=messages,
-        evidence_slots=(slot,),
-        model_influence=(observation,),
-        answer_question_hmac='d' * 64,
-        retrieval_query_hmac='2' * 64,
-        rendered_input_hmac='e' * 64,
-        generation_estimator_input_hmac=budget.estimator_input_hmac,
-        encoded_input_tokens=budget.estimated_input_tokens - 528,
-        framed_input_tokens=budget.estimated_input_tokens,
-        reserved_cost_usd=budget.reserved_cost_usd,
-        model_config_snapshot_hmac=(
-            policy.answer_model_config_snapshot_hmac
-        ),
-        provider_policy_snapshot_hmac=(
-            policy.authorized_policy_snapshot_hmac(
-                'answer_generation'
-            )
-        ),
-        prepared_input_hmac='f' * 64,
-        prepared_invocation_hmac='a' * 64,
-        budget=budget,
-    )
     grant = ledger.claim_component(
         run_id=run_id,
         component='answer_generation',
         prepared=budget,
     )
-    authority = _authority(ledger)
+    authority = _authority(
+        ledger,
+        settings=policy_settings,
+        answer_model=answer_model,
+    )
     dispatch = authority.prepare(grant=grant, prepared=prepared_answer)
     return ledger, authority, grant, dispatch, client, prepared_answer
 
@@ -661,6 +797,104 @@ def test_answer_dispatch_freshly_rechecks_c5_key_corpus_and_projection_rows(
     with pytest.raises(RagProviderTransportError):
         authority.dispatch(grant=grant, prepared=dispatch)
     assert _client.seen == []
+
+
+def test_same_budget_altered_answer_messages_are_rejected_before_send(tmp_path: Path):
+    ledger, authority, grant, _dispatch, client, prepared = (
+        _answer_transport_case(tmp_path, 390)
+    )
+    altered_messages = (
+        prepared.messages[0],
+        (prepared.messages[1][0], prepared.messages[1][1].replace('질문', '문질')),
+    )
+    messages_json = canonical_json_bytes([
+        {'content': content, 'ordinal': ordinal, 'role': role}
+        for ordinal, (role, content) in enumerate(altered_messages, start=1)
+    ])
+    altered_budget = ledger.cost_policy_authority.prepare_answer_generation(
+        AnswerGenerationCostInput(
+            exact_messages_json=messages_json,
+            exact_response_schema_json=ANSWER_OUTPUT_SCHEMA_PROVIDER_BYTES,
+            model_config_snapshot_hmac=prepared.model_config_snapshot_hmac,
+        )
+    )
+    assert altered_budget.estimated_input_tokens == prepared.budget.estimated_input_tokens
+    assert altered_budget.reserved_cost_usd == prepared.budget.reserved_cost_usd
+    altered = replace(
+        prepared,
+        messages=altered_messages,
+        generation_estimator_input_hmac=altered_budget.estimator_input_hmac,
+        encoded_input_tokens=altered_budget.estimated_input_tokens - 528,
+        framed_input_tokens=altered_budget.estimated_input_tokens,
+        reserved_cost_usd=altered_budget.reserved_cost_usd,
+        budget=altered_budget,
+    )
+
+    with pytest.raises(RagProviderTransportError):
+        authority.prepare(grant=grant, prepared=altered)
+
+    assert client.seen == []
+
+
+def test_query_dispatch_rechecks_corpus_and_vector_generation_before_send(
+    tmp_path: Path,
+):
+    seen = []
+    ledger = _transport_ledger(tmp_path, _Client(seen))
+    budget = _admit_transport(ledger, 391)
+    grant = ledger.claim_component(
+        run_id=391, component='query_embedding', prepared=budget
+    )
+    authority = _authority(ledger)
+    dispatch = authority.prepare(grant=grant, prepared=_prepared_query(budget))
+    with Session(ledger._session.get_bind()) as competing:
+        competing.execute(
+            update(RagServingCorpusGeneration)
+            .where(RagServingCorpusGeneration.id == 1)
+            .values(vector_index_generation=2)
+        )
+        competing.commit()
+
+    with pytest.raises(RagProviderTransportError):
+        authority.dispatch(grant=grant, prepared=dispatch)
+
+    assert seen == []
+
+
+def test_query_dispatch_rechecks_exact_readiness_snapshot_before_send(
+    tmp_path: Path,
+):
+    seen = []
+    ledger = _transport_ledger(tmp_path, _Client(seen))
+    budget = _admit_transport(ledger, 392)
+    current = ['4' * 64]
+
+    def readiness():
+        return RagServingIndexReadiness(
+            ready=True,
+            corpus_generation=1,
+            vector_index_generation=1,
+            expected_document_count=0,
+            live_vector_count=0,
+            tombstone_count=0,
+            mismatch_count_capped_at_20=0,
+            embedding_model='text-embedding-3-small',
+            embedding_dimensions=1536,
+            index_policy_version='rag-v2-serving-index:v1',
+            readiness_snapshot_hmac=current[0],
+        )
+
+    grant = ledger.claim_component(
+        run_id=392, component='query_embedding', prepared=budget
+    )
+    authority = _authority(ledger, readiness=readiness)
+    dispatch = authority.prepare(grant=grant, prepared=_prepared_query(budget))
+    current[0] = '6' * 64
+
+    with pytest.raises(RagProviderTransportError):
+        authority.dispatch(grant=grant, prepared=dispatch)
+
+    assert seen == []
 
 
 @pytest.mark.parametrize(
@@ -732,3 +966,71 @@ def test_transport_owns_answer_identity_schema_and_citation_precedence(
     assert final.charge_basis == 'actual'
     assert len(client.seen) == 1
     assert ledger.total_charged_cost(run_id) == final.charged_cost_usd
+
+
+def test_answer_usage_invalid_precedes_schema_and_citation_validation(
+    tmp_path: Path,
+):
+    ledger, authority, grant, dispatch, client, _prepared = (
+        _answer_transport_case(tmp_path, 420)
+    )
+    raw = AIMessage(
+        content='',
+        usage_metadata={
+            'input_tokens': 10,
+            'output_tokens': 5,
+            'total_tokens': 15,
+        },
+        response_metadata={
+            'model': 'gpt-5.4-mini-2026-03-17',
+            'object': 'response',
+            'service_tier': 'default',
+        },
+    )
+    raw.usage_metadata = {
+        'input_tokens': '10',
+        'output_tokens': 5,
+        'total_tokens': 15,
+    }
+    client.response = {
+        'raw': raw,
+        'parsed': [],
+        'parsing_error': None,
+    }
+
+    observation = authority.dispatch(grant=grant, prepared=dispatch)
+    final = authority.finalize(grant=grant, observation=observation)
+
+    assert final.terminal_outcome == 'provider_safety_unavailable'
+    assert final.charge_basis == 'reserved'
+
+
+def test_answer_overrun_precedes_identity_usage_and_schema_failures(tmp_path: Path):
+    ledger, authority, grant, dispatch, client, prepared = (
+        _answer_transport_case(tmp_path, 421)
+    )
+    overrun_input = prepared.budget.estimated_input_tokens + 1
+    client.response = {
+        'raw': AIMessage(
+            content='',
+            usage_metadata={
+                'input_tokens': overrun_input,
+                'output_tokens': 1,
+                'total_tokens': overrun_input + 1,
+            },
+            response_metadata={
+                'model': 'wrong',
+                'object': 'wrong',
+                'service_tier': 'wrong',
+            },
+        ),
+        'parsed': [],
+        'parsing_error': RuntimeError('not exposed'),
+    }
+
+    observation = authority.dispatch(grant=grant, prepared=dispatch)
+    final = authority.finalize(grant=grant, observation=observation)
+
+    assert final.terminal_outcome == 'provider_usage_overrun'
+    assert final.charge_basis == 'actual'
+    assert ledger.total_charged_cost(421) == final.charged_cost_usd

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TypeVar
@@ -39,6 +38,7 @@ from backend.app.agent_runtime.rag_safety_identity import (
 )
 from backend.app.agents.rag_orchestrator_agent.v2_answer import (
     PreparedAnswerInvocation,
+    StructuredRagAnswerModel,
 )
 from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
     ANSWER_OUTPUT_SCHEMA_PROVIDER_BYTES,
@@ -50,7 +50,10 @@ from backend.app.rag.retrieval import (
     AnswerGenerationCostInput,
     PreparedQueryEmbedding,
     QueryEmbeddingCostInput,
+    validate_prepared_query_embedding,
+    validate_rag_serving_index_readiness,
 )
+from backend.app.rag.vector_validation import CosineIndexableVectorValidator
 
 _T = TypeVar('_T')
 _PREPARED_SEAL = object()
@@ -67,7 +70,7 @@ class _DirectOpenAIProviderClient:
 
     __slots__ = ('_answer_model', '_embedding_client')
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, routed_model: object | None = None) -> None:
         if type(settings) is not Settings or not settings.openai_api_key:
             raise TypeError('direct OpenAI provider settings are unavailable')
         import httpx
@@ -84,9 +87,8 @@ class _DirectOpenAIProviderClient:
             max_retries=0,
             http_client=httpx.Client(trust_env=False),
         )
-        self._answer_model = build_rag_answer_model_route(
-            settings=settings
-        ).model
+        route = routed_model or build_rag_answer_model_route(settings=settings)
+        self._answer_model = route.model
 
     def send(
         self,
@@ -238,6 +240,9 @@ class _RagProviderDispatchAssembly:
     identity_secret: bytes = field(repr=False)
     timeout_seconds: int
     provider_client: object = field(repr=False)
+    settings: Settings = field(repr=False)
+    answer_model: StructuredRagAnswerModel | None = field(repr=False)
+    load_current_readiness: Callable[[], object] = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -250,6 +255,9 @@ def _assemble_rag_provider_dispatch_authority(
     identity_secret: bytes,
     timeout_seconds: int,
     provider_client: object,
+    settings: Settings,
+    answer_model: StructuredRagAnswerModel | None,
+    load_current_readiness: Callable[[], object],
 ) -> RagProviderDispatchAuthority:
     return RagProviderDispatchAuthority(_RagProviderDispatchAssembly(
         store=store,
@@ -259,29 +267,131 @@ def _assemble_rag_provider_dispatch_authority(
         identity_secret=identity_secret,
         timeout_seconds=timeout_seconds,
         provider_client=provider_client,
+        settings=settings,
+        answer_model=answer_model,
+        load_current_readiness=load_current_readiness,
         _seal=_DISPATCH_ASSEMBLY_SEAL,
     ))
 
 
 def _assemble_direct_openai_rag_provider_dispatch_authority(
     *,
-    store: RagCostLedger,
-    provider_safety: RagProviderSafetyService,
-    provider_connection_factory: Callable[[], Connection],
-    evidence_barrier: RagEvidenceSendBarrier,
-    identity_secret: bytes,
-    timeout_seconds: int,
     settings: Settings,
 ) -> RagProviderDispatchAuthority:
-    """Production assembly seam; caller never owns the provider binding."""
+    """Build the full production dispatch authority from frozen settings only."""
+    import socket
+
+    from backend.app.agent_runtime.fingerprints import fingerprint_secret_bytes
+    from backend.app.agent_runtime.model_router import (
+        build_rag_answer_model_route,
+    )
+    from backend.app.agent_runtime.provider_send_fence import (
+        _assemble_rag_evidence_barrier,
+    )
+    from backend.app.agent_runtime.rag_advisory_locks import (
+        RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+        RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+        load_registered_advisory_capability,
+        rag_projection_owner_lock_id,
+    )
+    from backend.app.agent_runtime.rag_cost_ledger import _assemble_rag_cost_ledger
+    from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
+    from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
+        build_answer_output_schema_hmac,
+        build_answer_prompt_renderer_hmac,
+    )
+    from backend.app.db.session import SessionLocal, engine
+    from backend.app.rag.index_readiness import RagV2ServingIndexReadinessService
+
+    if type(settings) is not Settings:
+        raise TypeError('production RAG settings are required')
+    identity_secret, _ = fingerprint_secret_bytes(settings)
+    postgres = engine.dialect.name == 'postgresql'
+
+    def load_static_capability(identity: object):
+        with engine.connect() as connection:
+            return load_registered_advisory_capability(
+                connection,
+                identity,
+                identity_namespace='static',
+            )
+
+    provider_advisory = (
+        load_static_capability(RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID)
+        if postgres
+        else None
+    )
+    evidence_advisory = (
+        load_static_capability(RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID)
+        if postgres
+        else None
+    )
+    provider_safety = RagProviderSafetyService(
+        latch_path=settings.paraworks_provider_safety_latch_path,
+        identity_secret=identity_secret,
+        designated_environment_id=settings.paraworks_env,
+        advisory_capability=provider_advisory,
+    )
+    cost_policy = RagCostPolicy(
+        settings=settings,
+        answer_output_schema_hmac=build_answer_output_schema_hmac(settings),
+        answer_prompt_renderer_hmac=build_answer_prompt_renderer_hmac(settings),
+    )
+
+    def load_projection_capability(agent_run_id: int):
+        if not postgres:
+            return None
+        with engine.connect() as connection:
+            return load_registered_advisory_capability(
+                connection,
+                rag_projection_owner_lock_id(agent_run_id),
+                identity_namespace='dynamic',
+            )
+
+    session = SessionLocal()
+    store = _assemble_rag_cost_ledger(
+        session,
+        identity_secret=identity_secret,
+        cost_policy=cost_policy,
+        provider_safety=provider_safety,
+        provider_connection_factory=engine.connect,
+        designated_environment_id=settings.paraworks_env,
+        designated_host_id=socket.gethostname(),
+        projection_lock_capability_factory=(
+            load_projection_capability if postgres else None
+        ),
+    )
+
+    def load_current_readiness():
+        session.expire_all()
+        return RagV2ServingIndexReadinessService(settings).inspect(db=session)
+
+    evidence_barrier = _assemble_rag_evidence_barrier(
+        load_current_identity=lambda: (
+            load_current_readiness().readiness_snapshot_hmac
+        ),
+        connection_factory=(engine.connect if postgres else None),
+        registered_lock=evidence_advisory,
+    )
+    routed_model = build_rag_answer_model_route(settings=settings)
+    answer_model = StructuredRagAnswerModel(
+        routed_model=routed_model,
+        cost_policy=cost_policy,
+    )
     return _assemble_rag_provider_dispatch_authority(
         store=store,
         provider_safety=provider_safety,
-        provider_connection_factory=provider_connection_factory,
+        provider_connection_factory=engine.connect,
         evidence_barrier=evidence_barrier,
         identity_secret=identity_secret,
-        timeout_seconds=timeout_seconds,
-        provider_client=_DirectOpenAIProviderClient(settings),
+        timeout_seconds=30,
+        provider_client=_DirectOpenAIProviderClient(
+            settings,
+            routed_model=routed_model,
+        ),
+        settings=settings,
+        answer_model=answer_model,
+        load_current_readiness=load_current_readiness,
     )
 
 
@@ -290,7 +400,8 @@ class RagProviderDispatchAuthority:
 
     __slots__ = (
         '_barrier', '_client', '_connection_factory', '_prepared', '_safety',
-        '_secret', '_store', '_timeout_seconds',
+        '_secret', '_store', '_timeout_seconds', '_settings', '_answer_model',
+        '_load_current_readiness',
     )
 
     def __init__(self, authority: object) -> None:
@@ -306,6 +417,9 @@ class RagProviderDispatchAuthority:
         identity_secret = authority.identity_secret
         timeout_seconds = authority.timeout_seconds
         provider_client = authority.provider_client
+        settings = authority.settings
+        answer_model = authority.answer_model
+        load_current_readiness = authority.load_current_readiness
         if (
             type(store) is not RagCostLedger
             or type(provider_safety) is not RagProviderSafetyService
@@ -317,6 +431,12 @@ class RagProviderDispatchAuthority:
             or type(timeout_seconds) is not int
             or timeout_seconds <= 0
             or not callable(getattr(provider_client, 'send', None))
+            or type(settings) is not Settings
+            or (
+                answer_model is not None
+                and type(answer_model) is not StructuredRagAnswerModel
+            )
+            or not callable(load_current_readiness)
         ):
             raise TypeError('provider dispatch authority is unavailable')
         self._store = store
@@ -328,6 +448,9 @@ class RagProviderDispatchAuthority:
         )
         self._secret = identity_secret
         self._timeout_seconds = timeout_seconds
+        self._settings = settings
+        self._answer_model = answer_model
+        self._load_current_readiness = load_current_readiness
         self._prepared: dict[int, _PreparedState] = {}
 
     def prepare(
@@ -343,6 +466,31 @@ class RagProviderDispatchAuthority:
                 outcome='provider_safety_unavailable',
             )
             raise TypeError('frozen provider invocation is required')
+        try:
+            if type(prepared) is PreparedQueryEmbedding:
+                readiness = validate_rag_serving_index_readiness(
+                    self._load_current_readiness()
+                )
+                if readiness[0] is not True:
+                    raise ValueError
+                prepared = validate_prepared_query_embedding(
+                    prepared,
+                    settings=self._settings,
+                    expected_readiness=readiness,
+                )
+            else:
+                if self._answer_model is None:
+                    raise ValueError
+                prepared = self._answer_model.validate_prepared_invocation(prepared)
+            domain_prepared = prepared
+        except Exception:
+            self._cancel_unconsumed_claim(
+                grant,
+                outcome='provider_safety_unavailable',
+            )
+            raise RagProviderTransportError(
+                'frozen provider invocation is invalid'
+            ) from None
         try:
             snapshot, binding, budget, query_identity_hmac = (
                 self._store._transport_context(grant)
@@ -370,6 +518,10 @@ class RagProviderDispatchAuthority:
             or not hmac.compare_digest(
                 grant.provider_safety_snapshot_hmac,
                 binding.provider_safety_snapshot_hmac,
+            )
+            or not hmac.compare_digest(
+                prepared.retrieval_query_hmac,
+                query_identity_hmac,
             )
         ):
             self._cancel_unconsumed_claim(
@@ -540,6 +692,7 @@ class RagProviderDispatchAuthority:
                     state.domain_prepared,
                     order=order,
                     order_capability=c5_capability,
+                    load_current_readiness=self._load_current_readiness,
                 )
                 cost_capability = order.acquire('agent_run_cost')
                 self._store.consume_transport_grant(
@@ -717,11 +870,13 @@ class RagProviderDispatchAuthority:
         vector_valid = False
         try:
             vector = item['embedding']
-            vector_valid = (
-                type(vector) is list
-                and len(vector) == 1536
-                and all(type(value) is float and math.isfinite(value) for value in vector)
+            if type(vector) is not list:
+                raise ValueError
+            CosineIndexableVectorValidator().validate(
+                vector,
+                expected_dimensions=1536,
             )
+            vector_valid = True
         except Exception:
             vector_valid = False
         if not vector_valid:
@@ -794,6 +949,16 @@ class RagProviderDispatchAuthority:
                 'provider_response_identity_invalid', usage, actual,
                 'block_remediation',
             )
+        if usage_invalid:
+            return self._classified(
+                'answer_generation', 'usage_contract_invalid',
+                'provider_safety_unavailable', None, None, 'block_remediation'
+            )
+        if storage_invalid:
+            return self._classified(
+                'answer_generation', 'usage_storage_invalid',
+                'provider_safety_unavailable', None, None, 'block_remediation'
+            )
         schema_valid = False
         validation_failure = 'structured_output_invalid'
         validator = RagAnswerOutputValidator(
@@ -813,16 +978,6 @@ class RagProviderDispatchAuthority:
             return self._classified(
                 'answer_generation', validation_failure,
                 validation_failure, usage, actual, 'unchanged'
-            )
-        if usage_invalid:
-            return self._classified(
-                'answer_generation', 'usage_contract_invalid',
-                'provider_safety_unavailable', None, None, 'block_remediation'
-            )
-        if storage_invalid:
-            return self._classified(
-                'answer_generation', 'usage_storage_invalid',
-                'provider_safety_unavailable', None, None, 'block_remediation'
             )
         return self._classified(
             'answer_generation', 'validated_success', 'component_succeeded',

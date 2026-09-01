@@ -133,19 +133,24 @@ def _ledger(
     )
 
 
-def _admit(ledger: RagCostLedger, run_id: int) -> None:
+def _admit(
+    ledger: RagCostLedger,
+    run_id: int,
+    *,
+    backend: str = 'pgvector',
+) -> None:
     ledger.create_admission(
         agent_run_id=run_id,
         surface='ask',
         mode='enforce',
         cutover_stage='ask',
-        configured_backend='keyword',
+        configured_backend=backend,
         query_context_version='direct-query:v1',
         current_text_hmac='1' * 64,
         retrieval_query_hmac='2' * 64,
         security_scope_fingerprint='3' * 64,
         admission_cache_identity_hmac=None,
-        source_window='rag-v2:admission:enforce:ask:keyword',
+        source_window=f'rag-v2:admission:enforce:ask:{backend}',
         components=(
             (
                 _snapshot('query_embedding', _TEST_COST_POLICY),
@@ -346,11 +351,53 @@ def test_failed_selected_component_closes_impossible_sibling_and_parent_final(
         )
 
 
+def test_claim_rejects_route_unused_query_component(tmp_path: Path):
+    ledger = _ledger(tmp_path)
+    _admit(ledger, 123, backend='keyword')
+
+    with pytest.raises(RagCostLedgerError, match='route'):
+        ledger.claim_component(
+            run_id=123,
+            component='query_embedding',
+            prepared=_budget('query_embedding', '0.000010'),
+        )
+
+
+def test_pgvector_answer_cannot_claim_before_query_terminal(tmp_path: Path):
+    ledger = _ledger(tmp_path)
+    ledger.create_admission(
+        agent_run_id=124,
+        surface='ask',
+        mode='enforce',
+        cutover_stage='ask',
+        configured_backend='pgvector',
+        query_context_version='direct-query:v1',
+        current_text_hmac='1' * 64,
+        retrieval_query_hmac='2' * 64,
+        security_scope_fingerprint='3' * 64,
+        admission_cache_identity_hmac=None,
+        source_window='rag-v2:admission:enforce:ask:pgvector',
+        components=(
+            (_snapshot('query_embedding', _TEST_COST_POLICY),
+             _budget('query_embedding', '0.000010')),
+            (_snapshot('answer_generation', _TEST_COST_POLICY),
+             _budget('answer_generation', '0.002000')),
+        ),
+    )
+
+    with pytest.raises(RagCostLedgerError, match='order'):
+        ledger.claim_component(
+            run_id=124,
+            component='answer_generation',
+            prepared=_budget('answer_generation', '0.002000'),
+        )
+
+
 def test_projectionless_failure_closes_exact_two_terminal_zero_children(
     tmp_path: Path,
 ):
     ledger = _ledger(tmp_path)
-    _admit(ledger, 11)
+    _admit(ledger, 11, backend='keyword')
     terminal = ledger.finalize_projectionless_failure(
         run_id=11, outcome='abandoned_unknown'
     )

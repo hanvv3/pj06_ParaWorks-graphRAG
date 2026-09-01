@@ -57,7 +57,12 @@ from backend.app.models.rag_serving import (
     RagLexicalServingProjection,
     RagServingCorpusGeneration,
 )
-from backend.app.rag.retrieval import PreparedPaidCallBudget, RagPaidComponent
+from backend.app.rag.retrieval import (
+    PreparedPaidCallBudget,
+    PreparedQueryEmbedding,
+    RagPaidComponent,
+    validate_rag_serving_index_readiness,
+)
 
 _ZERO = Decimal('0.000000')
 _COMPONENT_ORDER = ('query_embedding', 'answer_generation')
@@ -661,6 +666,17 @@ class RagCostLedger:
             or tuple(row.component for row in rows) != _COMPONENT_ORDER
         ):
             raise RagCostLedgerError('committed exact-two admission is unavailable')
+        if self._component_is_unused(parent, component):
+            raise RagCostLedgerError('component is unused by the admitted route')
+        if (
+            component == 'answer_generation'
+            and parent.metadata_.get('configured_backend') == 'pgvector'
+            and (
+                rows[0].dispatch_state != 'terminal'
+                or rows[0].terminal_outcome != 'component_succeeded'
+            )
+        ):
+            raise RagCostLedgerError('component claim order is invalid')
         row = rows[_COMPONENT_ORDER.index(component)]
         snapshot = self._admission_snapshots.get((run_id, component))
         if (
@@ -817,11 +833,12 @@ class RagCostLedger:
         *,
         order: RagLockOrderCoordinator,
         order_capability: RagLockOrderCapability,
+        load_current_readiness: Callable[[], object],
     ) -> None:
-        """Lock and exact-check C.5 key/corpus/projection rows before answer send."""
+        """Lock and exact-check C.5 key/corpus/readiness rows before a send."""
         order.require(order_capability, stage='c5_key_corpus')
-        if type(prepared) is not PreparedAnswerInvocation:
-            return
+        if type(prepared) not in {PreparedQueryEmbedding, PreparedAnswerInvocation}:
+            raise RagCostLedgerError('C.5 prepared carrier is unavailable')
         key_state = self._session.scalar(
             select(AutoReviewRuntimeKeyState)
             .where(
@@ -855,6 +872,31 @@ class RagCostLedger:
             != 'pgvector-cosine-indexable:v1'
         ):
             raise RagCostLedgerError('C.5 serving authority changed before send')
+        if type(prepared) is PreparedQueryEmbedding:
+            try:
+                readiness = validate_rag_serving_index_readiness(
+                    load_current_readiness()
+                )
+            except Exception:
+                raise RagCostLedgerError(
+                    'C.5 serving readiness changed before send'
+                ) from None
+            if (
+                readiness[0] is not True
+                or (
+                    prepared.corpus_generation,
+                    prepared.vector_index_generation,
+                    prepared.readiness_snapshot_hmac,
+                )
+                != (readiness[1], readiness[2], readiness[10])
+                or prepared.corpus_generation != corpus.corpus_generation
+                or prepared.vector_index_generation
+                != corpus.vector_index_generation
+            ):
+                raise RagCostLedgerError(
+                    'C.5 serving readiness changed before send'
+                )
+            return
         observations = prepared.model_influence
         if (
             type(observations) is not tuple

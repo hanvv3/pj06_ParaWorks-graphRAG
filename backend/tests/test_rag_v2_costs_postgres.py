@@ -34,6 +34,7 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
     _issue_classified_provider_observation as StrictProviderOutcome,
 )
 from backend.app.core.config import get_settings
+from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import StrictProviderUsage
 from backend.tests.test_rag_v2_costs import (
     _TEST_COST_POLICY,
@@ -42,6 +43,7 @@ from backend.tests.test_rag_v2_costs import (
     _snapshot,
 )
 from backend.tests.test_rag_v2_provider_transport import (
+    _TEST_SETTINGS,
     _admit_transport,
     _Client,
     _prepared_query,
@@ -249,6 +251,21 @@ def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
         identity_secret=b'task-12-test-identity-secret',
         timeout_seconds=30,
         provider_client=_Client(seen),
+        settings=_TEST_SETTINGS,
+        answer_model=None,
+        load_current_readiness=lambda: RagServingIndexReadiness(
+            ready=True,
+            corpus_generation=1,
+            vector_index_generation=1,
+            expected_document_count=0,
+            live_vector_count=0,
+            tombstone_count=0,
+            mismatch_count_capped_at_20=0,
+            embedding_model='text-embedding-3-small',
+            embedding_dimensions=1536,
+            index_policy_version='rag-v2-serving-index:v1',
+            readiness_snapshot_hmac='4' * 64,
+        ),
     )
     prepared = authority.prepare(
         grant=grant,

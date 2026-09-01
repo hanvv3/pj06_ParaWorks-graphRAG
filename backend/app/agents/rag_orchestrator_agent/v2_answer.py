@@ -362,6 +362,7 @@ class StructuredRagAnswerModel:
                 )
         except Exception:
             raise RagAnswerModelBoundaryError('model_provider_failed') from None
+
         latency_ms = max(0, (time.monotonic_ns() - started) // 1_000_000)
         if not provider_logging_is_safe():
             raise RagAnswerModelBoundaryError('provider_safety_unavailable')
@@ -412,6 +413,17 @@ class StructuredRagAnswerModel:
             raise
         except Exception:
             raise RagAnswerModelBoundaryError('model_provider_failed') from None
+
+    def validate_prepared_invocation(
+        self,
+        value: object,
+    ) -> PreparedAnswerInvocation:
+        """Authenticate an exact Task 10 carrier without invoking a provider."""
+        try:
+            self._validate_prepared(value)  # type: ignore[arg-type]
+        except Exception:
+            raise RagAnswerModelBoundaryError('model_unavailable') from None
+        return value  # type: ignore[return-value]
 
     def validate(
         self,
