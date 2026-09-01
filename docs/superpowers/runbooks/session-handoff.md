@@ -15,6 +15,12 @@ Updated: 2026-09-01
   state once inside the continuous provider-safety, projection-owner, and
   evidence/C.5 barriers. Every real acquisition requires its exact order
   capability.
+- `_assemble_direct_openai_rag_provider_dispatch_authority` is PostgreSQL-only
+  and must load all five committed static advisory capabilities before it may
+  create provider or safety artifacts. SQLite uses only the explicit
+  provider-free deterministic smoke assembly; never restore the paid
+  assembler's SQLite fallback. The PostgreSQL recovery/send gate must remain a
+  real two-session lock interleaving rather than a sequential state change.
 - Recovery is fail-closed and never redispatches. Dead dispatch becomes
   `abandoned_unknown` admission-only while preserving prior actual/reserve;
   pending projection recovery requires the exact owner fence and ends as
@@ -22,7 +28,7 @@ Updated: 2026-09-01
 - The additive `a4d5e6f7b8c9` head corrects pending-projection null outcome and
   permits the frozen reviewed inter-component admission-only recovery shape.
   Do not remove it or point head back to `f3c4d5e6a7b8`.
-- Fresh affected Task 12/RAG V2 verification: `596 passed, 9 skipped`; Ruff,
+- Fresh affected Task 12/RAG V2 verification: `638 passed, 12 skipped`; Ruff,
   compile/import, diff, and changed-lines secret scan are green. The disposable
   PostgreSQL URL was absent, so its executable gates remain a release blocker,
   not claimed execution. No Docker/network/provider/paid/`.env` access.

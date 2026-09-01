@@ -8,7 +8,10 @@ from sqlalchemy import create_engine, func, select
 from backend.app.agent_runtime.rag_advisory_locks import (
     LIVE_RELEASE_LOCK_ORDER,
     ORDINARY_RAG_LOCK_ORDER,
+    RAG_AGENT_RUN_COST_AUTHORITY_LOCK_ID,
+    RAG_C5_KEY_CORPUS_AUTHORITY_LOCK_ID,
     RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+    RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID,
     RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
     AdvisoryLockCollisionError,
     RagLockOrderError,
@@ -66,6 +69,18 @@ def test_global_lock_orders_are_executable_exact_contracts():
     }
     assert RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID == {
         'lock_name': 'evidence_provider_send',
+        'scope': 'database',
+    }
+    assert RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID == {
+        'lock_name': 'projection_owner_registry',
+        'scope': 'database',
+    }
+    assert RAG_C5_KEY_CORPUS_AUTHORITY_LOCK_ID == {
+        'lock_name': 'c5_key_corpus_authority',
+        'scope': 'database',
+    }
+    assert RAG_AGENT_RUN_COST_AUTHORITY_LOCK_ID == {
+        'lock_name': 'agent_run_cost_authority',
         'scope': 'database',
     }
     assert ORDINARY_RAG_LOCK_ORDER == (

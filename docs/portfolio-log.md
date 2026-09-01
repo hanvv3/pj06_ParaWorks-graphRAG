@@ -23,9 +23,15 @@ demo story changes.
   sidecar and database safety authority remain continuously locked through the
   send and post-response recheck. Reviewed crash recovery requires a signed
   dead-process attestation and preserves any prior actual charge.
+- The paid dispatch composition root is PostgreSQL-only and refuses assembly
+  before creating provider or safety artifacts unless all five committed
+  static lock capabilities are present. SQLite has a separate explicit
+  deterministic provider-free smoke assembly and cannot expose dispatch.
+  A two-session PostgreSQL gate now interleaves recovery and sender row-lock
+  acquisition instead of simulating the race sequentially.
 - Added the reversible `a4d5e6f7b8c9` lifecycle revision, closed cumulative
   stage/surface/context routing, typed identity goldens, and disposable-
-  PostgreSQL gates. Fresh affected verification is `596 passed, 9 skipped`;
+  PostgreSQL gates. Fresh affected verification is `638 passed, 12 skipped`;
   PostgreSQL was not configured, so those gates were not claimed. No paid/
   provider/network/Docker/`.env` access occurred.
 

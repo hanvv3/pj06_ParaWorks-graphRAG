@@ -149,6 +149,18 @@ RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID = {
     'lock_name': 'evidence_provider_send',
     'scope': 'database',
 }
+RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID = {
+    'lock_name': 'projection_owner_registry',
+    'scope': 'database',
+}
+RAG_C5_KEY_CORPUS_AUTHORITY_LOCK_ID = {
+    'lock_name': 'c5_key_corpus_authority',
+    'scope': 'database',
+}
+RAG_AGENT_RUN_COST_AUTHORITY_LOCK_ID = {
+    'lock_name': 'agent_run_cost_authority',
+    'scope': 'database',
+}
 
 
 def rag_projection_owner_lock_id(agent_run_id: int) -> dict[str, int | str]:

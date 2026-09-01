@@ -232,6 +232,24 @@ class _PreparedState:
 
 
 @dataclass(frozen=True, slots=True)
+class _ProviderFreeSqliteRagSmoke:
+    backend: str = 'deterministic_lexical'
+    provider_dispatch_enabled: bool = False
+
+
+def _assemble_sqlite_provider_free_rag_smoke(
+    *,
+    settings: Settings,
+) -> _ProviderFreeSqliteRagSmoke:
+    """Explicit local smoke path that cannot construct or dispatch a provider."""
+    from backend.app.db.session import engine
+
+    if type(settings) is not Settings or engine.dialect.name != 'sqlite':
+        raise TypeError('provider-free RAG smoke requires SQLite')
+    return _ProviderFreeSqliteRagSmoke()
+
+
+@dataclass(frozen=True, slots=True)
 class _RagProviderDispatchAssembly:
     store: RagCostLedger = field(repr=False)
     provider_safety: RagProviderSafetyService = field(repr=False)
@@ -289,7 +307,10 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
         _assemble_rag_evidence_barrier,
     )
     from backend.app.agent_runtime.rag_advisory_locks import (
+        RAG_AGENT_RUN_COST_AUTHORITY_LOCK_ID,
+        RAG_C5_KEY_CORPUS_AUTHORITY_LOCK_ID,
         RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+        RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID,
         RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
         load_registered_advisory_capability,
         rag_projection_owner_lock_id,
@@ -305,8 +326,11 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
 
     if type(settings) is not Settings:
         raise TypeError('production RAG settings are required')
+    if engine.dialect.name != 'postgresql':
+        raise RagProviderTransportError(
+            'paid RAG dispatch requires PostgreSQL registered capabilities'
+        )
     identity_secret, _ = fingerprint_secret_bytes(settings)
-    postgres = engine.dialect.name == 'postgresql'
 
     def load_static_capability(identity: object):
         with engine.connect() as connection:
@@ -316,16 +340,18 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
                 identity_namespace='static',
             )
 
-    provider_advisory = (
-        load_static_capability(RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID)
-        if postgres
-        else None
-    )
-    evidence_advisory = (
-        load_static_capability(RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID)
-        if postgres
-        else None
-    )
+    paid_capabilities = {
+        identity['lock_name']: load_static_capability(identity)
+        for identity in (
+            RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+            RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+            RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID,
+            RAG_C5_KEY_CORPUS_AUTHORITY_LOCK_ID,
+            RAG_AGENT_RUN_COST_AUTHORITY_LOCK_ID,
+        )
+    }
+    provider_advisory = paid_capabilities['provider_safety_authority']
+    evidence_advisory = paid_capabilities['evidence_provider_send']
     provider_safety = RagProviderSafetyService(
         latch_path=settings.paraworks_provider_safety_latch_path,
         identity_secret=identity_secret,
@@ -339,8 +365,6 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
     )
 
     def load_projection_capability(agent_run_id: int):
-        if not postgres:
-            return None
         with engine.connect() as connection:
             return load_registered_advisory_capability(
                 connection,
@@ -357,9 +381,7 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
         provider_connection_factory=engine.connect,
         designated_environment_id=settings.paraworks_env,
         designated_host_id=socket.gethostname(),
-        projection_lock_capability_factory=(
-            load_projection_capability if postgres else None
-        ),
+        projection_lock_capability_factory=load_projection_capability,
     )
 
     def load_current_readiness():
@@ -370,7 +392,7 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
         load_current_identity=lambda: (
             load_current_readiness().readiness_snapshot_hmac
         ),
-        connection_factory=(engine.connect if postgres else None),
+        connection_factory=engine.connect,
         registered_lock=evidence_advisory,
     )
     routed_model = build_rag_answer_model_route(settings=settings)

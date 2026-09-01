@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -9,10 +10,11 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 
 from backend.app.agent_runtime.provider_send_fence import (
     _assemble_rag_evidence_barrier,
@@ -45,7 +47,6 @@ from backend.tests.test_rag_v2_costs import (
 from backend.tests.test_rag_v2_provider_transport import (
     _TEST_SETTINGS,
     _admit_transport,
-    _Client,
     _prepared_query,
 )
 
@@ -220,15 +221,45 @@ def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
             rag_projection_owner_lock_id(run_id),
             identity_namespace='dynamic',
         )
-    seen = []
+    with engine.connect() as connection:
+        provider_lock = load_registered_advisory_capability(
+            connection,
+            RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+            identity_namespace='static',
+        )
+    recovery_before_commit = threading.Event()
+    allow_recovery_commit = threading.Event()
+    sender_finished = threading.Event()
+    recovery_finished = threading.Event()
+    seen: list[bytes] = []
+
+    class ForbiddenClient:
+        def send(self, body: bytes, *, timeout_seconds: int, max_retries: int):
+            seen.append(body)
+            raise AssertionError('recovery must win before provider send')
+
+    sender_session = Session(engine)
+    recovery_session = Session(engine)
     ledger = _assemble_rag_cost_ledger(
-        Session(engine),
+        sender_session,
         identity_secret=b'task-12-test-identity-secret',
         cost_policy=_TEST_COST_POLICY,
         provider_safety=service,
         provider_connection_factory=engine.connect,
         designated_environment_id='test',
         designated_host_id='pytest-postgres-host',
+        projection_lock_capability_factory=lambda value: (
+            projection_lock if value == run_id else None
+        ),
+    )
+    recovery_ledger = _assemble_rag_cost_ledger(
+        recovery_session,
+        identity_secret=b'task-12-test-identity-secret',
+        cost_policy=_TEST_COST_POLICY,
+        provider_safety=service,
+        provider_connection_factory=engine.connect,
+        designated_environment_id='test',
+        designated_host_id='pytest-postgres-recovery-host',
         projection_lock_capability_factory=lambda value: (
             projection_lock if value == run_id else None
         ),
@@ -250,7 +281,7 @@ def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
         ),
         identity_secret=b'task-12-test-identity-secret',
         timeout_seconds=30,
-        provider_client=_Client(seen),
+        provider_client=ForbiddenClient(),
         settings=_TEST_SETTINGS,
         answer_model=None,
         load_current_readiness=lambda: RagServingIndexReadiness(
@@ -271,16 +302,75 @@ def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
         grant=grant,
         prepared=_prepared_query(query_budget),
     )
-    ledger.recover_incomplete_run(
-        run_id=run_id,
-        dead_process_attestation_hmac=(
-            ledger._expected_dead_process_attestation_hmac(
-                run_id=run_id,
-                dead_process_instance_hmac=ledger.process_instance_hmac,
-            )
-        ),
-    )
+    sender_result: list[object] = []
+    recovery_result: list[object] = []
+    thread_errors: list[BaseException] = []
 
-    with pytest.raises(RagProviderTransportError):
-        authority.dispatch(grant=grant, prepared=prepared)
+    @event.listens_for(recovery_session, 'before_commit')
+    def hold_recovery_commit(_session: Session) -> None:
+        recovery_before_commit.set()
+        assert allow_recovery_commit.wait(timeout=10)
+
+    def send() -> None:
+        try:
+            sender_result.append(
+                authority.dispatch(grant=grant, prepared=prepared)
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            sender_result.append(exc)
+        finally:
+            sender_finished.set()
+
+    def recover() -> None:
+        try:
+            recovery_result.append(recovery_ledger.recover_incomplete_run(
+                run_id=run_id,
+                dead_process_attestation_hmac=(
+                    recovery_ledger._expected_dead_process_attestation_hmac(
+                        run_id=run_id,
+                        dead_process_instance_hmac=ledger.process_instance_hmac,
+                    )
+                ),
+            ))
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            thread_errors.append(exc)
+        finally:
+            recovery_finished.set()
+
+    recovery = threading.Thread(target=recover, name='rag-recovery-worker')
+    recovery.start()
+    assert recovery_before_commit.wait(timeout=10)
+
+    sender = threading.Thread(target=send, name='rag-provider-sender')
+    sender.start()
+    assert not sender_finished.wait(timeout=0.25)
+    allow_recovery_commit.set()
+    sender.join(timeout=10)
+    recovery.join(timeout=10)
+
+    assert not sender.is_alive()
+    assert not recovery.is_alive()
+    assert thread_errors == []
+    assert len(sender_result) == 1
+    assert isinstance(sender_result[0], RagProviderTransportError)
+    assert len(recovery_result) == 1
     assert seen == []
+    assert recovery_result[0].run_record_phase == 'admission_only'
+
+    event.remove(recovery_session, 'before_commit', hold_recovery_commit)
+    sender_session.close()
+    recovery_session.close()
+    probe_engine = create_engine(engine.url, poolclass=NullPool)
+    with probe_engine.connect() as connection:
+        for capability in (provider_lock, evidence_lock, projection_lock):
+            acquired = connection.scalar(
+                text('SELECT pg_try_advisory_lock(:key1, :key2)'),
+                {'key1': capability.key[0], 'key2': capability.key[1]},
+            )
+            assert acquired is True
+            assert connection.scalar(
+                text('SELECT pg_advisory_unlock(:key1, :key2)'),
+                {'key1': capability.key[0], 'key2': capability.key[1]},
+            ) is True
+    probe_engine.dispose()
+    assert engine.pool.checkedout() == 0
