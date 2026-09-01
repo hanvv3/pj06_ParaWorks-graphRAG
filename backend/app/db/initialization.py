@@ -45,6 +45,7 @@ _POSTGRES_RUNTIME_HEALTH_LEASE_SEAL = object()
 _POSTGRES_CLEANUP_OWNER_SEAL = object()
 _POSTGRES_EMERGENCY_TRANSITION_SEAL = object()
 _POSTGRES_PHYSICAL_CLEANUP_SEAL = object()
+_POSTGRES_LISTENER_CONSTRUCTION_SEAL = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +129,7 @@ class TrustedPostgresRuntimeHealth:
         '_active_operation_authorities',
         '_condition',
         '_effect_depths',
+        '_effect_leases',
         '_epoch',
         '_exclusive_generation_sequence',
         '_exclusive_owner_state',
@@ -160,6 +162,7 @@ class TrustedPostgresRuntimeHealth:
         ] = {}
         self._active_operation_authorities: dict[int, object] = {}
         self._effect_depths: dict[int, int] = {}
+        self._effect_leases: dict[int, _PostgresRuntimeHealthLease] = {}
         self._exclusive_owner_state: _PostgresExclusiveOwnerState | None = None
         self._exclusive_generation_sequence = 0
         self._exclusive_ticket_sequence = 0
@@ -381,8 +384,22 @@ class TrustedPostgresRuntimeHealth:
     @contextmanager
     def _effect(self, purpose: str):
         """Admit one compound effect under the shared healthy epoch."""
-        with self._operation(purpose) as lease, self._guard(lease):
+        with self._operation_or_current_effect(purpose) as lease, self._guard(lease):
             yield
+
+    @contextmanager
+    def _operation_or_current_effect(self, purpose: str):
+        """Reuse only the exact lease already owning this thread's effect."""
+        thread_id = get_ident()
+        with self._condition:
+            current = self._effect_leases.get(thread_id)
+            if current is not None:
+                self._require_effect_lease(current)
+        if current is not None:
+            yield current
+            return
+        with self._operation(purpose) as lease:
+            yield lease
 
     def _enter_effect(self, lease: _PostgresRuntimeHealthLease) -> None:
         thread_id = get_ident()
@@ -390,13 +407,29 @@ class TrustedPostgresRuntimeHealth:
             depth = self._effect_depths.get(thread_id, 0)
             if depth:
                 self._require_effect_lease(lease)
+                if self._effect_leases.get(thread_id) is not lease:
+                    raise PostgresRuntimeHealthUnavailableError(
+                        'RAG PostgreSQL runtime health lease changed'
+                    )
                 self._effect_depths[thread_id] = depth + 1
                 return
-            while self._exclusive_owner is not None or self._exclusive_tickets:
+            while (
+                self._healthy
+                and not self._poison_requested
+                and (
+                    self._exclusive_owner is not None
+                    or bool(self._exclusive_tickets)
+                    or any(
+                        record.phase == 'REVOKED_UNCERTAIN'
+                        for record in self._emergency_cleanup_records.values()
+                    )
+                )
+            ):
                 self._condition.wait()
             self._require_effect_lease(lease)
             self._active_effects += 1
             self._effect_depths[thread_id] = 1
+            self._effect_leases[thread_id] = lease
 
     def _exit_effect(self) -> None:
         thread_id = get_ident()
@@ -408,6 +441,7 @@ class TrustedPostgresRuntimeHealth:
                 self._effect_depths[thread_id] = depth - 1
                 return
             del self._effect_depths[thread_id]
+            self._effect_leases.pop(thread_id, None)
             self._active_effects -= 1
             if self._active_effects < 0:
                 raise RuntimeError('PostgreSQL runtime effect count underflow')
@@ -1218,9 +1252,168 @@ class _IssuedDedicatedPostgresEngine:
 
 _FAILED_CHECKOUT_LISTENER_CLEANUPS: dict[
     int,
-    _TrustedApplicationCheckoutRegistry,
+    _CheckoutListenerConstructionResponsibility,
 ] = {}
 _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK = RLock()
+_FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION = Condition(
+    _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK
+)
+
+
+class _CheckoutListenerConstructionResponsibility:
+    """Sealed process owner spanning listener install through bootstrap claim."""
+
+    __slots__ = (
+        '_lock',
+        '_owner',
+        '_registry',
+        '_runtime_health',
+        '_seal',
+        '_state',
+    )
+
+    def __init__(
+        self,
+        *,
+        owner: object,
+        runtime_health: TrustedPostgresRuntimeHealth,
+        _seal: object,
+    ) -> None:
+        if (
+            _seal is not _POSTGRES_LISTENER_CONSTRUCTION_SEAL
+            or type(runtime_health) is not TrustedPostgresRuntimeHealth
+        ):
+            raise TypeError('PostgreSQL listener construction is unavailable')
+        self._lock = RLock()
+        self._owner = owner
+        self._registry: _TrustedApplicationCheckoutRegistry | None = None
+        self._runtime_health = runtime_health
+        self._seal = _seal
+        self._state: Literal[
+            'NEW',
+            'INSTALLING',
+            'INSTALLED',
+            'QUARANTINED',
+            'CLAIMED',
+            'CLEAN',
+        ] = 'NEW'
+
+    @property
+    def runtime_health(self) -> TrustedPostgresRuntimeHealth:
+        return self._runtime_health
+
+    @property
+    def remaining_listeners(self) -> tuple[tuple[object, str, object], ...]:
+        with self._lock:
+            if self._registry is None:
+                return ()
+            return self._registry.remaining_listeners
+
+    def register(self) -> None:
+        """Bound process quarantine to one exact construction before effects."""
+        while True:
+            existing: _CheckoutListenerConstructionResponsibility | None
+            with _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION:
+                if self._state != 'NEW':
+                    raise TypeError('PostgreSQL listener construction changed')
+                existing = next(
+                    iter(_FAILED_CHECKOUT_LISTENER_CLEANUPS.values()),
+                    None,
+                )
+                if existing is None:
+                    self._state = 'INSTALLING'
+                    _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
+                    return
+                if existing._state in {'INSTALLING', 'INSTALLED'}:
+                    _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.wait()
+                    continue
+            if existing.drain_quarantine():
+                continue
+            raise PostgresRuntimeHealthUnavailableError(
+                'PostgreSQL listener cleanup is fail-stopped'
+            )
+
+    def publish_registry(
+        self,
+        registry: _TrustedApplicationCheckoutRegistry,
+    ) -> None:
+        with self._lock:
+            if (
+                self._seal is not _POSTGRES_LISTENER_CONSTRUCTION_SEAL
+                or self._state != 'INSTALLING'
+                or self._registry is not None
+            ):
+                raise TypeError('PostgreSQL listener construction changed')
+            self._registry = registry
+
+    def mark_installed(self) -> None:
+        with self._lock:
+            if self._state != 'INSTALLING' or self._registry is None:
+                raise TypeError('PostgreSQL listener construction changed')
+            self._state = 'INSTALLED'
+
+    def claim_into_bootstrap(self, bootstrap: TrustedPostgresEngineBootstrap) -> None:
+        with self._lock:
+            if (
+                self._state != 'INSTALLED'
+                or self._owner is not bootstrap
+                or self._registry is None
+            ):
+                raise TypeError('PostgreSQL listener construction changed')
+            bootstrap._listener_handoff_checkpoint('after_registry_install')
+            bootstrap._checkout_registry = self._registry
+            bootstrap._listener_handoff_checkpoint('after_bootstrap_store')
+            self._state = 'CLAIMED'
+        self._retire_claimed()
+
+    def claim_standalone(self, owner: object) -> None:
+        with self._lock:
+            if self._state != 'INSTALLED' or self._owner is not owner:
+                raise TypeError('PostgreSQL listener construction changed')
+            self._state = 'CLAIMED'
+        self._retire_claimed()
+
+    def construction_failed(self) -> None:
+        with self._lock:
+            if self._state in {'NEW', 'CLEAN'}:
+                return
+            if self._state == 'CLAIMED':
+                raise TypeError('PostgreSQL listener construction changed')
+            self._state = 'QUARANTINED'
+        with self._runtime_health._condition:
+            self._runtime_health._force_fail_stop_locked()
+            self._runtime_health._condition.notify_all()
+        self.drain_quarantine()
+
+    def drain_quarantine(self) -> bool:
+        with self._lock:
+            if self._state == 'CLEAN':
+                return True
+            if self._state != 'QUARANTINED':
+                return False
+            registry = self._registry
+            unresolved = bool(
+                registry is not None
+                and registry._retry_failed_installation_cleanup()
+            )
+            if unresolved:
+                return False
+            self._state = 'CLEAN'
+        with _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION:
+            if _FAILED_CHECKOUT_LISTENER_CLEANUPS.get(id(self)) is self:
+                _FAILED_CHECKOUT_LISTENER_CLEANUPS.pop(id(self), None)
+            _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.notify_all()
+        return True
+
+    def _retire_claimed(self) -> None:
+        with _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION:
+            if (
+                self._state != 'CLAIMED'
+                or _FAILED_CHECKOUT_LISTENER_CLEANUPS.get(id(self)) is not self
+            ):
+                raise TypeError('PostgreSQL listener construction changed')
+            _FAILED_CHECKOUT_LISTENER_CLEANUPS.pop(id(self), None)
+            _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.notify_all()
 
 
 def _drain_failed_checkout_listener_cleanups(
@@ -1237,7 +1430,7 @@ def _drain_failed_checkout_listener_cleanups(
             or responsibility_id in responsibility_ids
         )
     for responsibility in responsibilities:
-        responsibility._retry_failed_installation_cleanup()
+        responsibility.drain_quarantine()
 
 
 class _TrustedApplicationCheckoutRegistry:
@@ -1262,6 +1455,9 @@ class _TrustedApplicationCheckoutRegistry:
         engine: Engine,
         *,
         runtime_health: TrustedPostgresRuntimeHealth,
+        _construction_responsibility: (
+            _CheckoutListenerConstructionResponsibility | None
+        ) = None,
     ) -> None:
         self._engine = engine
         self._lock = RLock()
@@ -1339,12 +1535,17 @@ class _TrustedApplicationCheckoutRegistry:
         )
         self._listeners = listeners
         self._remaining_listeners = list(listeners)
+        standalone_responsibility = _construction_responsibility is None
+        responsibility = _construction_responsibility
+        if responsibility is None:
+            responsibility = _CheckoutListenerConstructionResponsibility(
+                owner=self,
+                runtime_health=runtime_health,
+                _seal=_POSTGRES_LISTENER_CONSTRUCTION_SEAL,
+            )
+            responsibility.register()
+        responsibility.publish_registry(self)
         installed: list[tuple[object, str, object]] = []
-        # The responsibility is reachable before the first listener side effect.
-        # A successful install retires it; a partial failure narrows it to the
-        # exact listeners that may still be attached.
-        with _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK:
-            _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
         try:
             for target, identifier, callback in listeners:
                 event.listen(target, identifier, callback)
@@ -1362,18 +1563,15 @@ class _TrustedApplicationCheckoutRegistry:
                 if is_installed:
                     confirmed.append(listener)
             self._remaining_listeners = list(confirmed)
-            removal_failed = self._retry_failed_installation_cleanup()
             with self._condition:
-                self._state = (
-                    'closing' if self._remaining_listeners else 'closed'
-                )
+                self._state = 'closing'
                 self._condition.notify_all()
-            if removal_failed:
-                self._fail_stop_runtime()
+            responsibility.construction_failed()
             raise
         else:
-            with _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK:
-                _FAILED_CHECKOUT_LISTENER_CLEANUPS.pop(id(self), None)
+            responsibility.mark_installed()
+            if standalone_responsibility:
+                responsibility.claim_standalone(self)
 
     @property
     def runtime_health(self) -> TrustedPostgresRuntimeHealth:
@@ -1385,7 +1583,6 @@ class _TrustedApplicationCheckoutRegistry:
 
     def _retry_failed_installation_cleanup(self) -> bool:
         """Remove only listeners this failed installation may still own."""
-        failed = False
         for listener in tuple(reversed(self._remaining_listeners)):
             target, identifier, callback = listener
             removed = False
@@ -1393,7 +1590,6 @@ class _TrustedApplicationCheckoutRegistry:
                 try:
                     event.remove(target, identifier, callback)
                 except BaseException:
-                    failed = True
                     try:
                         removed = not event.contains(
                             target,
@@ -1414,12 +1610,7 @@ class _TrustedApplicationCheckoutRegistry:
             else:
                 self._state = 'closing'
             self._condition.notify_all()
-        with _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK:
-            if self._remaining_listeners:
-                _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
-            else:
-                _FAILED_CHECKOUT_LISTENER_CLEANUPS.pop(id(self), None)
-        return bool(self._remaining_listeners) or failed
+        return bool(self._remaining_listeners)
 
     def arm(self, capability: _PostgresEmergencyCleanupCapability) -> None:
         with self._condition:
@@ -1593,6 +1784,7 @@ class TrustedPostgresEngineBootstrap:
         '_application_engine',
         '_checkout_registry',
         '_dedicated_factory',
+        '_listener_construction',
         '_policy_capability_id',
         '_revoked',
         '_runtime_health',
@@ -1625,11 +1817,28 @@ class TrustedPostgresEngineBootstrap:
         self._runtime_health = runtime_health
         self._seal = _seal
         self._state_lock = RLock()
-
-        self._checkout_registry = _TrustedApplicationCheckoutRegistry(
-            application_engine,
+        responsibility = _CheckoutListenerConstructionResponsibility(
+            owner=self,
             runtime_health=runtime_health,
+            _seal=_POSTGRES_LISTENER_CONSTRUCTION_SEAL,
         )
+        self._listener_construction = responsibility
+        try:
+            responsibility.register()
+            _TrustedApplicationCheckoutRegistry(
+                application_engine,
+                runtime_health=runtime_health,
+                _construction_responsibility=responsibility,
+            )
+            responsibility.claim_into_bootstrap(self)
+        except BaseException:
+            responsibility.construction_failed()
+            raise
+        finally:
+            self._listener_construction = None
+
+    def _listener_handoff_checkpoint(self, _stage: str) -> None:
+        """Test seam around the lower-layer listener ownership handoff."""
 
     def _connect_registered_application(
         self,
@@ -1668,7 +1877,9 @@ class TrustedPostgresEngineBootstrap:
         return self._checkout_registry.drain(capability)
 
     def _issue(self, application_engine: Engine) -> _IssuedDedicatedPostgresEngine:
-        with self._runtime_health._operation('bootstrap_issue') as health_lease:
+        with self._runtime_health._operation_or_current_effect(
+            'bootstrap_issue'
+        ) as health_lease:
             with self._runtime_health._guard(health_lease), self._state_lock:
                 if (
                     self._revoked
@@ -1904,10 +2115,6 @@ def initialize_database_runtime(
             dedicated_options['poolclass'] = NullPool
             return create_engine(database_url, **dedicated_options)
 
-        with _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK:
-            listener_cleanup_ids_before = frozenset(
-                _FAILED_CHECKOUT_LISTENER_CLEANUPS
-            )
         try:
             postgres_bootstrap = TrustedPostgresEngineBootstrap(
                 application_engine=engine,
@@ -1917,17 +2124,6 @@ def initialize_database_runtime(
                 _seal=_POSTGRES_BOOTSTRAP_SEAL,
             )
         except BaseException:
-            with _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK:
-                current_listener_cleanup_ids = frozenset(
-                    _FAILED_CHECKOUT_LISTENER_CLEANUPS
-                )
-            exact_listener_cleanup_ids = (
-                current_listener_cleanup_ids - listener_cleanup_ids_before
-            )
-            with suppress(BaseException):
-                _drain_failed_checkout_listener_cleanups(
-                    exact_listener_cleanup_ids
-                )
             with suppress(BaseException):
                 engine.dispose()
             raise

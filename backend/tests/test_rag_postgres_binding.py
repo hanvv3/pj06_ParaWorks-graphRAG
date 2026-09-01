@@ -3552,6 +3552,257 @@ def test_persistent_partial_listener_cleanup_remains_reachable_and_fail_stopped(
         assert event.contains(target, identifier, callback) is False
 
 
+@pytest.mark.parametrize(
+    'handoff_stage',
+    ('after_registry_install', 'after_bootstrap_store'),
+)
+def test_listener_handoff_fault_retains_and_drains_exact_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    handoff_stage: str,
+) -> None:
+    application = create_engine('sqlite+pysqlite:///:memory:')
+    application.dialect.name = 'postgresql'
+    installed: list[tuple[object, str, object]] = []
+    disposed: list[str] = []
+    primary = _CleanupStateMachineFault('secret listener handoff primary')
+    original_listen = initialization.event.listen
+    event.listen(application, 'engine_disposed', lambda *_args: disposed.append('done'))
+
+    def create_once(*_args, **_kwargs):
+        return application
+
+    def observe_listen(target, identifier, callback) -> None:
+        original_listen(target, identifier, callback)
+        if identifier in {'checkout', 'checkin', 'invalidate'}:
+            installed.append((target, identifier, callback))
+
+    def fail_handoff(self, stage: str) -> None:
+        if stage == handoff_stage:
+            raise primary
+
+    monkeypatch.setattr(initialization, 'create_engine', create_once)
+    monkeypatch.setattr(initialization.event, 'listen', observe_listen)
+    monkeypatch.setattr(
+        initialization.TrustedPostgresEngineBootstrap,
+        '_listener_handoff_checkpoint',
+        fail_handoff,
+        raising=False,
+    )
+    runtime = None
+    caught: BaseException | None = None
+    try:
+        runtime = initialization.initialize_database_runtime(
+            'postgresql+psycopg://authority-role@localhost/authority-database'
+        )
+    except BaseException as exc:
+        caught = exc
+    finally:
+        if runtime is not None:
+            runtime.dispose()
+
+    assert caught is primary
+    assert len(installed) == 3
+    assert disposed == ['done']
+    assert initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS == {}
+    for target, identifier, callback in installed:
+        assert event.contains(target, identifier, callback) is False
+
+
+def test_concurrent_listener_handoffs_are_exactly_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engines = [
+        create_engine('sqlite+pysqlite:///:memory:'),
+        create_engine('sqlite+pysqlite:///:memory:'),
+    ]
+    for engine in engines:
+        engine.dialect.name = 'postgresql'
+    engine_by_thread = {'listener-A': engines[0], 'listener-B': engines[1]}
+    a_installed = threading.Event()
+    release_a = threading.Event()
+    b_done = threading.Event()
+    runtimes: list[initialization.DatabaseRuntime] = []
+    errors: list[BaseException] = []
+
+    def create_for_thread(*_args, **_kwargs):
+        return engine_by_thread[threading.current_thread().name]
+
+    def pause_a(self, stage: str) -> None:
+        if stage == 'after_registry_install' and threading.current_thread().name == 'listener-A':
+            a_installed.set()
+            assert release_a.wait(2)
+
+    monkeypatch.setattr(initialization, 'create_engine', create_for_thread)
+    monkeypatch.setattr(
+        initialization.TrustedPostgresEngineBootstrap,
+        '_listener_handoff_checkpoint',
+        pause_a,
+        raising=False,
+    )
+
+    def initialize() -> None:
+        try:
+            runtimes.append(
+                initialization.initialize_database_runtime(
+                    'postgresql+psycopg://authority-role@localhost/authority-database'
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if threading.current_thread().name == 'listener-B':
+                b_done.set()
+
+    first = threading.Thread(target=initialize, name='listener-A')
+    second = threading.Thread(target=initialize, name='listener-B')
+    first.start()
+    second_started = False
+    try:
+        assert a_installed.wait(2)
+        second.start()
+        second_started = True
+        assert b_done.wait(0.1) is False
+        release_a.set()
+        first.join(2)
+        second.join(2)
+        assert errors == []
+        assert len(runtimes) == 2
+        assert initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS == {}
+        assert {runtime.engine for runtime in runtimes} == set(engines)
+    finally:
+        release_a.set()
+        first.join(2)
+        if second_started:
+            second.join(2)
+        for runtime in runtimes:
+            runtime.dispose()
+
+
+def test_persistent_listener_quarantine_is_bounded_and_auto_drained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engines = [
+        create_engine('sqlite+pysqlite:///:memory:')
+        for _index in range(3)
+    ]
+    for engine in engines:
+        engine.dialect.name = 'postgresql'
+    next_engine = iter(engines)
+    original_listen = initialization.event.listen
+    original_remove = initialization.event.remove
+    primary = _CleanupStateMachineFault('secret first listener primary')
+    listen_calls = 0
+
+    def create_next(*_args, **_kwargs):
+        return next(next_engine)
+
+    def listen_then_fail(target, identifier, callback) -> None:
+        nonlocal listen_calls
+        original_listen(target, identifier, callback)
+        listen_calls += 1
+        raise primary
+
+    def persistent_remove(*_args, **_kwargs) -> None:
+        raise _CleanupStateMachineFault('secret persistent quarantine removal')
+
+    monkeypatch.setattr(initialization, 'create_engine', create_next)
+    monkeypatch.setattr(initialization.event, 'listen', listen_then_fail)
+    monkeypatch.setattr(initialization.event, 'remove', persistent_remove)
+    runtime = None
+    try:
+        with pytest.raises(_CleanupStateMachineFault) as first:
+            initialization.initialize_database_runtime(
+                'postgresql+psycopg://authority-role@localhost/authority-database'
+            )
+        assert first.value is primary
+        assert len(initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS) == 1
+
+        with pytest.raises(
+            initialization.PostgresRuntimeHealthUnavailableError
+        ):
+            initialization.initialize_database_runtime(
+                'postgresql+psycopg://authority-role@localhost/authority-database'
+            )
+        assert listen_calls == 1
+        assert len(initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS) == 1
+
+        monkeypatch.setattr(initialization.event, 'listen', original_listen)
+        monkeypatch.setattr(initialization.event, 'remove', original_remove)
+        runtime = initialization.initialize_database_runtime(
+            'postgresql+psycopg://authority-role@localhost/authority-database'
+        )
+        assert runtime.engine is engines[2]
+        assert initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS == {}
+    finally:
+        monkeypatch.setattr(initialization.event, 'remove', original_remove)
+        initialization._drain_failed_checkout_listener_cleanups()
+        if runtime is not None:
+            runtime.dispose()
+
+
+def test_concurrent_listener_quarantine_drain_removes_each_callback_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = create_engine('sqlite+pysqlite:///:memory:')
+    application.dialect.name = 'postgresql'
+    original_listen = initialization.event.listen
+    original_remove = initialization.event.remove
+    primary = _CleanupStateMachineFault('secret drain ownership primary')
+
+    def create_once(*_args, **_kwargs):
+        return application
+
+    def listen_then_fail(target, identifier, callback) -> None:
+        original_listen(target, identifier, callback)
+        raise primary
+
+    def persistent_remove(*_args, **_kwargs) -> None:
+        raise _CleanupStateMachineFault('secret drain ownership removal')
+
+    monkeypatch.setattr(initialization, 'create_engine', create_once)
+    monkeypatch.setattr(initialization.event, 'listen', listen_then_fail)
+    monkeypatch.setattr(initialization.event, 'remove', persistent_remove)
+    with pytest.raises(_CleanupStateMachineFault):
+        initialization.initialize_database_runtime(
+            'postgresql+psycopg://authority-role@localhost/authority-database'
+        )
+    assert len(initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS) == 1
+
+    remove_entered = threading.Event()
+    release_remove = threading.Event()
+    removal_calls = 0
+    errors: list[BaseException] = []
+
+    def remove_once(target, identifier, callback) -> None:
+        nonlocal removal_calls
+        removal_calls += 1
+        if removal_calls == 1:
+            remove_entered.set()
+            assert release_remove.wait(2)
+        original_remove(target, identifier, callback)
+
+    monkeypatch.setattr(initialization.event, 'remove', remove_once)
+
+    def drain() -> None:
+        try:
+            initialization._drain_failed_checkout_listener_cleanups()
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=drain)
+    second = threading.Thread(target=drain)
+    first.start()
+    assert remove_entered.wait(2)
+    second.start()
+    release_remove.set()
+    first.join(2)
+    second.join(2)
+
+    assert errors == []
+    assert removal_calls == 1
+    assert initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS == {}
+
+
 def test_checkout_registry_remove_uncertainty_poison_is_sanitized_and_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4392,6 +4643,190 @@ def test_runtime_blocks_new_effect_while_logical_revoke_is_physically_uncertain(
     assert failures == []
     session.close()
     application.dispose()
+
+
+@pytest.mark.parametrize(
+    'step_name',
+    (
+        '_runtime_session_cleanup',
+        '_runtime_application_cleanup',
+        '_runtime_advisory_cleanup',
+        '_runtime_logical_cleanup',
+    ),
+)
+@pytest.mark.parametrize('physical_succeeds', (True, False))
+def test_preissued_inactive_lease_cannot_enter_during_physical_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    step_name: str,
+    physical_succeeds: bool,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    original = getattr(binding_module, step_name)
+    lease_issued = threading.Event()
+    start_effect = threading.Event()
+    physical_entered = threading.Event()
+    release_physical = threading.Event()
+    effect_entered = threading.Event()
+    owner_done = threading.Event()
+    effect_errors: list[BaseException] = []
+    owner_errors: list[BaseException] = []
+    attempts = 0
+
+    def pause_physical(*args, **kwargs) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            physical_entered.set()
+            assert release_physical.wait(2)
+        if physical_succeeds:
+            return bool(original(*args, **kwargs))
+        return True
+
+    monkeypatch.setattr(binding_module, step_name, pause_physical)
+
+    def preissue_then_enter() -> None:
+        try:
+            with health._operation('preissued-competing-operation') as lease:
+                lease_issued.set()
+                assert start_effect.wait(2)
+                with health._guard(lease):
+                    effect_entered.set()
+        except BaseException as exc:
+            effect_errors.append(exc)
+
+    def finalize() -> None:
+        try:
+            assert lease_issued.wait(2)
+            with authority.owned_operation():
+                authority.connect()
+        except BaseException as exc:
+            owner_errors.append(exc)
+        finally:
+            owner_done.set()
+
+    contender = threading.Thread(target=preissue_then_enter)
+    owner = threading.Thread(target=finalize)
+    contender.start()
+    owner.start()
+    assert physical_entered.wait(2)
+    start_effect.set()
+    assert effect_entered.wait(0.1) is False
+    release_physical.set()
+    assert owner_done.wait(2)
+    owner.join(2)
+    contender.join(2)
+
+    assert owner_errors == []
+    assert health._active_effects == 0
+    assert health._effect_depths == {}
+    assert health._effect_leases == {}
+    if physical_succeeds:
+        assert effect_entered.is_set()
+        assert effect_errors == []
+        assert health.snapshot.healthy is True
+    else:
+        assert effect_entered.is_set() is False
+        assert len(effect_errors) == 1
+        assert isinstance(
+            effect_errors[0],
+            initialization.PostgresRuntimeHealthUnavailableError,
+        )
+        assert health.snapshot.healthy is False
+        assert attempts == 2
+    session.close()
+    application.dispose()
+
+
+def test_preissued_effect_wait_cancellation_leaks_no_effect_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    original_step = binding_module._runtime_session_cleanup
+    physical_entered = threading.Event()
+    release_physical = threading.Event()
+    owner_done = threading.Event()
+
+    def pause_physical(*args, **kwargs) -> bool:
+        physical_entered.set()
+        assert release_physical.wait(2)
+        return bool(original_step(*args, **kwargs))
+
+    monkeypatch.setattr(binding_module, '_runtime_session_cleanup', pause_physical)
+    lease_context = health._operation('preissued-cancelled-operation')
+    lease = lease_context.__enter__()
+
+    def finalize() -> None:
+        try:
+            with authority.owned_operation():
+                authority.connect()
+        finally:
+            owner_done.set()
+
+    owner = threading.Thread(target=finalize)
+    owner.start()
+    assert physical_entered.wait(2)
+    wait_calls = 0
+    original_wait = type(health._condition).wait
+
+    def cancel_wait(condition, timeout=None):
+        nonlocal wait_calls
+        if condition is health._condition and threading.current_thread() is threading.main_thread():
+            wait_calls += 1
+            raise KeyboardInterrupt('preissued effect wait cancellation')
+        return original_wait(condition, timeout)
+
+    monkeypatch.setattr(type(health._condition), 'wait', cancel_wait)
+    try:
+        with (
+            pytest.raises(KeyboardInterrupt, match='preissued effect wait'),
+            health._guard(lease),
+        ):
+            raise AssertionError('cancelled effect must not enter')
+        assert wait_calls == 1
+        assert health._active_effects == 0
+        assert health._effect_depths == {}
+        assert health._effect_leases == {}
+    finally:
+        monkeypatch.setattr(type(health._condition), 'wait', original_wait)
+        release_physical.set()
+        assert owner_done.wait(2)
+        owner.join(2)
+        lease_context.__exit__(None, None, None)
+        session.close()
+        application.dispose()
+
+
+def test_nested_effect_requires_the_exact_already_active_lease() -> None:
+    health = initialization.TrustedPostgresRuntimeHealth(
+        _seal=initialization._POSTGRES_RUNTIME_HEALTH_SEAL
+    )
+
+    with (
+        health._operation('outer-operation') as outer,
+        health._operation('different-operation') as different,
+        health._guard(outer),
+    ):
+        with (
+            pytest.raises(
+                initialization.PostgresRuntimeHealthUnavailableError,
+                match='lease changed',
+            ),
+            health._guard(different),
+        ):
+            raise AssertionError('different nested lease must not enter')
+        with health._guard(outer):
+            assert health._active_effects == 1
+            assert health._effect_depths == {threading.get_ident(): 2}
+
+    assert health._active_effects == 0
+    assert health._effect_depths == {}
+    assert health._effect_leases == {}
 
 
 @pytest.mark.parametrize(

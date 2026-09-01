@@ -4290,3 +4290,21 @@ tests passed with 53 tests; ruff passed.
   single-head `a4d5e6f7b8c9` are green. Real PostgreSQL is unrun because
   `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate only; Task 14 remains
   blocked pending independent rereview.
+
+## 2026-09-01 Deliverable D Core Task 13 twentieth rereview candidate
+
+- Nineteenth rereview was `NOT CLEAN` because pre-issued inactive runtime
+  leases could start effects during another operation's physical cleanup, and
+  listener construction-to-bootstrap handoff was not an exact owned lifecycle.
+- Runtime effect entry now waits on `REVOKED_UNCERTAIN`, revalidates the exact
+  lease/epoch after wake, and permits nesting only for the exact lease already
+  active on that thread. Wait cancellation leaves all counters unchanged.
+- A sealed exact listener-construction responsibility owns installation through
+  lower-layer publication and bootstrap claim. Failed handoff is retained in a
+  bounded process quarantine; subsequent initialization drains it first or
+  refuses before installing another listener set. Concurrent records and
+  drains remain isolated and exact-once.
+- Evidence: RED `10 failed` plus `5 failed`; focused initialization/binding
+  `301 passed`; affected broad `991 passed, 16 skipped, 2128 deselected`.
+  Real PostgreSQL is unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent.
+  Candidate only; do not claim `CLEAN` or start Task 14 before rereview.

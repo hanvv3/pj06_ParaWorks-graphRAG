@@ -5947,3 +5947,27 @@ Cost/security note:
   `PARAWORKS_TEST_POSTGRES_URL` is absent. Ruff `--no-fix`, compile/import, and
   the single Alembic head `a4d5e6f7b8c9` are green. This is a rereview candidate
   only, not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 twentieth rereview candidate
+
+- The nineteenth independent rereview kept Task 13 open on two PostgreSQL
+  admission/lifecycle gaps: a pre-issued but inactive lease could enter while
+  another operation was still physically cleaning up, and SQLAlchemy checkout
+  listeners had no exact lower-layer handoff from construction to bootstrap
+  ownership. Task 14 remains blocked.
+- Outermost effects now share the operation admission predicate, wait through
+  `REVOKED_UNCERTAIN`, and revalidate the exact runtime epoch and lease before
+  publishing an effect count. Only an already-active exact lease may nest;
+  cancellation leaves no effect or lease residue.
+- Listener installation now has a sealed per-construction responsibility that
+  is registered before the first listener side effect and retained until the
+  bootstrap atomically claims the exact registry. An unresolved responsibility
+  remains in a process quarantine; later construction first drains it or
+  refuses without installing another listener set. Concurrent constructions
+  and drains cannot remove each other's callbacks.
+- RED evidence was `10 failed` for lease admission and `5 failed` for listener
+  handoff/quarantine. Fresh focused verification is `301 passed`; affected
+  broad verification is `991 passed, 16 skipped, 2128 deselected`. The 16 real
+  PostgreSQL cases remain URL-gated and were not run because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a rereview candidate only,
+  not `CLEAN`; Task 14 remains blocked.
