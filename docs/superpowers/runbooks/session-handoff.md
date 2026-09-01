@@ -4267,3 +4267,26 @@ tests passed with 53 tests; ruff passed.
   skipped, 2144 deselected`. Real PostgreSQL remains URL-gated and unrun because
   the URL is absent. Do not start Task 14 or claim `CLEAN` before independent
   rereview.
+
+## 2026-09-01 Deliverable D Core Task 13 nineteenth rereview candidate
+
+- Eighteenth rereview was `NOT CLEAN` on premature physical-clean attestation,
+  disposal acknowledgement, and partial SQLAlchemy listener-install rollback.
+- Runtime cleanup now leaves logical revoke at `REVOKED_UNCERTAIN`, blocks new
+  admission while exact physical responsibilities run, and publishes
+  `REVOKED_CLEAN` only after all required steps explicitly succeed. Persistent
+  physical failure stays uncertain and fail-stops without replacing the durable
+  body result or original validation, cancellation, or commit-unknown primary.
+- Dedicated advisory disposal is bounded to two real attempts and distinguishes
+  `SUCCEEDED` from `FAILED_UNCERTAIN`. Application-engine disposal remains
+  one-shot; failures and cancellation are terminal uncertain, never `DONE`.
+- A private listener cleanup responsibility is registered before the first pool
+  listener side effect. Partial installs are exact, reverse-drained, retained in
+  fail-stopped quarantine when unresolved, and initialization retries only its
+  own construction responsibility before the one-shot application-engine
+  disposal.
+- Evidence: RED `8 failed`; focused `286 passed`; affected broad `976 passed,
+  16 skipped, 2128 deselected`; Ruff `--no-fix`, compile/import, and Alembic
+  single-head `a4d5e6f7b8c9` are green. Real PostgreSQL is unrun because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate only; Task 14 remains
+  blocked pending independent rereview.

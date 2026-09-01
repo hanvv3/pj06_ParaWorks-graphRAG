@@ -5917,3 +5917,33 @@ Cost/security note:
   `946 passed, 16 skipped, 2144 deselected`. The skipped real-PostgreSQL gates
   remain unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a
   rereview candidate only, not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 nineteenth rereview candidate
+
+- The eighteenth independent rereview kept Task 13 open on three PostgreSQL
+  cleanup acknowledgements: logical revoke could attest `CLEAN` before physical
+  cleanup, failed disposal could be marked complete, and a partially installed
+  SQLAlchemy pool-listener set could lose its cleanup owner. Task 14 remains
+  blocked.
+- Logical cleanup now stops at `REVOKED_UNCERTAIN`. The trusted runtime blocks
+  later operation admission, executes every sealed physical cleanup step
+  outside the health lock, and publishes `REVOKED_CLEAN` only after every
+  required step explicitly succeeds. Two failed attempts leave no clean
+  attestation and latch the shared runtime unhealthy before the captured result
+  or primary exception escapes.
+- Dedicated advisory-engine disposal has explicit `NOT_ATTEMPTED`,
+  `IN_PROGRESS`, `SUCCEEDED`, and `FAILED_UNCERTAIN` states with at most two
+  actual attempts. Application-engine disposal preserves the approved one-shot
+  policy and records `FAILED_UNCERTAIN`, rather than `DONE`, on any exception or
+  cancellation.
+- Pool-listener installation pre-registers a private exact cleanup
+  responsibility before the first listener effect. Partial installation is
+  reverse-drained with bounded retries; unresolved callbacks remain in a
+  fail-stopped private quarantine instead of losing reachability, and database
+  initialization retries only the responsibility created by that construction.
+- RED was `8 failed`. Fresh focused verification is `286 passed`; broad affected
+  verification is `976 passed, 16 skipped, 2128 deselected`. The 16 real
+  PostgreSQL cases remain URL-gated and were not run because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. Ruff `--no-fix`, compile/import, and
+  the single Alembic head `a4d5e6f7b8c9` are green. This is a rereview candidate
+  only, not `CLEAN`; Task 14 remains blocked.

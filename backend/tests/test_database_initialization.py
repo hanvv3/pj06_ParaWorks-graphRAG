@@ -903,7 +903,7 @@ def test_real_dialect_programmer_failure_remains_original(
 
 
 class _DisposeProbe:
-    def __init__(self, failure: Exception | None = None) -> None:
+    def __init__(self, failure: BaseException | None = None) -> None:
         self.failure = failure
         self.calls = 0
 
@@ -961,6 +961,42 @@ def test_runtime_dispose_preserves_programmer_failure_and_does_not_retry() -> No
     with pytest.raises(TypeError) as captured:
         runtime.dispose()
     assert captured.value is failure
+    runtime.dispose()
+    assert engine.calls == 1
+
+
+def test_runtime_dispose_failure_is_terminal_uncertain_not_done() -> None:
+    failure = TypeError('dispose-terminal-uncertain-sentinel')
+    engine = _DisposeProbe(failure)
+    runtime = initialization.DatabaseRuntime(
+        engine=engine,  # type: ignore[arg-type]
+        session_factory=object(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(TypeError) as captured:
+        runtime.dispose()
+
+    assert captured.value is failure
+    assert runtime._dispose_state == 'FAILED_UNCERTAIN'
+    assert runtime._engine_disposed is False
+    runtime.dispose()
+    assert engine.calls == 1
+
+
+def test_runtime_dispose_cancellation_is_terminal_uncertain_and_preserved() -> None:
+    primary = KeyboardInterrupt('dispose cancellation primary')
+    engine = _DisposeProbe(primary)
+    runtime = initialization.DatabaseRuntime(
+        engine=engine,  # type: ignore[arg-type]
+        session_factory=object(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(KeyboardInterrupt) as captured:
+        runtime.dispose()
+
+    assert captured.value is primary
+    assert runtime._dispose_state == 'FAILED_UNCERTAIN'
+    assert runtime._engine_disposed is False
     runtime.dispose()
     assert engine.calls == 1
 

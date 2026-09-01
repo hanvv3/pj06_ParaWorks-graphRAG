@@ -233,6 +233,15 @@ class TrustedPostgresRuntimeHealth:
         if type(purpose) is not str or not purpose:
             raise TypeError('PostgreSQL runtime health purpose is invalid')
         with self._condition:
+            while (
+                self._healthy
+                and not self._poison_requested
+                and any(
+                    record.phase == 'REVOKED_UNCERTAIN'
+                    for record in self._emergency_cleanup_records.values()
+                )
+            ):
+                self._condition.wait()
             if not self._healthy or self._poison_requested:
                 raise PostgresRuntimeHealthUnavailableError(
                     'RAG PostgreSQL runtime health is fail-stopped'
@@ -295,10 +304,25 @@ class TrustedPostgresRuntimeHealth:
                         None,
                     )
                 if record is not None and record.operation_lease is lease:
+                    physical_missing = (
+                        record.physical_cleanup_registered and physical is None
+                    )
                     if (
-                        record.phase != 'REVOKED_CLEAN'
-                        or (record.physical_cleanup_registered and physical is None)
+                        record.phase == 'REVOKED_UNCERTAIN'
+                        and not physical_failed
+                        and not physical_missing
                     ):
+                        try:
+                            record = self._attest_emergency_cleanup_clean_locked(
+                                record
+                            )
+                        except BaseException:
+                            current = self._emergency_cleanup_records.get(
+                                id(record.capability)
+                            )
+                            if current is not None:
+                                record = current
+                    if record.phase != 'REVOKED_CLEAN' or physical_missing:
                         self._force_fail_stop_locked()
                     self._drain_exact_emergency_record_locked(record)
                     self._emergency_cleanup_records.pop(id(record.capability), None)
@@ -737,20 +761,31 @@ class TrustedPostgresRuntimeHealth:
         )
         self._drain_exact_emergency_record_locked(phased)
         self._emergency_cleanup_transition_checkpoint('after_revoke_resource_drain')
+        self._condition.notify_all()
+
+    def _attest_emergency_cleanup_clean_locked(
+        self,
+        record: _PostgresEmergencyCleanupRecord,
+    ) -> _PostgresEmergencyCleanupRecord:
+        """Publish CLEAN only after runtime-owned physical cleanup succeeds."""
+        current = self._emergency_cleanup_records.get(id(record.capability))
+        if current is not record or record.phase != 'REVOKED_UNCERTAIN':
+            raise TypeError('PostgreSQL emergency cleanup disposition changed')
         self._emergency_cleanup_transition_checkpoint(
             'before_revoke_clean_attestation'
         )
-        clean = phased._replace(
+        clean = record._replace(
             phase='REVOKED_CLEAN',
-            revision=phased.revision + 1,
+            revision=record.revision + 1,
             cleanup_ticket=None,
             cleanup_generation=None,
         )
-        self._emergency_cleanup_records[id(capability)] = clean
+        self._emergency_cleanup_records[id(record.capability)] = clean
         self._emergency_cleanup_transition_checkpoint(
             'after_revoke_clean_attestation'
         )
         self._condition.notify_all()
+        return clean
 
     def _drain_exact_emergency_record_locked(
         self,
@@ -785,7 +820,8 @@ class TrustedPostgresRuntimeHealth:
                     capability,
                     authority=authority,
                 )
-                self._revoke_emergency_cleanup_locked(capability)
+                if record.phase == 'ACTIVE':
+                    self._revoke_emergency_cleanup_locked(capability)
                 record = self._emergency_cleanup_records.get(id(capability))
             else:
                 record = self._emergency_cleanup_records.get(id(capability))
@@ -806,13 +842,6 @@ class TrustedPostgresRuntimeHealth:
                 raise TypeError('PostgreSQL emergency cleanup disposition changed')
             if record.phase == 'REVOKED_UNCERTAIN':
                 self._drain_exact_emergency_record_locked(record)
-                record = record._replace(
-                    phase='REVOKED_CLEAN',
-                    revision=record.revision + 1,
-                    cleanup_ticket=None,
-                    cleanup_generation=None,
-                )
-                self._emergency_cleanup_records[id(capability)] = record
             if poison:
                 self._force_fail_stop_locked()
             self._condition.notify_all()
@@ -1187,6 +1216,30 @@ class _IssuedDedicatedPostgresEngine:
     _seal: object = field(repr=False, compare=False)
 
 
+_FAILED_CHECKOUT_LISTENER_CLEANUPS: dict[
+    int,
+    _TrustedApplicationCheckoutRegistry,
+] = {}
+_FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK = RLock()
+
+
+def _drain_failed_checkout_listener_cleanups(
+    responsibility_ids: frozenset[int] | None = None,
+) -> None:
+    """Retry retained partial installs without replacing their primary error."""
+    with _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK:
+        responsibilities = tuple(
+            responsibility
+            for responsibility_id, responsibility in (
+                _FAILED_CHECKOUT_LISTENER_CLEANUPS.items()
+            )
+            if responsibility_ids is None
+            or responsibility_id in responsibility_ids
+        )
+    for responsibility in responsibilities:
+        responsibility._retry_failed_installation_cleanup()
+
+
 class _TrustedApplicationCheckoutRegistry:
     """Pool-local ownership tracker; callbacks never acquire health locks."""
 
@@ -1287,6 +1340,11 @@ class _TrustedApplicationCheckoutRegistry:
         self._listeners = listeners
         self._remaining_listeners = list(listeners)
         installed: list[tuple[object, str, object]] = []
+        # The responsibility is reachable before the first listener side effect.
+        # A successful install retires it; a partial failure narrows it to the
+        # exact listeners that may still be attached.
+        with _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK:
+            _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
         try:
             for target, identifier, callback in listeners:
                 event.listen(target, identifier, callback)
@@ -1303,13 +1361,65 @@ class _TrustedApplicationCheckoutRegistry:
                     is_installed = listener in installed
                 if is_installed:
                     confirmed.append(listener)
-            removal_failed = self._remove_listeners(tuple(reversed(confirmed)))
+            self._remaining_listeners = list(confirmed)
+            removal_failed = self._retry_failed_installation_cleanup()
             with self._condition:
-                self._state = 'closed'
+                self._state = (
+                    'closing' if self._remaining_listeners else 'closed'
+                )
                 self._condition.notify_all()
             if removal_failed:
                 self._fail_stop_runtime()
             raise
+        else:
+            with _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK:
+                _FAILED_CHECKOUT_LISTENER_CLEANUPS.pop(id(self), None)
+
+    @property
+    def runtime_health(self) -> TrustedPostgresRuntimeHealth:
+        return self._runtime_health
+
+    @property
+    def remaining_listeners(self) -> tuple[tuple[object, str, object], ...]:
+        return tuple(self._remaining_listeners)
+
+    def _retry_failed_installation_cleanup(self) -> bool:
+        """Remove only listeners this failed installation may still own."""
+        failed = False
+        for listener in tuple(reversed(self._remaining_listeners)):
+            target, identifier, callback = listener
+            removed = False
+            for _attempt in range(2):
+                try:
+                    event.remove(target, identifier, callback)
+                except BaseException:
+                    failed = True
+                    try:
+                        removed = not event.contains(
+                            target,
+                            identifier,
+                            callback,
+                        )
+                    except BaseException:
+                        removed = False
+                else:
+                    removed = True
+                if removed:
+                    break
+            if removed:
+                self._remaining_listeners.remove(listener)
+        with self._condition:
+            if not self._remaining_listeners:
+                self._state = 'closed'
+            else:
+                self._state = 'closing'
+            self._condition.notify_all()
+        with _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK:
+            if self._remaining_listeners:
+                _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
+            else:
+                _FAILED_CHECKOUT_LISTENER_CLEANUPS.pop(id(self), None)
+        return bool(self._remaining_listeners) or failed
 
     def arm(self, capability: _PostgresEmergencyCleanupCapability) -> None:
         with self._condition:
@@ -1655,6 +1765,7 @@ class DatabaseRuntime:
         'IN_PROGRESS',
         'RETRY_REQUIRED',
         'DONE',
+        'FAILED_UNCERTAIN',
     ] = field(default='OPEN', init=False)
     _engine_disposed: bool = field(default=False, init=False, repr=False)
 
@@ -1670,7 +1781,7 @@ class DatabaseRuntime:
                     self._dispose_condition.notify_all()
                     return
                 self._dispose_condition.wait()
-            if self._dispose_state == 'DONE':
+            if self._dispose_state in {'DONE', 'FAILED_UNCERTAIN'}:
                 return
             self._dispose_state = 'IN_PROGRESS'
             self._dispose_owner_thread_id = thread_id
@@ -1697,20 +1808,28 @@ class DatabaseRuntime:
                 self._dispose_owner_thread_id = None
                 self._dispose_condition.notify_all()
                 return
-        cleanup_failure: Exception | None = None
+        cleanup_failure: BaseException | None = None
         try:
             self.engine.dispose()
-        except Exception as error:
+        except BaseException as error:
             cleanup_failure = error
-        finally:
+        if cleanup_failure is None:
             with self._dispose_condition:
                 self._engine_disposed = True
                 self._dispose_state = 'DONE'
                 self._dispose_owner_thread_id = None
                 self._dispose_condition.notify_all()
-        if cleanup_failure is None:
             return
-        if _is_database_availability_error(cleanup_failure):
+        if self.rag_postgres_bootstrap is not None:
+            self.rag_postgres_bootstrap._runtime_health._poison()
+        with self._dispose_condition:
+            self._engine_disposed = False
+            self._dispose_state = 'FAILED_UNCERTAIN'
+            self._dispose_owner_thread_id = None
+            self._dispose_condition.notify_all()
+        if isinstance(cleanup_failure, Exception) and _is_database_availability_error(
+            cleanup_failure
+        ):
             raise DatabaseInitializationError()
         raise cleanup_failure
 
@@ -1785,6 +1904,10 @@ def initialize_database_runtime(
             dedicated_options['poolclass'] = NullPool
             return create_engine(database_url, **dedicated_options)
 
+        with _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK:
+            listener_cleanup_ids_before = frozenset(
+                _FAILED_CHECKOUT_LISTENER_CLEANUPS
+            )
         try:
             postgres_bootstrap = TrustedPostgresEngineBootstrap(
                 application_engine=engine,
@@ -1794,6 +1917,17 @@ def initialize_database_runtime(
                 _seal=_POSTGRES_BOOTSTRAP_SEAL,
             )
         except BaseException:
+            with _FAILED_CHECKOUT_LISTENER_CLEANUPS_LOCK:
+                current_listener_cleanup_ids = frozenset(
+                    _FAILED_CHECKOUT_LISTENER_CLEANUPS
+                )
+            exact_listener_cleanup_ids = (
+                current_listener_cleanup_ids - listener_cleanup_ids_before
+            )
+            with suppress(BaseException):
+                _drain_failed_checkout_listener_cleanups(
+                    exact_listener_cleanup_ids
+                )
             with suppress(BaseException):
                 engine.dispose()
             raise

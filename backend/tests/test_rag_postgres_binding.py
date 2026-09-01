@@ -1386,8 +1386,8 @@ def test_owned_operation_cleanup_failure_poisons_before_escape_with_waiter(
     else:
         assert errors == [primary]
     assert returned_health == [False]
-    assert order == ['dispose_failed', 'foreign_cleanup']
-    assert dispose_calls == 1
+    assert order == ['dispose_failed', 'dispose_failed', 'foreign_cleanup']
+    assert dispose_calls == 2
     assert authority.closed is True
     assert advisory_connections[0].closed is True
     assert authority.cleanup_failure is not None
@@ -2228,9 +2228,10 @@ def test_owned_operation_lower_cleanup_faults_are_secondary_and_bounded(
     assert session.get_bind() is application
     assert application_connection[0].closed is True
     assert advisory_connection[0].closed is True
-    assert dispose_calls == 1
-    assert health.snapshot.healthy is False
-    assert health.snapshot.failure_count == 1
+    recovered_disposal = fault_point == 'dedicated_dispose'
+    assert dispose_calls == (2 if recovered_disposal else 1)
+    assert health.snapshot.healthy is recovered_disposal
+    assert health.snapshot.failure_count == (0 if recovered_disposal else 1)
     assert 'secret' not in repr(health.snapshot)
     assert health._exclusive_waiters == 0
     assert health._exclusive_owner is None
@@ -2714,8 +2715,8 @@ def test_finish_after_revoke_fault_uses_current_operation_attestation(
     assert returned == ['durable-product']
     assert len(captured) == 1
     assert health._emergency_cleanup_capability_is_active(captured[0]) is False
-    assert health.snapshot.healthy is True
-    assert health.snapshot.failure_count == 0
+    assert health.snapshot.healthy is False
+    assert health.snapshot.failure_count == 1
     assert tuple(health._emergency_cleanup_capabilities.values()) == ()
     assert tuple(health._active_operation_authorities.values()) == ()
     assert authority.closed is True
@@ -3146,8 +3147,8 @@ def test_revoked_cleanup_disposition_ignores_mutable_state_lease_substitution(
         wrong_context.__exit__(None, None, None)
 
     assert returned == ['durable-product']
-    assert health.snapshot.healthy is True
-    assert health.snapshot.failure_count == 0
+    assert health.snapshot.healthy is False
+    assert health.snapshot.failure_count == 1
     assert authority._emergency_cleanup_state is None
     assert authority._active_leases == 0
     assert authority._lease_context.get() is None
@@ -3455,6 +3456,102 @@ def test_bootstrap_listener_failure_preserves_primary_and_disposes_engine(
     assert event.contains(target, identifier, callback) is False
 
 
+@pytest.mark.parametrize('listen_failure_index', (0, 1, 2))
+def test_runtime_initialization_retains_and_retries_partial_listener_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    listen_failure_index: int,
+) -> None:
+    application = create_engine('sqlite+pysqlite:///:memory:')
+    application.dialect.name = 'postgresql'
+    disposed: list[str] = []
+    installed: list[tuple[object, str, object]] = []
+    removal_calls = 0
+    primary = _CleanupStateMachineFault('secret retained listener primary')
+    original_listen = initialization.event.listen
+    original_remove = initialization.event.remove
+    event.listen(application, 'engine_disposed', lambda *_args: disposed.append('done'))
+
+    def create_once(*_args, **_kwargs):
+        return application
+
+    def listen_then_fail(target, identifier, callback) -> None:
+        original_listen(target, identifier, callback)
+        installed.append((target, identifier, callback))
+        if len(installed) - 1 == listen_failure_index:
+            raise primary
+
+    def remove_twice_then_succeed(target, identifier, callback) -> None:
+        nonlocal removal_calls
+        removal_calls += 1
+        if removal_calls <= 2:
+            raise _CleanupStateMachineFault('secret transient listener removal')
+        original_remove(target, identifier, callback)
+
+    monkeypatch.setattr(initialization, 'create_engine', create_once)
+    monkeypatch.setattr(initialization.event, 'listen', listen_then_fail)
+    monkeypatch.setattr(initialization.event, 'remove', remove_twice_then_succeed)
+
+    with pytest.raises(_CleanupStateMachineFault) as captured:
+        initialization.initialize_database_runtime(
+            'postgresql+psycopg://authority-role@localhost/authority-database'
+        )
+
+    assert captured.value is primary
+    assert removal_calls >= 3
+    assert disposed == ['done']
+    for target, identifier, callback in installed:
+        assert event.contains(target, identifier, callback) is False
+
+
+def test_persistent_partial_listener_cleanup_remains_reachable_and_fail_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = create_engine('sqlite+pysqlite:///:memory:')
+    application.dialect.name = 'postgresql'
+    primary = _CleanupStateMachineFault('secret persistent listener primary')
+    original_listen = initialization.event.listen
+    original_remove = initialization.event.remove
+    installed: list[tuple[object, str, object]] = []
+    disposed: list[str] = []
+    event.listen(application, 'engine_disposed', lambda *_args: disposed.append('done'))
+
+    def create_once(*_args, **_kwargs):
+        return application
+
+    def listen_then_fail(target, identifier, callback) -> None:
+        original_listen(target, identifier, callback)
+        installed.append((target, identifier, callback))
+        raise primary
+
+    def persistent_remove(*_args, **_kwargs) -> None:
+        raise _CleanupStateMachineFault('secret persistent listener removal')
+
+    monkeypatch.setattr(initialization, 'create_engine', create_once)
+    monkeypatch.setattr(initialization.event, 'listen', listen_then_fail)
+    monkeypatch.setattr(initialization.event, 'remove', persistent_remove)
+
+    with pytest.raises(_CleanupStateMachineFault) as captured:
+        initialization.initialize_database_runtime(
+            'postgresql+psycopg://authority-role@localhost/authority-database'
+        )
+
+    assert captured.value is primary
+    assert disposed == ['done']
+    responsibilities = initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS
+    assert len(responsibilities) == 1
+    responsibility = next(iter(responsibilities.values()))
+    assert responsibility.runtime_health.snapshot.healthy is False
+    assert responsibility.remaining_listeners
+
+    monkeypatch.setattr(initialization.event, 'remove', original_remove)
+    initialization._drain_failed_checkout_listener_cleanups()
+
+    assert initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS == {}
+    assert disposed == ['done']
+    for target, identifier, callback in installed:
+        assert event.contains(target, identifier, callback) is False
+
+
 def test_checkout_registry_remove_uncertainty_poison_is_sanitized_and_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3656,7 +3753,7 @@ def test_emergency_registry_has_one_atomic_active_or_revoked_record(
         )
         records = tuple(health._emergency_cleanup_records.values())
         assert len(records) == 1
-        assert records[0].phase == 'REVOKED_CLEAN'
+        assert records[0].phase == 'REVOKED_UNCERTAIN'
         assert health.snapshot.healthy is False
 
     assert health._emergency_cleanup_records == {}
@@ -4183,6 +4280,229 @@ def test_runtime_registry_owns_physical_cleanup_when_all_boundary_drains_fail(
     with (
         pytest.raises(initialization.PostgresRuntimeHealthUnavailableError),
         health._operation('future-effect'),
+    ):
+        pass
+    session.close()
+    application.dispose()
+
+
+def test_runtime_attests_clean_only_after_every_physical_cleanup_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    events: list[str] = []
+
+    for name in (
+        '_runtime_session_cleanup',
+        '_runtime_application_cleanup',
+        '_runtime_advisory_cleanup',
+        '_runtime_logical_cleanup',
+    ):
+        original = getattr(binding_module, name)
+
+        def observed(*args, _name=name, _original=original, **kwargs) -> bool:
+            events.append(_name)
+            return bool(_original(*args, **kwargs))
+
+        monkeypatch.setattr(binding_module, name, observed)
+
+    def observe_transition(self, checkpoint: str) -> None:
+        if checkpoint == 'after_revoke_clean_attestation':
+            events.append('CLEAN')
+
+    monkeypatch.setattr(
+        type(health),
+        '_emergency_cleanup_transition_checkpoint',
+        observe_transition,
+    )
+
+    with authority.owned_operation():
+        authority.connect()
+
+    assert events == [
+        '_runtime_session_cleanup',
+        '_runtime_application_cleanup',
+        '_runtime_advisory_cleanup',
+        '_runtime_logical_cleanup',
+        'CLEAN',
+    ]
+    assert health.snapshot.healthy is True
+    session.close()
+    application.dispose()
+
+
+def test_runtime_blocks_new_effect_while_logical_revoke_is_physically_uncertain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    physical_entered = threading.Event()
+    release_physical = threading.Event()
+    operation_done = threading.Event()
+    competing_entered = threading.Event()
+    failures: list[BaseException] = []
+    observed_phases: list[str] = []
+    original = binding_module._runtime_session_cleanup
+
+    def pause_physical(*args, **kwargs) -> bool:
+        with health._condition:
+            observed_phases.extend(
+                record.phase for record in health._emergency_cleanup_records.values()
+            )
+        physical_entered.set()
+        assert release_physical.wait(2)
+        return bool(original(*args, **kwargs))
+
+    monkeypatch.setattr(binding_module, '_runtime_session_cleanup', pause_physical)
+
+    def finalize() -> None:
+        try:
+            with authority.owned_operation():
+                authority.connect()
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            operation_done.set()
+
+    def compete() -> None:
+        try:
+            with health._operation('competing-finalization'):
+                competing_entered.set()
+        except BaseException as exc:
+            failures.append(exc)
+
+    owner = threading.Thread(target=finalize)
+    owner.start()
+    assert physical_entered.wait(2)
+    contender = threading.Thread(target=compete)
+    contender.start()
+    assert competing_entered.wait(0.1) is False
+    release_physical.set()
+    assert operation_done.wait(2)
+    assert competing_entered.wait(2)
+    owner.join(2)
+    contender.join(2)
+
+    assert observed_phases == ['REVOKED_UNCERTAIN']
+    assert failures == []
+    session.close()
+    application.dispose()
+
+
+@pytest.mark.parametrize(
+    'step_name',
+    (
+        '_runtime_session_cleanup',
+        '_runtime_application_cleanup',
+        '_runtime_advisory_cleanup',
+        '_runtime_logical_cleanup',
+    ),
+)
+def test_physical_cleanup_two_failures_never_publish_clean(
+    monkeypatch: pytest.MonkeyPatch,
+    step_name: str,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    calls = 0
+    clean_events: list[str] = []
+
+    def fail_persistently(*_args, **_kwargs) -> bool:
+        nonlocal calls
+        calls += 1
+        raise _CleanupStateMachineFault('secret persistent physical failure')
+
+    def observe_transition(self, checkpoint: str) -> None:
+        if checkpoint == 'after_revoke_clean_attestation':
+            clean_events.append(checkpoint)
+
+    monkeypatch.setattr(binding_module, step_name, fail_persistently)
+    monkeypatch.setattr(
+        type(health),
+        '_emergency_cleanup_transition_checkpoint',
+        observe_transition,
+    )
+    returned: list[str] = []
+
+    with authority.owned_operation():
+        authority.connect()
+        returned.append('durable-product')
+
+    assert returned == ['durable-product']
+    assert calls == 2
+    assert clean_events == []
+    assert health.snapshot.healthy is False
+    assert health.snapshot.failure_count == 1
+    session.close()
+    application.dispose()
+
+
+def test_dedicated_engine_disposal_retries_then_attests_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    original_dispose = dedicated.dispose
+    calls = 0
+
+    def fail_once_then_dispose() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _CleanupStateMachineFault('secret first dedicated dispose failure')
+        original_dispose()
+
+    monkeypatch.setattr(dedicated, 'dispose', fail_once_then_dispose)
+
+    with authority.owned_operation():
+        authority.connect()
+
+    assert calls == 2
+    assert authority._transport_disposal_complete is True
+    assert health.snapshot.healthy is True
+    session.close()
+    application.dispose()
+
+
+def test_dedicated_engine_disposal_two_failures_remain_uncertain_and_poison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated, session, authority = _cleanup_responsibility_authority(
+        monkeypatch
+    )
+    health = authority.runtime_health_authority
+    calls = 0
+
+    def fail_persistently() -> None:
+        nonlocal calls
+        calls += 1
+        raise _CleanupStateMachineFault('secret persistent dedicated failure')
+
+    monkeypatch.setattr(dedicated, 'dispose', fail_persistently)
+    returned: list[str] = []
+
+    with authority.owned_operation():
+        authority.connect()
+        returned.append('durable-product')
+
+    assert returned == ['durable-product']
+    assert calls == 2
+    assert authority._transport_disposal_state == 'FAILED_UNCERTAIN'
+    assert authority._transport_disposal_complete is False
+    assert health.snapshot.healthy is False
+    assert health.snapshot.failure_count == 1
+    with (
+        pytest.raises(initialization.PostgresRuntimeHealthUnavailableError),
+        health._operation('future-finalization'),
     ):
         pass
     session.close()

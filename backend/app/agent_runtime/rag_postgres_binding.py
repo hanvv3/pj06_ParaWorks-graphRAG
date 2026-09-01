@@ -342,6 +342,8 @@ class RagPostgresDatabaseAuthority:
         '_lifecycle_lock',
         '_state',
         '_transport_disposal_complete',
+        '_transport_disposal_attempts',
+        '_transport_disposal_state',
     )
 
     def __init__(self, assembly: object) -> None:
@@ -381,6 +383,13 @@ class RagPostgresDatabaseAuthority:
         )
         self._lifecycle_lock = RLock()
         self._transport_disposal_complete = False
+        self._transport_disposal_attempts = 0
+        self._transport_disposal_state: Literal[
+            'NOT_ATTEMPTED',
+            'IN_PROGRESS',
+            'SUCCEEDED',
+            'FAILED_UNCERTAIN',
+        ] = 'NOT_ATTEMPTED'
 
     @property
     def closed(self) -> bool:
@@ -748,6 +757,8 @@ class RagPostgresDatabaseAuthority:
             with self._lifecycle_lock:
                 if self._cleanup_failure is None:
                     self._cleanup_failure = RagPostgresDatabaseCleanupFailure()
+            with suppress(BaseException):
+                health._poison()
         with suppress(BaseException):
             health._force_emergency_cleanup_disposition(
                 state.health_capability,
@@ -830,9 +841,10 @@ class RagPostgresDatabaseAuthority:
                     with suppress(BaseException):
                         advisory_connection.close()
                 if not self._transport_disposal_complete:
-                    with suppress(BaseException):
-                        self._assembly.dedicated_engine.dispose()
-                    self._transport_disposal_complete = True
+                    for _attempt in range(2):
+                        with suppress(BaseException):
+                            if not self._attempt_dedicated_transport_dispose():
+                                break
         with suppress(BaseException):
             health._force_emergency_cleanup_disposition(
                 state.health_capability,
@@ -1012,12 +1024,12 @@ class RagPostgresDatabaseAuthority:
                 except BaseException:
                     failed = True
         if not self._transport_disposal_complete:
-            try:
-                self._assembly.dedicated_engine.dispose()
-            except BaseException:
-                failed = True
-            finally:
-                self._transport_disposal_complete = True
+            disposal_failed = True
+            for _attempt in range(2):
+                disposal_failed = self._attempt_dedicated_transport_dispose()
+                if not disposal_failed:
+                    break
+            failed = disposal_failed or failed
         if failed:
             self._mark_cleanup_uncertain(state)
 
@@ -1363,15 +1375,42 @@ class RagPostgresDatabaseAuthority:
                     connection.close()
                 except BaseException as exc:
                     failure = failure or exc
-        try:
-            self._assembly.dedicated_engine.dispose()
-        except BaseException as exc:
-            failure = failure or exc
-        finally:
-            self._transport_disposal_complete = True
+        disposal_failed = True
+        for _attempt in range(2):
+            disposal_failed = self._attempt_dedicated_transport_dispose()
+            if not disposal_failed:
+                break
+        if disposal_failed:
+            failure = failure or RuntimeError(
+                'dedicated PostgreSQL transport disposal is uncertain'
+            )
         if failure is None:
             return None
         return RagPostgresDatabaseCleanupFailure()
+
+    def _attempt_dedicated_transport_dispose(self) -> bool:
+        """Attempt one disposal and attest success only on normal return."""
+        with self._lifecycle_lock:
+            if self._transport_disposal_state == 'SUCCEEDED':
+                return False
+            if self._transport_disposal_state == 'IN_PROGRESS':
+                return True
+            if self._transport_disposal_attempts >= 2:
+                self._transport_disposal_state = 'FAILED_UNCERTAIN'
+                return True
+            self._transport_disposal_attempts += 1
+            self._transport_disposal_state = 'IN_PROGRESS'
+        try:
+            self._assembly.dedicated_engine.dispose()
+        except BaseException:
+            with self._lifecycle_lock:
+                self._transport_disposal_state = 'FAILED_UNCERTAIN'
+                self._transport_disposal_complete = False
+            return True
+        with self._lifecycle_lock:
+            self._transport_disposal_state = 'SUCCEEDED'
+            self._transport_disposal_complete = True
+        return False
 
     def _require_usable(self) -> None:
         if self._state == 'closed' or (
@@ -1511,13 +1550,7 @@ def _runtime_advisory_cleanup(
         should_dispose = True
         failed = True
     if should_dispose:
-        try:
-            authority._assembly.dedicated_engine.dispose()
-        except BaseException:
-            failed = True
-        finally:
-            with suppress(BaseException):
-                authority._transport_disposal_complete = True
+        failed = authority._attempt_dedicated_transport_dispose() or failed
     return failed
 
 
