@@ -161,6 +161,15 @@ def append_assistant_message(
     evidence_derived: bool = False,
 ) -> AssistantMessage:
     _ensure_owned_conversation(user, conversation)
+    if set(metadata).intersection(
+        {
+            'content_write_mode',
+            'rag_result_hmac',
+            'assistant_message_content_hmac',
+            'dependency_set_hmac',
+        }
+    ):
+        raise ValueError('RAG V2 persistence fields are server-owned')
     normalized_content = content.strip()
     if not normalized_content:
         raise ValueError('assistant message content is required')

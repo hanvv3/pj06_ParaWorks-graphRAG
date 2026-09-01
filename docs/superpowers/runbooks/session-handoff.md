@@ -3876,3 +3876,29 @@ tests passed with 53 tests; ruff passed.
   uses `mandatory_50` in a few paragraphs, but the approved design and existing
   database check constraint use `first_50`; changing that output schema requires
   an explicit human decision.
+
+## 2026-09-01 Deliverable D Core Task 13 implementation complete
+
+- Task 13 adds the sole atomic final-product boundary for direct and Assistant
+  RAG V2 results. The boundary fresh-locks serving generations and the pending
+  parent, verifies the exact-two terminal cost snapshot and projection-owner
+  fence, reruns the same retriever without provider dispatch, fresh-resolves
+  every evidence dependency, and returns a DTO only after commit succeeds.
+- Assistant V2 persistence is finalizer-owned and exact-byte. It locks and
+  verifies the string owner/conversation/user-message target, writes the answer
+  plus full selected/unselected model-influence dependency set, and never lets
+  route or legacy helpers request the server-only `rag_v2_exact` mode.
+- Dead projection-owner recovery accepts only the sealed callback assembled
+  after exact session-lock reacquisition and fence/CAS checks. Provider output is
+  never retried. The executable real-PostgreSQL concurrency check is URL-gated.
+- SQLite smoke is deterministic and provider-free only. A process-lifetime file
+  lock and stable in-process RLock serialize one `BEGIN IMMEDIATE` transaction;
+  canonical-path, hardlink, alias, second-process, pgvector, paid, production,
+  and release attempts refuse before mutation.
+- Fresh evidence: focused `22 passed, 1 skipped`; affected regression `251
+  passed, 1 skipped`; advisory/secret `9 passed, 2 skipped`; Ruff `--no-fix`,
+  compile/import, Alembic head `a4d5e6f7b8c9`, and diff checks pass. All skips
+  require absent `PARAWORKS_TEST_POSTGRES_URL`; no external/provider/paid call,
+  Docker action, or `.env` read occurred.
+- Before Task 14 begins, run the independent Task 13 implementation review. The
+  remaining release gate is the URL-gated real PostgreSQL concurrency suite.

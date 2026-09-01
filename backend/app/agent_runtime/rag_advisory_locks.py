@@ -336,6 +336,21 @@ def acquire_advisory_lock(
     connection.exec_driver_sql(f'SELECT {fn}(%s, %s)', key)  # type: ignore[attr-defined]
 
 
+def try_acquire_advisory_lock(
+    connection: object,
+    capability: RegisteredAdvisoryLock,
+    *,
+    shared: bool,
+) -> bool:
+    """Nonblocking session-lock proof used by bounded owner recovery only."""
+    key = _require_registered_capability(connection, capability)
+    fn = 'pg_try_advisory_lock_shared' if shared else 'pg_try_advisory_lock'
+    result = connection.exec_driver_sql(  # type: ignore[attr-defined]
+        f'SELECT {fn}(%s, %s)', key
+    )
+    return result.scalar_one() is True
+
+
 def release_advisory_lock(
     connection: object, capability: RegisteredAdvisoryLock, *, shared: bool
 ) -> None:

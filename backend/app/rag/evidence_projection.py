@@ -517,6 +517,55 @@ class CanonicalEvidenceProjector:
             return self._checked_dependencies(())
         return self._checked_dependencies(tuple(dependencies))
 
+    def finalize_prepared_observations(
+        self,
+        observations: tuple[PreparedModelInfluenceObservation, ...],
+        selected_slot_ids: tuple[EvidenceSlotId, ...],
+        *,
+        scope: SecurityScope,
+        fence: ProjectionFence,
+    ) -> tuple[ModelInfluenceDependencySnapshot, ...]:
+        """Fresh-resolve the complete provider-visible set and derive roles now.
+
+        The prepared observations intentionally contain no dependency role.  The
+        role is a final-projection fact derived only from the validated selected
+        ids while the canonical serving transaction is still held.
+        """
+        self._begin_transaction_fence()
+        if (
+            type(observations) is not tuple
+            or not 1 <= len(observations) <= 8
+            or any(
+                type(value) is not PreparedModelInfluenceObservation
+                or value.ordinal != ordinal
+                or value.slot_id != _SLOT_IDS[ordinal]
+                for ordinal, value in enumerate(observations)
+            )
+        ):
+            return self._checked_dependencies(())
+        rendered_input_hmac = '0' * 64
+        prepared = PreparedModelInfluenceSet(
+            observations=observations,
+            prepared_corpus_generation=fence.prepared_corpus_generation,
+            prepared_index_generation=fence.prepared_index_generation,
+            prepared_readiness_hmac=fence.prepared_readiness_hmac,
+            rendered_input_hmac=rendered_input_hmac,
+            aggregate_observation_hmac=_build_prepared_model_influence_set_hmac_v2(
+                observations=observations,
+                prepared_corpus_generation=fence.prepared_corpus_generation,
+                prepared_index_generation=fence.prepared_index_generation,
+                prepared_readiness_hmac=fence.prepared_readiness_hmac,
+                rendered_input_hmac=rendered_input_hmac,
+                settings=self._settings,
+            ),
+        )
+        return self.finalize_model_influence_dependencies(
+            prepared,
+            selected_slot_ids,
+            scope=scope,
+            fence=fence,
+        )
+
     def _resolve_slots(
         self, slots: tuple[EvidenceSlot, ...], *, scope: SecurityScope
     ) -> tuple[CanonicalServingProjection, ...] | None:

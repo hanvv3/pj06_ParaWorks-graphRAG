@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import NoReturn
 
@@ -13,7 +14,10 @@ from backend.app.agent_runtime.fingerprints import (
     keyed_fingerprint,
 )
 from backend.app.agent_runtime.keyed_mutation_guard import (
+    KeyedMutationGuard,
     KeyGenerationLockedContext,
+    acquire_projection,
+    lock_runtime_state,
 )
 from backend.app.agent_runtime.review_v2_preflight import advisory_key_from_hmac
 from backend.app.core.config import Settings
@@ -29,6 +33,7 @@ from backend.app.models import (
     AutoReviewRolloutState,
     AutoReviewRuntimeKeyState,
     DocumentChunk,
+    RagServingCorpusGeneration,
     ReviewItem,
     Source,
     TrustedKnowledgeApprovalLink,
@@ -334,6 +339,37 @@ class ServingMutationLockCoordinator:
         if self._db.get_bind().dialect.name == 'postgresql':
             statement = statement.with_for_update(read=read)
         tuple(self._db.scalars(statement).all())
+
+
+class ServingProjectionReadCoordinator:
+    """Hold the shared C.5/corpus prefix through one final product commit."""
+
+    def __init__(self, *, db: Session, settings: Settings) -> None:
+        self._db = db
+        self._settings = settings
+
+    @contextmanager
+    def acquire(self) -> Iterator[tuple[int, int]]:
+        if self._db.get_transaction() is None:
+            raise TypeError('projection read requires an active transaction')
+        with KeyedMutationGuard.generation_barrier(self._db):
+            key_context = lock_runtime_state(self._db, mode='share')
+            if key_context is None:
+                raise RuntimeError('projection runtime key is unavailable')
+            lock_rag_serving_generation(
+                self._db,
+                settings=self._settings,
+                key_context=key_context,
+                for_update=False,
+            )
+            acquire_projection(self._db, key_context)
+            generation = self._db.get(RagServingCorpusGeneration, 1)
+            if generation is None:
+                raise RuntimeError('RAG serving generation is unavailable')
+            yield (
+                generation.corpus_generation,
+                generation.vector_index_generation,
+            )
 
 
 class VectorServingLockManager:

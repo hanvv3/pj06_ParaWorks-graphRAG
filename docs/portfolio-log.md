@@ -5490,3 +5490,29 @@ Cost/security note:
   paused V2.0 or V2.1 execution.
 - Fresh deterministic Task 11/lifecycle verification passed `124` tests with
   Ruff and diff checks green. Rollout and paid-provider gates remain disabled.
+
+## 2026-09-01 Deliverable D Core Task 13 atomic RAG finalization
+
+- Added a two-phase finalization boundary that reopens a fresh PostgreSQL
+  transaction, acquires the serving-generation projection prefix, validates the
+  pending parent plus exactly two terminal cost children, reruns retrieval with
+  the already validated optional vector, and commits only one canonical final
+  product.
+- Assistant answers now preserve exact server-generated UTF-8 bytes and commit
+  the message, result/content identities, canonical evidence, and the complete
+  selected/unselected model-influence dependency set in the same transaction.
+  Public and legacy message helpers cannot opt into the V2 exact-write path.
+- Provider-free and paid-embedding-only safe closures retain their original cost
+  authority without retrying provider work. Projection-owner recovery is sealed
+  behind exact advisory-lock reacquisition and fence/CAS authority; timeout or
+  process probing is not a recovery credential.
+- SQLite remains an explicit provider-free smoke path: one process-lifetime OS
+  lock plus one never-replaced reentrant mutex guards `BEGIN IMMEDIATE`, and the
+  parent, exact-two terminal-zero costs, and immutable product commit together.
+  Path aliases, hardlinks, second processes, pgvector, paid, and release modes
+  fail before mutation.
+- Fresh Task 13 verification passed `22` focused tests with one PostgreSQL-only
+  skip and `251` affected tests with the same skip. Advisory/secret verification
+  passed `9` tests with two PostgreSQL-only skips; Ruff, compile/import, Alembic
+  one-head, and diff checks were green. No provider, network, Docker, paid, or
+  `.env` access occurred.
