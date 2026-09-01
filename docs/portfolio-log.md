@@ -5597,11 +5597,12 @@ Cost/security note:
   exits.
 - PostgreSQL advisory transport now comes from the database initialization
   layer's trusted bootstrap. The application Engine and each request-scoped
-  `NullPool` Engine are created from the same snapshotted connection policy,
-  including `connect_args`, TLS objects, custom/dynamic creators, and Engine
-  initialization hooks. Binding accepts only the bootstrap-issued attestation;
-  it neither accepts an arbitrary `NullPool` Engine nor recreates credentials
-  from `Engine.url`. Runtime disposal revokes future issuance.
+  `NullPool` Engine are created from the same snapshotted connection policy.
+  That sixth candidate still overstated support for mutable opaque TLS objects,
+  custom/dynamic creators, and Engine initialization hooks; the current
+  candidate below rejects those unsupported inputs instead of claiming to
+  freeze them. Binding accepts only the bootstrap-issued attestation and never
+  recreates credentials from `Engine.url`.
 - The identity probe no longer calls privileged `pg_control_system()`. It uses
   database/schema/effective and configured search path/current role/database
   OID plus the bootstrap policy capability and registered advisory identity.
@@ -5614,3 +5615,28 @@ Cost/security note:
   `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a rereview candidate, not
   `CLEAN`; Task 14 remains blocked. No provider, network, Docker, paid, or
   `.env` access occurred.
+
+## 2026-09-01 Deliverable D Core Task 13 eighth rereview candidate
+
+- The seventh independent review kept Task 13 open on four PostgreSQL
+  authority edges. The current candidate binds the application transaction and
+  every advisory connection to one fresh least-privilege writable-server
+  identity: backend address/port plus postmaster start time, with replica and
+  transaction-read-only sessions rejected before any usable authority exists.
+- The bootstrap now exposes an explicitly named random sealed policy capability
+  rather than claiming a configuration fingerprint. Construction inputs are
+  recursively frozen; mutable opaque TLS/configuration objects, custom creators,
+  and Engine initialization hooks are rejected. Issuance transfers ownership
+  atomically with revocation, and any rejected newly-created `NullPool` Engine
+  is disposed exactly once.
+- Request-authority cleanup produces only a sanitized transport fail-stop
+  record. Cancellation and commit-unknown remain the primary classification;
+  a known committed answer or recovery CAS remains deliverable and is marked
+  non-retryable even if advisory transport cleanup fails.
+- Fresh candidate verification is focused `150 passed, 10 skipped` and broad
+  affected `748 passed, 16 skipped, 2144 deselected`. All skips are executable
+  real-PostgreSQL gates left unrun because `PARAWORKS_TEST_POSTGRES_URL` is
+  absent.
+- This remains an independent-rereview candidate, not review `CLEAN`. Task 14
+  stays blocked. Real PostgreSQL acceptance tests are URL-gated; no provider,
+  network, Docker, paid call, or `.env` access occurred.

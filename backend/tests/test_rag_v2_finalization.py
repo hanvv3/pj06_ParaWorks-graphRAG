@@ -23,12 +23,14 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     try_acquire_advisory_lock,
 )
 from backend.app.agent_runtime.rag_cost_ledger import (
+    PendingProjectionRecoverySnapshot,
     RagCostLedger,
 )
 from backend.app.agent_runtime.rag_finalization import (
     AssistantProjectionTarget,
     CanonicalRagProjection,
     PreparedRagFinalization,
+    ProviderFreeRagPhase2Authority,
     RagFinalizationError,
     RagFinalizationService,
     RagProjectionPending,
@@ -314,6 +316,8 @@ class _Boundary:
         self.final_parent = None
         self.fail_commit = False
         self.authority_closes = 0
+        self.cleanup_failure: BaseException | None = None
+        self.cleanup_dispositions: list[object] = []
 
     @contextmanager
     def acquire_request_database_authority(self):
@@ -321,6 +325,11 @@ class _Boundary:
 
     def close_request_database_authority(self) -> None:
         self.authority_closes += 1
+        if self.cleanup_failure is not None:
+            raise self.cleanup_failure
+
+    def record_request_database_cleanup_failure(self, disposition) -> None:
+        self.cleanup_dispositions.append(disposition)
 
     def begin(self):
         return self
@@ -999,6 +1008,74 @@ def test_direct_recovery_reasserts_database_before_pending_snapshot(
     assert snapshot_reads == []
 
 
+def test_successful_recovery_cleanup_failure_keeps_terminal_identity(
+    monkeypatch,
+) -> None:
+    engine = object()
+    db = _fake_postgres_session(engine=engine)
+    authority = _fake_database_authority(monkeypatch, session=db)
+    barrier = _postgres_barrier(postgres_database=authority)
+    recovery, _, _ = _recovery_bundle(
+        db,
+        postgres_database=authority,
+        provider_free_barrier=barrier,
+        paid_barrier=barrier,
+    )
+    snapshot = PendingProjectionRecoverySnapshot(
+        agent_run_id=82,
+        projection_owner_fence_hmac='2' * 64,
+        runtime_cost_snapshot_hmac='3' * 64,
+        paid_work_performed=False,
+    )
+    terminal = SimpleNamespace(
+        outcome='persistence_failed',
+        agent_run_id=82,
+    )
+    monkeypatch.setattr(
+        RagCostLedger,
+        'pending_projection_recovery_snapshot',
+        lambda self, run_id: snapshot,
+    )
+    monkeypatch.setattr(
+        ProviderFreeRagPhase2Authority,
+        'acquire_recovery',
+        lambda self, candidate: nullcontext(),
+    )
+    monkeypatch.setattr(
+        ServingProjectionReadCoordinator,
+        'acquire',
+        lambda self: nullcontext(),
+    )
+    monkeypatch.setattr(
+        ServingProjectionReadCoordinator,
+        'lock_canonical_tail',
+        lambda self, identities: object(),
+    )
+    monkeypatch.setattr(
+        ServingProjectionReadCoordinator,
+        'validate_tail_context',
+        lambda self, context: None,
+    )
+    monkeypatch.setattr(
+        RagCostLedger,
+        'recover_incomplete_run',
+        lambda self, **kwargs: terminal,
+    )
+
+    def fail_cleanup(self):
+        raise RuntimeError('sensitive cleanup detail')
+
+    monkeypatch.setattr(RagPostgresDatabaseAuthority, 'close', fail_cleanup)
+
+    assert recovery.recover(82) is terminal
+    disposition = recovery.last_cleanup_disposition
+    assert disposition is not None
+    assert disposition.operation_state == 'acknowledged_recovery'
+    assert disposition.delivery_permitted is True
+    assert disposition.retry_permitted is False
+    assert 'sensitive cleanup detail' not in repr(disposition)
+
+
 def _construct_boundary(*, db, phase2, recovery):
     return SqlAlchemyRagFinalizationBoundary(
         db=db,
@@ -1288,6 +1365,61 @@ def test_request_database_authority_closes_on_base_exception() -> None:
 
     assert boundary.authority_closes == 1
     assert boundary.commits == 0
+
+
+def test_cleanup_failure_preserves_cancellation_primary() -> None:
+    boundary = _Boundary()
+    boundary.cleanup_failure = RuntimeError('sensitive cleanup detail')
+    boundary.project = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        KeyboardInterrupt('injected cancellation')
+    )
+    service = RagFinalizationService(
+        transaction_boundary=boundary,
+        settings=Settings(_env_file=None, agent_runtime_fingerprint_secret='secret'),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match='injected cancellation'):
+        service.finalize_provider_free_safe(_pending(), _prepared())
+
+    assert len(boundary.cleanup_dispositions) == 1
+    disposition = boundary.cleanup_dispositions[0]
+    assert disposition.operation_state == 'primary_failure'
+    assert disposition.delivery_permitted is False
+    assert 'sensitive cleanup detail' not in repr(disposition)
+
+
+def test_cleanup_failure_preserves_commit_unknown_classification() -> None:
+    boundary = _Boundary()
+    boundary.fail_commit = True
+    boundary.cleanup_failure = RuntimeError('sensitive cleanup detail')
+    service = RagFinalizationService(
+        transaction_boundary=boundary,
+        settings=Settings(_env_file=None, agent_runtime_fingerprint_secret='secret'),
+    )
+
+    with pytest.raises(RagFinalizationError, match='commit'):
+        service.finalize_provider_free_safe(_pending(), _prepared())
+
+    disposition = boundary.cleanup_dispositions[0]
+    assert disposition.operation_state == 'primary_failure'
+    assert disposition.delivery_permitted is False
+
+
+def test_cleanup_failure_after_acknowledged_commit_returns_product() -> None:
+    boundary = _Boundary()
+    boundary.cleanup_failure = RuntimeError('sensitive cleanup detail')
+    service = RagFinalizationService(
+        transaction_boundary=boundary,
+        settings=Settings(_env_file=None, agent_runtime_fingerprint_secret='secret'),
+    )
+
+    product = service.finalize_provider_free_safe(_pending(), _prepared())
+
+    assert product.result_hmac == '6' * 64
+    disposition = boundary.cleanup_dispositions[0]
+    assert disposition.operation_state == 'acknowledged_product'
+    assert disposition.delivery_permitted is True
+    assert disposition.retry_permitted is False
 
 
 def test_request_database_authority_closes_on_pretransaction_validation_error() -> None:

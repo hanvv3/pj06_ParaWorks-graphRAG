@@ -7,6 +7,7 @@ import sys
 import traceback
 from collections.abc import Generator
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any
 
 import pytest
@@ -81,13 +82,14 @@ def test_postgres_bootstrap_preserves_the_resolved_connection_policy(
     application.dialect.name = 'postgresql'
     dedicated.dialect.name = 'postgresql'
     created: list[tuple[str, dict[str, object]]] = []
-    initialized: list[object] = []
     engines = iter((application, dedicated))
-    creator = object()
-    tls_context = object()
     mutable_connect_args: dict[str, object] = {
         'sslmode': 'verify-full',
-        'sslrootcert': tls_context,
+        'sslrootcert': '/run/secrets/database-ca.pem',
+        'server_settings': {
+            'application_name': 'paraworks-rag',
+            'statement_timeout': '5000',
+        },
     }
 
     def create_engine_probe(database_url: str, **kwargs: object):
@@ -96,23 +98,17 @@ def test_postgres_bootstrap_preserves_the_resolved_connection_policy(
 
     monkeypatch.setattr(initialization, 'create_engine', create_engine_probe)
     policy = initialization.DatabaseConnectionPolicy(
-        engine_options={
-            'creator': creator,
-            'connect_args': mutable_connect_args,
-        },
-        initialize_engine=initialized.append,
+        engine_options={'connect_args': mutable_connect_args},
     )
     mutable_connect_args['sslmode'] = 'disable'
     runtime = initialization.initialize_database_runtime(
         'postgresql+psycopg://invalid.example/authority',
         connection_policy=policy,
     )
+    mutable_connect_args['server_settings']['statement_timeout'] = '0'
     assert runtime.rag_postgres_bootstrap is not None
     issued = runtime.rag_postgres_bootstrap._issue(application)
-    issued_engine = runtime.rag_postgres_bootstrap._require_issued(
-        issued,
-        application,
-    )
+    issued_engine = issued.engine
 
     assert issued_engine is dedicated
     assert created == [
@@ -120,10 +116,13 @@ def test_postgres_bootstrap_preserves_the_resolved_connection_policy(
             'postgresql+psycopg://invalid.example/authority',
             {
                 'pool_pre_ping': True,
-                'creator': creator,
                 'connect_args': {
                     'sslmode': 'verify-full',
-                    'sslrootcert': tls_context,
+                    'sslrootcert': '/run/secrets/database-ca.pem',
+                    'server_settings': {
+                        'application_name': 'paraworks-rag',
+                        'statement_timeout': '5000',
+                    },
                 },
             },
         ),
@@ -131,50 +130,166 @@ def test_postgres_bootstrap_preserves_the_resolved_connection_policy(
             'postgresql+psycopg://invalid.example/authority',
             {
                 'pool_pre_ping': True,
-                'creator': creator,
                 'connect_args': {
                     'sslmode': 'verify-full',
-                    'sslrootcert': tls_context,
+                    'sslrootcert': '/run/secrets/database-ca.pem',
+                    'server_settings': {
+                        'application_name': 'paraworks-rag',
+                        'statement_timeout': '5000',
+                    },
                 },
                 'poolclass': NullPool,
             },
         ),
     ]
-    assert initialized == [application, dedicated]
+    assert len(issued.policy_capability_id) == 64
 
     issued_engine.dispose()
     runtime.dispose()
-    with pytest.raises(TypeError, match='attestation changed'):
-        runtime.rag_postgres_bootstrap._require_issued(issued, application)
     with pytest.raises(TypeError, match='bootstrap authority changed'):
         runtime.rag_postgres_bootstrap._issue(application)
 
 
-def test_postgres_bootstrap_cleans_up_when_engine_initialization_fails(
+def test_postgres_bootstrap_uses_distinct_sealed_policy_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability_ids: list[str] = []
+    variants = (
+        (
+            'postgresql+psycopg://first.example/authority',
+            {'sslmode': 'verify-full', 'application_name': 'one'},
+        ),
+        (
+            'postgresql+psycopg://second.example/authority',
+            {'sslmode': 'verify-ca', 'application_name': 'two'},
+        ),
+    )
+    for database_url, connect_args in variants:
+        application = sqlalchemy_create_engine('sqlite+pysqlite:///:memory:')
+        dedicated = sqlalchemy_create_engine(
+            'sqlite+pysqlite:///:memory:',
+            poolclass=NullPool,
+        )
+        application.dialect.name = 'postgresql'
+        dedicated.dialect.name = 'postgresql'
+        engines = iter((application, dedicated))
+        monkeypatch.setattr(
+            initialization,
+            'create_engine',
+            lambda *_args, _engines=engines, **_kwargs: next(_engines),
+        )
+        runtime = initialization.initialize_database_runtime(
+            database_url,
+            connection_policy=initialization.DatabaseConnectionPolicy(
+                engine_options={'connect_args': connect_args},
+            ),
+        )
+        assert runtime.rag_postgres_bootstrap is not None
+        issued = runtime.rag_postgres_bootstrap._issue(application)
+        capability_ids.append(issued.policy_capability_id)
+        issued.engine.dispose()
+        runtime.dispose()
+
+    assert len(set(capability_ids)) == 2
+    assert all(len(value) == 64 for value in capability_ids)
+
+
+@pytest.mark.parametrize(
+    'policy',
+    (
+        initialization.DatabaseConnectionPolicy(
+            engine_options={'connect_args': {'sslmode': 'verify-full'}}
+        ),
+        {'engine_options': {'creator': lambda: object()}},
+        {'initialize_engine': lambda _engine: None},
+        {'engine_options': {'connect_args': {'ssl_context': object()}}},
+        {'engine_options': {'connect_args': {'fallbacks': ['unsafe']}}},
+    ),
+)
+def test_connection_policy_rejects_mutable_or_stateful_authority(
+    policy: object,
+) -> None:
+    if isinstance(policy, initialization.DatabaseConnectionPolicy):
+        assert policy.engine_options['connect_args']['sslmode'] == 'verify-full'
+        return
+    with pytest.raises(initialization.DatabaseConfigurationError):
+        initialization.DatabaseConnectionPolicy(**policy)
+
+
+def test_postgres_revoke_during_issue_rejects_and_disposes_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     application = sqlalchemy_create_engine('sqlite+pysqlite:///:memory:')
+    dedicated = sqlalchemy_create_engine(
+        'sqlite+pysqlite:///:memory:',
+        poolclass=NullPool,
+    )
     application.dialect.name = 'postgresql'
+    dedicated.dialect.name = 'postgresql'
+    dedicated_created = Event()
+    resume_issue = Event()
+    revoke_finished = Event()
+    issue_errors: list[BaseException] = []
     disposals: list[object] = []
-    event.listen(application, 'engine_disposed', lambda engine: disposals.append(engine))
+    event.listen(dedicated, 'engine_disposed', lambda engine: disposals.append(engine))
+    calls = 0
+
+    def create_engine_probe(*_args: object, **_kwargs: object):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return application
+        dedicated_created.set()
+        assert resume_issue.wait(5)
+        return dedicated
+
+    monkeypatch.setattr(initialization, 'create_engine', create_engine_probe)
+    runtime = initialization.initialize_database_runtime(
+        'postgresql+psycopg://invalid.example/authority'
+    )
+    assert runtime.rag_postgres_bootstrap is not None
+
+    def issue() -> None:
+        try:
+            runtime.rag_postgres_bootstrap._issue(application)
+        except BaseException as exc:
+            issue_errors.append(exc)
+
+    issuer = Thread(target=issue)
+    issuer.start()
+    assert dedicated_created.wait(5)
+    revoker = Thread(target=lambda: (runtime.dispose(), revoke_finished.set()))
+    revoker.start()
+    assert revoke_finished.wait(5)
+    resume_issue.set()
+    issuer.join(timeout=5)
+    revoker.join(timeout=5)
+
+    assert issuer.is_alive() is False and revoker.is_alive() is False
+    assert len(issue_errors) == 1
+    assert isinstance(issue_errors[0], TypeError)
+    assert disposals == [dedicated]
+
+
+def test_postgres_policy_rejects_stateful_initializer_before_engine_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine_creations: list[object] = []
     monkeypatch.setattr(
         initialization,
         'create_engine',
-        lambda *_args, **_kwargs: application,
+        lambda *_args, **_kwargs: engine_creations.append(object()),
     )
 
     def fail_initialization(_engine: object) -> None:
         raise RuntimeError('injected engine initialization failure')
 
-    with pytest.raises(RuntimeError, match='injected engine initialization'):
-        initialization.initialize_database_runtime(
-            'postgresql+psycopg://invalid.example/authority',
-            connection_policy=initialization.DatabaseConnectionPolicy(
-                initialize_engine=fail_initialization,
-            ),
+    with pytest.raises(initialization.DatabaseConfigurationError):
+        initialization.DatabaseConnectionPolicy(
+            initialize_engine=fail_initialization,
         )
 
-    assert disposals == [application]
+    assert engine_creations == []
 
 
 @pytest.mark.parametrize(

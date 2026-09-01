@@ -34,6 +34,7 @@ from backend.app.agent_runtime.rag_cost_ledger import (
 )
 from backend.app.agent_runtime.rag_postgres_binding import (
     RagPostgresDatabaseAuthority,
+    RagPostgresDatabaseCleanupFailure,
 )
 from backend.app.agent_runtime.rag_provider_safety import (
     RagProviderSafetyError,
@@ -102,6 +103,32 @@ from backend.app.rag.serving_locks import (
 
 class RagFinalizationError(RuntimeError):
     """No immutable product was committed; callers must not synthesize one."""
+
+
+@dataclass(frozen=True, slots=True)
+class RagDatabaseCleanupDisposition:
+    operation_state: Literal[
+        'primary_failure',
+        'acknowledged_product',
+        'acknowledged_recovery',
+    ]
+    cleanup_code: Literal['rag_postgres_transport_cleanup_failed']
+    delivery_permitted: bool
+    retry_permitted: Literal[False] = False
+
+
+def _cleanup_disposition(
+    operation_state: Literal[
+        'primary_failure',
+        'acknowledged_product',
+        'acknowledged_recovery',
+    ],
+) -> RagDatabaseCleanupDisposition:
+    return RagDatabaseCleanupDisposition(
+        operation_state=operation_state,
+        cleanup_code='rag_postgres_transport_cleanup_failed',
+        delivery_permitted=operation_state != 'primary_failure',
+    )
 
 
 _PHASE2_AUTHORITY_SEAL = object()
@@ -729,7 +756,7 @@ def _assemble_paid_rag_phase2_authority(
 class RagProjectionOwnerRecoveryAuthority:
     """Concrete no-redispatch recovery across safety, owner, C.5 and cost CAS."""
 
-    __slots__ = ('_assembly',)
+    __slots__ = ('_assembly', '_last_cleanup_disposition')
 
     def __init__(self, assembly: object) -> None:
         if (
@@ -744,7 +771,14 @@ class RagProjectionOwnerRecoveryAuthority:
         ):
             raise TypeError('projection-owner recovery authority is unavailable')
         self._assembly = assembly
+        self._last_cleanup_disposition: RagDatabaseCleanupDisposition | None = None
         self._require_active_database()
+
+    @property
+    def last_cleanup_disposition(
+        self,
+    ) -> RagDatabaseCleanupDisposition | None:
+        return self._last_cleanup_disposition
 
     def recover(self, run_id: int) -> object:
         if type(run_id) is not int or run_id <= 0:
@@ -767,7 +801,7 @@ class RagProjectionOwnerRecoveryAuthority:
                 ), assembly.projection_read.acquire():
                     tail = assembly.projection_read.lock_canonical_tail(())
                     assembly.projection_read.validate_tail_context(tail)
-                    return assembly.ledger.recover_incomplete_run(
+                    recovered = assembly.ledger.recover_incomplete_run(
                         run_id=run_id,
                         projection_owner_fence_hmac=(
                             snapshot.projection_owner_fence_hmac
@@ -776,8 +810,26 @@ class RagProjectionOwnerRecoveryAuthority:
                             snapshot.runtime_cost_snapshot_hmac
                         ),
                     )
-        finally:
-            authority.close()
+        except BaseException:
+            self._close_authority(authority, operation_state='primary_failure')
+            raise
+        self._close_authority(authority, operation_state='acknowledged_recovery')
+        return recovered
+
+    def _close_authority(
+        self,
+        authority: RagPostgresDatabaseAuthority,
+        *,
+        operation_state: Literal['primary_failure', 'acknowledged_recovery'],
+    ) -> None:
+        try:
+            failure = authority.close()
+        except BaseException:
+            failure = RagPostgresDatabaseCleanupFailure()
+        if failure is not None:
+            self._last_cleanup_disposition = _cleanup_disposition(
+                operation_state
+            )
 
     def _require_boundary(
         self,
@@ -972,7 +1024,13 @@ class PreparedRagFinalization:
 
 class RagFinalizationTransactionPort(Protocol):
     def acquire_request_database_authority(self): ...
-    def close_request_database_authority(self) -> None: ...
+    def close_request_database_authority(
+        self,
+    ) -> RagPostgresDatabaseCleanupFailure | None: ...
+    def record_request_database_cleanup_failure(
+        self,
+        disposition: RagDatabaseCleanupDisposition,
+    ) -> None: ...
     def acquire_phase2(
         self,
         pending: RagProjectionPending,
@@ -1142,9 +1200,44 @@ class RagFinalizationService:
             )
         try:
             with acquire():
-                return operation()
-        finally:
-            close()
+                result = operation()
+        except BaseException:
+            self._close_owned_authority(
+                close,
+                operation_state='primary_failure',
+            )
+            raise
+        self._close_owned_authority(
+            close,
+            operation_state='acknowledged_product',
+        )
+        return result
+
+    def _close_owned_authority(
+        self,
+        close: Callable[[], object],
+        *,
+        operation_state: Literal['primary_failure', 'acknowledged_product'],
+    ) -> None:
+        try:
+            failure = close()
+        except BaseException:
+            failure = RagPostgresDatabaseCleanupFailure()
+        if failure is None:
+            return
+        record = getattr(
+            self._boundary,
+            'record_request_database_cleanup_failure',
+            None,
+        )
+        if not callable(record):
+            return
+        try:
+            record(_cleanup_disposition(operation_state))
+        except BaseException:
+            # Product/primary outcome is authoritative; cleanup reporting is
+            # bounded sanitized evidence and cannot replace it.
+            return
 
     @staticmethod
     def _require_safe_surface_outcome(
@@ -1376,13 +1469,30 @@ class SqlAlchemyRagFinalizationBoundary:
         self._pending: RagProjectionPending | None = None
         self._assembled_answer_hmac: str | None = None
         self._committed = False
+        self._cleanup_dispositions: list[RagDatabaseCleanupDisposition] = []
         self._secret, _ = fingerprint_secret_bytes(settings)
 
     def acquire_request_database_authority(self):
         return self._postgres_database.operation_lease()
 
-    def close_request_database_authority(self) -> None:
-        self._postgres_database.close()
+    def close_request_database_authority(
+        self,
+    ) -> RagPostgresDatabaseCleanupFailure | None:
+        return self._postgres_database.close()
+
+    def record_request_database_cleanup_failure(
+        self,
+        disposition: RagDatabaseCleanupDisposition,
+    ) -> None:
+        if type(disposition) is not RagDatabaseCleanupDisposition:
+            raise TypeError('RAG cleanup disposition is invalid')
+        self._cleanup_dispositions.append(disposition)
+
+    @property
+    def request_database_cleanup_failures(
+        self,
+    ) -> tuple[RagDatabaseCleanupDisposition, ...]:
+        return tuple(self._cleanup_dispositions)
 
     def begin(self) -> AbstractContextManager:
         return _SessionFinalizationTransaction(self)

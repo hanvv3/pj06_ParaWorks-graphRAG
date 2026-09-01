@@ -25,10 +25,23 @@ _IDENTITY_SQL = text(
     "current_setting('search_path'), current_user, "
     "(SELECT oid FROM pg_database WHERE datname = current_database())"
 )
+_SERVER_IDENTITY_SQL = text(
+    "SELECT inet_server_addr()::text, inet_server_port(), "
+    "pg_postmaster_start_time()::text, pg_is_in_recovery(), "
+    "current_setting('transaction_read_only')"
+)
 
 
 class RagPostgresDatabaseBusyError(RuntimeError):
     """The request authority is draining an already active operation."""
+
+
+@dataclass(frozen=True, slots=True)
+class RagPostgresDatabaseCleanupFailure:
+    code: Literal['rag_postgres_transport_cleanup_failed'] = (
+        'rag_postgres_transport_cleanup_failed'
+    )
+    transport_fail_stopped: Literal[True] = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,14 +73,31 @@ class RagPostgresDatabaseIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class RagPostgresWritableServerIdentity:
+    server_address: str
+    server_port: int
+    postmaster_start_time: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.server_address
+            or type(self.server_port) is not int
+            or self.server_port <= 0
+            or not self.postmaster_start_time
+        ):
+            raise TypeError('authoritative writable PostgreSQL server is unavailable')
+
+
+@dataclass(frozen=True, slots=True)
 class _PostgresDatabaseAssembly:
     session: Session = field(repr=False)
     application_engine: Engine = field(repr=False)
     dedicated_engine: Engine = field(repr=False)
     trusted_bootstrap: TrustedPostgresEngineBootstrap = field(repr=False)
-    policy_fingerprint: str
+    policy_capability_id: str
     bootstrap_capability: RegisteredAdvisoryLock = field(repr=False)
     identity: RagPostgresDatabaseIdentity
+    server_identity: RagPostgresWritableServerIdentity
     _seal: object = field(repr=False, compare=False)
 
 
@@ -78,6 +108,7 @@ class RagPostgresDatabaseAuthority:
         '_active_leases',
         '_assembly',
         '_connections',
+        '_cleanup_failure',
         '_lease_context',
         '_lifecycle_lock',
         '_state',
@@ -95,8 +126,10 @@ class RagPostgresDatabaseAuthority:
             or assembly.dedicated_engine.dialect.name != 'postgresql'
             or type(assembly.trusted_bootstrap)
             is not TrustedPostgresEngineBootstrap
-            or len(assembly.policy_fingerprint) != 64
+            or len(assembly.policy_capability_id) != 64
             or type(assembly.identity) is not RagPostgresDatabaseIdentity
+            or type(assembly.server_identity)
+            is not RagPostgresWritableServerIdentity
             or type(assembly.bootstrap_capability) is not RegisteredAdvisoryLock
         ):
             raise TypeError('RAG PostgreSQL database authority is unavailable')
@@ -104,6 +137,7 @@ class RagPostgresDatabaseAuthority:
         self._active_leases = 0
         self._state: Literal['open', 'closing', 'closed'] = 'open'
         self._connections: set[Connection] = set()
+        self._cleanup_failure: RagPostgresDatabaseCleanupFailure | None = None
         self._lease_context: ContextVar[_RagPostgresOperationLease | None] = (
             ContextVar(
                 f'rag_postgres_operation_lease_{id(self)}',
@@ -116,6 +150,11 @@ class RagPostgresDatabaseAuthority:
     def closed(self) -> bool:
         with self._lifecycle_lock:
             return self._state == 'closed'
+
+    @property
+    def cleanup_failure(self) -> RagPostgresDatabaseCleanupFailure | None:
+        with self._lifecycle_lock:
+            return self._cleanup_failure
 
     def __enter__(self) -> RagPostgresDatabaseAuthority:
         with self._lifecycle_lock:
@@ -141,6 +180,13 @@ class RagPostgresDatabaseAuthority:
                 current = _connection_identity(connection)
                 if current != self._assembly.identity:
                     raise TypeError('RAG PostgreSQL connection identity changed')
+                if (
+                    _connection_server_identity(connection)
+                    != self._assembly.server_identity
+                ):
+                    raise TypeError(
+                        'authoritative writable PostgreSQL server changed'
+                    )
                 _require_bootstrap_capability(
                     connection,
                     self._assembly.bootstrap_capability,
@@ -163,9 +209,16 @@ class RagPostgresDatabaseAuthority:
             engine = bind.engine if isinstance(bind, Connection) else bind
             if engine is not self._assembly.application_engine:
                 raise TypeError('RAG PostgreSQL engine authority changed')
-            if _session_identity(session) != self._assembly.identity:
-                raise TypeError('RAG PostgreSQL session identity changed')
             try:
+                if _session_identity(session) != self._assembly.identity:
+                    raise TypeError('RAG PostgreSQL session identity changed')
+                if (
+                    _session_server_identity(session)
+                    != self._assembly.server_identity
+                ):
+                    raise TypeError(
+                        'authoritative writable PostgreSQL server changed'
+                    )
                 _require_bootstrap_capability(
                     session,
                     self._assembly.bootstrap_capability,
@@ -196,20 +249,25 @@ class RagPostgresDatabaseAuthority:
                 if self._active_leases < 0:
                     raise RuntimeError('RAG PostgreSQL authority lease underflow')
 
-    def close(self) -> None:
+    def close(self) -> RagPostgresDatabaseCleanupFailure | None:
         """Stop new leases, then close idle request-owned transport once."""
         with self._lifecycle_lock:
             if self._state == 'closed':
-                return
+                return self._cleanup_failure
             if self._active_leases:
                 self._state = 'closing'
                 raise RagPostgresDatabaseBusyError(
                     'RAG PostgreSQL database authority has an active operation'
                 )
             self._state = 'closed'
-        self._dispose_owned_transport()
+        failure = self._dispose_owned_transport()
+        with self._lifecycle_lock:
+            self._cleanup_failure = failure
+        return failure
 
-    def _dispose_owned_transport(self) -> None:
+    def _dispose_owned_transport(
+        self,
+    ) -> RagPostgresDatabaseCleanupFailure | None:
         connections = tuple(self._connections)
         self._connections.clear()
         failure: BaseException | None = None
@@ -229,8 +287,9 @@ class RagPostgresDatabaseAuthority:
             self._assembly.dedicated_engine.dispose()
         except BaseException as exc:
             failure = failure or exc
-        if failure is not None:
-            raise failure
+        if failure is None:
+            return None
+        return RagPostgresDatabaseCleanupFailure()
 
     def _require_usable(self) -> None:
         if self._state == 'closed' or (
@@ -269,9 +328,10 @@ def _bind_rag_postgres_database(
     dedicated_engine: Engine | None = None
     try:
         issued = trusted_bootstrap._issue(engine)
-        dedicated_engine = trusted_bootstrap._require_issued(issued, engine)
-        identity = _session_identity(session)
+        dedicated_engine = issued.engine
         try:
+            identity = _session_identity(session)
+            server_identity = _session_server_identity(session)
             _require_bootstrap_capability(session, bootstrap_capability)
         finally:
             session.rollback()
@@ -280,6 +340,10 @@ def _bind_rag_postgres_database(
                 raise TypeError(
                     'dedicated PostgreSQL database identity does not match session'
                 )
+            if _connection_server_identity(connection) != server_identity:
+                raise TypeError(
+                    'dedicated PostgreSQL writable server does not match session'
+                )
             _require_bootstrap_capability(connection, bootstrap_capability)
         return RagPostgresDatabaseAuthority(
             _PostgresDatabaseAssembly(
@@ -287,9 +351,10 @@ def _bind_rag_postgres_database(
                 application_engine=engine,
                 dedicated_engine=dedicated_engine,
                 trusted_bootstrap=trusted_bootstrap,
-                policy_fingerprint=issued.policy_fingerprint,
+                policy_capability_id=issued.policy_capability_id,
                 bootstrap_capability=bootstrap_capability,
                 identity=identity,
+                server_identity=server_identity,
                 _seal=_POSTGRES_DATABASE_AUTHORITY_SEAL,
             )
         )
@@ -317,16 +382,27 @@ def _require_bootstrap_capability(
 def _session_identity(session: Session) -> RagPostgresDatabaseIdentity:
     if session.in_transaction():
         raise TypeError('fresh PostgreSQL session identity requires no transaction')
-    try:
-        row = session.execute(_IDENTITY_SQL).one()
-        return _identity_from_row(row)
-    finally:
-        session.rollback()
+    row = session.execute(_IDENTITY_SQL).one()
+    return _identity_from_row(row)
 
 
 def _connection_identity(connection: Connection) -> RagPostgresDatabaseIdentity:
     row = connection.execute(_IDENTITY_SQL).one()
     return _identity_from_row(row)
+
+
+def _session_server_identity(
+    session: Session,
+) -> RagPostgresWritableServerIdentity:
+    row = session.execute(_SERVER_IDENTITY_SQL).one()
+    return _server_identity_from_row(row)
+
+
+def _connection_server_identity(
+    connection: Connection,
+) -> RagPostgresWritableServerIdentity:
+    row = connection.execute(_SERVER_IDENTITY_SQL).one()
+    return _server_identity_from_row(row)
 
 
 def _identity_from_row(row: object) -> RagPostgresDatabaseIdentity:
@@ -340,4 +416,21 @@ def _identity_from_row(row: object) -> RagPostgresDatabaseIdentity:
         search_path_setting=values[3],
         current_role=values[4],
         database_oid=values[5],
+    )
+
+
+def _server_identity_from_row(
+    row: object,
+) -> RagPostgresWritableServerIdentity:
+    values = tuple(row)  # type: ignore[arg-type]
+    if (
+        len(values) != 5
+        or values[3] is not False
+        or values[4] != 'off'
+    ):
+        raise TypeError('authoritative writable PostgreSQL server is unavailable')
+    return RagPostgresWritableServerIdentity(
+        server_address=values[0],
+        server_port=values[1],
+        postmaster_start_time=values[2],
     )

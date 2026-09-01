@@ -44,7 +44,25 @@ def _trusted_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
     application,
     dedicated,
+    *,
+    preserve_server_identity: bool = False,
 ):
+    if not preserve_server_identity:
+        server_identity = binding_module.RagPostgresWritableServerIdentity(
+            server_address='127.0.0.1',
+            server_port=5432,
+            postmaster_start_time='2026-09-01 00:00:00+00',
+        )
+        monkeypatch.setattr(
+            binding_module,
+            '_session_server_identity',
+            lambda _session: server_identity,
+        )
+        monkeypatch.setattr(
+            binding_module,
+            '_connection_server_identity',
+            lambda _connection: server_identity,
+        )
     engines = iter((application, dedicated))
     monkeypatch.setattr(
         initialization,
@@ -68,6 +86,76 @@ def test_binding_api_requires_explicit_dedicated_engine_and_bootstrap_capability
 
 def test_identity_probe_is_least_privilege_and_has_no_control_file_dependency():
     assert 'pg_control_system' not in str(binding_module._IDENTITY_SQL)
+
+
+def test_binding_rejects_different_authoritative_writable_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated = _fake_postgres_engines()
+    session = Session(application)
+    logical_identity = _identity()
+    monkeypatch.setattr(
+        binding_module,
+        '_session_identity',
+        lambda _session: logical_identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: logical_identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_session_server_identity',
+        lambda _session: binding_module.RagPostgresWritableServerIdentity(
+            server_address='10.0.0.11',
+            server_port=5432,
+            postmaster_start_time='2026-09-01T00:00:00Z',
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_server_identity',
+        lambda _connection: binding_module.RagPostgresWritableServerIdentity(
+            server_address='10.0.0.12',
+            server_port=5432,
+            postmaster_start_time='2026-09-01T00:00:01Z',
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(TypeError, match='writable server'):
+        _bind_rag_postgres_database(
+            session,
+            trusted_bootstrap=_trusted_bootstrap(
+                monkeypatch,
+                application,
+                dedicated,
+                preserve_server_identity=True,
+            ),
+            bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+        )
+
+    session.close()
+    application.dispose()
+
+
+@pytest.mark.parametrize(
+    'row',
+    (
+        ('127.0.0.1', 5432, '2026-09-01T00:00:00Z', True, 'off'),
+        ('127.0.0.1', 5432, '2026-09-01T00:00:00Z', False, 'on'),
+    ),
+)
+def test_server_identity_refuses_replica_or_read_only_session(row: tuple) -> None:
+    with pytest.raises(TypeError, match='writable PostgreSQL server'):
+        binding_module._server_identity_from_row(row)
 
 
 def test_database_authority_requires_an_active_operation_lease(
@@ -330,13 +418,16 @@ def test_close_disposes_once_even_when_connection_invalidation_fails(
         raise RuntimeError('injected invalidate failure')
 
     monkeypatch.setattr(type(connection), 'invalidate', fail_invalidate)
-    with pytest.raises(RuntimeError, match='injected invalidate failure'):
-        authority.close()
+    cleanup_failure = authority.close()
 
     assert connection.closed is True
     assert authority.closed is True
+    assert cleanup_failure is authority.cleanup_failure
+    assert cleanup_failure is not None
+    assert cleanup_failure.code == 'rag_postgres_transport_cleanup_failed'
+    assert 'injected invalidate failure' not in repr(cleanup_failure)
     assert disposed == 1
-    authority.close()
+    assert authority.close() is cleanup_failure
     assert disposed == 1
     session.close()
     application.dispose()

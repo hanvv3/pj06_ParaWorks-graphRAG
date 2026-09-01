@@ -3979,11 +3979,12 @@ tests passed with 53 tests; ruff passed.
   cross-thread leases are refused. The service/recovery owner always closes in
   `finally`, including validation failure, cancellation, and commit-unknown.
 - `backend.app.db.initialization` is the trusted construction boundary for both
-  the application Engine and request-scoped dedicated `NullPool` Engines. Its
-  immutable policy snapshot preserves custom/dynamic creators, TLS/connect
-  args, dialect options, and initialization hooks. A bootstrap-issued sealed
-  attestation is mandatory; RAG binding does not accept caller-constructed
-  Engines and contains no URL reconstruction path.
+  the application Engine and request-scoped dedicated `NullPool` Engines. This
+  sixth candidate overstated preservation of mutable opaque TLS objects,
+  custom/dynamic creators, and initialization hooks; the current candidate
+  rejects those unsupported inputs and deeply freezes only safe immutable
+  connection options. A bootstrap-issued sealed attestation is mandatory; RAG
+  binding does not accept caller-constructed Engines or reconstruct a URL.
 - PostgreSQL identity is least-privilege: database, schema, resolved/configured
   search path, current role, and database OID, plus the bootstrap policy and
   registered advisory capability. `pg_control_system()` is intentionally absent.
@@ -3994,3 +3995,29 @@ tests passed with 53 tests; ruff passed.
   role cases are executable but unrun because `PARAWORKS_TEST_POSTGRES_URL` is
   absent. Do not claim `CLEAN` and do not start Task 14 before independent
   rereview.
+
+## 2026-09-01 Deliverable D Core Task 13 eighth rereview candidate
+
+- Seventh review findings are implemented but not independently accepted.
+  Application and request-owned advisory connections must freshly match the
+  exact writable PostgreSQL backend address/port and postmaster start time;
+  recovery/read-only sessions fail before authority issuance. The existing
+  database/schema/search-path/role/OID and registered advisory proofs remain.
+- `DatabaseConnectionPolicy` recursively freezes only safe scalar, mapping, and
+  tuple values. Mutable opaque TLS/configuration values, `creator`, and Engine
+  initialization hooks fail at initialization. The bootstrap's
+  `policy_capability_id` is a sealed per-runtime capability, not a digest or a
+  secret-bearing representation of configuration.
+- Dedicated Engine creation happens outside the bootstrap lock, then ownership
+  transfer is accepted atomically with the revoke check. Revocation during
+  creation rejects issuance and disposes the new Engine exactly once.
+- Finalization and direct recovery preserve the primary exception or durable
+  committed identity across cleanup failure. Only a sanitized
+  `rag_postgres_transport_cleanup_failed` disposition is retained, with retry
+  forbidden and delivery allowed only for an acknowledged product/recovery.
+- Fresh candidate verification is focused `150 passed, 10 skipped` and broad
+  affected `748 passed, 16 skipped, 2144 deselected`; the skips are absent-URL
+  real-PostgreSQL gates.
+- Keep Task 14 blocked until a new independent Task 13 rereview is `CLEAN`.
+  With no configured real PostgreSQL URL, split-server behavior is unit-tested
+  and same-server PostgreSQL acceptance remains executable but unrun.

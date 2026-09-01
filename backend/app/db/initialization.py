@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import hashlib
+import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from threading import RLock
@@ -42,31 +42,25 @@ class DatabaseConnectionPolicy:
         default_factory=dict,
         repr=False,
     )
-    initialize_engine: Callable[[Engine], None] | None = field(
-        default=None,
-        repr=False,
-    )
+    initialize_engine: object | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         options = dict(self.engine_options)
-        if 'poolclass' in options:
+        if 'poolclass' in options or 'creator' in options:
             raise DatabaseConfigurationError()
-        connect_args = options.get('connect_args')
-        if connect_args is not None:
-            if not isinstance(connect_args, Mapping):
-                raise DatabaseConfigurationError()
-            options['connect_args'] = MappingProxyType(dict(connect_args))
-        if self.initialize_engine is not None and not callable(
-            self.initialize_engine
-        ):
+        if self.initialize_engine is not None:
             raise DatabaseConfigurationError()
-        object.__setattr__(self, 'engine_options', MappingProxyType(options))
+        object.__setattr__(
+            self,
+            'engine_options',
+            _freeze_policy_mapping(options),
+        )
 
 
 @dataclass(frozen=True, slots=True, repr=False)
 class _IssuedDedicatedPostgresEngine:
     engine: Engine = field(repr=False)
-    policy_fingerprint: str
+    policy_capability_id: str
     bootstrap: TrustedPostgresEngineBootstrap = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
@@ -77,7 +71,7 @@ class TrustedPostgresEngineBootstrap:
     __slots__ = (
         '_application_engine',
         '_dedicated_factory',
-        '_policy_fingerprint',
+        '_policy_capability_id',
         '_revoked',
         '_seal',
         '_state_lock',
@@ -88,7 +82,7 @@ class TrustedPostgresEngineBootstrap:
         *,
         application_engine: Engine,
         dedicated_factory: Callable[[], Engine],
-        policy_fingerprint: str,
+        policy_capability_id: str,
         _seal: object,
     ) -> None:
         if (
@@ -96,12 +90,12 @@ class TrustedPostgresEngineBootstrap:
             or not isinstance(application_engine, Engine)
             or application_engine.dialect.name != 'postgresql'
             or not callable(dedicated_factory)
-            or len(policy_fingerprint) != 64
+            or len(policy_capability_id) != 64
         ):
             raise TypeError('trusted PostgreSQL Engine bootstrap is unavailable')
         self._application_engine = application_engine
         self._dedicated_factory = dedicated_factory
-        self._policy_fingerprint = policy_fingerprint
+        self._policy_capability_id = policy_capability_id
         self._revoked = False
         self._seal = _seal
         self._state_lock = RLock()
@@ -114,44 +108,32 @@ class TrustedPostgresEngineBootstrap:
                 or application_engine is not self._application_engine
             ):
                 raise TypeError('PostgreSQL Engine bootstrap authority changed')
-            dedicated_engine = self._dedicated_factory()
-        if (
-            not isinstance(dedicated_engine, Engine)
-            or dedicated_engine is application_engine
-            or dedicated_engine.dialect.name != 'postgresql'
-            or type(dedicated_engine.pool) is not NullPool
-        ):
-            if isinstance(dedicated_engine, Engine):
-                dedicated_engine.dispose()
-            raise TypeError('trusted dedicated PostgreSQL Engine is unavailable')
-        return _IssuedDedicatedPostgresEngine(
-            engine=dedicated_engine,
-            policy_fingerprint=self._policy_fingerprint,
-            bootstrap=self,
-            _seal=_POSTGRES_BOOTSTRAP_SEAL,
-        )
+            dedicated_factory = self._dedicated_factory
+        dedicated_engine = dedicated_factory()
+        with self._state_lock:
+            accepted = (
+                not self._revoked
+                and self._seal is _POSTGRES_BOOTSTRAP_SEAL
+                and application_engine is self._application_engine
+                and isinstance(dedicated_engine, Engine)
+                and dedicated_engine is not application_engine
+                and dedicated_engine.dialect.name == 'postgresql'
+                and type(dedicated_engine.pool) is NullPool
+            )
+            if accepted:
+                return _IssuedDedicatedPostgresEngine(
+                    engine=dedicated_engine,
+                    policy_capability_id=self._policy_capability_id,
+                    bootstrap=self,
+                    _seal=_POSTGRES_BOOTSTRAP_SEAL,
+                )
+        if isinstance(dedicated_engine, Engine):
+            dedicated_engine.dispose()
+        raise TypeError('trusted dedicated PostgreSQL Engine is unavailable')
 
     def _revoke(self) -> None:
         with self._state_lock:
             self._revoked = True
-
-    def _require_issued(
-        self,
-        issued: _IssuedDedicatedPostgresEngine,
-        application_engine: Engine,
-    ) -> Engine:
-        with self._state_lock:
-            if (
-                self._revoked
-                or type(issued) is not _IssuedDedicatedPostgresEngine
-                or issued._seal is not _POSTGRES_BOOTSTRAP_SEAL
-                or issued.bootstrap is not self
-                or issued.policy_fingerprint != self._policy_fingerprint
-                or application_engine is not self._application_engine
-            ):
-                raise TypeError('dedicated PostgreSQL Engine attestation changed')
-            return issued.engine
-
 
 def _is_database_availability_error(error: Exception) -> bool:
     if isinstance(error, (ModuleNotFoundError, ImportError, OSError)):
@@ -219,12 +201,6 @@ def initialize_database_runtime(
             database_url,
             **_engine_options_for_create(engine_options),
         )
-        if policy.initialize_engine is not None:
-            try:
-                policy.initialize_engine(engine)
-            except BaseException:
-                engine.dispose()
-                raise
     except (NoSuchModuleError, ArgumentError):
         configuration_failure = True
     except Exception as error:
@@ -263,24 +239,17 @@ def initialize_database_runtime(
     assert session_factory is not None
     postgres_bootstrap: TrustedPostgresEngineBootstrap | None = None
     if parsed_url.get_backend_name() == 'postgresql':
-        policy_fingerprint = _connection_policy_fingerprint(object())
+        policy_capability_id = secrets.token_hex(32)
 
         def dedicated_factory() -> Engine:
             dedicated_options = _engine_options_for_create(engine_options)
             dedicated_options['poolclass'] = NullPool
-            dedicated = create_engine(database_url, **dedicated_options)
-            try:
-                if policy.initialize_engine is not None:
-                    policy.initialize_engine(dedicated)
-                return dedicated
-            except BaseException:
-                dedicated.dispose()
-                raise
+            return create_engine(database_url, **dedicated_options)
 
         postgres_bootstrap = TrustedPostgresEngineBootstrap(
             application_engine=engine,
             dedicated_factory=dedicated_factory,
-            policy_fingerprint=policy_fingerprint,
+            policy_capability_id=policy_capability_id,
             _seal=_POSTGRES_BOOTSTRAP_SEAL,
         )
     return DatabaseRuntime(
@@ -293,14 +262,39 @@ def initialize_database_runtime(
 def _engine_options_for_create(
     engine_options: Mapping[str, object],
 ) -> dict[str, object]:
-    copied = dict(engine_options)
-    connect_args = copied.get('connect_args')
-    if isinstance(connect_args, Mapping):
-        copied['connect_args'] = dict(connect_args)
-    return copied
+    return {
+        key: _thaw_policy_value(value)
+        for key, value in engine_options.items()
+    }
 
 
-def _connection_policy_fingerprint(policy_token: object) -> str:
-    return hashlib.sha256(
-        f'paraworks-db-policy:{id(policy_token)}'.encode('ascii')
-    ).hexdigest()
+def _freeze_policy_mapping(
+    value: Mapping[object, object],
+) -> Mapping[str, object]:
+    frozen: dict[str, object] = {}
+    for key, item in value.items():
+        if type(key) is not str or not key:
+            raise DatabaseConfigurationError()
+        frozen[key] = _freeze_policy_value(item)
+    return MappingProxyType(frozen)
+
+
+def _freeze_policy_value(value: object) -> object:
+    if value is None or type(value) in {bool, int, float, str, bytes}:
+        return value
+    if isinstance(value, Mapping):
+        return _freeze_policy_mapping(value)
+    if type(value) is tuple:
+        return tuple(_freeze_policy_value(item) for item in value)
+    raise DatabaseConfigurationError()
+
+
+def _thaw_policy_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            key: _thaw_policy_value(item)
+            for key, item in value.items()
+        }
+    if type(value) is tuple:
+        return tuple(_thaw_policy_value(item) for item in value)
+    return value

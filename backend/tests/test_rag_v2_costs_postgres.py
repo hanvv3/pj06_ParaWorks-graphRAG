@@ -46,6 +46,8 @@ from backend.app.agent_runtime.rag_finalization import (
 from backend.app.agent_runtime.rag_postgres_binding import (
     RagPostgresDatabaseBusyError,
     _bind_rag_postgres_database,
+    _connection_server_identity,
+    _session_server_identity,
 )
 from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
 from backend.app.agent_runtime.rag_provider_transport import (
@@ -57,6 +59,7 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
 )
 from backend.app.core.config import get_settings
 from backend.app.db.initialization import (
+    DatabaseConfigurationError,
     DatabaseConnectionPolicy,
     TrustedPostgresEngineBootstrap,
     initialize_database_runtime,
@@ -588,11 +591,14 @@ def test_postgres_database_authority_uses_dedicated_nullpool_without_app_reuse(
 
     event.listen(engine, 'checkout', checkout)
     try:
+        application_server = _session_server_identity(session)
+        session.rollback()
         with authority.operation_lease():
             with authority.connect() as first:
                 dedicated_engine = first.engine
                 assert type(dedicated_engine.pool) is NullPool
                 assert first.scalar(text('SELECT current_database()'))
+                assert _connection_server_identity(first) == application_server
 
             def record_dispose(*_args: object) -> None:
                 nonlocal dedicated_disposals
@@ -612,50 +618,15 @@ def test_postgres_database_authority_uses_dedicated_nullpool_without_app_reuse(
         session.close()
 
 
-def test_postgres_database_authority_preserves_injected_custom_creator_contract(
-    postgres_cost_authority: PostgresAuthorityFixture,
-):
-    engine, _, _ = postgres_cost_authority
-    args, kwargs = engine.dialect.create_connect_args(engine.url)
-    application_name = f'rag-authority-{uuid4().hex}'
-    creator_calls = 0
-    creator_kwargs = dict(kwargs)
-    creator_kwargs['application_name'] = application_name
+def test_postgres_database_policy_rejects_stateful_custom_creator() -> None:
+    class StatefulCreator:
+        def __call__(self):
+            raise AssertionError('rejected creator must not run')
 
-    def creator():
-        nonlocal creator_calls
-        creator_calls += 1
-        return engine.dialect.loaded_dbapi.connect(
-            *args,
-            **creator_kwargs,
+    with pytest.raises(DatabaseConfigurationError):
+        DatabaseConnectionPolicy(
+            engine_options={'creator': StatefulCreator()},
         )
-
-    invalid_url = engine.url.set(host='127.0.0.2', port=1)
-    runtime = initialize_database_runtime(
-        invalid_url,
-        connection_policy=DatabaseConnectionPolicy(
-            engine_options={'creator': creator},
-        ),
-    )
-    assert runtime.rag_postgres_bootstrap is not None
-    session = Session(runtime.engine)
-    authority = None
-    try:
-        authority = _bind_rag_postgres_database(
-            session,
-            trusted_bootstrap=runtime.rag_postgres_bootstrap,
-            bootstrap_capability=_database_bootstrap_capability(runtime.engine),
-        )
-        with authority.operation_lease(), authority.connect() as connection:
-            assert connection.scalar(
-                text("SELECT current_setting('application_name')")
-            ) == application_name
-        assert creator_calls >= 2
-    finally:
-        if authority is not None:
-            authority.close()
-        session.close()
-        runtime.dispose()
 
 
 def test_postgres_database_authority_preserves_injected_connect_args(
@@ -759,19 +730,17 @@ def test_postgres_intended_non_superuser_role_can_bind_finalization_boundary(
             identity_namespace='dynamic',
         )
 
-    def initialize_role(runtime_engine: Engine) -> None:
-        @event.listens_for(runtime_engine, 'connect')
-        def set_intended_role(dbapi_connection, _record) -> None:
-            cursor = dbapi_connection.cursor()
-            try:
-                cursor.execute(f'SET ROLE "{role_name}"')
-            finally:
-                cursor.close()
-
     runtime = initialize_database_runtime(
         engine.url,
         connection_policy=DatabaseConnectionPolicy(
-            initialize_engine=initialize_role,
+            engine_options={
+                'connect_args': {
+                    'options': (
+                        f'-crole={role_name} '
+                        f'-csearch_path={schema_name},public'
+                    ),
+                },
+            },
         ),
     )
     assert runtime.rag_postgres_bootstrap is not None
