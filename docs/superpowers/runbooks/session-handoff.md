@@ -4242,3 +4242,28 @@ tests passed with 53 tests; ruff passed.
   expanded focused `364 passed, 13 skipped`; broad affected `934 passed, 16
   skipped, 2128 deselected`. Real PostgreSQL is absent-URL unrun. Candidate
   only; keep Task 14 blocked until independent rereview returns `CLEAN`.
+
+## 2026-09-01 Deliverable D Core Task 13 eighteenth rereview candidate
+
+- Seventeenth rereview was `NOT CLEAN` on sticky cleanup attestation,
+  retryable/reentrant checkout tracker disposal, and the lower runtime's
+  ownership of physical request cleanup.
+- Runtime cleanup records now use `ACTIVE`, `REVOKED_UNCERTAIN`, and
+  `REVOKED_CLEAN`. The exact operation index survives until operation exit;
+  only exact clean attestation avoids fail-stop, while earlier uncertainty is
+  sticky and never replaces the captured body outcome.
+- Each RAG PostgreSQL operation registers a sealed, by-value physical cleanup
+  responsibility before database/provider-side effects. Health finalization
+  executes bounded Session/application/advisory/dedicated/logical drains
+  outside the health lock, so patchable boundary failure cannot leak resources
+  or introduce lock inversion.
+- Checkout shutdown is retryable and callback-aware. Reentrant same-owner
+  disposal defers, foreign cleanup remains FIFO, listener-removal cancellation
+  leaves `closing`/`RETRY_REQUIRED`, and a later retry removes every listener
+  before disposing the application engine once.
+- Verification candidate: RED `26 failed, 166 deselected`; targeted `28 passed,
+  166 deselected`; binding `194 passed`; initialization `68 passed, 10
+  deselected` plus isolated imports `10 passed`; affected broad `946 passed, 16
+  skipped, 2144 deselected`. Real PostgreSQL remains URL-gated and unrun because
+  the URL is absent. Do not start Task 14 or claim `CLEAN` before independent
+  rereview.

@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from functools import partial
 from threading import RLock
 from typing import Literal
 
@@ -19,6 +20,7 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     release_advisory_lock,
 )
 from backend.app.db.initialization import (
+    _POSTGRES_PHYSICAL_CLEANUP_SEAL,
     PostgresRuntimeHealthUnavailableError,
     TrustedPostgresEngineBootstrap,
     TrustedPostgresRuntimeHealth,
@@ -538,6 +540,17 @@ class RagPostgresDatabaseAuthority:
                 )
             if setup_uncertain:
                 self._mark_cleanup_uncertain(state)
+            health._register_physical_cleanup(
+                health_lease,
+                authority=self,
+                steps=(
+                    partial(_runtime_session_cleanup, self, state),
+                    partial(_runtime_application_cleanup, self, state),
+                    partial(_runtime_advisory_cleanup, self, state),
+                    partial(_runtime_logical_cleanup, self, state),
+                ),
+                _seal=_POSTGRES_PHYSICAL_CLEANUP_SEAL,
+            )
             primary: BaseException | None = None
             primary_traceback = None
             try:
@@ -697,7 +710,13 @@ class RagPostgresDatabaseAuthority:
         try:
             health._finish_emergency_cleanup(state.health_capability)
         except BaseException:
-            uncertain = True
+            # A fault after the immutable CLEAN attestation cannot make already
+            # completed cleanup uncertain. Earlier publication faults remain
+            # sticky and are fail-stopped below.
+            uncertain = not health._emergency_cleanup_is_clean(
+                state.health_capability,
+                authority=self,
+            )
         try:
             health._emergency_cleanup_capability_is_active(
                 state.health_capability
@@ -1373,23 +1392,32 @@ class RagPostgresDatabaseAuthority:
         return lease
 
 
-def _unconditional_terminal_drain(
+def _runtime_session_cleanup(
     authority: RagPostgresDatabaseAuthority,
     state: _RagPostgresEmergencyCleanupState,
-    *,
-    _seal: object,
-) -> None:
-    """Non-throwing physical drain independent of patchable cleanup hooks."""
-    if _seal is not _UNCONDITIONAL_TERMINAL_DRAIN_SEAL:
-        return
-    with suppress(BaseException):
-        authority._assembly.trusted_bootstrap._drain_registered_application_checkout(
-            state.health_capability
-        )
+) -> bool:
+    failed = False
     session = authority._assembly.session
-    with suppress(BaseException):
+    try:
         if session.in_transaction():
             session.rollback()
+    except BaseException:
+        failed = True
+    return failed
+
+
+def _runtime_application_cleanup(
+    authority: RagPostgresDatabaseAuthority,
+    state: _RagPostgresEmergencyCleanupState,
+) -> bool:
+    failed = False
+    session = authority._assembly.session
+    with suppress(BaseException):
+        failed = bool(
+            authority._assembly.trusted_bootstrap._drain_registered_application_checkout(
+                state.health_capability
+            )
+        )
     lease = state.lease
     responsibility = state.connection_responsibility
     connection = (
@@ -1417,45 +1445,120 @@ def _unconditional_terminal_drain(
         )
     )
     if connection is not None:
-        with suppress(BaseException):
-            if connection.in_transaction() or connection.in_nested_transaction():
+        try:
+            is_closed = connection.closed
+        except BaseException:
+            is_closed = False
+            failed = True
+        try:
+            if not is_closed and (
+                connection.in_transaction() or connection.in_nested_transaction()
+            ):
                 connection.rollback()
-        if owns_connection:
-            with suppress(BaseException):
+        except BaseException:
+            failed = True
+        if owns_connection and not is_closed:
+            try:
                 connection.invalidate()
-            with suppress(BaseException):
+            except BaseException:
+                failed = True
+            try:
                 connection.close()
+            except BaseException:
+                failed = True
     if original_bind is not None:
-        with suppress(BaseException):
+        try:
             session.bind = original_bind
-    with suppress(BaseException):
+        except BaseException:
+            failed = True
+    return failed
+
+
+def _runtime_advisory_cleanup(
+    authority: RagPostgresDatabaseAuthority,
+    state: _RagPostgresEmergencyCleanupState,
+) -> bool:
+    if not state.close_on_exit:
+        return False
+    failed = False
+    connections: tuple[Connection, ...] = ()
+    try:
         with authority._lifecycle_lock:
-            authority._active_leases = 0
-        authority._lease_context.set(None)
-    if state.close_on_exit:
-        connections: tuple[Connection, ...] = ()
-        with suppress(BaseException), authority._lifecycle_lock:
             connections = tuple(authority._connections)
             authority._connections.clear()
             authority._state = 'closed'
-        for advisory_connection in connections:
+    except BaseException:
+        failed = True
+    for advisory_connection in connections:
+        try:
+            is_closed = advisory_connection.closed
+        except BaseException:
+            is_closed = False
+            failed = True
+        if is_closed:
+            continue
+        try:
+            advisory_connection.invalidate()
+        except BaseException:
+            failed = True
+        try:
+            advisory_connection.close()
+        except BaseException:
+            failed = True
+    try:
+        should_dispose = not authority._transport_disposal_complete
+    except BaseException:
+        should_dispose = True
+        failed = True
+    if should_dispose:
+        try:
+            authority._assembly.dedicated_engine.dispose()
+        except BaseException:
+            failed = True
+        finally:
             with suppress(BaseException):
-                advisory_connection.invalidate()
-            with suppress(BaseException):
-                advisory_connection.close()
-        with suppress(BaseException):
-            if not authority._transport_disposal_complete:
-                try:
-                    authority._assembly.dedicated_engine.dispose()
-                finally:
-                    authority._transport_disposal_complete = True
-    with suppress(BaseException):
+                authority._transport_disposal_complete = True
+    return failed
+
+
+def _runtime_logical_cleanup(
+    authority: RagPostgresDatabaseAuthority,
+    state: _RagPostgresEmergencyCleanupState,
+) -> bool:
+    failed = False
+    try:
         with authority._lifecycle_lock:
+            authority._active_leases = 0
             if authority._emergency_cleanup_state is state:
                 authority._emergency_cleanup_state = None
             authority._cleanup_owner_capability = None
-            authority._active_leases = 0
+        authority._lease_context.set(None)
+    except BaseException:
+        failed = True
+    try:
         state.active = False
+    except BaseException:
+        failed = True
+    return failed
+
+
+def _unconditional_terminal_drain(
+    authority: RagPostgresDatabaseAuthority,
+    state: _RagPostgresEmergencyCleanupState,
+    *,
+    _seal: object,
+) -> None:
+    """Non-throwing physical drain independent of patchable cleanup hooks."""
+    if _seal is not _UNCONDITIONAL_TERMINAL_DRAIN_SEAL:
+        return
+    for cleanup_step in (
+        _runtime_session_cleanup,
+        _runtime_application_cleanup,
+        _runtime_advisory_cleanup,
+        _runtime_logical_cleanup,
+    ):
+        with suppress(BaseException):
+            cleanup_step(authority, state)
 
 
 def _bind_rag_postgres_database(

@@ -44,6 +44,7 @@ _POSTGRES_RUNTIME_HEALTH_SEAL = object()
 _POSTGRES_RUNTIME_HEALTH_LEASE_SEAL = object()
 _POSTGRES_CLEANUP_OWNER_SEAL = object()
 _POSTGRES_EMERGENCY_TRANSITION_SEAL = object()
+_POSTGRES_PHYSICAL_CLEANUP_SEAL = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,10 +92,15 @@ class _PostgresEmergencyCleanupRecord(NamedTuple):
     operation_epoch: int
     operation_purpose: str
     owner_thread_id: int
-    phase: Literal['ACTIVE', 'REVOKED'] = 'ACTIVE'
+    phase: Literal[
+        'ACTIVE',
+        'REVOKED_UNCERTAIN',
+        'REVOKED_CLEAN',
+    ] = 'ACTIVE'
     revision: int = 0
     cleanup_ticket: _PostgresRuntimeExclusiveTicket | None = None
     cleanup_generation: int | None = None
+    physical_cleanup_registered: bool = False
 
 
 class _PostgresExclusiveOwnerState(NamedTuple):
@@ -103,6 +109,14 @@ class _PostgresExclusiveOwnerState(NamedTuple):
     generation: int
     capability: _PostgresCleanupOwnerCapability
     operation_lease_id: int | None = None
+
+
+class _PostgresPhysicalCleanupResponsibility(NamedTuple):
+    operation_lease: _PostgresRuntimeHealthLease
+    authority: object
+    owner_thread_id: int
+    steps: tuple[Callable[[], bool | None], ...]
+    seal: object
 
 
 class TrustedPostgresRuntimeHealth:
@@ -126,6 +140,7 @@ class TrustedPostgresRuntimeHealth:
         '_healthy',
         '_lock',
         '_poison_requested',
+        '_physical_cleanup_responsibilities',
         '_seal',
     )
 
@@ -158,6 +173,10 @@ class TrustedPostgresRuntimeHealth:
             _PostgresEmergencyCleanupCapability,
         ] = {}
         self._poison_requested = False
+        self._physical_cleanup_responsibilities: dict[
+            int,
+            _PostgresPhysicalCleanupResponsibility,
+        ] = {}
         self._seal = _seal
 
     @property
@@ -228,7 +247,38 @@ class TrustedPostgresRuntimeHealth:
         try:
             yield lease
         finally:
+            physical: _PostgresPhysicalCleanupResponsibility | None
+            physical_valid = False
             with self._condition:
+                physical = self._physical_cleanup_responsibilities.get(id(lease))
+                if physical is not None:
+                    physical_valid = not (
+                        physical.seal is not _POSTGRES_PHYSICAL_CLEANUP_SEAL
+                        or physical.operation_lease is not lease
+                        or self._active_operation_authorities.get(id(lease))
+                        is not physical.authority
+                        or physical.owner_thread_id != get_ident()
+                    )
+            # Trusted cleanup adapters may take lifecycle/session/bootstrap locks.
+            # Never execute them while holding the runtime-health condition.
+            physical_failed = physical is not None and not physical_valid
+            if physical is not None and physical_valid:
+                for step in physical.steps:
+                    completed = False
+                    for _attempt in range(2):
+                        try:
+                            completed = not bool(step())
+                        except BaseException:
+                            completed = False
+                        if completed:
+                            break
+                    if not completed:
+                        physical_failed = True
+            with self._condition:
+                if physical is not None:
+                    self._physical_cleanup_responsibilities.pop(id(lease), None)
+                if physical_failed:
+                    self._force_fail_stop_locked()
                 capability = self._emergency_cleanup_operation_index.get(id(lease))
                 record = (
                     None
@@ -245,7 +295,10 @@ class TrustedPostgresRuntimeHealth:
                         None,
                     )
                 if record is not None and record.operation_lease is lease:
-                    if record.phase == 'ACTIVE':
+                    if (
+                        record.phase != 'REVOKED_CLEAN'
+                        or (record.physical_cleanup_registered and physical is None)
+                    ):
                         self._force_fail_stop_locked()
                     self._drain_exact_emergency_record_locked(record)
                     self._emergency_cleanup_records.pop(id(record.capability), None)
@@ -256,6 +309,42 @@ class TrustedPostgresRuntimeHealth:
                     self._active_operation_leases.pop(id(lease), None)
                     self._active_operation_authorities.pop(id(lease), None)
                 self._condition.notify_all()
+
+    def _register_physical_cleanup(
+        self,
+        operation_lease: _PostgresRuntimeHealthLease,
+        *,
+        authority: object,
+        steps: tuple[Callable[[], bool | None], ...],
+        _seal: object,
+    ) -> None:
+        with self._condition:
+            self._require_emergency_cleanup_capability(
+                self._emergency_cleanup_operation_index[id(operation_lease)],
+                authority=authority,
+            )
+            if (
+                _seal is not _POSTGRES_PHYSICAL_CLEANUP_SEAL
+                or not steps
+                or any(not callable(step) for step in steps)
+                or id(operation_lease) in self._physical_cleanup_responsibilities
+            ):
+                raise TypeError('PostgreSQL physical cleanup authority changed')
+            self._physical_cleanup_responsibilities[id(operation_lease)] = (
+                _PostgresPhysicalCleanupResponsibility(
+                    operation_lease=operation_lease,
+                    authority=authority,
+                    owner_thread_id=get_ident(),
+                    steps=steps,
+                    seal=_POSTGRES_PHYSICAL_CLEANUP_SEAL,
+                )
+            )
+            capability = self._emergency_cleanup_operation_index[id(operation_lease)]
+            record = self._emergency_cleanup_records[id(capability)]
+            self._emergency_cleanup_records[id(capability)] = record._replace(
+                revision=record.revision + 1,
+                physical_cleanup_registered=True,
+            )
 
     @contextmanager
     def _guard(self, lease: _PostgresRuntimeHealthLease):
@@ -636,21 +725,31 @@ class TrustedPostgresRuntimeHealth:
     ) -> None:
         record = self._emergency_cleanup_record(capability)
         self._emergency_cleanup_transition_checkpoint(
-            'before_revoke_phase_publication'
+            'before_revoke_uncertain_publication'
         )
         phased = record._replace(
-            phase='REVOKED',
+            phase='REVOKED_UNCERTAIN',
             revision=record.revision + 1,
         )
         self._emergency_cleanup_records[id(capability)] = phased
-        self._emergency_cleanup_transition_checkpoint('after_revoke_phase_publication')
+        self._emergency_cleanup_transition_checkpoint(
+            'after_revoke_uncertain_publication'
+        )
         self._drain_exact_emergency_record_locked(phased)
-        self._emergency_cleanup_records[id(capability)] = phased._replace(
+        self._emergency_cleanup_transition_checkpoint('after_revoke_resource_drain')
+        self._emergency_cleanup_transition_checkpoint(
+            'before_revoke_clean_attestation'
+        )
+        clean = phased._replace(
+            phase='REVOKED_CLEAN',
             revision=phased.revision + 1,
             cleanup_ticket=None,
             cleanup_generation=None,
         )
-        self._emergency_cleanup_operation_index.pop(id(record.operation_lease), None)
+        self._emergency_cleanup_records[id(capability)] = clean
+        self._emergency_cleanup_transition_checkpoint(
+            'after_revoke_clean_attestation'
+        )
         self._condition.notify_all()
 
     def _drain_exact_emergency_record_locked(
@@ -693,7 +792,8 @@ class TrustedPostgresRuntimeHealth:
             if (
                 record is None
                 or record.capability is not capability
-                or record.phase != 'REVOKED'
+                or record.phase
+                not in {'REVOKED_UNCERTAIN', 'REVOKED_CLEAN'}
                 or record.authority is not authority
                 or record.owner_thread_id != get_ident()
                 or self._active_operation_leases.get(id(record.operation_lease))
@@ -704,19 +804,34 @@ class TrustedPostgresRuntimeHealth:
                 is not authority
             ):
                 raise TypeError('PostgreSQL emergency cleanup disposition changed')
-            self._drain_exact_emergency_record_locked(record)
-            self._emergency_cleanup_records[id(capability)] = record._replace(
-                revision=record.revision + 1,
-                cleanup_ticket=None,
-                cleanup_generation=None,
-            )
-            self._emergency_cleanup_operation_index.pop(
-                id(record.operation_lease),
-                None,
-            )
+            if record.phase == 'REVOKED_UNCERTAIN':
+                self._drain_exact_emergency_record_locked(record)
+                record = record._replace(
+                    phase='REVOKED_CLEAN',
+                    revision=record.revision + 1,
+                    cleanup_ticket=None,
+                    cleanup_generation=None,
+                )
+                self._emergency_cleanup_records[id(capability)] = record
             if poison:
                 self._force_fail_stop_locked()
             self._condition.notify_all()
+
+    def _emergency_cleanup_is_clean(
+        self,
+        capability: object,
+        *,
+        authority: object,
+    ) -> bool:
+        with self._condition:
+            try:
+                record = self._require_emergency_cleanup_capability_any_phase(
+                    capability,
+                    authority=authority,
+                )
+            except BaseException:
+                return False
+            return record.phase == 'REVOKED_CLEAN'
 
     def _require_emergency_cleanup_capability(
         self,
@@ -743,6 +858,37 @@ class TrustedPostgresRuntimeHealth:
             is not record.authority
         ):
             raise TypeError('PostgreSQL emergency cleanup capability changed')
+
+    def _require_emergency_cleanup_capability_any_phase(
+        self,
+        capability: object,
+        *,
+        authority: object | None = None,
+    ) -> _PostgresEmergencyCleanupRecord:
+        """Validate an exact still-owned operation during terminal cleanup."""
+        record = (
+            None
+            if type(capability) is not _PostgresEmergencyCleanupCapability
+            else self._emergency_cleanup_records.get(id(capability))
+        )
+        if (
+            record is None
+            or record.capability is not capability
+            or record.phase
+            not in {'ACTIVE', 'REVOKED_UNCERTAIN', 'REVOKED_CLEAN'}
+            or (authority is not None and record.authority is not authority)
+            or record.owner_thread_id != get_ident()
+            or record.operation_lease._seal
+            is not _POSTGRES_RUNTIME_HEALTH_LEASE_SEAL
+            or record.operation_lease.health is not self
+            or not record.operation_lease.active
+            or self._active_operation_leases.get(id(record.operation_lease))
+            is not record.operation_lease
+            or self._active_operation_authorities.get(id(record.operation_lease))
+            is not record.authority
+        ):
+            raise TypeError('PostgreSQL emergency cleanup capability changed')
+        return record
 
     def _emergency_cleanup_capability_is_active(
         self,
@@ -1045,12 +1191,15 @@ class _TrustedApplicationCheckoutRegistry:
     """Pool-local ownership tracker; callbacks never acquire health locks."""
 
     __slots__ = (
+        '_callback_depths',
         '_captured',
+        '_close_owner_thread_id',
         '_condition',
         '_engine',
         '_listeners',
         '_lock',
         '_pending',
+        '_remaining_listeners',
         '_runtime_health',
         '_state',
     )
@@ -1065,10 +1214,12 @@ class _TrustedApplicationCheckoutRegistry:
         self._lock = RLock()
         self._condition = Condition(self._lock)
         self._runtime_health = runtime_health
+        self._callback_depths: dict[int, int] = {}
+        self._close_owner_thread_id: int | None = None
         self._pending: dict[int, _PostgresEmergencyCleanupCapability] = {}
         self._captured: dict[
             int,
-            tuple[object, object],
+            tuple[object, object, int],
         ] = {}
         self._state: Literal['open', 'closing', 'closed'] = 'open'
 
@@ -1077,27 +1228,56 @@ class _TrustedApplicationCheckoutRegistry:
             connection_record: object,
             connection_proxy: object,
         ) -> None:
+            thread_id = get_ident()
             with self._condition:
-                if self._state == 'closed':
-                    return
-                capability = self._pending.get(get_ident())
-                if capability is not None:
-                    self._captured[id(capability)] = (
-                        connection_proxy,
-                        connection_record,
-                    )
-                self._condition.notify_all()
+                self._callback_depths[thread_id] = (
+                    self._callback_depths.get(thread_id, 0) + 1
+                )
+            try:
+                with self._condition:
+                    if self._state == 'closed':
+                        return
+                    capability = self._pending.get(thread_id)
+                    if capability is not None:
+                        self._captured[id(capability)] = (
+                            connection_proxy,
+                            connection_record,
+                            thread_id,
+                        )
+                    self._condition.notify_all()
+            finally:
+                with self._condition:
+                    depth = self._callback_depths.get(thread_id, 0)
+                    if depth <= 1:
+                        self._callback_depths.pop(thread_id, None)
+                    else:
+                        self._callback_depths[thread_id] = depth - 1
+                    self._condition.notify_all()
 
         def on_return(
             _dbapi_connection: object,
             connection_record: object,
             *_args: object,
         ) -> None:
+            thread_id = get_ident()
             with self._condition:
-                for capability_id, captured in tuple(self._captured.items()):
-                    if captured[1] is connection_record:
-                        self._captured.pop(capability_id, None)
-                self._condition.notify_all()
+                self._callback_depths[thread_id] = (
+                    self._callback_depths.get(thread_id, 0) + 1
+                )
+            try:
+                with self._condition:
+                    for capability_id, captured in tuple(self._captured.items()):
+                        if captured[1] is connection_record:
+                            self._captured.pop(capability_id, None)
+                    self._condition.notify_all()
+            finally:
+                with self._condition:
+                    depth = self._callback_depths.get(thread_id, 0)
+                    if depth <= 1:
+                        self._callback_depths.pop(thread_id, None)
+                    else:
+                        self._callback_depths[thread_id] = depth - 1
+                    self._condition.notify_all()
 
         listeners = (
             (engine.pool, 'checkout', on_checkout),
@@ -1105,6 +1285,7 @@ class _TrustedApplicationCheckoutRegistry:
             (engine.pool, 'invalidate', on_return),
         )
         self._listeners = listeners
+        self._remaining_listeners = list(listeners)
         installed: list[tuple[object, str, object]] = []
         try:
             for target, identifier, callback in listeners:
@@ -1195,19 +1376,75 @@ class _TrustedApplicationCheckoutRegistry:
             failed = True
         return failed
 
-    def revoke(self) -> None:
+    def revoke(self) -> bool:
+        thread_id = get_ident()
         with self._condition:
+            while self._close_owner_thread_id is not None:
+                if self._close_owner_thread_id == thread_id:
+                    self._state = 'closing'
+                    self._fail_stop_runtime()
+                    return False
+                try:
+                    self._condition.wait()
+                except BaseException:
+                    self._condition.notify_all()
+                    self._fail_stop_runtime()
+                    raise
             if self._state == 'closed':
-                return
+                return True
             self._state = 'closing'
-            while self._pending or self._captured:
-                self._condition.wait()
-        removal_failed = self._remove_listeners(tuple(reversed(self._listeners)))
+            self._close_owner_thread_id = thread_id
+            deferred = (
+                self._pending.get(thread_id) is not None
+                or any(
+                    captured[2] == thread_id
+                    for captured in self._captured.values()
+                )
+                or self._callback_depths.get(thread_id, 0) > 0
+            )
+            if not deferred:
+                try:
+                    while self._pending or self._captured or self._callback_depths:
+                        self._condition.wait()
+                except BaseException:
+                    self._close_owner_thread_id = None
+                    self._condition.notify_all()
+                    self._fail_stop_runtime()
+                    raise
+        if deferred:
+            with self._condition:
+                self._close_owner_thread_id = None
+                self._condition.notify_all()
+                self._fail_stop_runtime()
+            return False
+        removal_error: BaseException | None = None
+        removal_uncertain = False
+        for listener in tuple(reversed(self._remaining_listeners)):
+            target, identifier, callback = listener
+            try:
+                event.remove(target, identifier, callback)
+            except BaseException as exc:
+                removal_uncertain = True
+                try:
+                    removed = not event.contains(target, identifier, callback)
+                except BaseException:
+                    removed = False
+                if removed:
+                    self._remaining_listeners.remove(listener)
+                removal_error = exc
+                break
+            else:
+                self._remaining_listeners.remove(listener)
         with self._condition:
-            self._state = 'closed'
+            if not self._remaining_listeners:
+                self._state = 'closed'
+            self._close_owner_thread_id = None
             self._condition.notify_all()
-        if removal_failed:
+        if removal_uncertain:
             self._fail_stop_runtime()
+        if removal_error is not None:
+            raise removal_error
+        return self._state == 'closed'
 
     def _remove_listeners(
         self,
@@ -1313,7 +1550,9 @@ class TrustedPostgresEngineBootstrap:
     ) -> bool:
         """Physically discard a checkout whose Connection was never exposed."""
         try:
-            self._runtime_health._require_emergency_cleanup_capability(capability)
+            self._runtime_health._require_emergency_cleanup_capability_any_phase(
+                capability
+            )
         except BaseException:
             return True
         return self._checkout_registry.drain(capability)
@@ -1379,10 +1618,10 @@ class TrustedPostgresEngineBootstrap:
                 raise TypeError('PostgreSQL Engine bootstrap authority changed')
             return self._runtime_health
 
-    def _revoke(self) -> None:
+    def _revoke(self) -> bool:
         with self._state_lock:
             self._revoked = True
-        self._checkout_registry.revoke()
+        return self._checkout_registry.revoke()
 
 def _is_database_availability_error(error: Exception) -> bool:
     if isinstance(error, (ModuleNotFoundError, ImportError, OSError)):
@@ -1408,19 +1647,67 @@ class DatabaseRuntime:
         default=None,
         repr=False,
     )
-    _dispose_attempted: bool = field(default=False, init=False, repr=False)
+    _dispose_condition: Condition = field(init=False, repr=False)
+    _dispose_lock: object = field(default_factory=RLock, init=False, repr=False)
+    _dispose_owner_thread_id: int | None = field(default=None, init=False, repr=False)
+    _dispose_state: Literal[
+        'OPEN',
+        'IN_PROGRESS',
+        'RETRY_REQUIRED',
+        'DONE',
+    ] = field(default='OPEN', init=False)
+    _engine_disposed: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._dispose_condition = Condition(self._dispose_lock)  # type: ignore[arg-type]
 
     def dispose(self) -> None:
-        if self._dispose_attempted:
-            return
-        self._dispose_attempted = True
-        if self.rag_postgres_bootstrap is not None:
-            self.rag_postgres_bootstrap._revoke()
+        thread_id = get_ident()
+        with self._dispose_condition:
+            while self._dispose_state == 'IN_PROGRESS':
+                if self._dispose_owner_thread_id == thread_id:
+                    self._dispose_state = 'RETRY_REQUIRED'
+                    self._dispose_condition.notify_all()
+                    return
+                self._dispose_condition.wait()
+            if self._dispose_state == 'DONE':
+                return
+            self._dispose_state = 'IN_PROGRESS'
+            self._dispose_owner_thread_id = thread_id
+        try:
+            if (
+                self.rag_postgres_bootstrap is not None
+                and not self.rag_postgres_bootstrap._revoke()
+            ):
+                with self._dispose_condition:
+                    self._dispose_state = 'RETRY_REQUIRED'
+                return
+        except BaseException:
+            with self._dispose_condition:
+                self._dispose_state = 'RETRY_REQUIRED'
+            raise
+        finally:
+            with self._dispose_condition:
+                if self._dispose_state != 'IN_PROGRESS':
+                    self._dispose_owner_thread_id = None
+                    self._dispose_condition.notify_all()
+        with self._dispose_condition:
+            if self._engine_disposed:
+                self._dispose_state = 'DONE'
+                self._dispose_owner_thread_id = None
+                self._dispose_condition.notify_all()
+                return
         cleanup_failure: Exception | None = None
         try:
             self.engine.dispose()
         except Exception as error:
             cleanup_failure = error
+        finally:
+            with self._dispose_condition:
+                self._engine_disposed = True
+                self._dispose_state = 'DONE'
+                self._dispose_owner_thread_id = None
+                self._dispose_condition.notify_all()
         if cleanup_failure is None:
             return
         if _is_database_availability_error(cleanup_failure):

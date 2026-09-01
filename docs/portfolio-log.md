@@ -5887,3 +5887,33 @@ Cost/security note:
   is `934 passed, 16 skipped, 2128 deselected`. Real PostgreSQL remains
   URL-gated and unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate
   only; no `CLEAN` claim and Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 eighteenth rereview candidate
+
+- The seventeenth independent rereview kept Task 13 open on sticky cleanup
+  disposition, retryable checkout-tracker shutdown, and ownership of the final
+  physical cleanup fallback. Task 14 remains blocked.
+- Emergency cleanup now progresses through immutable `ACTIVE ->
+  REVOKED_UNCERTAIN -> REVOKED_CLEAN` records. The exact operation index stays
+  live until operation exit, and only a clean attestation may retire without a
+  new fail-stop. Earlier publication/drain faults remain sticky and preserve the
+  durable result or original validation, cancellation, or commit-unknown
+  outcome.
+- The trusted runtime owns a sealed per-operation cleanup responsibility before
+  application checkout or advisory effects. It captures fixed cleanup adapters
+  by value, runs each bounded resource drain outside the health-condition lock,
+  and retires the Session, application checkout, advisory connections,
+  dedicated engine, ContextVar, and authority state even if both ordinary RAG
+  cleanup paths are replaced by persistent faults.
+- The checkout tracker has a retryable `open -> closing -> closed` lifecycle
+  with an exact close owner and callback-depth tracking. Same-owner disposal
+  from a checkout callback defers without deadlock; foreign closure waits;
+  listener-removal cancellation leaves a retryable obligation. Database runtime
+  disposal reaches `DONE` only after tracker closure and application-engine
+  disposal.
+- RED was `26 failed, 166 deselected`. Targeted GREEN is `28 passed, 166
+  deselected`; binding is `194 passed`; database initialization is `68 passed,
+  10 deselected` plus the isolated-import cohort `10 passed`; broad affected is
+  `946 passed, 16 skipped, 2144 deselected`. The skipped real-PostgreSQL gates
+  remain unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a
+  rereview candidate only, not `CLEAN`; Task 14 remains blocked.
