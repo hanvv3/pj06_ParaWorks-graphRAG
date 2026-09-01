@@ -68,6 +68,26 @@ TERMINAL_SOURCE_WINDOWS = (
     'rag-v2:final-error:search:keyword', 'rag-v2:final-error:search:pgvector',
     'rag-v2:final-error:assistant:keyword', 'rag-v2:final-error:assistant:pgvector',
 )
+
+
+def admission_source_window(*, mode: str, surface: str, backend: str) -> str:
+    candidate = f'rag-v2:admission:{mode}:{surface}:{backend}'
+    if candidate not in ADMISSION_SOURCE_WINDOWS:
+        raise ValueError('RAG admission source window is invalid')
+    return candidate
+
+
+def terminal_source_window(*, stage: str, surface: str, backend: str) -> str:
+    prefixes = {
+        'product': 'rag-v2',
+        'shadow': 'rag-v2:shadow',
+        'final_error': 'rag-v2:final-error',
+    }
+    prefix = prefixes.get(stage)
+    candidate = '' if prefix is None else f'{prefix}:{surface}:{backend}'
+    if candidate not in TERMINAL_SOURCE_WINDOWS:
+        raise ValueError('RAG terminal source window is invalid')
+    return candidate
 RagTerminalSourceWindow: TypeAlias = Literal[
     'rag-v2:ask:keyword', 'rag-v2:ask:pgvector',
     'rag-v2:search:keyword', 'rag-v2:search:pgvector',

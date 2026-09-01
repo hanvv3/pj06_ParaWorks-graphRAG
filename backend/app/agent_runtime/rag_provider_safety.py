@@ -18,6 +18,8 @@ from backend.app.agent_runtime.durable_file_authority import DurableFileAuthorit
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
 from backend.app.agent_runtime.rag_advisory_locks import (
     RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
+    RagLockOrderCapability,
+    RagLockOrderCoordinator,
     RegisteredAdvisoryLock,
     acquire_advisory_lock,
     release_advisory_lock,
@@ -1073,6 +1075,40 @@ class RagProviderSafetyService:
             policy_snapshot,
             expected_binding=expected_binding,
         )
+
+    @contextmanager
+    def dispatch_barrier(
+        self,
+        connection: Connection,
+        component: RagPaidComponent,
+        policy_snapshot: AuthorizedProviderPolicySnapshot,
+        *,
+        expected_binding: RagProviderSafetyBinding,
+        order: RagLockOrderCoordinator,
+        sidecar_capability: RagLockOrderCapability,
+        safety_capability: RagLockOrderCapability,
+    ) -> Iterator[None]:
+        """Hold stable sidecar and registered DB authority through one send."""
+        order.require(sidecar_capability, stage='provider_stable_sidecar')
+        order.require(safety_capability, stage='provider_safety_rows')
+        with self._authority.locked(), self._registered_advisory(connection):
+            before = self._binding(
+                connection,
+                self._read_unlocked(),
+                component,
+                policy_snapshot,
+            )
+            if before != expected_binding:
+                raise RagProviderSafetyError('provider safety binding changed')
+            yield
+            after = self._binding(
+                connection,
+                self._read_unlocked(),
+                component,
+                policy_snapshot,
+            )
+            if after != expected_binding:
+                raise RagProviderSafetyError('provider safety binding changed')
 
     def _blocker_agent_run_hmac(self, agent_run_id: int) -> str:
         return rag_identity_hmac(

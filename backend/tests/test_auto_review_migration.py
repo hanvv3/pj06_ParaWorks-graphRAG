@@ -47,7 +47,7 @@ from backend.app.models import (
     TrustedKnowledgeEvidenceLink,
 )
 
-REVISION = 'f3c4d5e6a7b8'
+REVISION = 'a4d5e6f7b8c9'
 TASK2_REVISION = '7c5a2e9f4b10'
 PREVIOUS_REVISION = '2f6a8b9c0d1e'
 PROVIDER_OVERRIDE_UNSET = object()

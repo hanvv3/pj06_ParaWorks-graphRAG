@@ -668,6 +668,97 @@ def _create_rag_cost_policy_type(
             require_same_state(self, state, code)
             return result
 
+        def usage_exceeds_authorized_cap(
+            self,
+            component: RagPaidComponent,
+            usage: StrictProviderUsage,
+        ) -> bool:
+            selected = _exact_component(component)
+            code = (
+                'retriever_not_configured'
+                if selected == 'query_embedding'
+                else 'model_unavailable'
+            )
+            state = get_state(self, code)
+            strict_usage = validate_strict_provider_usage(usage)
+            authority = state.authority
+            result = (
+                (
+                    strict_usage.input_tokens > authority.max_query_tokens
+                    or strict_usage.output_tokens != 0
+                )
+                if selected == 'query_embedding'
+                else (
+                    strict_usage.input_tokens > authority.max_answer_input_tokens
+                    or strict_usage.output_tokens > authority.max_answer_output_tokens
+                )
+            )
+            require_same_state(self, state, code)
+            return result
+
+        def validate_prepared_budget(
+            self,
+            prepared: PreparedPaidCallBudget,
+        ) -> None:
+            if type(prepared) is not PreparedPaidCallBudget:
+                raise ValueError('RAG prepared budget is invalid')
+            selected = _exact_component(prepared.component)
+            code = (
+                'retriever_not_configured'
+                if selected == 'query_embedding'
+                else 'model_unavailable'
+            )
+            state = get_state(self, code)
+            expected_policy = (
+                state.query_policy_hmac
+                if selected == 'query_embedding'
+                else state.answer_policy_hmac
+            )
+            authority = state.authority
+            if (
+                not is_lower_hex_64(prepared.cost_policy_snapshot_hmac)
+                or not hmac.compare_digest(
+                    prepared.cost_policy_snapshot_hmac,
+                    expected_policy,
+                )
+                or not is_lower_hex_64(prepared.estimator_input_hmac)
+                or type(prepared.estimated_input_tokens) is not int
+                or prepared.estimated_input_tokens < 0
+                or type(prepared.maximum_output_tokens) is not int
+                or prepared.maximum_output_tokens < 0
+                or selected == 'query_embedding'
+                and prepared.maximum_output_tokens != 0
+                or selected == 'query_embedding'
+                and prepared.estimated_input_tokens > authority.max_query_tokens
+                or selected == 'answer_generation'
+                and prepared.estimated_input_tokens > authority.max_answer_input_tokens
+                or selected == 'answer_generation'
+                and prepared.maximum_output_tokens > authority.max_answer_output_tokens
+            ):
+                raise ValueError('RAG prepared budget is invalid')
+            expected = _rounded_cost(
+                input_tokens=prepared.estimated_input_tokens,
+                output_tokens=prepared.maximum_output_tokens,
+                input_price=(
+                    authority.query_input_usd_per_1m
+                    if selected == 'query_embedding'
+                    else authority.answer_input_usd_per_1m
+                ),
+                output_price=(
+                    Decimal('0.000000')
+                    if selected == 'query_embedding'
+                    else authority.answer_output_usd_per_1m
+                ),
+                authority=authority,
+            )
+            if (
+                type(prepared.reserved_cost_usd) is not Decimal
+                or prepared.reserved_cost_usd != expected
+                or expected > authority.component_ceiling_usd
+            ):
+                raise ValueError('RAG prepared budget is invalid')
+            require_same_state(self, state, code)
+
         def sign_answer_artifact(self, kind: str, payload: object) -> str:
             code = 'model_unavailable'
             state = get_state(self, code)

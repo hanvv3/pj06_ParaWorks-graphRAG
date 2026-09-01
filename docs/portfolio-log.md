@@ -1,10 +1,33 @@
 # ParaWorks Portfolio Log
 
-Last updated: 2026-08-31
+Last updated: 2026-09-01
 
 This document records ParaWorks work in a portfolio-friendly format. Keep adding
 short entries here whenever the product, architecture, UX, verification, or
 demo story changes.
+
+## 2026-09-01 Deliverable D provider dispatch and accounting authority
+
+- Replaced caller-supplied RAG pricing/safety callbacks with the frozen cost
+  policy and concrete durable provider-safety authority. The exact outcome
+  matrix now controls actual versus reserve charge, remediation/overrun, zero-
+  charge pre-send refusal, sibling closure, pending projection, and crash
+  recovery without redispatch.
+- Provider request bytes are canonical and server-built. A store-owned client
+  capability and opaque one-use dispatch bind target/config/query/evidence,
+  rendered input, dispatch fence, and provider safety. Preparation or pre-send
+  refusal atomically closes the committed claim; retries/tracing are disabled
+  and sensitive bodies or provider exceptions do not cross the boundary.
+- The executable lock-order capabilities are now required by every real
+  safety, projection, evidence/C.5, cost, and client acquisition. Provider
+  sidecar and database safety authority remain continuously locked through the
+  send and post-response recheck. Reviewed crash recovery requires a signed
+  dead-process attestation and preserves any prior actual charge.
+- Added the reversible `a4d5e6f7b8c9` lifecycle revision, closed cumulative
+  stage/surface/context routing, typed identity goldens, and disposable-
+  PostgreSQL gates. Fresh affected verification is `596 passed, 9 skipped`;
+  PostgreSQL was not configured, so those gates were not claimed. No paid/
+  provider/network/Docker/`.env` access occurred.
 
 ## 2026-08-31 Deliverable D Core implementation plan
 

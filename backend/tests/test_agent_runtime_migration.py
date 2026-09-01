@@ -19,7 +19,7 @@ from sqlalchemy.engine import Engine
 
 from backend.app.core.config import get_settings
 
-REVISION = 'f3c4d5e6a7b8'
+REVISION = 'a4d5e6f7b8c9'
 RUNTIME_REVISION = '2f6a8b9c0d1e'
 PREVIOUS_REVISION = 'b4b6d9f4d3e1'
 

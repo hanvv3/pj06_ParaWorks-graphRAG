@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
+from typing import Literal
 
 from sqlalchemy import Connection, insert, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -14,6 +15,10 @@ from backend.app.models.rag_runtime import RagAdvisoryLockKey
 
 class AdvisoryLockCollisionError(RuntimeError):
     pass
+
+
+class RagLockOrderError(RuntimeError):
+    """A required RAG authority was acquired outside the frozen order."""
 
 
 _CAPABILITY_SEAL = object()
@@ -64,6 +69,74 @@ LIVE_RELEASE_LOCK_ORDER = (
     'agent_run_cost',
     'optional_assistant',
 )
+_ORDER_CAPABILITY_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True)
+class RagLockOrderCapability:
+    path: Literal['ordinary', 'live_release']
+    stage: str
+    ordinal: int
+    _coordinator: object = field(repr=False, compare=False)
+    _seal: object = field(repr=False, compare=False)
+
+
+class RagLockOrderCoordinator:
+    """Issues non-forgeable stage capabilities in the one audited order."""
+
+    __slots__ = ('_next', '_order', '_path')
+
+    def __init__(
+        self,
+        path: Literal['ordinary', 'live_release'],
+        order: tuple[str, ...],
+    ) -> None:
+        self._path = path
+        self._order = order
+        self._next = 0
+
+    def acquire(self, stage: str) -> RagLockOrderCapability:
+        if self._next >= len(self._order):
+            raise RagLockOrderError('RAG lock order is already complete')
+        expected = self._order[self._next]
+        if stage != expected:
+            raise RagLockOrderError(
+                f'RAG lock order expected {expected}, received {stage}'
+            )
+        capability = RagLockOrderCapability(
+            path=self._path,
+            stage=stage,
+            ordinal=self._next,
+            _coordinator=self,
+            _seal=_ORDER_CAPABILITY_SEAL,
+        )
+        self._next += 1
+        return capability
+
+    def require(self, capability: object, *, stage: str) -> None:
+        if (
+            type(capability) is not RagLockOrderCapability
+            or capability._seal is not _ORDER_CAPABILITY_SEAL
+            or capability._coordinator is not self
+            or capability.path != self._path
+            or capability.stage != stage
+            or capability.ordinal >= self._next
+        ):
+            raise RagLockOrderError('RAG lock-order capability is invalid')
+
+    def finish(self) -> None:
+        if self._next != len(self._order):
+            raise RagLockOrderError('RAG lock order is incomplete')
+
+
+def begin_rag_lock_order(
+    path: Literal['ordinary', 'live_release'],
+) -> RagLockOrderCoordinator:
+    if path == 'ordinary':
+        return RagLockOrderCoordinator(path, ORDINARY_RAG_LOCK_ORDER)
+    if path == 'live_release':
+        return RagLockOrderCoordinator(path, LIVE_RELEASE_LOCK_ORDER)
+    raise ValueError('RAG lock-order path is invalid')
 RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID = {
     'lock_name': 'provider_safety_authority',
     'scope': 'database',

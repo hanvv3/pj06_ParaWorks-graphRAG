@@ -1,6 +1,31 @@
 # ParaWorks Harness Session Handoff
 
-Updated: 2026-08-31
+Updated: 2026-09-01
+
+## 2026-09-01 Deliverable D Task 12 dispatch/accounting closure
+
+- Task 12 now composes `RagCostLedger` with the exact frozen `RagCostPolicy`
+  and concrete `RagProviderSafetyService`; do not restore public actual-cost or
+  safety-action callbacks. Safety mutation/revalidation completes before the
+  component terminal ledger write.
+- Provider dispatch uses `RagProviderDispatchAuthority`: callers supply typed
+  server inputs, never serialized request bytes, provider clients, or per-call
+  send/evidence/safety callbacks. The ledger owns the client capability. The
+  authority server-builds canonical bytes and consumes its opaque prepared
+  state once inside the continuous provider-safety, projection-owner, and
+  evidence/C.5 barriers. Every real acquisition requires its exact order
+  capability.
+- Recovery is fail-closed and never redispatches. Dead dispatch becomes
+  `abandoned_unknown` admission-only while preserving prior actual/reserve;
+  pending projection recovery requires the exact owner fence and ends as
+  `persistence_failed` final.
+- The additive `a4d5e6f7b8c9` head corrects pending-projection null outcome and
+  permits the frozen reviewed inter-component admission-only recovery shape.
+  Do not remove it or point head back to `f3c4d5e6a7b8`.
+- Fresh affected Task 12/RAG V2 verification: `596 passed, 9 skipped`; Ruff,
+  compile/import, diff, and changed-lines secret scan are green. The disposable
+  PostgreSQL URL was absent, so its executable gates remain a release blocker,
+  not claimed execution. No Docker/network/provider/paid/`.env` access.
 
 ## 2026-08-31 Deliverable D Core implementation plan
 

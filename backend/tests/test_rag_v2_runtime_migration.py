@@ -33,7 +33,8 @@ from backend.app.models.rag_runtime import RagProviderSafetyTransition
 from backend.tests.test_rag_v2_costs import _snapshot
 
 REVISION = 'e2b3c4d5f6a7'
-HEAD_REVISION = 'f3c4d5e6a7b8'
+TRANSITION_REVISION = 'f3c4d5e6a7b8'
+HEAD_REVISION = 'a4d5e6f7b8c9'
 PREVIOUS_REVISION = 'd1a2b3c4e5f6'
 MIGRATION_PATH = Path(
     'backend/migrations/versions/e2b3c4d5f6a7_add_rag_runtime_safety.py'
@@ -103,7 +104,7 @@ def test_second_d_revision_has_exact_chain_and_postgresql_guard_installers() -> 
 
 def test_transition_generation_guard_revision_has_exact_chain_and_constraint() -> None:
     migration = _load_transition_guard_migration_module()
-    assert migration.revision == HEAD_REVISION
+    assert migration.revision == TRANSITION_REVISION
     assert migration.down_revision == REVISION
     assert migration.CONSTRAINT_NAME == (
         'ck_rag_provider_safety_transition_bootstrap_generation'
@@ -113,6 +114,18 @@ def test_transition_generation_guard_revision_has_exact_chain_and_constraint() -
         'readiness_id IS NULL) OR '
         "(global_safety_generation > 0 AND transition_kind <> 'bootstrap')"
     )
+
+
+def test_pending_lifecycle_revision_restores_frozen_null_outcome_contract() -> None:
+    path = Path(
+        'backend/migrations/versions/'
+        'a4d5e6f7b8c9_align_rag_pending_lifecycle.py'
+    )
+    source = path.read_text(encoding='utf-8')
+    assert "down_revision = 'f3c4d5e6a7b8'" in source
+    assert "pending_requires_null=True" in source
+    assert "admission_requires_abandoned=False" in source
+    assert "parent_outcome {pending_outcome}" in source
 
 
 def test_sqlite_head_upgrade_is_additive_and_leaves_historical_rows_null(

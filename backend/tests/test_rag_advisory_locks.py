@@ -11,8 +11,10 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
     RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
     AdvisoryLockCollisionError,
+    RagLockOrderError,
     acquire_advisory_lock,
     advisory_int4_pair,
+    begin_rag_lock_order,
     load_registered_advisory_capability,
     register_advisory_identity,
     register_advisory_identity_db,
@@ -86,6 +88,26 @@ def test_global_lock_orders_are_executable_exact_contracts():
         'agent_run_cost',
         'optional_assistant',
     )
+
+    ordinary = begin_rag_lock_order('ordinary')
+    for stage in ORDINARY_RAG_LOCK_ORDER:
+        capability = ordinary.acquire(stage)
+        assert capability.stage == stage
+        assert capability.path == 'ordinary'
+    ordinary.finish()
+
+
+def test_global_lock_order_capabilities_reject_skip_reverse_and_cross_path():
+    ordinary = begin_rag_lock_order('ordinary')
+    with pytest.raises(RagLockOrderError, match='expected provider_stable_sidecar'):
+        ordinary.acquire('provider_safety_rows')
+    first = ordinary.acquire('provider_stable_sidecar')
+    with pytest.raises(RagLockOrderError):
+        ordinary.acquire('provider_stable_sidecar')
+    with pytest.raises(RagLockOrderError):
+        ordinary.require(first, stage='release_rows')
+    with pytest.raises(RagLockOrderError, match='incomplete'):
+        ordinary.finish()
 
 
 def test_db_registration_never_commits_or_rolls_back_callers_transaction():

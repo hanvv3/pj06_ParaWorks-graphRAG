@@ -167,6 +167,22 @@ def test_cost_policy_exposes_only_fail_closed_answer_influence_verification() ->
         policy.verify_answer_model_influence((), ())
 
 
+def test_cost_policy_validates_the_exact_frozen_prepared_budget() -> None:
+    policy = _policy()
+    prepared = policy.prepare_query_embedding(QueryEmbeddingCostInput(
+        retrieval_query_utf8='검증할 질문'.encode(),
+        model_config_snapshot_hmac=(
+            policy.query_embedding_model_config_snapshot_hmac
+        ),
+    ))
+
+    policy.validate_prepared_budget(prepared)
+    with pytest.raises(ValueError, match='prepared budget'):
+        policy.validate_prepared_budget(
+            replace(prepared, reserved_cost_usd=Decimal('0.000000'))
+        )
+
+
 def test_answer_influence_verifier_retains_no_unrelated_provider_secrets(
     monkeypatch,
 ) -> None:
