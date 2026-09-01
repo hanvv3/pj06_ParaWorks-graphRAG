@@ -240,7 +240,7 @@ def test_fresh_retrieval_drift_commits_safe_outcome_with_zero_dispatch(
         assert db.scalar(select(func.count()).select_from(AgentRunCostComponent)) == 2
 
 
-def test_assistant_product_and_all_model_dependencies_commit_together(
+def test_unsealed_substantive_answer_is_rejected_before_any_mutation(
     tmp_path: Path,
 ) -> None:
     db_path = (tmp_path / 'assistant.db').absolute()
@@ -333,43 +333,29 @@ def test_assistant_product_and_all_model_dependencies_commit_together(
             answer_model_config_snapshot_hmac='e' * 64,
         )
 
-    record = SQLiteRagSmokeCoordinator(
-        engine=engine, database_path=db_path, settings=settings
-    ).run_keyword(
-        prepared,
-        assistant_target=AssistantProjectionTarget(
-            conversation_id=conversation_id,
-            user_message_id=user_message_id,
-            owner_user_id='user-1',
-        ),
-    )
+    with pytest.raises(SQLiteRagSmokeUnavailable, match='sealed.*authority'):
+        SQLiteRagSmokeCoordinator(
+            engine=engine, database_path=db_path, settings=settings
+        ).run_keyword(
+            prepared,
+            assistant_target=AssistantProjectionTarget(
+                conversation_id=conversation_id,
+                user_message_id=user_message_id,
+                owner_user_id='user-1',
+            ),
+        )
 
     with Session(engine) as db:
-        message = db.get(AssistantMessage, record.assistant_message_id)
-        assert message is not None
-        assert message.content_write_mode == 'rag_v2_exact'
-        assert message.content == 'Trusted fact.'
-        parent = db.get(AgentRun, record.parent_agent_run_id)
-        assert parent is not None
-        assert message.linked_agent_run_id == record.parent_agent_run_id
-        assert message.agent_run_id == record.parent_agent_run_id
-        assert message.rag_result_hmac == parent.metadata_['rag_result_hmac']
-        dependencies = tuple(
-            db.scalars(
-                select(AssistantMessageEvidenceDependency)
-                .where(
-                    AssistantMessageEvidenceDependency.assistant_message_id
-                    == message.id
-                )
-                .order_by(AssistantMessageEvidenceDependency.candidate_ordinal)
-            )
-        )
-        assert [row.dependency_role for row in dependencies] == [
-            'selected_citation',
-            'unselected_model_influence',
-        ]
-        assert db.scalar(select(func.count()).select_from(AgentRun)) == 1
-        assert db.scalar(select(func.count()).select_from(AgentRunCostComponent)) == 2
+        assert db.scalar(select(func.count()).select_from(AgentRun)) == 0
+        assert db.scalar(select(func.count()).select_from(AgentRunCostComponent)) == 0
+        assert db.scalar(
+            select(func.count())
+            .select_from(AssistantMessage)
+            .where(AssistantMessage.role == 'assistant')
+        ) == 0
+        assert db.scalar(
+            select(func.count()).select_from(AssistantMessageEvidenceDependency)
+        ) == 0
 
 
 def test_changed_assistant_target_rolls_back_parent_and_exact_two_children(

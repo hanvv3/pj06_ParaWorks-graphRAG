@@ -56,6 +56,9 @@ _CONSUMED_KEY_CONTEXTS_INFO_KEY = 'paraworks_c5_consumed_serving_key_contexts'
 _SERVING_CONTEXTS_INFO_KEY = 'paraworks_c5_vector_serving_contexts'
 _TRANSACTION_LISTENER_INFO_KEY = 'paraworks_c5_serving_transaction_listener'
 _DOCUMENT_LOCK_SQL = text('SELECT pg_advisory_xact_lock(:key)')
+_DOCUMENT_LOCK_SHARED_SQL = text(
+    'SELECT pg_advisory_xact_lock_shared(:key)'
+)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -116,6 +119,27 @@ class ServingMutationLockPlan:
     approval_link_ids: tuple[int, ...]
     targets: tuple[tuple[str, int], ...]
     security_scope_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ServingProjectionTailLockedContext:
+    session_identity: int
+    transaction_identity: int
+    plan: ServingMutationLockPlan
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise TypeError(
+            'Projection-tail contexts are minted only by the lock coordinator'
+        )
+
+    def __copy__(self) -> NoReturn:
+        raise TypeError('Projection-tail contexts cannot be copied')
+
+    def __deepcopy__(self, memo: dict[int, object]) -> NoReturn:
+        raise TypeError('Projection-tail contexts cannot be copied')
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError('Projection-tail contexts cannot be serialized')
 
 
 def build_serving_lock_plan(
@@ -257,43 +281,7 @@ class ServingMutationLockCoordinator:
             key_context=key_context,
         )
         acquire_projection(self._db, key_context)
-        self._lock_rows(
-            AutoReviewRolloutState,
-            AutoReviewRolloutState.security_scope_id,
-            plan.security_scope_ids,
-        )
-        self._lock_rows(Source, Source.id, plan.source_ids, read=True)
-        self._lock_rows(
-            AgentWorkflowThread,
-            AgentWorkflowThread.thread_id,
-            plan.workflow_thread_ids,
-        )
-        self._lock_rows(
-            ReviewItem, ReviewItem.id, plan.review_item_ids
-        )
-        self._lock_rows(
-            AutoReviewPostAudit,
-            AutoReviewPostAudit.review_item_id,
-            plan.review_item_ids,
-        )
-        self._lock_rows(
-            AutoReviewAuditCorrection,
-            AutoReviewAuditCorrection.review_item_id,
-            plan.review_item_ids,
-        )
-        self._lock_rows(
-            TrustedKnowledgeApprovalLink,
-            TrustedKnowledgeApprovalLink.id,
-            plan.approval_link_ids,
-        )
-        self._lock_rows(
-            TrustedKnowledgeEvidenceLink,
-            TrustedKnowledgeEvidenceLink.approval_link_id,
-            plan.approval_link_ids,
-        )
-        for knowledge_type, knowledge_id in plan.targets:
-            model = _knowledge_model(knowledge_type)
-            self._lock_rows(model, model.id, (knowledge_id,))
+        self._lock_canonical_rows(plan, read_only=False)
         current = build_serving_lock_plan(
             self._db,
             plan.document_ids,
@@ -303,16 +291,7 @@ class ServingMutationLockCoordinator:
             raise RuntimeError('Serving mutation dependency plan changed')
         bound = self._manager.bind_transaction(key_context)
         locked = self._manager.acquire_documents(bound, plan.document_ids)
-        self._lock_rows(
-            VectorServingTombstone,
-            VectorServingTombstone.document_id,
-            plan.document_ids,
-        )
-        self._lock_rows(
-            VectorIndexState,
-            VectorIndexState.document_id,
-            plan.document_ids,
-        )
+        self._lock_vector_rows(plan, read_only=False)
         arm_corpus_generation_refresh(
             self._db,
             settings=self._settings,
@@ -320,6 +299,108 @@ class ServingMutationLockCoordinator:
         )
         self._generation_context = generation_context
         return locked
+
+    def _lock_canonical_rows(
+        self,
+        plan: ServingMutationLockPlan,
+        *,
+        read_only: bool,
+    ) -> None:
+        self._lock_rows(
+            AutoReviewRolloutState,
+            AutoReviewRolloutState.security_scope_id,
+            plan.security_scope_ids,
+            read=read_only,
+        )
+        self._lock_rows(Source, Source.id, plan.source_ids, read=True)
+        self._lock_rows(
+            AgentWorkflowThread,
+            AgentWorkflowThread.thread_id,
+            plan.workflow_thread_ids,
+            read=read_only,
+        )
+        self._lock_rows(
+            ReviewItem,
+            ReviewItem.id,
+            plan.review_item_ids,
+            read=read_only,
+        )
+        self._lock_rows(
+            AutoReviewPostAudit,
+            AutoReviewPostAudit.review_item_id,
+            plan.review_item_ids,
+            read=read_only,
+        )
+        self._lock_rows(
+            AutoReviewAuditCorrection,
+            AutoReviewAuditCorrection.review_item_id,
+            plan.review_item_ids,
+            read=read_only,
+        )
+        self._lock_rows(
+            TrustedKnowledgeApprovalLink,
+            TrustedKnowledgeApprovalLink.id,
+            plan.approval_link_ids,
+            read=read_only,
+        )
+        self._lock_rows(
+            TrustedKnowledgeEvidenceLink,
+            TrustedKnowledgeEvidenceLink.approval_link_id,
+            plan.approval_link_ids,
+            read=read_only,
+        )
+        for knowledge_type, knowledge_id in plan.targets:
+            model = _knowledge_model(knowledge_type)
+            self._lock_rows(
+                model,
+                model.id,
+                (knowledge_id,),
+                read=read_only,
+            )
+
+    def acquire_projection_tail(
+        self,
+        *,
+        key_context: KeyGenerationLockedContext,
+        plan: ServingMutationLockPlan,
+    ) -> None:
+        """Acquire the read-only canonical tail after the shared C.5 prefix."""
+        self._lock_canonical_rows(plan, read_only=True)
+        current = build_serving_lock_plan(
+            self._db,
+            plan.document_ids,
+            extra_review_item_ids=plan.review_item_ids,
+        )
+        if current != plan:
+            raise RuntimeError('Serving projection dependency plan changed')
+        if not plan.document_ids:
+            return
+        bound = self._manager.bind_transaction(key_context)
+        self._manager.acquire_documents(
+            bound,
+            plan.document_ids,
+            shared=True,
+        )
+        self._lock_vector_rows(plan, read_only=True)
+
+    def _lock_vector_rows(
+        self,
+        plan: ServingMutationLockPlan,
+        *,
+        read_only: bool,
+    ) -> None:
+        self._lock_rows(
+            VectorServingTombstone,
+            VectorServingTombstone.document_id,
+            plan.document_ids,
+            read=read_only,
+        )
+        self._lock_rows(
+            VectorIndexState,
+            VectorIndexState.document_id,
+            plan.document_ids,
+            read=read_only,
+        )
 
     def _lock_rows(
         self,
@@ -347,11 +428,17 @@ class ServingProjectionReadCoordinator:
     def __init__(self, *, db: Session, settings: Settings) -> None:
         self._db = db
         self._settings = settings
+        self._key_context: KeyGenerationLockedContext | None = None
+        self._prefix_active = False
+        self._tail_context: ServingProjectionTailLockedContext | None = None
 
     @contextmanager
-    def acquire(self) -> Iterator[tuple[int, int]]:
+    def acquire(self) -> Iterator[tuple[int, int | None]]:
         if self._db.get_transaction() is None:
             raise TypeError('projection read requires an active transaction')
+        if self._prefix_active:
+            raise TypeError('projection prefix is already active')
+        self._tail_context = None
         with KeyedMutationGuard.generation_barrier(self._db):
             key_context = lock_runtime_state(self._db, mode='share')
             if key_context is None:
@@ -366,9 +453,68 @@ class ServingProjectionReadCoordinator:
             generation = self._db.get(RagServingCorpusGeneration, 1)
             if generation is None:
                 raise RuntimeError('RAG serving generation is unavailable')
-            yield (
-                generation.corpus_generation,
-                generation.vector_index_generation,
+            self._key_context = key_context
+            self._prefix_active = True
+            try:
+                yield (
+                    generation.corpus_generation,
+                    generation.vector_index_generation,
+                )
+            finally:
+                self._prefix_active = False
+                self._key_context = None
+
+    def lock_canonical_tail(
+        self,
+        document_ids: Sequence[str],
+        *,
+        extra_review_item_ids: Sequence[int] = (),
+    ) -> ServingProjectionTailLockedContext:
+        if not self._prefix_active or self._key_context is None:
+            raise TypeError('projection prefix must be held before its tail')
+        if self._tail_context is not None:
+            raise TypeError('projection canonical tail is already locked')
+        transaction = self._db.get_transaction()
+        if transaction is None:
+            raise TypeError('projection read requires an active transaction')
+        plan = build_serving_lock_plan(
+            self._db,
+            document_ids,
+            extra_review_item_ids=extra_review_item_ids,
+        )
+        rows = ServingMutationLockCoordinator(
+            db=self._db,
+            settings=self._settings,
+        )
+        rows.acquire_projection_tail(
+            key_context=self._key_context,
+            plan=plan,
+        )
+        context = object.__new__(ServingProjectionTailLockedContext)
+        object.__setattr__(context, 'session_identity', id(self._db))
+        object.__setattr__(context, 'transaction_identity', id(transaction))
+        object.__setattr__(context, 'plan', plan)
+        self._tail_context = context
+        return context
+
+    def validate_tail_context(
+        self,
+        context: ServingProjectionTailLockedContext,
+    ) -> None:
+        if type(context) is not ServingProjectionTailLockedContext:
+            raise TypeError('A projection-tail lock context is required')
+        transaction = self._db.get_transaction()
+        if (
+            transaction is None
+            or id(transaction) != context.transaction_identity
+        ):
+            raise TypeError('projection-tail transaction is no longer active')
+        if (
+            context.session_identity != id(self._db)
+            or self._tail_context is not context
+        ):
+            raise TypeError(
+                'projection-tail context was not issued for this session'
             )
 
 
@@ -424,6 +570,8 @@ class VectorServingLockManager:
         self,
         key_context: TransactionBoundServingKeyContext | None,
         document_ids: Sequence[str],
+        *,
+        shared: bool = False,
     ) -> VectorServingLockedContext:
         self._validate_bound_key_context(key_context)
         normalized = _normalize_document_ids(document_ids)
@@ -442,8 +590,11 @@ class VectorServingLockManager:
             for document_id in normalized
         )
         if self._db.get_bind().dialect.name == 'postgresql':
+            statement = (
+                _DOCUMENT_LOCK_SHARED_SQL if shared else _DOCUMENT_LOCK_SQL
+            )
             for advisory_key in advisory_keys:
-                self._db.execute(_DOCUMENT_LOCK_SQL, {'key': advisory_key})
+                self._db.execute(statement, {'key': advisory_key})
         transaction = self._db.get_transaction()
         if transaction is None:
             raise TypeError(

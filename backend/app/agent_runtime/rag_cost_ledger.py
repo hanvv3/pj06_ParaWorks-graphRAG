@@ -74,6 +74,18 @@ class RagCostLedgerError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class PendingProjectionPaidComponentAuthority:
+    component: str
+    provider: str
+    model: str
+    authorized_model_config_version: str
+    authorized_model_config_snapshot_hmac: str
+    authorized_cost_policy_version: str
+    authorized_token_estimator_version: str
+    authorized_policy_snapshot_hmac: str
+
+
+@dataclass(frozen=True, slots=True)
 class PendingProjectionRecoverySnapshot:
     """Fresh, read-only phase-1 identity used before recovery lock acquisition."""
 
@@ -81,6 +93,9 @@ class PendingProjectionRecoverySnapshot:
     projection_owner_fence_hmac: str
     runtime_cost_snapshot_hmac: str
     paid_work_performed: bool
+    paid_component_authorities: tuple[
+        PendingProjectionPaidComponentAuthority, ...
+    ] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1664,6 +1679,30 @@ class RagCostLedger:
             projection_owner_fence_hmac=fence,
             runtime_cost_snapshot_hmac=runtime_hmac,
             paid_work_performed=any(row.attempted for row in rows),
+            paid_component_authorities=tuple(
+                PendingProjectionPaidComponentAuthority(
+                    component=row.component,
+                    provider=row.provider,
+                    model=row.model,
+                    authorized_model_config_version=(
+                        row.authorized_model_config_version
+                    ),
+                    authorized_model_config_snapshot_hmac=(
+                        row.authorized_model_config_snapshot_hmac
+                    ),
+                    authorized_cost_policy_version=(
+                        row.authorized_cost_policy_version
+                    ),
+                    authorized_token_estimator_version=(
+                        row.authorized_token_estimator_version
+                    ),
+                    authorized_policy_snapshot_hmac=(
+                        row.authorized_policy_snapshot_hmac
+                    ),
+                )
+                for row in rows
+                if row.attempted
+            ),
         )
 
     def _locked_run(

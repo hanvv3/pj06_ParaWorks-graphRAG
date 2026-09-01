@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 import stat as stat_module
-import threading
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from threading import RLock
 
 from sqlalchemy import Engine, event, func, select
 from sqlalchemy.orm import Session
@@ -14,6 +14,7 @@ from backend.app.agent_runtime.fingerprints import (
     fingerprint_secret_bytes,
     keyed_fingerprint,
 )
+from backend.app.agent_runtime.keyed_mutation_guard import sqlite_keyed_mutation_mutex
 from backend.app.agent_runtime.model_router import (
     build_rag_answer_model_config_snapshot_hmac,
 )
@@ -74,7 +75,7 @@ from backend.app.rag.retrieval import (
 from backend.app.rag.search_store import SqlAlchemyKeywordSearchStore
 
 _ZERO = Decimal('0.000000')
-_SQLITE_RAG_SMOKE_MUTEX = threading.RLock()
+_SQLITE_RAG_SMOKE_MUTEX = sqlite_keyed_mutation_mutex()
 
 
 @dataclass(slots=True)
@@ -91,7 +92,7 @@ class SQLiteRagSmokeUnavailable(RuntimeError):  # noqa: N818 - approved API name
     pass
 
 
-def sqlite_rag_smoke_mutex() -> threading.RLock:
+def sqlite_rag_smoke_mutex() -> RLock:
     """The single never-replaced process mutex shared by smoke writers."""
     return _SQLITE_RAG_SMOKE_MUTEX
 
@@ -141,6 +142,15 @@ class SQLiteRagSmokeCoordinator:
             )
         ):
             raise SQLiteRagSmokeUnavailable('SQLite keyword smoke finalizer is unavailable')
+        if (
+            prepared.validated_answer is not None
+            or prepared.prepared_model_influence is not None
+            or prepared.model_influence_observations
+            or prepared.selected_slot_ids
+        ):
+            raise SQLiteRagSmokeUnavailable(
+                'SQLite substantive answer requires sealed internal fake-model authority'
+            )
         with _SQLITE_RAG_SMOKE_MUTEX:
             self._revalidate_file_authority()
             connection = self._engine.connect()

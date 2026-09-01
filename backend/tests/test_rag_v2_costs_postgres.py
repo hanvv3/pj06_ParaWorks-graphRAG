@@ -47,6 +47,7 @@ from backend.app.core.config import get_settings
 from backend.app.models import AgentRun
 from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import StrictProviderUsage
+from backend.app.rag.serving_locks import ServingProjectionReadCoordinator
 from backend.tests.test_rag_v2_costs import (
     _TEST_COST_POLICY,
     _admit,
@@ -58,6 +59,7 @@ from backend.tests.test_rag_v2_provider_transport import (
     _admit_transport,
     _prepared_query,
 )
+from backend.tests.test_rag_v2_serving_locks import _seed_lock_prefix
 
 
 @pytest.fixture
@@ -325,10 +327,16 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
             readiness_snapshot_hmac='4' * 64,
         ),
     )
+    projection_settings = get_settings()
+    _seed_lock_prefix(ledger._session, projection_settings)
     recovery = _assemble_projection_owner_recovery_authority(
         ledger=ledger,
         provider_free=provider_free,
         paid=paid,
+        projection_read=ServingProjectionReadCoordinator(
+            db=ledger._session,
+            settings=projection_settings,
+        ),
     )
     live_owner = engine.connect()
     try:

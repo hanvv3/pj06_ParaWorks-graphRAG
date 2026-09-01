@@ -1,13 +1,20 @@
-from sqlalchemy.dialects import postgresql
+from threading import Event, Thread
 
+from sqlalchemy import create_engine
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import Session
+
+from backend.app.agent_runtime import keyed_mutation_guard
 from backend.app.agent_runtime.keyed_mutation_guard import (
     AUTO_REVIEW_GLOBAL_LOCK_ORDER,
     AUTO_REVIEW_KEY_GENERATION_LOCK_ID,
     GENERATION_BARRIER_EXCLUSIVE_SQL,
     GENERATION_BARRIER_SHARED_SQL,
     TRUSTED_FINGERPRINT_PROJECTION_LOCK_ID,
+    KeyedMutationGuard,
     build_runtime_key_state_lock,
 )
+from backend.app.agent_runtime.rag_sqlite_smoke import sqlite_rag_smoke_mutex
 
 
 def test_fixed_advisory_lock_ids_and_global_order_are_stable() -> None:
@@ -16,6 +23,7 @@ def test_fixed_advisory_lock_ids_and_global_order_are_stable() -> None:
     assert AUTO_REVIEW_GLOBAL_LOCK_ORDER == (
         'generation_barrier',
         'runtime_key_state',
+        'rag_serving_corpus_generation',
         'provider_safety_states',
         'fingerprint_projection',
         'rollout_states',
@@ -54,3 +62,28 @@ def test_runtime_key_state_lock_uses_for_share_or_for_update() -> None:
 
     assert 'FOR SHARE' in shared
     assert 'FOR UPDATE' in exclusive
+
+
+def test_sqlite_rag_and_c5_paths_share_exact_never_replaced_mutex() -> None:
+    keyed_mutex = keyed_mutation_guard.sqlite_keyed_mutation_mutex()
+    assert sqlite_rag_smoke_mutex() is keyed_mutex
+    assert keyed_mutex is keyed_mutation_guard.sqlite_keyed_mutation_mutex()
+
+
+def test_sqlite_rag_mutex_serializes_c5_generation_guard_across_threads() -> None:
+    entered = Event()
+    finished = Event()
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+
+    def enter_c5_guard() -> None:
+        with Session(engine) as db, KeyedMutationGuard.generation_barrier(db):
+            entered.set()
+        finished.set()
+
+    with sqlite_rag_smoke_mutex():
+        worker = Thread(target=enter_c5_guard)
+        worker.start()
+        assert not entered.wait(0.2)
+    worker.join(2)
+    assert entered.is_set()
+    assert finished.is_set()

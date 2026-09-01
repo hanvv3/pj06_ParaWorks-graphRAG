@@ -28,6 +28,7 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     try_acquire_advisory_lock,
 )
 from backend.app.agent_runtime.rag_cost_ledger import (
+    PendingProjectionPaidComponentAuthority,
     PendingProjectionRecoverySnapshot,
     RagCostLedger,
 )
@@ -90,7 +91,10 @@ from backend.app.rag.retrieval import (
     rank_evidence_slots,
     validate_query_embedding_call_result,
 )
-from backend.app.rag.serving_locks import ServingProjectionReadCoordinator
+from backend.app.rag.serving_locks import (
+    ServingProjectionReadCoordinator,
+    ServingProjectionTailLockedContext,
+)
 
 
 class RagFinalizationError(RuntimeError):
@@ -99,6 +103,17 @@ class RagFinalizationError(RuntimeError):
 
 _PHASE2_AUTHORITY_SEAL = object()
 _RECOVERY_AUTHORITY_SEAL = object()
+_ANSWER_SAFE_NO_EVIDENCE_OUTCOMES = frozenset({
+    'no_match',
+    'hidden_only',
+    'safety_filter_empty',
+    'insufficient_evidence',
+})
+_RAG_PRODUCT_OUTCOMES = _ANSWER_SAFE_NO_EVIDENCE_OUTCOMES | {
+    'supported',
+    'search_projected',
+    'evidence_unavailable',
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +151,7 @@ class _ProjectionOwnerRecoveryAssembly:
     ledger: RagCostLedger = field(repr=False)
     provider_free: ProviderFreeRagPhase2Authority = field(repr=False)
     paid: PaidRagPhase2Authority = field(repr=False)
+    projection_read: ServingProjectionReadCoordinator = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -155,6 +171,10 @@ class ProviderFreeRagPhase2Authority:
         ):
             raise TypeError('provider-free phase-2 authority is unavailable')
         self._assembly = assembly
+
+    @property
+    def evidence_barrier_is_postgresql(self) -> bool:
+        return self._assembly.evidence_barrier.is_postgresql_backed
 
     @contextmanager
     def acquire(
@@ -308,6 +328,52 @@ class PaidRagPhase2Authority:
         value = self._current_readiness
         return value.readiness_snapshot_hmac if value is not None else None
 
+    @property
+    def evidence_barrier_is_postgresql(self) -> bool:
+        return self._assembly.evidence_barrier.is_postgresql_backed
+
+    def _require_exact_requirement_components(
+        self,
+        expected_components: tuple[str, ...],
+    ) -> None:
+        requirements = self._assembly.safety_requirements
+        actual = tuple(snapshot.component for snapshot, _ in requirements)
+        if (
+            len(actual) != len(set(actual))
+            or actual != expected_components
+        ):
+            raise RagFinalizationError(
+                'paid phase-2 safety requirements do not match request'
+            )
+
+    def validate_locked_cost_authority(
+        self,
+        children: tuple[AgentRunCostComponent, ...],
+        *,
+        expected_components: tuple[str, ...],
+    ) -> None:
+        self._require_exact_requirement_components(expected_components)
+        rows = {row.component: row for row in children}
+        for snapshot, _ in self._assembly.safety_requirements:
+            row = rows.get(snapshot.component)
+            if row is None or (
+                row.provider != snapshot.provider
+                or row.model != snapshot.model
+                or row.authorized_model_config_version
+                != snapshot.authorized_model_config_version
+                or row.authorized_model_config_snapshot_hmac
+                != snapshot.authorized_model_config_snapshot_hmac
+                or row.authorized_cost_policy_version
+                != snapshot.authorized_cost_policy_version
+                or row.authorized_token_estimator_version
+                != snapshot.authorized_token_estimator_version
+                or row.authorized_policy_snapshot_hmac
+                != snapshot.authorized_policy_snapshot_hmac
+            ):
+                raise RagFinalizationError(
+                    'paid phase-2 safety authority changed from committed cost'
+                )
+
     @contextmanager
     def acquire(
         self,
@@ -318,6 +384,9 @@ class PaidRagPhase2Authority:
     ):
         if branch not in {'paid_embedding_only', 'paid_prepared'}:
             raise RagFinalizationError('paid phase-2 branch is invalid')
+        self._require_exact_requirement_components(
+            _expected_paid_components(prepared, branch=branch)
+        )
         assembly = self._assembly
         order = begin_rag_lock_order('ordinary')
         sidecar_order = order.acquire('provider_stable_sidecar')
@@ -423,6 +492,36 @@ class PaidRagPhase2Authority:
             or snapshot.paid_work_performed is not True
         ):
             raise RagFinalizationError('paid projection recovery authority is invalid')
+        expected_components = tuple(
+            value.component for value in snapshot.paid_component_authorities
+        )
+        self._require_exact_requirement_components(expected_components)
+        committed = {
+            value.component: value
+            for value in snapshot.paid_component_authorities
+            if type(value) is PendingProjectionPaidComponentAuthority
+        }
+        if len(committed) != len(snapshot.paid_component_authorities):
+            raise RagFinalizationError('paid projection recovery authority is invalid')
+        for requirement, _ in self._assembly.safety_requirements:
+            value = committed.get(requirement.component)
+            if value is None or (
+                value.provider != requirement.provider
+                or value.model != requirement.model
+                or value.authorized_model_config_version
+                != requirement.authorized_model_config_version
+                or value.authorized_model_config_snapshot_hmac
+                != requirement.authorized_model_config_snapshot_hmac
+                or value.authorized_cost_policy_version
+                != requirement.authorized_cost_policy_version
+                or value.authorized_token_estimator_version
+                != requirement.authorized_token_estimator_version
+                or value.authorized_policy_snapshot_hmac
+                != requirement.authorized_policy_snapshot_hmac
+            ):
+                raise RagFinalizationError(
+                    'paid recovery safety authority changed from committed cost'
+                )
         assembly = self._assembly
         order = begin_rag_lock_order('ordinary')
         sidecar_order = order.acquire('provider_stable_sidecar')
@@ -551,6 +650,9 @@ class RagProjectionOwnerRecoveryAuthority:
             or type(assembly.ledger) is not RagCostLedger
             or type(assembly.provider_free) is not ProviderFreeRagPhase2Authority
             or type(assembly.paid) is not PaidRagPhase2Authority
+            or type(assembly.projection_read)
+            is not ServingProjectionReadCoordinator
+            or assembly.projection_read._db is not assembly.ledger._session
         ):
             raise TypeError('projection-owner recovery authority is unavailable')
         self._assembly = assembly
@@ -561,7 +663,11 @@ class RagProjectionOwnerRecoveryAuthority:
         assembly = self._assembly
         snapshot = assembly.ledger.pending_projection_recovery_snapshot(run_id)
         phase2 = assembly.paid if snapshot.paid_work_performed else assembly.provider_free
-        with phase2.acquire_recovery(snapshot):
+        with phase2.acquire_recovery(
+            snapshot
+        ), assembly.projection_read.acquire():
+            tail = assembly.projection_read.lock_canonical_tail(())
+            assembly.projection_read.validate_tail_context(tail)
             return assembly.ledger.recover_incomplete_run(
                 run_id=run_id,
                 projection_owner_fence_hmac=(
@@ -578,12 +684,14 @@ def _assemble_projection_owner_recovery_authority(
     ledger: RagCostLedger,
     provider_free: ProviderFreeRagPhase2Authority,
     paid: PaidRagPhase2Authority,
+    projection_read: ServingProjectionReadCoordinator,
 ) -> RagProjectionOwnerRecoveryAuthority:
     return RagProjectionOwnerRecoveryAuthority(
         _ProjectionOwnerRecoveryAssembly(
             ledger=ledger,
             provider_free=provider_free,
             paid=paid,
+            projection_read=projection_read,
             _seal=_RECOVERY_AUTHORITY_SEAL,
         )
     )
@@ -723,6 +831,7 @@ class PreparedRagFinalization:
             or not self.model_influence_observations
         ):
             raise ValueError('validated answer projection carrier is incomplete')
+        _validate_prepared_product_contract(self)
 
 
 class RagFinalizationTransactionPort(Protocol):
@@ -790,6 +899,7 @@ class RagFinalizationService:
         *,
         assistant_target: AssistantProjectionTarget | None = None,
     ) -> RagFinalProjection:
+        self._require_safe_surface_outcome(prepared, evidence_changed=False)
         if (
             prepared.query_embedding_result is not None
             or prepared.model_influence_observations
@@ -807,6 +917,7 @@ class RagFinalizationService:
         *,
         assistant_target: AssistantProjectionTarget | None = None,
     ) -> RagFinalProjection:
+        self._require_safe_surface_outcome(prepared, evidence_changed=False)
         if (
             prepared.query_embedding_result is None
             or prepared.model_influence_observations
@@ -824,6 +935,7 @@ class RagFinalizationService:
         *,
         assistant_target: AssistantProjectionTarget | None = None,
     ) -> RagFinalProjection:
+        self._require_safe_surface_outcome(prepared, evidence_changed=True)
         if (
             prepared.canned_message_identity
             != 'rag-canned-evidence-unavailable:v1'
@@ -836,12 +948,40 @@ class RagFinalizationService:
             prepared,
             assistant_target,
             branch=(
-                'paid_prepared'
+                'paid_embedding_only'
                 if prepared.query_embedding_result is not None
                 else 'provider_free'
             ),
             force_drift=True,
         )
+
+    @staticmethod
+    def _require_safe_surface_outcome(
+        prepared: PreparedRagFinalization,
+        *,
+        evidence_changed: bool,
+    ) -> None:
+        try:
+            _validate_prepared_product_contract(prepared)
+        except ValueError as exc:
+            raise RagFinalizationError('safe product outcome is invalid') from exc
+        if evidence_changed:
+            if prepared.tentative_outcome != 'evidence_unavailable':
+                raise RagFinalizationError(
+                    'evidence-changed finalization outcome is invalid'
+                )
+            return
+        if (
+            prepared.product_kind == 'search'
+            and prepared.tentative_outcome == 'search_projected'
+        ):
+            return
+        if (
+            prepared.product_kind == 'answer'
+            and prepared.tentative_outcome in _ANSWER_SAFE_NO_EVIDENCE_OUTCOMES
+        ):
+            return
+        raise RagFinalizationError('safe product outcome is invalid')
 
     def finalize_inter_component_failure(self, *args, **kwargs):
         finalizer = getattr(self._boundary, 'finalize_inter_component_failure', None)
@@ -868,6 +1008,10 @@ class RagFinalizationService:
             raise TypeError('typed pending projection is required')
         if type(prepared) is not PreparedRagFinalization:
             raise TypeError('typed prepared finalization is required')
+        try:
+            _validate_prepared_product_contract(prepared)
+        except ValueError as exc:
+            raise RagFinalizationError('RAG product outcome is invalid') from exc
         if assistant_target is not None and prepared.product_kind != 'answer':
             raise RagFinalizationError(
                 'assistant finalization requires an answer product'
@@ -992,6 +1136,10 @@ class SqlAlchemyRagFinalizationBoundary:
             PaidRagPhase2Authority,
         }:
             raise TypeError('concrete RAG phase-2 authority is required')
+        if phase2_authority.evidence_barrier_is_postgresql is not True:
+            raise TypeError(
+                'PostgreSQL evidence barrier requires registered DB authority'
+            )
         self._db = db
         self._settings = settings
         self._retriever = retriever
@@ -1004,6 +1152,8 @@ class SqlAlchemyRagFinalizationBoundary:
         self._recovery_authority = recovery_authority
         self._phase2_authority = phase2_authority
         self._prefix: AbstractContextManager | None = None
+        self._projection_coordinator: ServingProjectionReadCoordinator | None = None
+        self._projection_tail: ServingProjectionTailLockedContext | None = None
         self._prefix_generations: tuple[int, int | None] | None = None
         self._pending_parent: AgentRun | None = None
         self._pending_children: tuple[AgentRunCostComponent, ...] = ()
@@ -1031,10 +1181,12 @@ class SqlAlchemyRagFinalizationBoundary:
     def acquire_projection_prefix(self) -> None:
         if self._prefix is not None:
             raise RagFinalizationError('projection prefix was already acquired')
-        prefix = ServingProjectionReadCoordinator(
+        coordinator = ServingProjectionReadCoordinator(
             db=self._db, settings=self._settings
-        ).acquire()
+        )
+        prefix = coordinator.acquire()
         generations = prefix.__enter__()
+        self._projection_coordinator = coordinator
         self._prefix = prefix
         self._prefix_generations = generations
 
@@ -1104,6 +1256,18 @@ class SqlAlchemyRagFinalizationBoundary:
         ):
             raise RagFinalizationError('exact-two RAG cost authority is unavailable')
         query, answer = children
+        if branch != 'provider_free':
+            if type(self._phase2_authority) is not PaidRagPhase2Authority:
+                raise RagFinalizationError(
+                    'paid phase-2 safety authority is unavailable'
+                )
+            self._phase2_authority.validate_locked_cost_authority(
+                children,
+                expected_components=_expected_paid_components(
+                    prepared,
+                    branch=branch,
+                ),
+            )
         if branch == 'provider_free':
             if not all(_exact_terminal_zero(value) for value in children):
                 raise RagFinalizationError('provider-free cost shape is invalid')
@@ -1196,6 +1360,16 @@ class SqlAlchemyRagFinalizationBoundary:
     ) -> CanonicalRagProjection:
         if self._prefix_generations is None:
             raise RagFinalizationError('projection prefix is unavailable')
+        if self._projection_coordinator is None:
+            raise RagFinalizationError('projection canonical lock authority is unavailable')
+        document_ids = tuple(
+            candidate.evidence.serving_document_id
+            for candidate in fresh.visible
+        )
+        self._projection_tail = self._projection_coordinator.lock_canonical_tail(
+            document_ids
+        )
+        self._projection_coordinator.validate_tail_context(self._projection_tail)
         current_corpus, current_index = self._prefix_generations
         slots = rank_evidence_slots(fresh.visible)
         hidden_hmac = _hidden_membership_hmac(fresh, secret=self._secret)
@@ -1454,6 +1628,8 @@ class _SessionFinalizationTransaction:
                 boundary._db.rollback()
             boundary._prefix = None
             boundary._prefix_generations = None
+            boundary._projection_coordinator = None
+            boundary._projection_tail = None
         return False
 
 
@@ -1527,6 +1703,34 @@ def _canned_text(identity: RagCannedMessageIdentity | None) -> str:
         return values[identity]
     except KeyError:
         raise RagFinalizationError('canned RAG message identity is unavailable') from None
+
+
+def _validate_prepared_product_contract(
+    prepared: PreparedRagFinalization,
+) -> None:
+    outcome = prepared.tentative_outcome
+    if outcome not in _RAG_PRODUCT_OUTCOMES:
+        raise ValueError('prepared RAG product outcome is invalid')
+    if prepared.product_kind == 'search':
+        if outcome != 'search_projected' or prepared.canned_message_identity is not None:
+            raise ValueError('prepared search product canned identity is invalid')
+        return
+    if outcome == 'supported':
+        if (
+            prepared.validated_answer is None
+            or prepared.canned_message_identity is not None
+        ):
+            raise ValueError('prepared supported product canned identity is invalid')
+        return
+    if outcome == 'evidence_unavailable':
+        expected = 'rag-canned-evidence-unavailable:v1'
+    else:
+        expected = 'rag-canned-no-evidence:v1'
+    if (
+        prepared.validated_answer is not None
+        or prepared.canned_message_identity != expected
+    ):
+        raise ValueError('prepared answer product canned identity is invalid')
 
 
 def _build_result_hmac(
@@ -1651,6 +1855,10 @@ def _apply_parent_final(
     *,
     secret: bytes,
 ) -> None:
+    if projection.outcome not in _RAG_PRODUCT_OUTCOMES:
+        raise RagFinalizationError(
+            'terminal failure requires the explicit failure finalizer'
+        )
     parts = parent.source_window.split(':')
     if len(parts) != 5 or parts[:2] != ['rag-v2', 'admission']:
         raise RagFinalizationError('RAG parent source window is invalid')
@@ -1877,4 +2085,20 @@ def _exact_paid_embedding_cost(
         == prepared.model_config_snapshot_hmac
         and row.authorized_policy_snapshot_hmac
         == prepared.provider_policy_snapshot_hmac
+    )
+
+
+def _expected_paid_components(
+    prepared: PreparedRagFinalization,
+    *,
+    branch: str,
+) -> tuple[str, ...]:
+    if branch == 'paid_embedding_only':
+        return ('query_embedding',)
+    if branch != 'paid_prepared':
+        raise RagFinalizationError('paid phase-2 branch is invalid')
+    return (
+        ('query_embedding', 'answer_generation')
+        if prepared.query_embedding_result is not None
+        else ('answer_generation',)
     )

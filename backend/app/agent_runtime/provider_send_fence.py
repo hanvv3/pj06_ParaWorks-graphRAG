@@ -8,6 +8,7 @@ from threading import RLock
 from typing import Any, Generic, Protocol, TypeVar
 
 from backend.app.agent_runtime.rag_advisory_locks import (
+    RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
     RagLockOrderCapability,
     RagLockOrderCoordinator,
     RegisteredAdvisoryLock,
@@ -119,6 +120,11 @@ class RagEvidenceSendBarrier:
             raise TypeError('evidence freshness authority is unavailable')
         if (connection_factory is None) != (registered_lock is None):
             raise ValueError('PostgreSQL evidence barrier is incomplete')
+        if registered_lock is not None and not registered_lock.matches(
+            RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
+            identity_namespace='static',
+        ):
+            raise ValueError('PostgreSQL evidence advisory capability is invalid')
         self._freshness = freshness
         self._connection_factory = connection_factory
         self._registered_lock = registered_lock
@@ -126,6 +132,14 @@ class RagEvidenceSendBarrier:
 
     def snapshot_identity(self) -> str:
         return self._freshness.snapshot_identity()
+
+    @property
+    def is_postgresql_backed(self) -> bool:
+        """True only when finalization holds the registered database barrier."""
+        return (
+            self._connection_factory is not None
+            and type(self._registered_lock) is RegisteredAdvisoryLock
+        )
 
     def _run(
         self,

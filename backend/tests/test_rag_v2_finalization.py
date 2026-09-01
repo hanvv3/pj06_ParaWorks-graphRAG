@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine
@@ -27,6 +27,7 @@ from backend.app.agent_runtime.rag_cost_ledger import (
 )
 from backend.app.agent_runtime.rag_finalization import (
     AssistantProjectionTarget,
+    CanonicalRagProjection,
     PreparedRagFinalization,
     RagFinalizationError,
     RagFinalizationService,
@@ -38,6 +39,7 @@ from backend.app.agent_runtime.rag_finalization import (
     _pre_projection_cost_snapshot_hmac,
 )
 from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
+from backend.app.agent_runtime.rag_runtime_contracts import RagProviderSafetyBinding
 from backend.app.agent_runtime.rag_v2_identity import (
     SecurityScope,
     security_scope_fingerprint,
@@ -54,6 +56,8 @@ from backend.app.rag.evidence_projection import (
 )
 from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import RetrievalResult, SanitizedRetrievalTrace
+from backend.app.rag.serving_locks import ServingProjectionReadCoordinator
+from backend.tests.test_rag_v2_costs import _snapshot
 from backend.tests.test_rag_v2_pgvector_retriever import _embedding_result
 
 
@@ -214,6 +218,23 @@ def _readiness(*, snapshot: str = '4' * 64) -> RagServingIndexReadiness:
     )
 
 
+def _safety_requirement(component: str):
+    snapshot = _snapshot(component, None)
+    return snapshot, RagProviderSafetyBinding(
+        policy_snapshot=snapshot,
+        authority_uuid=UUID('00000000-0000-0000-0000-000000000001'),
+        designated_environment_id='test',
+        envelope_digest='1' * 64,
+        fingerprint_key_version='fingerprint-key:v1',
+        fingerprint_key_material_verifier='2' * 64,
+        global_safety_generation=1,
+        family_state='ready',
+        family_state_version=1,
+        family_safety_generation=1,
+        provider_safety_snapshot_hmac='3' * 64,
+    )
+
+
 class _Boundary:
     def __init__(self) -> None:
         self.commits = 0
@@ -326,6 +347,23 @@ def test_prepared_carrier_is_frozen_and_request_local_complete() -> None:
     assert prepared.retrieval_result.hidden_match_count == 2
     with pytest.raises(FrozenInstanceError):
         prepared.tentative_outcome = 'no_match'  # type: ignore[misc]
+
+
+def test_prepared_carrier_rejects_terminal_error_outcome() -> None:
+    with pytest.raises(ValueError, match='product outcome'):
+        replace(
+            _prepared(),
+            tentative_outcome='budget_exceeded',
+            canned_message_identity='rag-canned-budget-failure:v1',
+        )
+
+
+def test_prepared_carrier_rejects_mismatched_canned_identity() -> None:
+    with pytest.raises(ValueError, match='canned identity'):
+        replace(
+            _prepared(),
+            canned_message_identity='rag-canned-evidence-unavailable:v1',
+        )
 
 
 def test_prepared_influence_requires_exact_authenticated_aggregate() -> None:
@@ -501,7 +539,7 @@ def test_paid_phase2_refuses_fresh_readiness_drift_after_safety_and_owner(
     authority = _assemble_paid_rag_phase2_authority(
         provider_safety=safety,
         safety_connection_factory=lambda: safety_connection,
-        safety_requirements=(),
+        safety_requirements=(_safety_requirement('query_embedding'),),
         owner_connection_factory=lambda: owner_connection,
         owner_capability_factory=_owner_capability,
         load_current_owner_fence=lambda _run_id: '2' * 64,
@@ -529,6 +567,119 @@ def test_paid_phase2_refuses_fresh_readiness_drift_after_safety_and_owner(
 
     assert safety_connection.closed is True
     assert owner_connection.closed is True
+
+
+def test_paid_phase2_rejects_wrong_component_safety_requirement_before_locking() -> None:
+    authority = _assemble_paid_rag_phase2_authority(
+        provider_safety=object.__new__(RagProviderSafetyService),
+        safety_connection_factory=_ClosableConnection,
+        safety_requirements=(_safety_requirement('answer_generation'),),
+        owner_connection_factory=_ClosableConnection,
+        owner_capability_factory=_owner_capability,
+        load_current_owner_fence=lambda _run_id: '2' * 64,
+        evidence_barrier=_assemble_rag_evidence_barrier(
+            load_current_identity=lambda: 'a' * 64
+        ),
+        load_current_readiness=_readiness,
+    )
+    prepared = replace(
+        _prepared(),
+        query_embedding_result=SimpleNamespace(prepared=SimpleNamespace()),
+    )
+
+    with (
+        pytest.raises(RagFinalizationError, match='safety requirements'),
+        authority.acquire(_pending(), prepared, branch='paid_embedding_only'),
+    ):
+        raise AssertionError('unreachable')
+
+
+def test_paid_prepared_phase2_rejects_incomplete_safety_requirement_set() -> None:
+    observation = PreparedModelInfluenceObservation(
+        ordinal=0,
+        slot_id='E1',
+        support_mode='trusted_fact',
+        lookup_identity=SimpleNamespace(),
+        effective_permission='internal',
+        serving_identity_hmac='5' * 64,
+        serving_version_fingerprint='6' * 64,
+        model_content_hmac='7' * 64,
+        canonical_citation_projection_hmac='8' * 64,
+        approval_provenance_hmac=None,
+        evidence_link_set_hmac=None,
+        observation_hmac='9' * 64,
+    )
+    influence = PreparedModelInfluenceSet(
+        observations=(observation,),
+        prepared_corpus_generation=5,
+        prepared_index_generation=1,
+        prepared_readiness_hmac='4' * 64,
+        rendered_input_hmac='a' * 64,
+        aggregate_observation_hmac='b' * 64,
+    )
+    prepared = replace(
+        _prepared(),
+        query_embedding_result=SimpleNamespace(prepared=SimpleNamespace()),
+        evidence_slots=(SimpleNamespace(slot_id='E1'),),
+        model_influence_observations=(observation,),
+        prepared_model_influence=influence,
+        rendered_input_hmac='a' * 64,
+        answer_model_config_snapshot_hmac='c' * 64,
+    )
+    authority = _assemble_paid_rag_phase2_authority(
+        provider_safety=object.__new__(RagProviderSafetyService),
+        safety_connection_factory=_ClosableConnection,
+        safety_requirements=(_safety_requirement('answer_generation'),),
+        owner_connection_factory=_ClosableConnection,
+        owner_capability_factory=_owner_capability,
+        load_current_owner_fence=lambda _run_id: '2' * 64,
+        evidence_barrier=_assemble_rag_evidence_barrier(
+            load_current_identity=lambda: 'a' * 64
+        ),
+        load_current_readiness=_readiness,
+    )
+
+    with (
+        pytest.raises(RagFinalizationError, match='safety requirements'),
+        authority.acquire(_pending(), prepared, branch='paid_prepared'),
+    ):
+        raise AssertionError('unreachable')
+
+
+def test_postgresql_boundary_rejects_mutex_only_evidence_barrier() -> None:
+    phase2 = _assemble_provider_free_rag_phase2_authority(
+        owner_connection_factory=_ClosableConnection,
+        owner_capability_factory=_owner_capability,
+        load_current_owner_fence=lambda _run_id: '2' * 64,
+        evidence_barrier=_assemble_rag_evidence_barrier(
+            load_current_identity=lambda: 'a' * 64
+        ),
+    )
+    db = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(
+            dialect=SimpleNamespace(name='postgresql')
+        )
+    )
+
+    with pytest.raises(TypeError, match='PostgreSQL evidence barrier'):
+        SqlAlchemyRagFinalizationBoundary(
+            db=db,
+            settings=Settings(
+                _env_file=None,
+                agent_runtime_fingerprint_secret='secret',
+            ),
+            retriever=SimpleNamespace(invoke=lambda request: request),
+            phase2_authority=phase2,
+        )
+
+
+def test_evidence_barrier_rejects_wrong_registered_postgresql_capability() -> None:
+    with pytest.raises(ValueError, match='evidence advisory'):
+        _assemble_rag_evidence_barrier(
+            load_current_identity=lambda: 'a' * 64,
+            connection_factory=_ClosableConnection,
+            registered_lock=_owner_capability(3),
+        )
 
 
 def test_paid_embedding_only_rejects_unvalidated_vector_carrier() -> None:
@@ -571,6 +722,61 @@ def test_direct_result_is_returned_only_after_fresh_projection_commit() -> None:
     assert boundary.retrievals == 1
     assert boundary.final_parent is not None
     assert boundary.commits == 1
+
+
+def test_provider_free_safe_rejects_corrupted_failure_outcome_before_transaction() -> None:
+    boundary = _Boundary()
+    prepared = _prepared()
+    object.__setattr__(prepared, 'tentative_outcome', 'retriever_unavailable')
+    service = RagFinalizationService(
+        transaction_boundary=boundary,
+        settings=Settings(_env_file=None, agent_runtime_fingerprint_secret='secret'),
+    )
+
+    with pytest.raises(RagFinalizationError, match='safe product outcome'):
+        service.finalize_provider_free_safe(_pending(), prepared)
+
+    assert boundary.retrievals == 0 and boundary.commits == 0
+
+
+def test_paid_embedding_safe_rejects_corrupted_failure_outcome_before_validation() -> None:
+    boundary = _Boundary()
+    prepared = replace(
+        _prepared(),
+        query_embedding_result=SimpleNamespace(prepared=SimpleNamespace()),
+    )
+    object.__setattr__(prepared, 'tentative_outcome', 'budget_exceeded')
+    service = RagFinalizationService(
+        transaction_boundary=boundary,
+        settings=Settings(_env_file=None, agent_runtime_fingerprint_secret='secret'),
+    )
+
+    with pytest.raises(RagFinalizationError, match='safe product outcome'):
+        service.finalize_paid_embedding_only_safe(_pending(), prepared)
+
+    assert boundary.retrievals == 0 and boundary.commits == 0
+
+
+def test_evidence_changed_safe_rejects_failure_outcome_before_transaction() -> None:
+    boundary = _Boundary()
+    prepared = replace(
+        _prepared(),
+        tentative_outcome='evidence_unavailable',
+        canned_message_identity='rag-canned-evidence-unavailable:v1',
+    )
+    object.__setattr__(prepared, 'tentative_outcome', 'model_provider_failed')
+    service = RagFinalizationService(
+        transaction_boundary=boundary,
+        settings=Settings(_env_file=None, agent_runtime_fingerprint_secret='secret'),
+    )
+
+    with pytest.raises(
+        RagFinalizationError,
+        match='safe product outcome|evidence-changed',
+    ):
+        service.finalize_pre_generation_evidence_changed(_pending(), prepared)
+
+    assert boundary.retrievals == 0 and boundary.commits == 0
 
 
 def test_phase2_and_canonical_locks_precede_agent_run_cost_tail() -> None:
@@ -684,6 +890,27 @@ def test_pending_success_rejects_abandoned_unknown_child() -> None:
         boundary.validate_pending(pending)
 
 
+def test_parent_finalizer_refuses_terminal_failure_projection() -> None:
+    children = [
+        _cost_child('query_embedding', 0),
+        _cost_child('answer_generation', 1),
+    ]
+    boundary, pending = _pending_boundary(children)
+    boundary.validate_pending(pending)
+    projection = CanonicalRagProjection(
+        outcome='budget_exceeded',
+        answer_text='실패',
+        evidence=V1EvidenceProjection((), (), (), (), (), '5' * 64),
+        model_influence=(),
+        hidden_match_count=0,
+        effective_backend='deterministic_lexical',
+        result_hmac='6' * 64,
+    )
+
+    with pytest.raises(RagFinalizationError, match='terminal failure'):
+        boundary.finalize_parent(pending, projection)
+
+
 def test_provider_free_branch_requires_both_exact_terminal_zero_children() -> None:
     children = [
         _cost_child('query_embedding', 0),
@@ -700,6 +927,17 @@ def test_provider_free_branch_requires_both_exact_terminal_zero_children() -> No
 
 def test_paid_embedding_only_requires_exact_attempt_vector_receipt_and_fence() -> None:
     result = _embedding_result(query='  민감한 질의  ')
+    snapshot, binding = _safety_requirement('query_embedding')
+    snapshot = replace(
+        snapshot,
+        authorized_model_config_snapshot_hmac=(
+            result.prepared.model_config_snapshot_hmac
+        ),
+        authorized_policy_snapshot_hmac=(
+            result.prepared.provider_policy_snapshot_hmac
+        ),
+    )
+    binding = replace(binding, policy_snapshot=snapshot)
     query = _cost_child('query_embedding', 0)
     query.attempted = True
     query.dispatch_count = 1
@@ -710,20 +948,96 @@ def test_paid_embedding_only_requires_exact_attempt_vector_receipt_and_fence() -
     query.dispatch_fence_hmac = result.prepared.attempt_fence_hmac
     query.process_instance_hmac = 'c' * 64
     query.terminal_outcome = 'component_succeeded'
+    query.provider = snapshot.provider
+    query.model = snapshot.model
+    query.authorized_model_config_version = snapshot.authorized_model_config_version
     query.authorized_model_config_snapshot_hmac = (
-        result.prepared.model_config_snapshot_hmac
+        snapshot.authorized_model_config_snapshot_hmac
+    )
+    query.authorized_cost_policy_version = snapshot.authorized_cost_policy_version
+    query.authorized_token_estimator_version = (
+        snapshot.authorized_token_estimator_version
     )
     query.authorized_policy_snapshot_hmac = (
-        result.prepared.provider_policy_snapshot_hmac
+        snapshot.authorized_policy_snapshot_hmac
     )
     children = [query, _cost_child('answer_generation', 1)]
     boundary, pending = _pending_boundary(children)
+    boundary._phase2_authority = _assemble_paid_rag_phase2_authority(
+        provider_safety=object.__new__(RagProviderSafetyService),
+        safety_connection_factory=_ClosableConnection,
+        safety_requirements=((snapshot, binding),),
+        owner_connection_factory=_ClosableConnection,
+        owner_capability_factory=_owner_capability,
+        load_current_owner_fence=lambda _run_id: '2' * 64,
+        evidence_barrier=_assemble_rag_evidence_barrier(
+            load_current_identity=lambda: 'a' * 64
+        ),
+        load_current_readiness=_readiness,
+    )
     boundary.validate_pending(pending)
     prepared = replace(_prepared(), query_embedding_result=result)
     boundary.validate_branch_costs(prepared, branch='paid_embedding_only')
     query.dispatch_fence_hmac = 'd' * 64
 
     with pytest.raises(RagFinalizationError, match='paid embedding cost shape'):
+        boundary.validate_branch_costs(prepared, branch='paid_embedding_only')
+
+
+def test_paid_phase2_safety_hmacs_must_match_locked_cost_rows() -> None:
+    result = _embedding_result(query='  민감한 질의  ')
+    snapshot, binding = _safety_requirement('query_embedding')
+    snapshot = replace(
+        snapshot,
+        authorized_model_config_snapshot_hmac=(
+            result.prepared.model_config_snapshot_hmac
+        ),
+        authorized_policy_snapshot_hmac=(
+            result.prepared.provider_policy_snapshot_hmac
+        ),
+    )
+    binding = replace(binding, policy_snapshot=snapshot)
+    query = _cost_child('query_embedding', 0)
+    query.attempted = True
+    query.dispatch_count = 1
+    query.actual_input_tokens = result.validated_input_tokens
+    query.actual_output_tokens = 0
+    query.charged_cost_usd = result.actual_cost_usd
+    query.charge_basis = 'actual'
+    query.dispatch_fence_hmac = result.prepared.attempt_fence_hmac
+    query.process_instance_hmac = 'c' * 64
+    query.terminal_outcome = 'component_succeeded'
+    query.provider = snapshot.provider
+    query.model = snapshot.model
+    query.authorized_model_config_version = snapshot.authorized_model_config_version
+    query.authorized_model_config_snapshot_hmac = (
+        snapshot.authorized_model_config_snapshot_hmac
+    )
+    query.authorized_cost_policy_version = snapshot.authorized_cost_policy_version
+    query.authorized_token_estimator_version = (
+        snapshot.authorized_token_estimator_version
+    )
+    query.authorized_policy_snapshot_hmac = snapshot.authorized_policy_snapshot_hmac
+    children = [query, _cost_child('answer_generation', 1)]
+    boundary, pending = _pending_boundary(children)
+    boundary._phase2_authority = _assemble_paid_rag_phase2_authority(
+        provider_safety=object.__new__(RagProviderSafetyService),
+        safety_connection_factory=_ClosableConnection,
+        safety_requirements=((snapshot, binding),),
+        owner_connection_factory=_ClosableConnection,
+        owner_capability_factory=_owner_capability,
+        load_current_owner_fence=lambda _run_id: '2' * 64,
+        evidence_barrier=_assemble_rag_evidence_barrier(
+            load_current_identity=lambda: 'a' * 64
+        ),
+        load_current_readiness=_readiness,
+    )
+    boundary.validate_pending(pending)
+    prepared = replace(_prepared(), query_embedding_result=result)
+    boundary.validate_branch_costs(prepared, branch='paid_embedding_only')
+    query.authorized_policy_snapshot_hmac = 'd' * 64
+
+    with pytest.raises(RagFinalizationError, match='committed cost'):
         boundary.validate_branch_costs(prepared, branch='paid_embedding_only')
 
 
@@ -744,7 +1058,12 @@ def test_assistant_finalization_rejects_search_product_before_transaction() -> N
     with pytest.raises(RagFinalizationError, match='answer product'):
         service.finalize_assistant(
             _pending(),
-            replace(_prepared(), product_kind='search'),
+            replace(
+                _prepared(),
+                product_kind='search',
+                tentative_outcome='search_projected',
+                canned_message_identity=None,
+            ),
             AssistantProjectionTarget(7, 8, 'owner-string'),
         )
 
@@ -763,6 +1082,31 @@ def test_projection_recovery_uses_provider_free_owner_fence_and_cost_cas(
         paid_work_performed=False,
     )
     ledger = object.__new__(RagCostLedger)
+    ledger._session = SimpleNamespace()
+    projection_read = object.__new__(ServingProjectionReadCoordinator)
+    projection_read._db = ledger._session
+
+    @contextmanager
+    def acquired_prefix(_self):
+        yield (5, 0)
+
+    monkeypatch.setattr(
+        ServingProjectionReadCoordinator,
+        'acquire',
+        acquired_prefix,
+    )
+    monkeypatch.setattr(
+        ServingProjectionReadCoordinator,
+        'lock_canonical_tail',
+        lambda self, document_ids: seen.append(
+            ('c5_tail', tuple(document_ids))
+        ) or object(),
+    )
+    monkeypatch.setattr(
+        ServingProjectionReadCoordinator,
+        'validate_tail_context',
+        lambda self, context: seen.append(('c5_tail_validated', context)),
+    )
     monkeypatch.setattr(
         RagCostLedger,
         'pending_projection_recovery_snapshot',
@@ -805,17 +1149,19 @@ def test_projection_recovery_uses_provider_free_owner_fence_and_cost_cas(
         ledger=ledger,
         provider_free=provider_free,
         paid=paid,
+        projection_read=projection_read,
     )
     boundary = object.__new__(SqlAlchemyRagFinalizationBoundary)
     boundary._recovery_authority = authority
     assert boundary.recover_dead_projection_owner(17) is None
-    assert seen == [
-        (
+    assert seen[0][0] == 'c5_tail'
+    assert seen[0][1] == ()
+    assert seen[1][0] == 'c5_tail_validated'
+    assert seen[2:] == [(
             ('expected_runtime_cost_snapshot_hmac', '4' * 64),
             ('projection_owner_fence_hmac', '2' * 64),
             ('run_id', 17),
-        )
-    ]
+        )]
     import inspect
 
     assert tuple(

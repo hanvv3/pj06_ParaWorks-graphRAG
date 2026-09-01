@@ -3877,7 +3877,7 @@ tests passed with 53 tests; ruff passed.
   database check constraint use `first_50`; changing that output schema requires
   an explicit human decision.
 
-## 2026-09-01 Deliverable D Core Task 13 implementation complete
+## 2026-09-01 Deliverable D Core Task 13 rereview candidate
 
 - Task 13 adds the sole atomic final-product boundary for direct and Assistant
   RAG V2 results. The boundary fresh-locks serving generations and the pending
@@ -3890,19 +3890,26 @@ tests passed with 53 tests; ruff passed.
   route or legacy helpers request the server-only `rag_v2_exact` mode.
 - Dead projection-owner recovery accepts only the concrete sealed cost-ledger
   authority. It retains paid sidecar/safety when paid work occurred, performs a
-  nonblocking exact session-lock reacquisition, rechecks the owner fence and
-  runtime-cost snapshot under row locks, and closes `persistence_failed` without
-  provider/output retry. The real two-session parent-mutation check is URL-gated.
+  nonblocking exact session-lock reacquisition, enters the actual C.5 shared
+  generation/corpus prefix plus canonical empty tail, rechecks the owner fence
+  and runtime-cost snapshot under row locks, and closes `persistence_failed`
+  without provider/output retry.
 - SQLite smoke is deterministic and provider-free only. The coordinator itself
   owns fresh keyword retrieval, canonical projection, exact-two terminal-zero
   parent/product and optional Assistant dependencies in one `BEGIN IMMEDIATE`.
-  A process-lifetime file lock plus stable RLock rejects DB/sidecar hardlinks,
+  A process-lifetime file lock plus the exact C.5 RLock rejects DB/sidecar hardlinks,
   cached-handle replacement, case/path aliases, and a second process before
-  mutation; in-memory mode is server-settings-gated to tests.
-- Independent review follow-up evidence: focused `75 passed, 5 skipped`;
-  affected RAG V2/lock/safety/Assistant regression `665 passed, 10 skipped,
-  2172 deselected`. All skips require absent `PARAWORKS_TEST_POSTGRES_URL`; the
-  real PostgreSQL parent-mutation recovery gate is executable but unrun. No
-  external/provider/paid call, Docker action, or `.env` read occurred.
-- Before Task 14 begins, run the independent Task 13 implementation review. The
-  remaining release gate is the URL-gated real PostgreSQL concurrency suite.
+  mutation; caller-prebuilt substantive answer/model-influence objects are
+  refused before connection/transaction/mutation.
+- The second independent review was `NOT CLEAN`; this candidate addresses its
+  paid safety/cost binding, PostgreSQL evidence capability, outcome allowlist,
+  actual C.5 canonical tail, shared SQLite mutex, and recovery-prefix findings.
+  Do not describe Task 13 as closed until the next independent rereview returns
+  `CLEAN`.
+- Candidate verification: focused `54 passed, 7 skipped`; provider-free affected
+  regression `735 passed, 12 skipped, 2088 deselected`. PostgreSQL finalization/
+  mutation and recovery/mutation tests are collected but unrun because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. No external provider/paid call or
+  Docker action occurred.
+- Task 14 must not begin before independent Task 13 rereview. The remaining
+  release gate after a clean rereview is the real PostgreSQL concurrency suite.

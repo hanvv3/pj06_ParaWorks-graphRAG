@@ -5491,7 +5491,7 @@ Cost/security note:
 - Fresh deterministic Task 11/lifecycle verification passed `124` tests with
   Ruff and diff checks green. Rollout and paid-provider gates remain disabled.
 
-## 2026-09-01 Deliverable D Core Task 13 atomic RAG finalization
+## 2026-09-01 Deliverable D Core Task 13 atomic RAG finalization candidate
 
 - Added a two-phase finalization boundary that reopens a fresh PostgreSQL
   transaction under a concrete provider-free or paid phase-2 authority. Paid
@@ -5514,9 +5514,19 @@ Cost/security note:
   parent, exact-two terminal-zero costs, and immutable product commit together.
   Path aliases, hardlinks, second processes, pgvector, paid, and release modes
   fail before mutation.
-- Independent review RED exposed seven authority gaps and the follow-up closed
-  each with executable behavioral tests. Fresh post-review verification passed
-  `75` focused tests with `5` PostgreSQL-only skips and `665` affected tests
-  with `10` PostgreSQL-only skips. The two-session PostgreSQL recovery test now
-  performs the real parent mutation but was not executed because its URL was
-  absent. No provider, network, Docker, paid, or `.env` access occurred.
+- A second independent review found remaining authority gaps. The current
+  rereview candidate binds paid safety snapshots to the exact attempted cost
+  rows, refuses mutex-only/wrong PostgreSQL advisory barriers, limits safe
+  finalization to exact successful/canned outcomes, and prevents a terminal
+  failure projection from completing the parent.
+- Final projection now holds the real C.5 shared generation/corpus prefix and
+  canonical sorted row-lock tail before AgentRun/cost. Recovery holds the same
+  prefix and an empty canonical tail before its cost CAS. SQLite refuses
+  caller-prebuilt substantive model output and uses the identical never-replaced
+  C.5 process RLock.
+- Candidate verification is `54 passed, 7 skipped` focused and `735 passed, 12
+  skipped, 2088 deselected` across the provider-free affected regression set.
+  The real PostgreSQL finalization/mutation and recovery/mutation interleavings
+  are executable but unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent.
+  This is not recorded as review `CLEAN`; independent rereview remains required.
+  No provider, network, Docker, or paid call occurred.

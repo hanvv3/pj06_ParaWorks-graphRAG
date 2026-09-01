@@ -45,6 +45,11 @@ _LATEST_CONTEXT_INFO_KEY = 'paraworks_c5_latest_keyed_context'
 _RUNTIME_ABSENT = object()
 
 
+def sqlite_keyed_mutation_mutex() -> RLock:
+    """Return the single never-replaced SQLite C.5/RAG mutation mutex."""
+    return _SQLITE_PROCESS_LOCAL_LOCK
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class KeyGenerationLockedContext:
     session_identity: int
