@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from threading import RLock
@@ -16,7 +16,11 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     RegisteredAdvisoryLock,
     _require_registered_capability,
 )
-from backend.app.db.initialization import TrustedPostgresEngineBootstrap
+from backend.app.db.initialization import (
+    TrustedPostgresEngineBootstrap,
+    TrustedPostgresRuntimeHealth,
+    _PostgresRuntimeHealthLease,
+)
 
 _POSTGRES_DATABASE_AUTHORITY_SEAL = object()
 _OPERATION_LEASE_SEAL = object()
@@ -47,7 +51,16 @@ class RagPostgresDatabaseCleanupFailure:
 @dataclass(frozen=True, slots=True)
 class _RagPostgresOperationLease:
     authority: RagPostgresDatabaseAuthority = field(repr=False)
+    application_connection: Connection = field(repr=False)
+    original_session_bind: Engine | Connection = field(repr=False)
+    owns_application_connection: bool
+    runtime_health_lease: _PostgresRuntimeHealthLease = field(repr=False)
     _seal: object = field(repr=False, compare=False)
+    _context_token: object | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +111,7 @@ class _PostgresDatabaseAssembly:
     bootstrap_capability: RegisteredAdvisoryLock = field(repr=False)
     identity: RagPostgresDatabaseIdentity
     server_identity: RagPostgresWritableServerIdentity
+    runtime_health: TrustedPostgresRuntimeHealth = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -131,6 +145,7 @@ class RagPostgresDatabaseAuthority:
             or type(assembly.server_identity)
             is not RagPostgresWritableServerIdentity
             or type(assembly.bootstrap_capability) is not RegisteredAdvisoryLock
+            or type(assembly.runtime_health) is not TrustedPostgresRuntimeHealth
         ):
             raise TypeError('RAG PostgreSQL database authority is unavailable')
         self._assembly = assembly
@@ -167,38 +182,41 @@ class RagPostgresDatabaseAuthority:
     def connect(self) -> Connection:
         """Open a never-pooled physical connection and validate DB identity."""
         with self._lifecycle_lock:
-            self._require_active_operation()
-            self._connections = {
-                connection
-                for connection in self._connections
-                if not connection.closed
-            }
-            connection = self._assembly.dedicated_engine.connect()
-            try:
-                if connection.engine is not self._assembly.dedicated_engine:
-                    raise TypeError('RAG PostgreSQL connection authority changed')
-                current = _connection_identity(connection)
-                if current != self._assembly.identity:
-                    raise TypeError('RAG PostgreSQL connection identity changed')
-                if (
-                    _connection_server_identity(connection)
-                    != self._assembly.server_identity
-                ):
-                    raise TypeError(
-                        'authoritative writable PostgreSQL server changed'
-                    )
-                _require_bootstrap_capability(
-                    connection,
-                    self._assembly.bootstrap_capability,
-                )
-                self._connections.add(connection)
-                return connection
-            except BaseException:
+            lease = self._require_active_operation()
+            with self._assembly.runtime_health._guard(
+                lease.runtime_health_lease
+            ):
+                self._connections = {
+                    connection
+                    for connection in self._connections
+                    if not connection.closed
+                }
+                connection = self._assembly.dedicated_engine.connect()
                 try:
-                    connection.invalidate()
-                finally:
-                    connection.close()
-                raise
+                    if connection.engine is not self._assembly.dedicated_engine:
+                        raise TypeError('RAG PostgreSQL connection authority changed')
+                    current = _connection_identity(connection)
+                    if current != self._assembly.identity:
+                        raise TypeError('RAG PostgreSQL connection identity changed')
+                    if (
+                        _connection_server_identity(connection)
+                        != self._assembly.server_identity
+                    ):
+                        raise TypeError(
+                            'authoritative writable PostgreSQL server changed'
+                        )
+                    _require_bootstrap_capability(
+                        connection,
+                        self._assembly.bootstrap_capability,
+                    )
+                    self._connections.add(connection)
+                    return connection
+                except BaseException:
+                    try:
+                        connection.invalidate()
+                    finally:
+                        connection.close()
+                    raise
 
     def require_session(self, session: Session) -> None:
         with self._lifecycle_lock:
@@ -209,6 +227,20 @@ class RagPostgresDatabaseAuthority:
             engine = bind.engine if isinstance(bind, Connection) else bind
             if engine is not self._assembly.application_engine:
                 raise TypeError('RAG PostgreSQL engine authority changed')
+            lease = self._lease_context.get()
+            if type(lease) is _RagPostgresOperationLease:
+                if (
+                    lease._seal is not _OPERATION_LEASE_SEAL
+                    or lease.authority is not self
+                    or bind is not lease.application_connection
+                    or not session.in_transaction()
+                ):
+                    raise TypeError('pinned PostgreSQL transaction changed')
+                with self._assembly.runtime_health._guard(
+                    lease.runtime_health_lease
+                ):
+                    self._validate_application_connection(bind)
+                return
             try:
                 if _session_identity(session) != self._assembly.identity:
                     raise TypeError('RAG PostgreSQL session identity changed')
@@ -228,42 +260,161 @@ class RagPostgresDatabaseAuthority:
 
     @contextmanager
     def operation_lease(self):
+        with self._leased_operation(close_on_exit=False) as lease:
+            yield lease
+
+    @contextmanager
+    def owned_operation(self):
+        """One-shot request owner including transport cleanup and health poison."""
+        with self._leased_operation(close_on_exit=True) as lease:
+            yield lease
+
+    @contextmanager
+    def _leased_operation(self, *, close_on_exit: bool):
+        health = self._assembly.runtime_health
+        with health._operation('rag_finalization_or_recovery') as health_lease:
+            lease = self._pin_application_transaction(health_lease)
+            try:
+                yield lease
+            finally:
+                with health._cleanup_boundary():
+                    self._release_application_transaction(lease)
+                    if close_on_exit:
+                        self.close()
+
+    def _pin_application_transaction(
+        self,
+        health_lease: _PostgresRuntimeHealthLease,
+    ) -> _RagPostgresOperationLease:
         with self._lifecycle_lock:
             if self._state != 'open':
                 raise TypeError('RAG PostgreSQL database authority is closing')
             if self._lease_context.get() is not None or self._active_leases:
                 raise TypeError('RAG PostgreSQL operation is already leased')
-            self.require_session(self._assembly.session)
+            session = self._assembly.session
+            if session.in_transaction():
+                raise TypeError('fresh pinned PostgreSQL transaction is required')
+            original_bind = session.get_bind()
+            original_engine = (
+                original_bind.engine
+                if isinstance(original_bind, Connection)
+                else original_bind
+            )
+            if original_engine is not self._assembly.application_engine:
+                raise TypeError('RAG PostgreSQL engine authority changed')
+            owns_connection = not isinstance(original_bind, Connection)
+            connection = (
+                self._assembly.application_engine.connect()
+                if owns_connection
+                else original_bind
+            )
+            session.bind = connection
             lease = _RagPostgresOperationLease(
                 authority=self,
+                application_connection=connection,
+                original_session_bind=original_bind,
+                owns_application_connection=owns_connection,
+                runtime_health_lease=health_lease,
                 _seal=_OPERATION_LEASE_SEAL,
             )
-            context_token = self._lease_context.set(lease)
-            self._active_leases += 1
         try:
-            yield lease
-        finally:
+            with self._assembly.runtime_health._guard(health_lease):
+                session.begin()
+                self._validate_application_connection(connection)
             with self._lifecycle_lock:
-                self._lease_context.reset(context_token)
-                self._active_leases -= 1
-                if self._active_leases < 0:
-                    raise RuntimeError('RAG PostgreSQL authority lease underflow')
+                context_token = self._lease_context.set(lease)
+                self._active_leases += 1
+                object.__setattr__(lease, '_context_token', context_token)
+            return lease
+        except BaseException:
+            self._cleanup_pinned_connection(lease)
+            raise
+
+    def _release_application_transaction(
+        self,
+        lease: _RagPostgresOperationLease,
+    ) -> None:
+        with self._lifecycle_lock:
+            current = self._lease_context.get()
+            if current is not lease:
+                raise RuntimeError('RAG PostgreSQL authority lease changed')
+            context_token = lease._context_token
+            if context_token is None:
+                raise RuntimeError('RAG PostgreSQL authority lease token is missing')
+            self._lease_context.reset(context_token)
+            self._active_leases -= 1
+            if self._active_leases < 0:
+                raise RuntimeError('RAG PostgreSQL authority lease underflow')
+        self._cleanup_pinned_connection(lease)
+
+    def _cleanup_pinned_connection(
+        self,
+        lease: _RagPostgresOperationLease,
+    ) -> None:
+        session = self._assembly.session
+        connection = lease.application_connection
+        failed = False
+        try:
+            if session.in_transaction():
+                session.rollback()
+        except BaseException:
+            failed = True
+            with suppress(BaseException):
+                connection.invalidate()
+        finally:
+            session.bind = lease.original_session_bind
+            if lease.owns_application_connection:
+                try:
+                    connection.close()
+                except BaseException:
+                    failed = True
+        if failed:
+            self._record_cleanup_failure()
+
+    def _validate_application_connection(self, connection: Connection) -> None:
+        if connection.engine is not self._assembly.application_engine:
+            raise TypeError('RAG PostgreSQL application connection changed')
+        if _connection_identity(connection) != self._assembly.identity:
+            raise TypeError('RAG PostgreSQL connection identity changed')
+        if _connection_server_identity(connection) != self._assembly.server_identity:
+            raise TypeError('authoritative writable PostgreSQL server changed')
+        _require_bootstrap_capability(
+            connection,
+            self._assembly.bootstrap_capability,
+        )
+
+    @contextmanager
+    def health_effect(self):
+        with self._lifecycle_lock:
+            lease = self._require_active_operation()
+        with self._assembly.runtime_health._guard(lease.runtime_health_lease):
+            yield
 
     def close(self) -> RagPostgresDatabaseCleanupFailure | None:
         """Stop new leases, then close idle request-owned transport once."""
+        with self._assembly.runtime_health._cleanup_boundary():
+            with self._lifecycle_lock:
+                if self._state == 'closed':
+                    return self._cleanup_failure
+                if self._active_leases:
+                    self._state = 'closing'
+                    raise RagPostgresDatabaseBusyError(
+                        'RAG PostgreSQL database authority has an active operation'
+                    )
+                self._state = 'closed'
+            failure = self._dispose_owned_transport()
+            with self._lifecycle_lock:
+                if failure is not None:
+                    self._cleanup_failure = failure
+                cleanup_failure = self._cleanup_failure
+            if failure is not None:
+                self._assembly.runtime_health._poison()
+            return cleanup_failure
+
+    def _record_cleanup_failure(self) -> None:
         with self._lifecycle_lock:
-            if self._state == 'closed':
-                return self._cleanup_failure
-            if self._active_leases:
-                self._state = 'closing'
-                raise RagPostgresDatabaseBusyError(
-                    'RAG PostgreSQL database authority has an active operation'
-                )
-            self._state = 'closed'
-        failure = self._dispose_owned_transport()
-        with self._lifecycle_lock:
-            self._cleanup_failure = failure
-        return failure
+            self._cleanup_failure = RagPostgresDatabaseCleanupFailure()
+        self._assembly.runtime_health._poison()
 
     def _dispose_owned_transport(
         self,
@@ -272,6 +423,10 @@ class RagPostgresDatabaseAuthority:
         self._connections.clear()
         failure: BaseException | None = None
         for connection in connections:
+            if connection.invalidated:
+                failure = failure or RuntimeError(
+                    'uncertain advisory connection was invalidated'
+                )
             if connection.closed:
                 continue
             try:
@@ -297,7 +452,7 @@ class RagPostgresDatabaseAuthority:
         ):
             raise TypeError('RAG PostgreSQL database authority is closed')
 
-    def _require_active_operation(self) -> None:
+    def _require_active_operation(self) -> _RagPostgresOperationLease:
         self._require_usable()
         lease = self._lease_context.get()
         if (
@@ -307,6 +462,7 @@ class RagPostgresDatabaseAuthority:
             or lease.authority is not self
         ):
             raise TypeError('RAG PostgreSQL operation lease is required')
+        return lease
 
 
 def _bind_rag_postgres_database(
@@ -355,6 +511,7 @@ def _bind_rag_postgres_database(
                 bootstrap_capability=bootstrap_capability,
                 identity=identity,
                 server_identity=server_identity,
+                runtime_health=issued.runtime_health,
                 _seal=_POSTGRES_DATABASE_AUTHORITY_SEAL,
             )
         )

@@ -4021,3 +4021,30 @@ tests passed with 53 tests; ruff passed.
 - Keep Task 14 blocked until a new independent Task 13 rereview is `CLEAN`.
   With no configured real PostgreSQL URL, split-server behavior is unit-tested
   and same-server PostgreSQL acceptance remains executable but unrun.
+
+## 2026-09-01 Deliverable D Core Task 13 ninth rereview candidate
+
+- Eighth rereview remained `NOT CLEAN`: `require_session()` proved a pooled
+  connection and returned it before phase-2, so the actual product transaction
+  could check out a different server. The new operation boundary pins the exact
+  application `Connection`, begins and validates its transaction before any
+  owner/evidence/safety lock, and retains it through C.5 locks, mutation,
+  commit/rollback, recovery CAS, and cleanup.
+- Keep the explicit TCP-only server-affinity contract. Null
+  `inet_server_addr()`/`inet_server_port()` (including ordinary Unix-socket
+  sessions), read-only sessions, postmaster restart, and any fresh server proof
+  drift fail closed before mutation or dispatch.
+- `TrustedPostgresEngineBootstrap` and all authorities it issues share one
+  one-way runtime health latch. Transport cleanup uncertainty poisons it under
+  the same admission/cleanup lock; current epoch guards and future issuance,
+  leases, recovery, finalization, and paid admission refuse work. The latch has
+  no public reset and stores only a fixed code, count, and monotonic timestamp.
+- Preserve primary cancellation/validation/commit-unknown classification.
+  Acknowledged product/recovery results survive cleanup failure as deliverable
+  exactly once with `retry_allowed=False`, while the shared runtime is already
+  unhealthy.
+- This remains a candidate awaiting independent rereview. Do not start Task 14.
+  Fresh verification is focused `155 passed, 10 skipped` and broad affected
+  `753 passed, 16 skipped, 2144 deselected`. Real PostgreSQL tests remain
+  executable but absent-URL skipped locally; no live provider, network, Docker,
+  paid, or `.env` action was performed.

@@ -420,12 +420,30 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
     recovery_started = threading.Event()
     recovery_finished = threading.Event()
     recovery_pid: list[int] = []
+    recovery_commit_pid: list[int] = []
     worker_databases: list[object] = []
     recovery_result: list[object] = []
     recovery_errors: list[BaseException] = []
 
     def recover_after_mutation_lock() -> None:
         recovery_session = Session(engine)
+
+        @event.listens_for(recovery_session, 'after_begin')
+        def capture_pinned_backend(
+            _session: Session,
+            _transaction: object,
+            connection: object,
+        ) -> None:
+            recovery_pid.append(
+                connection.scalar(text('SELECT pg_backend_pid()'))
+            )
+            recovery_started.set()
+
+        @event.listens_for(recovery_session, 'before_commit')
+        def capture_cas_backend(_session: Session) -> None:
+            recovery_commit_pid.append(
+                recovery_session.scalar(text('SELECT pg_backend_pid()'))
+            )
         try:
             recovery_ledger = _assemble_rag_cost_ledger(
                 recovery_session,
@@ -488,10 +506,6 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
                 ),
                 postgres_database=worker_database,
             )
-            recovery_pid.append(
-                recovery_session.scalar(text('SELECT pg_backend_pid()'))
-            )
-            recovery_started.set()
             recovery_result.append(worker_recovery.recover(run_id))
         except BaseException as exc:  # pragma: no cover - surfaced below
             recovery_errors.append(exc)
@@ -553,6 +567,7 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
     assert worker.is_alive() is False
     assert recovery_errors == []
     assert len(recovery_result) == 1
+    assert recovery_commit_pid == recovery_pid
     terminal = recovery_result[0]
     assert terminal.outcome == 'persistence_failed'
     with Session(engine) as probe:

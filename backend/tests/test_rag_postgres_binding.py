@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import inspect
 import threading
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
 from backend.app.agent_runtime import rag_postgres_binding as binding_module
 from backend.app.agent_runtime.rag_advisory_locks import RegisteredAdvisoryLock
+from backend.app.agent_runtime.rag_finalization import RagFinalizationService
 from backend.app.agent_runtime.rag_postgres_binding import (
     RagPostgresDatabaseBusyError,
     RagPostgresDatabaseIdentity,
     _bind_rag_postgres_database,
 )
+from backend.app.core.config import Settings
 from backend.app.db import initialization
 
 
@@ -190,6 +194,170 @@ def test_database_authority_requires_an_active_operation_lease(
     authority.close()
     session.close()
     application.dispose()
+
+
+def test_operation_lease_pins_exact_application_connection_through_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated = _fake_postgres_engines()
+    session = Session(application)
+    identity = _identity()
+    monkeypatch.setattr(binding_module, '_session_identity', lambda _session: identity)
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+    authority = _bind_rag_postgres_database(
+        session,
+        trusted_bootstrap=_trusted_bootstrap(
+            monkeypatch,
+            application,
+            dedicated,
+        ),
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    pinned: Connection | None = None
+
+    with authority.operation_lease():
+        bound = session.get_bind()
+        assert isinstance(bound, Connection)
+        pinned = bound
+        assert session.in_transaction() is True
+        session.execute(text('SELECT 1'))
+        session.commit()
+        assert pinned.closed is False
+        assert session.get_bind() is pinned
+
+    assert pinned is not None and pinned.closed is True
+    assert session.get_bind() is application
+    authority.close()
+    session.close()
+    application.dispose()
+
+
+def test_operation_lease_rejects_would_be_transaction_server_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated = _fake_postgres_engines()
+    session = Session(application)
+    logical_identity = _identity()
+    server_a = binding_module.RagPostgresWritableServerIdentity(
+        server_address='10.0.0.11',
+        server_port=5432,
+        postmaster_start_time='2026-09-01T00:00:00Z',
+    )
+    restarted_server_a = binding_module.RagPostgresWritableServerIdentity(
+        server_address='10.0.0.11',
+        server_port=5432,
+        postmaster_start_time='2026-09-01T00:00:01Z',
+    )
+    connection_servers = iter((server_a, restarted_server_a))
+    monkeypatch.setattr(
+        binding_module,
+        '_session_identity',
+        lambda _session: logical_identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: logical_identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_session_server_identity',
+        lambda _session: server_a,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_server_identity',
+        lambda _connection: next(connection_servers),
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+    authority = _bind_rag_postgres_database(
+        session,
+        trusted_bootstrap=_trusted_bootstrap(
+            monkeypatch,
+            application,
+            dedicated,
+            preserve_server_identity=True,
+        ),
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    effects: list[str] = []
+
+    with (
+        pytest.raises(TypeError, match='writable PostgreSQL server'),
+        authority.operation_lease(),
+    ):
+        effects.append('mutation')
+
+    assert effects == []
+    authority.close()
+    session.close()
+    application.dispose()
+
+
+def test_operation_lease_rolls_back_same_pinned_connection_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, dedicated = _fake_postgres_engines()
+    session = Session(application)
+    identity = _identity()
+    monkeypatch.setattr(binding_module, '_session_identity', lambda _session: identity)
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+    authority = _bind_rag_postgres_database(
+        session,
+        trusted_bootstrap=_trusted_bootstrap(
+            monkeypatch,
+            application,
+            dedicated,
+        ),
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    pinned: list[Connection] = []
+
+    with (
+        pytest.raises(RuntimeError, match='projection failed'),
+        authority.operation_lease(),
+    ):
+        bound = session.get_bind()
+        assert isinstance(bound, Connection)
+        pinned.append(bound)
+        session.execute(text('SELECT 1'))
+        raise RuntimeError('projection failed')
+
+    assert len(pinned) == 1 and pinned[0].closed is True
+    assert session.in_transaction() is False
+    assert session.get_bind() is application
+    authority.close()
+    session.close()
+    application.dispose()
+
+
+def test_unix_socket_server_identity_is_explicitly_unsupported() -> None:
+    with pytest.raises(TypeError, match='writable PostgreSQL server'):
+        binding_module._server_identity_from_row(
+            (None, None, '2026-09-01T00:00:00Z', False, 'off')
+        )
 
 
 def test_explicit_dedicated_engine_is_owned_closed_once_and_never_url_cloned(
@@ -430,4 +598,188 @@ def test_close_disposes_once_even_when_connection_invalidation_fails(
     assert authority.close() is cleanup_failure
     assert disposed == 1
     session.close()
+    application.dispose()
+
+
+def test_cleanup_failure_poisons_shared_runtime_and_stale_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = create_engine('sqlite+pysqlite:///:memory:')
+    dedicated_one = create_engine(
+        'sqlite+pysqlite:///:memory:',
+        poolclass=NullPool,
+    )
+    dedicated_two = create_engine(
+        'sqlite+pysqlite:///:memory:',
+        poolclass=NullPool,
+    )
+    dedicated_three = create_engine(
+        'sqlite+pysqlite:///:memory:',
+        poolclass=NullPool,
+    )
+    for engine in (application, dedicated_one, dedicated_two, dedicated_three):
+        engine.dialect.name = 'postgresql'
+    engines = iter((application, dedicated_one, dedicated_two, dedicated_three))
+    monkeypatch.setattr(
+        initialization,
+        'create_engine',
+        lambda *_args, **_kwargs: next(engines),
+    )
+    runtime = initialization.initialize_database_runtime(
+        'postgresql+psycopg://authority-role@localhost/authority-database'
+    )
+    bootstrap = runtime.rag_postgres_bootstrap
+    assert bootstrap is not None
+    logical_identity = _identity()
+    server_identity = binding_module.RagPostgresWritableServerIdentity(
+        server_address='127.0.0.1',
+        server_port=5432,
+        postmaster_start_time='2026-09-01T00:00:00Z',
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_session_identity',
+        lambda _session: logical_identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        lambda _connection: logical_identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_session_server_identity',
+        lambda _session: server_identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_server_identity',
+        lambda _connection: server_identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+    first_session = Session(application)
+    second_session = Session(application)
+    third_session = Session(application)
+    first = _bind_rag_postgres_database(
+        first_session,
+        trusted_bootstrap=bootstrap,
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    second = _bind_rag_postgres_database(
+        second_session,
+        trusted_bootstrap=bootstrap,
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    third = _bind_rag_postgres_database(
+        third_session,
+        trusted_bootstrap=bootstrap,
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    cleanup_results: list[object] = []
+
+    def fail_dispose(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError('sensitive transport failure')
+
+    monkeypatch.setattr(dedicated_one, 'dispose', fail_dispose)
+    monkeypatch.setattr(dedicated_three, 'dispose', fail_dispose)
+    product_results: list[object] = []
+
+    class FirstBoundary:
+        def __init__(self) -> None:
+            self.dispositions: list[object] = []
+
+        def acquire_request_database_authority(self):
+            return first.owned_operation()
+
+        def close_request_database_authority(self):
+            return first.close()
+
+        def record_request_database_cleanup_failure(self, disposition) -> None:
+            self.dispositions.append(disposition)
+
+        def finalize_inter_component_failure(self):
+            return SimpleNamespace(outcome='committed_terminal')
+
+    first_boundary = FirstBoundary()
+    first_service = RagFinalizationService(
+        transaction_boundary=first_boundary,
+        settings=Settings(
+            _env_file=None,
+            agent_runtime_fingerprint_secret='secret',
+        ),
+    )
+    with second.operation_lease():
+        first_closer = threading.Thread(
+            target=lambda: product_results.append(
+                first_service.finalize_inter_component_failure()
+            )
+        )
+        third_closer = threading.Thread(
+            target=lambda: cleanup_results.append(third.close())
+        )
+        first_closer.start()
+        third_closer.start()
+        first_closer.join(timeout=5)
+        third_closer.join(timeout=5)
+        assert not first_closer.is_alive() and not third_closer.is_alive()
+        assert len(cleanup_results) == 1 and cleanup_results[0] is not None
+        assert len(product_results) == 1
+        assert product_results[0].outcome == 'committed_terminal'
+        assert len(first_boundary.dispositions) == 1
+        disposition = first_boundary.dispositions[0]
+        assert disposition.operation_state == 'acknowledged_product'
+        assert disposition.delivery_permitted is True
+        assert disposition.retry_permitted is False
+        snapshot = bootstrap.runtime_health_snapshot
+        assert snapshot.healthy is False
+        assert snapshot.failure_count == 1
+        assert snapshot.code == 'rag_postgres_transport_cleanup_failed'
+        assert 'sensitive transport failure' not in repr(snapshot)
+        with pytest.raises(TypeError, match='runtime health'):
+            second.connect()
+
+    first_cleanup = first.close()
+    assert first_cleanup is not None
+    assert bootstrap.runtime_health_snapshot.failure_count == 1
+    with pytest.raises(TypeError, match='runtime health'):
+        bootstrap._issue(application)
+
+    class SeparateBoundary:
+        def __init__(self) -> None:
+            self.effects = 0
+
+        def acquire_request_database_authority(self):
+            return second.owned_operation()
+
+        def close_request_database_authority(self):
+            return second.close()
+
+        def record_request_database_cleanup_failure(self, _disposition) -> None:
+            return None
+
+        def finalize_inter_component_failure(self):
+            self.effects += 1
+            return SimpleNamespace(outcome='should-not-run')
+
+    separate = SeparateBoundary()
+    service = RagFinalizationService(
+        transaction_boundary=separate,
+        settings=Settings(
+            _env_file=None,
+            agent_runtime_fingerprint_secret='secret',
+        ),
+    )
+    with pytest.raises(TypeError, match='runtime health'):
+        service.finalize_inter_component_failure()
+    assert separate.effects == 0
+
+    second.close()
+    assert bootstrap.runtime_health_snapshot.failure_count == 1
+    first_session.close()
+    second_session.close()
+    third_session.close()
     application.dispose()

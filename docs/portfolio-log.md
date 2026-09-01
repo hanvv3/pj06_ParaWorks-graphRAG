@@ -5640,3 +5640,32 @@ Cost/security note:
 - This remains an independent-rereview candidate, not review `CLEAN`. Task 14
   stays blocked. Real PostgreSQL acceptance tests are URL-gated; no provider,
   network, Docker, paid call, or `.env` access occurred.
+
+## 2026-09-01 Deliverable D Core Task 13 ninth rereview candidate
+
+- The eighth independent review found that the earlier writable-server proof
+  was released before the product transaction acquired its physical
+  connection. The authority now checks out and pins the exact application
+  connection, starts its transaction, and fresh-validates that same connection
+  before any phase-2 advisory lock. It remains pinned through the C.5 lock
+  prefix/tail, mutation, commit or rollback, and authority cleanup. Direct
+  recovery uses the same boundary for its cost CAS.
+- The SQL proof rejects read-only/replica, restarted or different writable
+  servers, transaction-pooler drift, and a null server address. PostgreSQL RAG
+  finalization therefore has an explicit TCP-only contract; Unix-domain socket
+  deployments must provide an equally strong server-affinity proof before they
+  can be supported.
+- The trusted database runtime now owns one irreversible, sanitized health
+  latch. Advisory invalidate/close/dispose uncertainty poisons it before the
+  current call completes. Issuance, operation leases, finalization, recovery,
+  and paid lock admission all share its epoch guard, so an already-admitted
+  stale operation and every later request fail before provider or database
+  effects. A known committed product or recovery identity remains deliverable
+  once with retry disabled; cancellation and commit-unknown remain the primary
+  classification.
+- This is a rereview candidate only, not `CLEAN`; Task 14 remains blocked. Real
+  PostgreSQL acceptance remains URL-gated and was not run locally because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. Fresh verification is focused `155
+  passed, 10 skipped` and broad affected `753 passed, 16 skipped, 2144
+  deselected`. No provider, network, Docker, paid call, or `.env` access
+  occurred.

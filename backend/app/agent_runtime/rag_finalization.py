@@ -786,7 +786,7 @@ class RagProjectionOwnerRecoveryAuthority:
         assembly = self._assembly
         authority = assembly.postgres_database
         try:
-            with authority.operation_lease():
+            with authority.owned_operation(), authority.health_effect():
                 self._require_active_database()
                 snapshot = assembly.ledger.pending_projection_recovery_snapshot(
                     run_id
@@ -801,6 +801,7 @@ class RagProjectionOwnerRecoveryAuthority:
                 ), assembly.projection_read.acquire():
                     tail = assembly.projection_read.lock_canonical_tail(())
                     assembly.projection_read.validate_tail_context(tail)
+                    authority.require_session(assembly.ledger._session)
                     recovered = assembly.ledger.recover_incomplete_run(
                         run_id=run_id,
                         projection_owner_fence_hmac=(
@@ -1473,7 +1474,7 @@ class SqlAlchemyRagFinalizationBoundary:
         self._secret, _ = fingerprint_secret_bytes(settings)
 
     def acquire_request_database_authority(self):
-        return self._postgres_database.operation_lease()
+        return self._postgres_database.owned_operation()
 
     def close_request_database_authority(
         self,
@@ -1919,7 +1920,9 @@ class SqlAlchemyRagFinalizationBoundary:
     def commit(self) -> None:
         if self._pending_parent is None or self._committed:
             raise RagFinalizationError('final projection commit is unavailable')
-        self._db.commit()
+        with self._postgres_database.health_effect():
+            self._postgres_database.require_session(self._db)
+            self._db.commit()
         self._committed = True
 
     def recover_dead_projection_owner(self, run_id: int):
@@ -1948,10 +1951,18 @@ class _SessionFinalizationTransaction:
         self._boundary = boundary
 
     def __enter__(self) -> _SessionFinalizationTransaction:
-        db = self._boundary._db
-        if db.in_transaction():
-            raise RagFinalizationError('final projection requires a fresh transaction')
-        db.begin()
+        boundary = self._boundary
+        db = boundary._db
+        if not db.in_transaction():
+            raise RagFinalizationError(
+                'final projection requires a pinned transaction'
+            )
+        try:
+            boundary._postgres_database.require_session(db)
+        except TypeError as exc:
+            raise RagFinalizationError(
+                'final projection pinned transaction changed'
+            ) from exc
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> bool:

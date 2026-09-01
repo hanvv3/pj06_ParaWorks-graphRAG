@@ -970,6 +970,16 @@ def _fake_database_authority(monkeypatch, *, session, active=None):
     )
     monkeypatch.setattr(
         RagPostgresDatabaseAuthority,
+        'owned_operation',
+        lambda self: nullcontext(),
+    )
+    monkeypatch.setattr(
+        RagPostgresDatabaseAuthority,
+        'health_effect',
+        lambda self: nullcontext(),
+    )
+    monkeypatch.setattr(
+        RagPostgresDatabaseAuthority,
         'close',
         lambda self: None,
     )
