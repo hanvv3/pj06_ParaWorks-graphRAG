@@ -5749,3 +5749,29 @@ Cost/security note:
   broad affected `802 passed, 16 skipped, 2128 deselected`.
   `PARAWORKS_TEST_POSTGRES_URL` remains absent, so real PostgreSQL acceptance is
   unrun. This is not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 thirteenth rereview candidate
+
+- The twelfth independent review kept Task 13 open because a `BaseException`
+  at any intermediate cleanup step could replace the durable result or body
+  primary and stop the remaining cleanup responsibility. That could leave the
+  operation lease, pinned Session bind, application/advisory connection, or
+  FIFO cleanup owner live.
+- Each owned operation now registers a sealed emergency cleanup state bound to
+  the exact database authority, pinned operation lease, runtime-health lease,
+  and owner thread. Normal FIFO enter, owner mint, transaction release,
+  transport close, and FIFO exit remain the primary path. Any cleanup
+  uncertainty records only the fixed sanitized failure code, fail-stops the
+  shared runtime before escape, and runs a bounded idempotent continuation.
+- The continuation releases the ContextVar and active lease, rolls back and
+  restores the Session bind, closes the pinned and advisory connections,
+  disposes the dedicated transport once, expires both cleanup capabilities,
+  and removes only the interrupted owner's ticket/gate state. A queued foreign
+  owner retains FIFO order. A durable result is returned once; validation,
+  `KeyboardInterrupt`, and commit-unknown remain the exact primary outcome.
+- RED was `36 failed` for the enter/mint/release/close/exit outcome matrix.
+  Targeted cleanup GREEN is `56 passed`; initialization plus binding is `168
+  passed`; expanded focused is `288 passed, 13 skipped`; broad affected is
+  `858 passed, 16 skipped, 2128 deselected`. The real PostgreSQL cases remain
+  URL-gated and were not run because `PARAWORKS_TEST_POSTGRES_URL` is absent.
+  This is a rereview candidate only, not `CLEAN`; Task 14 remains blocked.

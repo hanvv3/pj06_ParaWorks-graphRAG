@@ -4120,3 +4120,28 @@ tests passed with 53 tests; ruff passed.
 - Fresh gates are expanded focused `187 passed, 11 skipped` and broad affected
   `802 passed, 16 skipped, 2128 deselected`. Real PostgreSQL remains absent-URL
   unrun. Keep Task 14 blocked until independent review returns `CLEAN`.
+
+## 2026-09-01 Deliverable D Core Task 13 thirteenth rereview candidate
+
+- Twelfth rereview was `NOT CLEAN` on cleanup interruption: the plain `finally`
+  chain allowed cancellation or another `BaseException` during gate entry,
+  owner mint, transaction release, internal close, or gate exit to mask the
+  already determined body outcome and abandon later resource cleanup.
+- `owned_operation()` now captures the body result or exact primary first. It
+  then executes an explicit cleanup state machine. A sealed emergency
+  capability is tied to the same database authority, pinned operation lease,
+  runtime health lease, and thread; it is neither public nor caller-mintable.
+- The normal FIFO owner remains authoritative. On uncertainty, the fallback
+  immediately latches sanitized runtime failure and boundedly drains lease and
+  ContextVar state, rollback and Session bind, pinned/advisory physical
+  connections, dedicated Engine disposal, cleanup owner, emergency capability,
+  and only its own ticket/depth. Foreign waiters continue in FIFO order.
+- Deterministic tests cover before/after enter, mint, release, internal close,
+  and exit; queued cancellation; forged/expired/cross-thread capability use;
+  and one-shot Session rollback/bind restore, pinned close, owner validation,
+  advisory close, and dedicated dispose faults against durable success,
+  validation, cancellation, and commit-unknown outcomes.
+- Fresh gates: cleanup target `56 passed`; initialization plus binding `168
+  passed`; expanded focused `288 passed, 13 skipped`; broad affected `858
+  passed, 16 skipped, 2128 deselected`. Real PostgreSQL is absent-URL unrun.
+  Candidate only: do not begin Task 14 until independent rereview is `CLEAN`.
