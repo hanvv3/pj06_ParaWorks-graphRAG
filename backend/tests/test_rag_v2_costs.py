@@ -26,6 +26,7 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
 from backend.app.agent_runtime.rag_runtime_contracts import (
     _issue_classified_provider_observation as StrictProviderOutcome,
 )
+from backend.app.db import initialization
 from backend.app.db.base import Base
 from backend.app.models.agent_runs import AgentRun
 from backend.app.models.rag_runtime import AgentRunCostComponent
@@ -33,6 +34,12 @@ from backend.app.rag.retrieval import PreparedPaidCallBudget, StrictProviderUsag
 from backend.tests.test_rag_v2_cost_policy import _policy
 
 _TEST_COST_POLICY = _policy()
+
+
+def _runtime_health():
+    return initialization.TrustedPostgresRuntimeHealth(
+        _seal=initialization._POSTGRES_RUNTIME_HEALTH_SEAL
+    )
 
 
 def _snapshot(
@@ -130,6 +137,7 @@ def _ledger(
         provider_connection_factory=engine.connect,
         designated_environment_id='test',
         designated_host_id='pytest-host',
+        runtime_health=_runtime_health(),
     )
 
 

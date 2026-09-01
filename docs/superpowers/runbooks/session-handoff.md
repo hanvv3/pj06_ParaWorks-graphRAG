@@ -4048,3 +4048,29 @@ tests passed with 53 tests; ruff passed.
   `753 passed, 16 skipped, 2144 deselected`. Real PostgreSQL tests remain
   executable but absent-URL skipped locally; no live provider, network, Docker,
   paid, or `.env` action was performed.
+
+## 2026-09-01 Deliverable D Core Task 13 tenth rereview candidate
+
+- Ninth rereview remained `NOT CLEAN`. The previous pin validated with raw
+  Connection SQL before the Session enlisted, so `Session.commit()` could leave
+  the physical root transaction open for cleanup rollback. The operation now
+  rejects active caller-bound root/savepoint state, calls `Session.begin()` and
+  `Session.connection()` first, proves the enlisted object is the exact pin,
+  and performs all identity SQL through that Session-owned transaction.
+- Ordinary commit, error rollback, and direct recovery CAS must leave both
+  `Connection.in_transaction()` and `in_nested_transaction()` false before
+  restore/close. Engine-owned and clean external-Connection paths have durable
+  independent-reader tests; active external work remains untouched on refusal.
+- `TrustedPostgresRuntimeHealth` now implements concurrent shared compound
+  effects and an exclusive one-way poison boundary. Finalization and recovery
+  hold one shared effect across all phase-2/C.5/product or CAS work. Cost-ledger
+  and provider transport assembly require that same sealed authority, including
+  grant consumption and client send.
+- A poison that wins before dispatch produces zero client calls and one
+  provider-free, non-retry terminal closure. Healthy operations overlap; poison
+  waits for already-admitted whole effects and prevents any later partial
+  effect.
+- Fresh verification is focused `219 passed, 10 skipped` and broad affected
+  `762 passed, 16 skipped, 2144 deselected`. Real PostgreSQL tests are absent-
+  URL skipped locally; no live external action was performed. Task 14 remains
+  blocked pending independent rereview.

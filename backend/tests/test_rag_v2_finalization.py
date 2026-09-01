@@ -893,6 +893,7 @@ def _recovery_bundle(
 ):
     ledger = object.__new__(RagCostLedger)
     ledger._session = session
+    ledger._runtime_health = postgres_database.runtime_health_authority
     projection_read = object.__new__(ServingProjectionReadCoordinator)
     projection_read._db = session
     provider_free = _assemble_provider_free_rag_phase2_authority(
@@ -945,6 +946,7 @@ def _fake_postgres_session(*, engine: object):
 
 def _fake_database_authority(monkeypatch, *, session, active=None):
     authority = object.__new__(RagPostgresDatabaseAuthority)
+    authority._assembly = SimpleNamespace(runtime_health=object())
     active = [True] if active is None else active
 
     def require_session(self, candidate) -> None:
@@ -977,6 +979,11 @@ def _fake_database_authority(monkeypatch, *, session, active=None):
         RagPostgresDatabaseAuthority,
         'health_effect',
         lambda self: nullcontext(),
+    )
+    monkeypatch.setattr(
+        RagPostgresDatabaseAuthority,
+        'require_session_transaction_ended',
+        lambda self, candidate: require_session(self, candidate),
     )
     monkeypatch.setattr(
         RagPostgresDatabaseAuthority,
@@ -1031,6 +1038,12 @@ def test_successful_recovery_cleanup_failure_keeps_terminal_identity(
         provider_free_barrier=barrier,
         paid_barrier=barrier,
     )
+    ended_sessions: list[object] = []
+    monkeypatch.setattr(
+        RagPostgresDatabaseAuthority,
+        'require_session_transaction_ended',
+        lambda self, candidate: ended_sessions.append(candidate),
+    )
     snapshot = PendingProjectionRecoverySnapshot(
         agent_run_id=82,
         projection_owner_fence_hmac='2' * 64,
@@ -1078,6 +1091,7 @@ def test_successful_recovery_cleanup_failure_keeps_terminal_identity(
     monkeypatch.setattr(RagPostgresDatabaseAuthority, 'close', fail_cleanup)
 
     assert recovery.recover(82) is terminal
+    assert ended_sessions == [db]
     disposition = recovery.last_cleanup_disposition
     assert disposition is not None
     assert disposition.operation_state == 'acknowledged_recovery'

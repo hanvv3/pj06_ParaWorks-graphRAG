@@ -170,11 +170,19 @@ def test_paid_assembler_requires_every_committed_static_capability_before_client
     import backend.app.agent_runtime.rag_provider_transport as transport_module
     import backend.app.db.session as db_session
 
+    trusted_bootstrap = db_session.RagPostgresDatabaseBootstrap
+    assert trusted_bootstrap is not None
+    runtime_health = trusted_bootstrap._runtime_effect_authority(db_session.engine)
     fake_engine = SimpleNamespace(
         dialect=SimpleNamespace(name='postgresql'),
         connect=lambda: nullcontext(object()),
     )
     monkeypatch.setattr(db_session, 'engine', fake_engine)
+    monkeypatch.setattr(
+        type(trusted_bootstrap),
+        '_runtime_effect_authority',
+        lambda self, application_engine: runtime_health,
+    )
 
     def load_registered(_connection, identity, *, identity_namespace):
         assert identity_namespace == 'static'

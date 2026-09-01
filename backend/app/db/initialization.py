@@ -4,7 +4,7 @@ import secrets
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from threading import RLock
+from threading import Condition, RLock, get_ident
 from time import monotonic_ns
 from types import MappingProxyType
 from typing import Literal
@@ -34,6 +34,10 @@ class DatabaseInitializationError(RuntimeError):
     code = 'database_initialization_failed'
 
 
+class PostgresRuntimeHealthUnavailableError(TypeError):
+    """Sanitized refusal after the trusted runtime is fail-stopped."""
+
+
 _POSTGRES_BOOTSTRAP_SEAL = object()
 _POSTGRES_RUNTIME_HEALTH_SEAL = object()
 _POSTGRES_RUNTIME_HEALTH_LEASE_SEAL = object()
@@ -60,11 +64,18 @@ class TrustedPostgresRuntimeHealth:
     """Process-local fail-stop admission shared by one DB runtime."""
 
     __slots__ = (
+        '_active_effects',
+        '_condition',
+        '_effect_depths',
         '_epoch',
+        '_exclusive_depth',
+        '_exclusive_owner',
+        '_exclusive_waiters',
         '_failure_count',
         '_first_failure_monotonic_ns',
         '_healthy',
         '_lock',
+        '_poison_requested',
         '_seal',
     )
 
@@ -76,6 +87,13 @@ class TrustedPostgresRuntimeHealth:
         self._first_failure_monotonic_ns: int | None = None
         self._healthy = True
         self._lock = RLock()
+        self._condition = Condition(self._lock)
+        self._active_effects = 0
+        self._effect_depths: dict[int, int] = {}
+        self._exclusive_owner: int | None = None
+        self._exclusive_depth = 0
+        self._exclusive_waiters = 0
+        self._poison_requested = False
         self._seal = _seal
 
     @property
@@ -96,9 +114,11 @@ class TrustedPostgresRuntimeHealth:
     def _operation(self, purpose: str):
         if type(purpose) is not str or not purpose:
             raise TypeError('PostgreSQL runtime health purpose is invalid')
-        with self._lock:
-            if not self._healthy:
-                raise TypeError('RAG PostgreSQL runtime health is fail-stopped')
+        with self._condition:
+            if not self._healthy or self._poison_requested:
+                raise PostgresRuntimeHealthUnavailableError(
+                    'RAG PostgreSQL runtime health is fail-stopped'
+                )
             lease = _PostgresRuntimeHealthLease(
                 health=self,
                 epoch=self._epoch,
@@ -113,35 +133,134 @@ class TrustedPostgresRuntimeHealth:
 
     @contextmanager
     def _guard(self, lease: _PostgresRuntimeHealthLease):
-        self._lock.acquire()
+        self._enter_effect(lease)
         try:
-            if (
-                type(lease) is not _PostgresRuntimeHealthLease
-                or lease._seal is not _POSTGRES_RUNTIME_HEALTH_LEASE_SEAL
-                or lease.health is not self
-                or not lease.active
-                or lease.epoch != self._epoch
-                or not self._healthy
-            ):
-                raise TypeError('RAG PostgreSQL runtime health lease changed')
             yield
         finally:
-            self._lock.release()
+            self._exit_effect()
+
+    @contextmanager
+    def _effect(self, purpose: str):
+        """Admit one compound effect under the shared healthy epoch."""
+        with self._operation(purpose) as lease, self._guard(lease):
+            yield
+
+    def _enter_effect(self, lease: _PostgresRuntimeHealthLease) -> None:
+        thread_id = get_ident()
+        with self._condition:
+            depth = self._effect_depths.get(thread_id, 0)
+            if depth:
+                self._require_effect_lease(lease)
+                self._effect_depths[thread_id] = depth + 1
+                return
+            while self._exclusive_owner is not None or self._exclusive_waiters:
+                self._condition.wait()
+            self._require_effect_lease(lease)
+            self._active_effects += 1
+            self._effect_depths[thread_id] = 1
+
+    def _exit_effect(self) -> None:
+        thread_id = get_ident()
+        with self._condition:
+            depth = self._effect_depths.get(thread_id, 0)
+            if depth <= 0:
+                raise RuntimeError('PostgreSQL runtime effect lease underflow')
+            if depth > 1:
+                self._effect_depths[thread_id] = depth - 1
+                return
+            del self._effect_depths[thread_id]
+            self._active_effects -= 1
+            if self._active_effects < 0:
+                raise RuntimeError('PostgreSQL runtime effect count underflow')
+            if self._active_effects == 0 and self._poison_requested:
+                self._apply_poison()
+            self._condition.notify_all()
+
+    def _require_effect_lease(
+        self,
+        lease: _PostgresRuntimeHealthLease,
+    ) -> None:
+        if (
+            type(lease) is not _PostgresRuntimeHealthLease
+            or lease._seal is not _POSTGRES_RUNTIME_HEALTH_LEASE_SEAL
+            or lease.health is not self
+            or not lease.active
+            or lease.epoch != self._epoch
+            or not self._healthy
+            or self._poison_requested
+        ):
+            raise PostgresRuntimeHealthUnavailableError(
+                'RAG PostgreSQL runtime health lease changed'
+            )
 
     def _poison(self) -> None:
-        with self._lock:
+        thread_id = get_ident()
+        with self._condition:
             if not self._healthy:
                 return
-            self._healthy = False
-            self._epoch += 1
-            self._failure_count = 1
-            self._first_failure_monotonic_ns = monotonic_ns()
+            if self._exclusive_owner == thread_id:
+                self._apply_poison()
+                return
+            if self._effect_depths.get(thread_id, 0):
+                self._poison_requested = True
+                self._condition.notify_all()
+                return
+            self._exclusive_waiters += 1
+            try:
+                while self._active_effects or self._exclusive_owner is not None:
+                    self._condition.wait()
+                if self._healthy:
+                    self._apply_poison()
+            finally:
+                self._exclusive_waiters -= 1
+                self._condition.notify_all()
+
+    def _apply_poison(self) -> None:
+        if not self._healthy:
+            return
+        self._healthy = False
+        self._poison_requested = False
+        self._epoch += 1
+        self._failure_count = 1
+        self._first_failure_monotonic_ns = monotonic_ns()
 
     @contextmanager
     def _cleanup_boundary(self):
         """Linearize cleanup success or poison before another admission."""
-        with self._lock:
+        self._enter_cleanup()
+        try:
             yield
+        finally:
+            self._exit_cleanup()
+
+    def _enter_cleanup(self) -> None:
+        thread_id = get_ident()
+        with self._condition:
+            if self._effect_depths.get(thread_id, 0):
+                raise RuntimeError(
+                    'cleanup cannot run inside a PostgreSQL runtime effect'
+                )
+            if self._exclusive_owner == thread_id:
+                self._exclusive_depth += 1
+                return
+            self._exclusive_waiters += 1
+            try:
+                while self._active_effects or self._exclusive_owner is not None:
+                    self._condition.wait()
+                self._exclusive_owner = thread_id
+                self._exclusive_depth = 1
+            finally:
+                self._exclusive_waiters -= 1
+
+    def _exit_cleanup(self) -> None:
+        thread_id = get_ident()
+        with self._condition:
+            if self._exclusive_owner != thread_id or self._exclusive_depth <= 0:
+                raise RuntimeError('PostgreSQL cleanup authority changed')
+            self._exclusive_depth -= 1
+            if self._exclusive_depth == 0:
+                self._exclusive_owner = None
+                self._condition.notify_all()
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -262,6 +381,19 @@ class TrustedPostgresEngineBootstrap:
     @property
     def runtime_health_snapshot(self) -> PostgresRuntimeHealthSnapshot:
         return self._runtime_health.snapshot
+
+    def _runtime_effect_authority(
+        self,
+        application_engine: Engine,
+    ) -> TrustedPostgresRuntimeHealth:
+        with self._state_lock:
+            if (
+                self._revoked
+                or self._seal is not _POSTGRES_BOOTSTRAP_SEAL
+                or application_engine is not self._application_engine
+            ):
+                raise TypeError('PostgreSQL Engine bootstrap authority changed')
+            return self._runtime_health
 
     def _revoke(self) -> None:
         with self._state_lock:

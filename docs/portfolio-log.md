@@ -5669,3 +5669,33 @@ Cost/security note:
   passed, 10 skipped` and broad affected `753 passed, 16 skipped, 2144
   deselected`. No provider, network, Docker, paid call, or `.env` access
   occurred.
+
+## 2026-09-01 Deliverable D Core Task 13 tenth rereview candidate
+
+- The ninth independent review found that raw identity SQL started a
+  Connection-owned transaction before SQLAlchemy Session enlistment. The new
+  boundary refuses caller-prebound root/savepoint work, pins a clean physical
+  connection, starts the Session transaction, forces exact Session enlistment,
+  and only then performs identity/server/capability SQL. Session commit or
+  rollback must physically end both root and nested transaction state before
+  the original bind is restored or an owned connection is closed. Direct
+  recovery applies the same post-CAS proof.
+- The runtime health boundary is now a shared-effect/exclusive-poison gate, not
+  a process-wide mutex. Concurrent healthy finalizations may overlap. Cleanup
+  poisoning blocks new effects and waits for admitted compound effects; a
+  poison raised inside an effect is deferred only until the outer shared effect
+  exits, then is latched before control escapes.
+- One shared effect spans ordinary phase-2 safety/advisory/evidence work, C.5
+  locks, fresh retrieval/mutation, and commit; recovery spans its equivalent CAS
+  sequence. Cost-ledger paid admission/claim/consume/finalize and provider
+  prepare/dispatch require the same bootstrap health authority. If poison wins
+  before a prepared dispatch, the client send remains zero and the committed
+  claim closes once as `provider_safety_unavailable` with exact-two
+  terminal-zero cost rows.
+- This remains a rereview candidate, not `CLEAN`, and Task 14 stays blocked.
+  Actual PostgreSQL gates remain executable but locally unrun because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. No provider, network, Docker, paid,
+  or `.env` action occurred.
+- Fresh verification is focused `219 passed, 10 skipped` and broad affected
+  `762 passed, 16 skipped, 2144 deselected`. The skips are the executable real-
+  PostgreSQL gates left unrun because the URL is absent.

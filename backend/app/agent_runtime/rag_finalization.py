@@ -811,6 +811,9 @@ class RagProjectionOwnerRecoveryAuthority:
                             snapshot.runtime_cost_snapshot_hmac
                         ),
                     )
+                    authority.require_session_transaction_ended(
+                        assembly.ledger._session
+                    )
         except BaseException:
             self._close_authority(authority, operation_state='primary_failure')
             raise
@@ -853,6 +856,8 @@ class RagProjectionOwnerRecoveryAuthority:
         if (
             type(authority) is not RagPostgresDatabaseAuthority
             or assembly.projection_read._db is not assembly.ledger._session
+            or assembly.ledger.runtime_health_authority
+            is not authority.runtime_health_authority
         ):
             raise TypeError('RAG recovery database authority changed')
         authority.require_session(assembly.ledger._session)
@@ -1473,8 +1478,13 @@ class SqlAlchemyRagFinalizationBoundary:
         self._cleanup_dispositions: list[RagDatabaseCleanupDisposition] = []
         self._secret, _ = fingerprint_secret_bytes(settings)
 
+    @contextmanager
     def acquire_request_database_authority(self):
-        return self._postgres_database.owned_operation()
+        with (
+            self._postgres_database.owned_operation(),
+            self._postgres_database.health_effect(),
+        ):
+            yield
 
     def close_request_database_authority(
         self,
@@ -1923,6 +1933,7 @@ class SqlAlchemyRagFinalizationBoundary:
         with self._postgres_database.health_effect():
             self._postgres_database.require_session(self._db)
             self._db.commit()
+            self._postgres_database.require_session_transaction_ended(self._db)
         self._committed = True
 
     def recover_dead_projection_owner(self, run_id: int):

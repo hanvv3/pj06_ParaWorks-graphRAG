@@ -183,7 +183,7 @@ def _database_authority(
 def test_postgres_failed_component_closes_exact_sibling_and_parent(
     postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, service, _ = postgres_cost_authority
+    engine, service, bootstrap = postgres_cost_authority
     ledger = _assemble_rag_cost_ledger(
         Session(engine),
         identity_secret=b'task-12-test-identity-secret',
@@ -192,6 +192,7 @@ def test_postgres_failed_component_closes_exact_sibling_and_parent(
         provider_connection_factory=engine.connect,
         designated_environment_id='test',
         designated_host_id='pytest-postgres-host',
+        runtime_health=bootstrap._runtime_effect_authority(engine),
     )
     _admit(ledger, 501)
     grant = ledger.claim_component(
@@ -220,7 +221,7 @@ def test_postgres_failed_component_closes_exact_sibling_and_parent(
 def test_postgres_reviewed_intercomponent_recovery_accepts_terminal_zero_sibling(
     postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, service, _ = postgres_cost_authority
+    engine, service, bootstrap = postgres_cost_authority
     ledger = _assemble_rag_cost_ledger(
         Session(engine),
         identity_secret=b'task-12-test-identity-secret',
@@ -229,6 +230,7 @@ def test_postgres_reviewed_intercomponent_recovery_accepts_terminal_zero_sibling
         provider_connection_factory=engine.connect,
         designated_environment_id='test',
         designated_host_id='pytest-postgres-host',
+        runtime_health=bootstrap._runtime_effect_authority(engine),
     )
     _admit(ledger, 502)
     grant = ledger.claim_component(
@@ -299,6 +301,7 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
         designated_environment_id='test',
         designated_host_id='pytest-postgres-recovery',
         projection_lock_capability_factory=lambda _run_id: owner_capability,
+        runtime_health=bootstrap._runtime_effect_authority(engine),
     )
     _admit(ledger, run_id)
     safety_requirements = []
@@ -454,6 +457,7 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
                 designated_environment_id='test',
                 designated_host_id='pytest-postgres-recovery-worker',
                 projection_lock_capability_factory=lambda _run_id: owner_capability,
+                runtime_health=bootstrap._runtime_effect_authority(engine),
             )
             worker_database = _database_authority(
                 engine,
@@ -864,7 +868,7 @@ def test_postgres_boundary_rejects_same_engine_search_path_drift(
 def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
     postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, service, _ = postgres_cost_authority
+    engine, service, bootstrap = postgres_cost_authority
     run_id = 503
     with engine.begin() as connection:
         register_advisory_identity_db(
@@ -919,6 +923,7 @@ def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
         projection_lock_capability_factory=lambda value: (
             projection_lock if value == run_id else None
         ),
+        runtime_health=bootstrap._runtime_effect_authority(engine),
     )
     recovery_ledger = _assemble_rag_cost_ledger(
         recovery_session,
@@ -931,6 +936,7 @@ def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
         projection_lock_capability_factory=lambda value: (
             projection_lock if value == run_id else None
         ),
+        runtime_health=bootstrap._runtime_effect_authority(engine),
     )
     query_budget = _admit_transport(ledger, run_id)
     grant = ledger.claim_component(
@@ -952,6 +958,7 @@ def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
         provider_client=ForbiddenClient(),
         settings=_TEST_SETTINGS,
         answer_model=None,
+        runtime_health=bootstrap._runtime_effect_authority(engine),
         load_current_readiness=lambda: RagServingIndexReadiness(
             ready=True,
             corpus_generation=1,

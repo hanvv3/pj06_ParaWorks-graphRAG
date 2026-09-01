@@ -71,6 +71,65 @@ def test_postgres_runtime_mints_a_trusted_dedicated_engine_bootstrap() -> None:
     assert 'rag_postgres_bootstrap' in initialization.DatabaseRuntime.__annotations__
 
 
+def test_runtime_health_effects_overlap_and_poison_waits_exclusively() -> None:
+    health = initialization.TrustedPostgresRuntimeHealth(
+        _seal=initialization._POSTGRES_RUNTIME_HEALTH_SEAL
+    )
+    effect = getattr(health, '_effect', None)
+    assert callable(effect)
+    entered = (Event(), Event())
+    release = Event()
+
+    def reader(index: int) -> None:
+        with effect(f'healthy-reader-{index}'):
+            entered[index].set()
+            assert release.wait(timeout=5)
+
+    readers = [Thread(target=reader, args=(index,)) for index in range(2)]
+    for reader in readers:
+        reader.start()
+    assert entered[0].wait(timeout=2)
+    assert entered[1].wait(timeout=2)
+
+    poison_finished = Event()
+
+    def poison() -> None:
+        health._poison()
+        poison_finished.set()
+
+    poisoner = Thread(target=poison)
+    poisoner.start()
+    assert poison_finished.wait(timeout=0.1) is False
+    assert health.snapshot.healthy is True
+    release.set()
+    for reader in readers:
+        reader.join(timeout=5)
+        assert reader.is_alive() is False
+    poisoner.join(timeout=5)
+    assert poisoner.is_alive() is False
+    assert health.snapshot.healthy is False
+    assert health.snapshot.failure_count == 1
+
+
+def test_runtime_health_poison_inside_effect_is_latched_before_escape() -> None:
+    health = initialization.TrustedPostgresRuntimeHealth(
+        _seal=initialization._POSTGRES_RUNTIME_HEALTH_SEAL
+    )
+    effect = getattr(health, '_effect', None)
+    assert callable(effect)
+
+    with effect('cleanup-failure'):
+        health._poison()
+        assert health.snapshot.healthy is True
+
+    assert health.snapshot.healthy is False
+    with (
+        pytest.raises(TypeError, match='runtime health'),
+        effect('future-effect'),
+    ):
+        raise AssertionError('poisoned effect must not run')
+
+
 def test_postgres_bootstrap_preserves_the_resolved_connection_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

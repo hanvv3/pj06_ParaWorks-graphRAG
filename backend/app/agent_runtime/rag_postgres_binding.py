@@ -171,6 +171,10 @@ class RagPostgresDatabaseAuthority:
         with self._lifecycle_lock:
             return self._cleanup_failure
 
+    @property
+    def runtime_health_authority(self) -> TrustedPostgresRuntimeHealth:
+        return self._assembly.runtime_health
+
     def __enter__(self) -> RagPostgresDatabaseAuthority:
         with self._lifecycle_lock:
             self._require_usable()
@@ -258,6 +262,19 @@ class RagPostgresDatabaseAuthority:
             finally:
                 session.rollback()
 
+    def require_session_transaction_ended(self, session: Session) -> None:
+        """Prove the Session-owned root transaction physically ended."""
+        with self._lifecycle_lock:
+            lease = self._require_active_operation()
+            if (
+                session is not self._assembly.session
+                or session.get_bind() is not lease.application_connection
+                or session.in_transaction()
+                or lease.application_connection.in_transaction()
+                or lease.application_connection.in_nested_transaction()
+            ):
+                raise TypeError('pinned PostgreSQL transaction did not end')
+
     @contextmanager
     def operation_lease(self):
         with self._leased_operation(close_on_exit=False) as lease:
@@ -308,6 +325,10 @@ class RagPostgresDatabaseAuthority:
                 if owns_connection
                 else original_bind
             )
+            if connection.in_transaction() or connection.in_nested_transaction():
+                if owns_connection:
+                    connection.close()
+                raise TypeError('fresh pinned PostgreSQL transaction is required')
             session.bind = connection
             lease = _RagPostgresOperationLease(
                 authority=self,
@@ -320,7 +341,10 @@ class RagPostgresDatabaseAuthority:
         try:
             with self._assembly.runtime_health._guard(health_lease):
                 session.begin()
-                self._validate_application_connection(connection)
+                enlisted = session.connection()
+                if enlisted is not connection:
+                    raise TypeError('pinned PostgreSQL connection was not enlisted')
+                self._validate_application_connection(enlisted)
             with self._lifecycle_lock:
                 context_token = self._lease_context.set(lease)
                 self._active_leases += 1
@@ -357,6 +381,10 @@ class RagPostgresDatabaseAuthority:
         try:
             if session.in_transaction():
                 session.rollback()
+            if connection.in_transaction() or connection.in_nested_transaction():
+                failed = True
+                with suppress(BaseException):
+                    connection.rollback()
         except BaseException:
             failed = True
             with suppress(BaseException):
@@ -474,6 +502,11 @@ def _bind_rag_postgres_database(
     if not isinstance(session, Session):
         raise TypeError('RAG PostgreSQL session authority is required')
     bind = session.get_bind()
+    if session.in_transaction() or (
+        isinstance(bind, Connection)
+        and (bind.in_transaction() or bind.in_nested_transaction())
+    ):
+        raise TypeError('fresh PostgreSQL transaction is required')
     engine = bind.engine if isinstance(bind, Connection) else bind
     if not isinstance(engine, Engine) or engine.dialect.name != 'postgresql':
         raise TypeError('RAG PostgreSQL database authority requires PostgreSQL')

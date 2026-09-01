@@ -215,6 +215,7 @@ def _authority(
         provider_client=_CLIENTS.get(id(ledger)),
         settings=settings,
         answer_model=answer_model,
+        runtime_health=ledger.runtime_health_authority,
         load_current_readiness=lambda: (
             readiness()
             if callable(readiness)
@@ -341,6 +342,45 @@ def test_forged_prepared_or_grant_and_evidence_drift_are_zero_call(tmp_path: Pat
     with pytest.raises((TypeError, RagProviderTransportError)):
         authority.dispatch(grant=grant, prepared=object())
     assert seen == []
+
+
+def test_runtime_poison_after_prepare_refuses_send_and_closes_claim_at_zero(
+    tmp_path: Path,
+) -> None:
+    seen: list[object] = []
+    ledger = _transport_ledger(tmp_path, _Client(seen))
+    query_budget = _admit_transport(ledger, 311)
+    grant = ledger.claim_component(
+        run_id=311,
+        component='query_embedding',
+        prepared=query_budget,
+    )
+    authority = _authority(ledger)
+    prepared = authority.prepare(
+        grant=grant,
+        prepared=_prepared_query(query_budget),
+    )
+    ledger.runtime_health_authority._poison()
+
+    with pytest.raises(RagProviderTransportError, match='runtime health'):
+        authority.dispatch(grant=grant, prepared=prepared)
+
+    ledger._session.expire_all()
+    parent = ledger._session.get(AgentRun, 311)
+    children = tuple(
+        ledger._session.query(AgentRunCostComponent)
+        .filter(AgentRunCostComponent.agent_run_id == 311)
+        .order_by(AgentRunCostComponent.component_ordinal)
+    )
+    assert seen == []
+    assert parent is not None
+    assert parent.status == 'failed'
+    assert parent.metadata_['outcome'] == 'provider_safety_unavailable'
+    assert parent.total_charged_cost_usd == 0
+    assert len(children) == 2
+    assert all(child.attempted is False for child in children)
+    assert all(child.dispatch_count == 0 for child in children)
+    assert all(child.charged_cost_usd == 0 for child in children)
 
 
 def test_request_identity_binds_rendered_input_and_dispatch_fence(tmp_path: Path):

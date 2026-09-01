@@ -46,6 +46,11 @@ from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
     RagAnswerOutputValidator,
 )
 from backend.app.core.config import Settings
+from backend.app.db.initialization import (
+    PostgresRuntimeHealthUnavailableError,
+    TrustedPostgresEngineBootstrap,
+    TrustedPostgresRuntimeHealth,
+)
 from backend.app.rag.retrieval import (
     AnswerGenerationCostInput,
     PreparedQueryEmbedding,
@@ -261,6 +266,7 @@ class _RagProviderDispatchAssembly:
     settings: Settings = field(repr=False)
     answer_model: StructuredRagAnswerModel | None = field(repr=False)
     load_current_readiness: Callable[[], object] = field(repr=False)
+    runtime_health: TrustedPostgresRuntimeHealth = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -276,6 +282,7 @@ def _assemble_rag_provider_dispatch_authority(
     settings: Settings,
     answer_model: StructuredRagAnswerModel | None,
     load_current_readiness: Callable[[], object],
+    runtime_health: TrustedPostgresRuntimeHealth,
 ) -> RagProviderDispatchAuthority:
     return RagProviderDispatchAuthority(_RagProviderDispatchAssembly(
         store=store,
@@ -288,6 +295,7 @@ def _assemble_rag_provider_dispatch_authority(
         settings=settings,
         answer_model=answer_model,
         load_current_readiness=load_current_readiness,
+        runtime_health=runtime_health,
         _seal=_DISPATCH_ASSEMBLY_SEAL,
     ))
 
@@ -321,7 +329,11 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
         build_answer_output_schema_hmac,
         build_answer_prompt_renderer_hmac,
     )
-    from backend.app.db.session import SessionLocal, engine
+    from backend.app.db.session import (
+        RagPostgresDatabaseBootstrap,
+        SessionLocal,
+        engine,
+    )
     from backend.app.rag.index_readiness import RagV2ServingIndexReadinessService
 
     if type(settings) is not Settings:
@@ -331,6 +343,11 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
             'paid RAG dispatch requires PostgreSQL registered capabilities'
         )
     identity_secret, _ = fingerprint_secret_bytes(settings)
+    if type(RagPostgresDatabaseBootstrap) is not TrustedPostgresEngineBootstrap:
+        raise RagProviderTransportError(
+            'paid RAG dispatch runtime health is unavailable'
+        )
+    runtime_health = RagPostgresDatabaseBootstrap._runtime_effect_authority(engine)
 
     def load_static_capability(identity: object):
         with engine.connect() as connection:
@@ -382,6 +399,7 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
         designated_environment_id=settings.paraworks_env,
         designated_host_id=socket.gethostname(),
         projection_lock_capability_factory=load_projection_capability,
+        runtime_health=runtime_health,
     )
 
     def load_current_readiness():
@@ -414,6 +432,7 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
         settings=settings,
         answer_model=answer_model,
         load_current_readiness=load_current_readiness,
+        runtime_health=runtime_health,
     )
 
 
@@ -424,6 +443,7 @@ class RagProviderDispatchAuthority:
         '_barrier', '_client', '_connection_factory', '_prepared', '_safety',
         '_secret', '_store', '_timeout_seconds', '_settings', '_answer_model',
         '_load_current_readiness',
+        '_runtime_health',
     )
 
     def __init__(self, authority: object) -> None:
@@ -442,6 +462,7 @@ class RagProviderDispatchAuthority:
         settings = authority.settings
         answer_model = authority.answer_model
         load_current_readiness = authority.load_current_readiness
+        runtime_health = authority.runtime_health
         if (
             type(store) is not RagCostLedger
             or type(provider_safety) is not RagProviderSafetyService
@@ -459,6 +480,8 @@ class RagProviderDispatchAuthority:
                 and type(answer_model) is not StructuredRagAnswerModel
             )
             or not callable(load_current_readiness)
+            or type(runtime_health) is not TrustedPostgresRuntimeHealth
+            or runtime_health is not store.runtime_health_authority
         ):
             raise TypeError('provider dispatch authority is unavailable')
         self._store = store
@@ -473,6 +496,7 @@ class RagProviderDispatchAuthority:
         self._settings = settings
         self._answer_model = answer_model
         self._load_current_readiness = load_current_readiness
+        self._runtime_health = runtime_health
         self._prepared: dict[int, _PreparedState] = {}
 
     def prepare(
@@ -480,6 +504,27 @@ class RagProviderDispatchAuthority:
         *,
         grant: CommittedRagDispatchGrant,
         prepared: PreparedQueryEmbedding | PreparedAnswerInvocation,
+    ) -> _PreparedProviderDispatch:
+        try:
+            with self._runtime_health._effect('rag_provider_prepare'):
+                return self._prepare_under_health(
+                    grant=grant,
+                    prepared=prepared,
+                )
+        except PostgresRuntimeHealthUnavailableError:
+            self._cancel_unconsumed_claim(
+                grant,
+                outcome='provider_safety_unavailable',
+            )
+            raise RagProviderTransportError(
+                'provider runtime health refused preparation'
+            ) from None
+
+    def _prepare_under_health(
+        self,
+        *,
+        grant: CommittedRagDispatchGrant,
+        prepared: object,
     ) -> _PreparedProviderDispatch:
         domain_prepared = prepared
         if type(prepared) not in {PreparedQueryEmbedding, PreparedAnswerInvocation}:
@@ -676,6 +721,28 @@ class RagProviderDispatchAuthority:
             ) from None
 
     def dispatch(
+        self,
+        *,
+        grant: CommittedRagDispatchGrant,
+        prepared: object,
+    ) -> _ClassifiedProviderObservation:
+        try:
+            with self._runtime_health._effect('rag_provider_dispatch'):
+                return self._dispatch_under_health(
+                    grant=grant,
+                    prepared=prepared,
+                )
+        except PostgresRuntimeHealthUnavailableError:
+            self._prepared.pop(id(prepared), None)
+            self._cancel_unconsumed_claim(
+                grant,
+                outcome='provider_safety_unavailable',
+            )
+            raise RagProviderTransportError(
+                'provider runtime health refused dispatch'
+            ) from None
+
+    def _dispatch_under_health(
         self,
         *,
         grant: CommittedRagDispatchGrant,

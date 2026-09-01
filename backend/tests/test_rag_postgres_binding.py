@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 import threading
+from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +14,10 @@ from sqlalchemy.pool import NullPool
 
 from backend.app.agent_runtime import rag_postgres_binding as binding_module
 from backend.app.agent_runtime.rag_advisory_locks import RegisteredAdvisoryLock
-from backend.app.agent_runtime.rag_finalization import RagFinalizationService
+from backend.app.agent_runtime.rag_finalization import (
+    RagFinalizationService,
+    SqlAlchemyRagFinalizationBoundary,
+)
 from backend.app.agent_runtime.rag_postgres_binding import (
     RagPostgresDatabaseBusyError,
     RagPostgresDatabaseIdentity,
@@ -236,6 +241,185 @@ def test_operation_lease_pins_exact_application_connection_through_commit(
 
     assert pinned is not None and pinned.closed is True
     assert session.get_bind() is application
+    authority.close()
+    session.close()
+    application.dispose()
+
+
+def _file_postgres_engines(tmp_path: Path):
+    application = create_engine(
+        f'sqlite+pysqlite:///{(tmp_path / "application.db").as_posix()}'
+    )
+    dedicated = create_engine(
+        'sqlite+pysqlite:///:memory:',
+        poolclass=NullPool,
+    )
+    with application.begin() as connection:
+        connection.execute(text('CREATE TABLE durable_probe (value INTEGER)'))
+    application.dialect.name = 'postgresql'
+    dedicated.dialect.name = 'postgresql'
+    return application, dedicated
+
+
+def _patch_raw_sql_identity_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    identity: RagPostgresDatabaseIdentity,
+) -> None:
+    monkeypatch.setattr(binding_module, '_session_identity', lambda _session: identity)
+
+    def connection_identity(connection: Connection):
+        connection.execute(text('SELECT 1'))
+        return identity
+
+    monkeypatch.setattr(
+        binding_module,
+        '_connection_identity',
+        connection_identity,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        '_require_bootstrap_capability',
+        lambda *_args, **_kwargs: None,
+    )
+
+
+def test_session_owned_pinned_transaction_commits_physically_before_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    application, dedicated = _file_postgres_engines(tmp_path)
+    session = Session(application)
+    _patch_raw_sql_identity_probe(monkeypatch, _identity())
+    authority = _bind_rag_postgres_database(
+        session,
+        trusted_bootstrap=_trusted_bootstrap(
+            monkeypatch,
+            application,
+            dedicated,
+        ),
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    pinned: Connection | None = None
+
+    with authority.operation_lease():
+        pinned = session.connection()
+        session.execute(text('INSERT INTO durable_probe VALUES (7)'))
+        session.commit()
+        assert pinned.in_transaction() is False
+        assert pinned.in_nested_transaction() is False
+        with application.connect() as independent:
+            assert independent.scalar(text('SELECT COUNT(*) FROM durable_probe')) == 1
+
+    assert pinned is not None and pinned.closed is True
+    authority.close()
+    session.close()
+    application.dispose()
+
+
+def test_clean_prebound_connection_is_enlisted_and_committed_without_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    application, dedicated = _file_postgres_engines(tmp_path)
+    external = application.connect()
+    session = Session(bind=external)
+    _patch_raw_sql_identity_probe(monkeypatch, _identity())
+    authority = _bind_rag_postgres_database(
+        session,
+        trusted_bootstrap=_trusted_bootstrap(
+            monkeypatch,
+            application,
+            dedicated,
+        ),
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+
+    with authority.operation_lease():
+        assert session.connection() is external
+        session.execute(text('INSERT INTO durable_probe VALUES (8)'))
+        session.commit()
+        assert external.in_transaction() is False
+        assert external.in_nested_transaction() is False
+        with application.connect() as independent:
+            assert independent.scalar(text('SELECT COUNT(*) FROM durable_probe')) == 1
+
+    assert external.closed is False
+    authority.close()
+    session.close()
+    external.close()
+    application.dispose()
+
+
+@pytest.mark.parametrize('nested', (False, True))
+def test_prebound_active_transaction_is_rejected_without_touching_caller_work(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    nested: bool,
+) -> None:
+    application, dedicated = _file_postgres_engines(tmp_path)
+    external = application.connect()
+    root = external.begin()
+    external.execute(text('INSERT INTO durable_probe VALUES (9)'))
+    savepoint = external.begin_nested() if nested else None
+    session = Session(bind=external)
+    _patch_raw_sql_identity_probe(monkeypatch, _identity())
+
+    with pytest.raises(TypeError, match='fresh.*transaction'):
+        _bind_rag_postgres_database(
+            session,
+            trusted_bootstrap=_trusted_bootstrap(
+                monkeypatch,
+                application,
+                dedicated,
+            ),
+            bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+        )
+
+    assert root.is_active is True
+    assert external.in_transaction() is True
+    assert external.in_nested_transaction() is nested
+    assert external.scalar(text('SELECT COUNT(*) FROM durable_probe')) == 1
+    if savepoint is not None:
+        savepoint.rollback()
+    root.rollback()
+    session.close()
+    external.close()
+    dedicated.dispose()
+    application.dispose()
+
+
+def test_session_owned_pinned_transaction_rolls_back_without_visibility_or_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    application, dedicated = _file_postgres_engines(tmp_path)
+    session = Session(application)
+    _patch_raw_sql_identity_probe(monkeypatch, _identity())
+    authority = _bind_rag_postgres_database(
+        session,
+        trusted_bootstrap=_trusted_bootstrap(
+            monkeypatch,
+            application,
+            dedicated,
+        ),
+        bootstrap_capability=object.__new__(RegisteredAdvisoryLock),
+    )
+    pinned: Connection | None = None
+
+    with (
+        pytest.raises(RuntimeError, match='rollback probe'),
+        authority.operation_lease(),
+    ):
+        pinned = session.connection()
+        session.execute(text('INSERT INTO durable_probe VALUES (10)'))
+        raise RuntimeError('rollback probe')
+
+    assert pinned is not None
+    assert pinned.in_transaction() is False
+    assert pinned.in_nested_transaction() is False
+    assert pinned.closed is True
+    with application.connect() as independent:
+        assert independent.scalar(text('SELECT COUNT(*) FROM durable_probe')) == 0
     authority.close()
     session.close()
     application.dispose()
@@ -783,3 +967,49 @@ def test_cleanup_failure_poisons_shared_runtime_and_stale_admission(
     second_session.close()
     third_session.close()
     application.dispose()
+
+
+def test_sql_finalization_refuses_all_phase2_effects_when_poison_wins_after_pin(
+) -> None:
+    pinned = threading.Event()
+    resume = threading.Event()
+    poisoned = threading.Event()
+    effects: list[str] = []
+    errors: list[BaseException] = []
+
+    class Authority:
+        @contextmanager
+        def owned_operation(self):
+            pinned.set()
+            assert resume.wait(timeout=5)
+            yield
+
+        @contextmanager
+        def health_effect(self):
+            if poisoned.is_set():
+                raise TypeError('RAG PostgreSQL runtime health is fail-stopped')
+            yield
+
+    boundary = object.__new__(SqlAlchemyRagFinalizationBoundary)
+    boundary._postgres_database = Authority()
+
+    def finalize() -> None:
+        try:
+            with boundary.acquire_request_database_authority():
+                effects.extend(
+                    ('advisory', 'safety', 'evidence', 'c5', 'retrieval', 'mutation')
+                )
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=finalize)
+    worker.start()
+    assert pinned.wait(timeout=5)
+    poisoned.set()
+    resume.set()
+    worker.join(timeout=5)
+
+    assert worker.is_alive() is False
+    assert effects == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], TypeError)

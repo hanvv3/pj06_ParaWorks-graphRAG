@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import wraps
 from typing import cast
 
 from sqlalchemy import select
@@ -50,6 +51,7 @@ from backend.app.agent_runtime.rag_v2_identity import exact_utf8_bytes
 from backend.app.agents.rag_orchestrator_agent.v2_answer import (
     PreparedAnswerInvocation,
 )
+from backend.app.db.initialization import TrustedPostgresRuntimeHealth
 from backend.app.models.agent_runs import AgentRun
 from backend.app.models.auto_review import AutoReviewRuntimeKeyState
 from backend.app.models.rag_runtime import AgentRunCostComponent
@@ -111,6 +113,7 @@ class _RagCostLedgerAuthority:
     projection_lock_capability_factory: (
         Callable[[int], RegisteredAdvisoryLock] | None
     ) = field(repr=False)
+    runtime_health: TrustedPostgresRuntimeHealth = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -126,6 +129,7 @@ def _assemble_rag_cost_ledger(
     projection_lock_capability_factory: (
         Callable[[int], RegisteredAdvisoryLock] | None
     ) = None,
+    runtime_health: TrustedPostgresRuntimeHealth,
     after_commit: Callable[[], None] | None = None,
 ) -> RagCostLedger:
     """Private composition seam used by the assembly root and deterministic tests."""
@@ -139,8 +143,20 @@ def _assemble_rag_cost_ledger(
         designated_environment_id=designated_environment_id,
         designated_host_id=designated_host_id,
         projection_lock_capability_factory=projection_lock_capability_factory,
+        runtime_health=runtime_health,
         _seal=_LEDGER_ASSEMBLY_SEAL,
     ))
+
+
+def _runtime_health_effect(method):
+    """Guard one complete paid ledger effect under the shared runtime gate."""
+
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self._runtime_health._effect(f'rag_cost_ledger:{method.__name__}'):
+            return method(self, *args, **kwargs)
+
+    return guarded
 
 
 def _make_grant(
@@ -231,12 +247,14 @@ class RagCostLedger:
         projection_lock_capability_factory = (
             authority.projection_lock_capability_factory
         )
+        runtime_health = authority.runtime_health
         if type(identity_secret) is not bytes or not identity_secret:
             raise ValueError('cost-ledger identity secret is required')
         if (
             type(cost_policy) is not RagCostPolicy
             or type(provider_safety) is not RagProviderSafetyService
             or not callable(provider_connection_factory)
+            or type(runtime_health) is not TrustedPostgresRuntimeHealth
             or type(designated_environment_id) is not str
             or not designated_environment_id.strip()
             or designated_environment_id != designated_environment_id.strip()
@@ -254,6 +272,7 @@ class RagCostLedger:
         self._projection_lock_capability_factory = (
             projection_lock_capability_factory
         )
+        self._runtime_health = runtime_health
         self._projection_mutex = threading.RLock()
         self._active_grants: dict[tuple[int, str], object] = {}
         self._admission_snapshots: dict[
@@ -297,6 +316,10 @@ class RagCostLedger:
     @property
     def provider_connection_factory(self) -> Callable[[], Connection]:
         return self._provider_connection_factory
+
+    @property
+    def runtime_health_authority(self) -> TrustedPostgresRuntimeHealth:
+        return self._runtime_health
 
     @property
     def process_instance_hmac(self) -> str:
@@ -455,6 +478,7 @@ class RagCostLedger:
             secret=self._secret,
         )
 
+    @_runtime_health_effect
     def create_admission(
         self,
         *,
@@ -667,6 +691,7 @@ class RagCostLedger:
             runtime_cost_snapshot_hmac=runtime_hmac,
         )
 
+    @_runtime_health_effect
     def claim_component(
         self,
         *,
@@ -787,6 +812,7 @@ class RagCostLedger:
         self._grant_bindings[key] = binding
         return grant
 
+    @_runtime_health_effect
     def consume_committed_grant(self, grant: object) -> None:
         """Authenticate and consume the exact process-local store capability."""
         try:
@@ -802,6 +828,7 @@ class RagCostLedger:
         except Exception:
             raise RagCostLedgerError('dispatch grant consumption failed') from None
 
+    @_runtime_health_effect
     def consume_transport_grant(
         self,
         grant: object,
@@ -853,6 +880,7 @@ class RagCostLedger:
             raise RagCostLedgerError('durable dispatch row changed before send')
         self.consume_committed_grant(grant)
 
+    @_runtime_health_effect
     def revalidate_c5_before_send(
         self,
         prepared: object,
@@ -979,6 +1007,7 @@ class RagCostLedger:
                     'C.5 serving evidence changed before send'
                 )
 
+    @_runtime_health_effect
     def finalize_component(
         self,
         *,
@@ -1359,6 +1388,7 @@ class RagCostLedger:
         ))
         return sum((Decimal(row.charged_cost_usd) for row in rows), _ZERO)
 
+    @_runtime_health_effect
     def finalize_projectionless_failure(
         self,
         *,
@@ -1441,6 +1471,7 @@ class RagCostLedger:
             completed_at=timestamp,
         )
 
+    @_runtime_health_effect
     def finalize_pre_send_refusal(
         self,
         *,
