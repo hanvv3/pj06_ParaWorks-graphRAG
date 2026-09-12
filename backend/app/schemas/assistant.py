@@ -1,12 +1,27 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from backend.app.agent_runtime.rag_v2_identity import StrictUnicodeScalarValidator
+from backend.app.schemas.rag import ExactV1Projection, RagCitationResponse
 
 
 class AssistantConversationCreateRequest(BaseModel):
     title: str | None = Field(default=None, max_length=160)
 
+    @field_validator('title')
+    @classmethod
+    def validate_title_unicode(cls, value: str | None) -> str | None:
+        if value is not None:
+            StrictUnicodeScalarValidator.validate(value)
+        return value
+
 
 class AssistantMessageCreateRequest(BaseModel):
     content: str = Field(min_length=1, max_length=4000)
+
+    @field_validator('content')
+    @classmethod
+    def validate_content_unicode(cls, value: str) -> str:
+        return StrictUnicodeScalarValidator.validate(value)
 
 
 class AssistantConversationResponse(BaseModel):
@@ -17,20 +32,20 @@ class AssistantConversationResponse(BaseModel):
     updated_at: str
 
 
-class AssistantMessageResponse(BaseModel):
+class AssistantMessageResponse(ExactV1Projection):
     id: int
     conversation_id: int
     role: str
     content: str
-    citations: list
-    source_ids: list
-    source_links: list
-    source_snippets: list
+    citations: list[RagCitationResponse]
+    source_ids: list[str]
+    source_links: list[str]
+    source_snippets: list[str]
     permission_level: str | None
     hidden_match_count: int
     permission_notice: str | None
     agent_run_id: int | None
-    metadata: dict
+    metadata: dict[str, object]
     created_at: str
 
 

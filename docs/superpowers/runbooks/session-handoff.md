@@ -2,6 +2,27 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task16 Assistant capability candidate
+
+- Task16 candidate implements the exact Assistant delivery-state/status/body/
+  id/outcome construction matrix and rejects all cross-combinations. It also
+  adds the exact-one raw-ASGI render declaration guard and exact cache-isolation
+  headers without treating the declaration as rollout or identity authority.
+- Assistant write precedence is authentication -> Pydantic/strict Unicode ->
+  owner-hidden 404 -> capability 409 -> scanner -> mutation/RAG. Scanner
+  unavailability is the pre-user generic500 boundary with no conversation
+  update, message, AgentRun, or provider work. Existing legacy/noncutover
+  writers and catch behavior remain in place for Task18.
+- GET message/list guards inspect only the target projection: a live V2 message
+  or live V2 summary contributor requires the header; stale/redacted,
+  noncontributing, unrelated, and legacy-only rows do not. The inspection is a
+  minimal structural/final-parent liveness boundary; Task17 still owns full
+  evidence/content revalidation and projection.
+- Candidate is locally verified and awaits controller review; do not call it
+  CLEAN. Task17 and Task18 remain next. No rollout activation, paid call, real
+  PostgreSQL proof, remote push, Slack/CDC/Redis/D.1/E change, or full D Core
+  release claim was made. Exact commands and caveats are in `task-16-report.md`.
+
 ## 2026-09-12 D Core Task15 CLEAN; resume at Task16 implementation
 
 - Task14 and Task15 are complete. Cumulative independent Task15 review is

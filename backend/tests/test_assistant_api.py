@@ -1,7 +1,9 @@
 import logging
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,7 +18,87 @@ from backend.app.assistant.service import (
 )
 from backend.app.core.demo_auth import USERS
 from backend.app.models import AgentRun, AssistantMessage, Source
+from backend.app.schemas.assistant import AssistantMessageResponse
 from backend.tests.test_rag_orchestrator_service import seed_chunk
+
+
+def _assistant_message_projection(citation: dict[str, object]) -> dict[str, object]:
+    return {
+        'id': 1,
+        'conversation_id': 2,
+        'role': 'assistant',
+        'content': '근거가 있는 답변',
+        'citations': [citation],
+        'source_ids': ['gmail:message-1'],
+        'source_links': ['https://mail.example/messages/1'],
+        'source_snippets': ['배포일은 금요일입니다.'],
+        'permission_level': 'internal',
+        'hidden_match_count': 0,
+        'permission_notice': None,
+        'agent_run_id': 3,
+        'metadata': {'agent_name': 'rag_orchestrator_agent'},
+        'created_at': '2026-09-12T00:00:00+00:00',
+    }
+
+
+def test_assistant_message_recursively_serializes_exact_shared_citation_shape() -> None:
+    citation = {
+        'source_id': 'gmail:message-1',
+        'source_url': 'https://mail.example/messages/1',
+        'source_type': 'gmail',
+        'permission_level': 'internal',
+        'source_snippet': '배포일은 금요일입니다.',
+        'relevance_score': 0.875,
+        'matched_terms': ['배포일'],
+    }
+    dumped = AssistantMessageResponse.model_validate(
+        _assistant_message_projection(citation)
+    ).model_dump(mode='json')
+    assert set(dumped['citations'][0]) == {
+        'source_id',
+        'source_url',
+        'source_type',
+        'permission_level',
+        'source_snippet',
+        'relevance_score',
+        'matched_terms',
+    }
+    assert dumped['citations'][0]['source_url'] == 'https://mail.example/messages/1'
+
+
+@pytest.mark.parametrize(
+    'invalid_citation',
+    [
+        {
+            'source_id': 'gmail:message-1',
+            'source_url': None,
+            'source_type': 'gmail',
+            'permission_level': 'internal',
+            'source_snippet': 'snippet',
+            'relevance_score': 0.5,
+            'matched_terms': [],
+        },
+        {
+            'source_id': 'gmail:message-1',
+            'source_url': 'https://mail.example/messages/1',
+            'source_type': 'gmail',
+            'permission_level': 'internal',
+            'source_snippet': 'snippet',
+            'relevance_score': 0.5,
+            'matched_terms': [],
+            'support_mode': 'direct',
+            'evidence_slot': 'E1',
+            'serving_identity_hmac': 'a' * 64,
+        },
+    ],
+)
+def test_assistant_message_citation_validation_rejects_null_url_or_internal_identity(
+    invalid_citation: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        AssistantMessageResponse.model_validate(
+            _assistant_message_projection(invalid_citation)
+        )
 
 
 def _email_intent(
@@ -50,7 +132,7 @@ def _patch_email_flow(monkeypatch, *, intent_decision, draft_decision=None) -> N
     monkeypatch.setattr(assistant_api, 'build_email_draft_composer', lambda settings: FakeEmailDraftComposer())
 
 
-def test_assistant_conversation_api_is_user_scoped(client: TestClient) -> None:
+def test_assistant_conversation_api_preserves_owner_hidden_scope(client: TestClient) -> None:
     create_response = client.post(
         '/api/v1/assistant/conversations',
         json={'title': 'Viewer Redis 질문'},

@@ -1,10 +1,27 @@
+import unicodedata
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from sqlalchemy.orm import Session
 
 from backend.app.agents.rag_orchestrator_agent import answer_question_with_rag
+from backend.app.agents.rag_orchestrator_agent.v2_input import (
+    RagInputSafetyError,
+    RagInputScannerUnavailableError,
+    _scan_value,
+)
+from backend.app.assistant.capability import (
+    RAG_RENDER_CAPABILITY_RESPONSE_HEADERS,
+    assistant_post_requires_render_capability,
+    conversation_summary_contains_live_v2,
+    messages_projection_contains_live_v2,
+    require_rag_render_capability,
+)
 from backend.app.assistant.contact_lookup import (
     contact_lookup_response_content,
     detect_contact_lookup_request,
@@ -65,11 +82,92 @@ from backend.app.schemas.assistant import (
     AssistantTurnResponse,
 )
 
-router = APIRouter(prefix='/assistant', tags=['assistant'])
+_CAPABILITY_DEPENDENT_STATE = 'assistant_rag_render_capability_dependent'
+
+
+class _AssistantCapabilityHeadersRoute(APIRoute):
+    def get_route_handler(self):
+        original_handler = super().get_route_handler()
+
+        async def capability_headers_handler(request: Request):
+            try:
+                response = await original_handler(request)
+            except RequestValidationError as exc:
+                if _is_capability_dependent(request):
+                    return JSONResponse(
+                        status_code=422,
+                        content=jsonable_encoder({'detail': exc.errors()}),
+                        headers=RAG_RENDER_CAPABILITY_RESPONSE_HEADERS,
+                    )
+                raise
+            except HTTPException as exc:
+                if _is_capability_dependent(request):
+                    exc.headers = {
+                        **(exc.headers or {}),
+                        **RAG_RENDER_CAPABILITY_RESPONSE_HEADERS,
+                    }
+                raise
+            if _is_capability_dependent(request):
+                for name, value in RAG_RENDER_CAPABILITY_RESPONSE_HEADERS.items():
+                    response.headers[name] = value
+            return response
+
+        return capability_headers_handler
+
+
+router = APIRouter(
+    prefix='/assistant',
+    tags=['assistant'],
+    route_class=_AssistantCapabilityHeadersRoute,
+)
 DbSession = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[DemoUser, Depends(get_demo_user)]
 AppSettings = Annotated[Settings, Depends(get_settings)]
 ASSISTANT_FAILURE_CONTENT = '답변 생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.'
+
+
+def _mark_capability_dependent(request: Request) -> None:
+    setattr(request.state, _CAPABILITY_DEPENDENT_STATE, True)
+
+
+def _is_capability_dependent(request: Request) -> bool:
+    return getattr(request.state, _CAPABILITY_DEPENDENT_STATE, False) is True
+
+
+def _mark_capability_dependent_post(
+    request: Request,
+    settings: AppSettings,
+) -> None:
+    if assistant_post_requires_render_capability(settings):
+        _mark_capability_dependent(request)
+
+
+CapabilityDependentPost = Annotated[
+    None,
+    Depends(_mark_capability_dependent_post),
+]
+
+
+def _require_post_capability(request: Request, settings: Settings) -> None:
+    if assistant_post_requires_render_capability(settings):
+        require_rag_render_capability(request.scope.get('headers', ()))
+
+
+def _require_assistant_ingress_scan(value: str) -> None:
+    normalized = ' '.join(unicodedata.normalize('NFC', value).split())
+    try:
+        _scan_value(value)
+        _scan_value(normalized)
+    except RagInputSafetyError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={'code': 'input_safety_blocked'},
+        ) from exc
+    except RagInputScannerUnavailableError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail='assistant request failed',
+        ) from exc
 
 
 def require_conversation(db: Session, user: DemoUser, conversation_id: int):
@@ -303,8 +401,20 @@ def _append_source_email_draft_message(
 
 
 @router.get('/conversations', response_model=AssistantConversationsResponse)
-def list_assistant_conversations(db: DbSession, user: CurrentUser) -> dict:
+def list_assistant_conversations(
+    raw_request: Request,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict:
     conversations = list_conversations(db, user)
+    if any(
+        conversation_summary_contains_live_v2(
+            db, user=user, conversation=conversation
+        )
+        for conversation in conversations
+    ):
+        _mark_capability_dependent(raw_request)
+        require_rag_render_capability(raw_request.scope.get('headers', ()))
     return {
         'conversations': [
             serialize_conversation(conversation, db=db, user=user)
@@ -316,9 +426,14 @@ def list_assistant_conversations(db: DbSession, user: CurrentUser) -> dict:
 @router.post('/conversations', response_model=AssistantConversationCreatedResponse)
 def create_assistant_conversation(
     request: AssistantConversationCreateRequest,
+    raw_request: Request,
     db: DbSession,
     user: CurrentUser,
+    settings: AppSettings,
+    _capability_context: CapabilityDependentPost,
 ) -> dict:
+    _require_post_capability(raw_request, settings)
+    _require_assistant_ingress_scan(request.title or '새 대화')
     if request.title is None or request.title.strip() == '새 대화':
         reusable_conversation = find_reusable_empty_conversation(db, user)
         if reusable_conversation is not None:
@@ -342,11 +457,17 @@ def create_assistant_conversation(
 )
 def list_assistant_messages(
     conversation_id: int,
+    raw_request: Request,
     db: DbSession,
     user: CurrentUser,
 ) -> dict:
     conversation = require_conversation(db, user, conversation_id)
     messages = list_messages(db, user, conversation.id)
+    if messages_projection_contains_live_v2(
+        db, user=user, messages=messages
+    ):
+        _mark_capability_dependent(raw_request)
+        require_rag_render_capability(raw_request.scope.get('headers', ()))
     return {
         'conversation': serialize_conversation(
             conversation, db=db, user=user
@@ -365,11 +486,15 @@ def list_assistant_messages(
 def create_assistant_message(
     conversation_id: int,
     request: AssistantMessageCreateRequest,
+    raw_request: Request,
     db: DbSession,
     user: CurrentUser,
     settings: AppSettings,
+    _capability_context: CapabilityDependentPost,
 ) -> dict:
     conversation = require_conversation(db, user, conversation_id)
+    _require_post_capability(raw_request, settings)
+    _require_assistant_ingress_scan(request.content)
     try:
         user_message = append_user_message(db, user, conversation, request.content)
     except ValueError as exc:

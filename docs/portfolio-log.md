@@ -1,5 +1,25 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Assistant delivery/capability candidate
+
+- Task16 adds a frozen, construction-validated `AssistantDeliveryResult`
+  algebra and the permanent refusal-only Assistant render-capability guard.
+  The header cannot activate a stage, authenticate a client, select legacy,
+  or change rollout ownership.
+- Enforced Assistant POSTs now preserve authentication/validation/owner lookup
+  precedence before the exact capability 409, then scan caller input before
+  conversation, message, AgentRun, retrieval, or provider mutation. GET guards
+  are projection-sensitive: only live V2 rows returned as messages or
+  contributing to a conversation summary require the capability.
+- Assistant message DTOs recursively reuse the shared exact seven-key citation
+  contract with a required non-null URL. Capability-dependent responses carry
+  exact private/no-store and Vary headers. Focused and adjacent SQLite/fake
+  gates are green; final verification is recorded in the Task16 report.
+- Candidate awaits controller-owned independent review and is not a CLEAN or
+  D Core release claim. Task17 evidence revalidation and Task18 V2 sole-writer
+  cutover remain separate; no rollout, live provider, PostgreSQL, remote push,
+  Slack, D.1, Redis, CDC, or E work is claimed.
+
 ## 2026-09-12 D Core direct API integration reviewed and complete
 
 - Task15 cumulative independent review is CLEAN at `d678552`. Ask/Search use
