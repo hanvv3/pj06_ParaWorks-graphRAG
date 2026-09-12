@@ -213,8 +213,16 @@ capability-dependent success/error including unexpected 500, and retains the
 existing status/body. The minimal V2 structural-parent check moved beside the
 existing service liveness decision so guard, serializer, context, and summary
 all make one projection decision. Missing/invalid parents redact without V2
-bytes; hidden already-redacted canned rows no longer require a capability.
+bytes. A final pre-candidate spec check corrected hidden-only canned handling:
+structurally valid `rag_canned`/`none-v1` rows with bounded hidden metadata are
+live, require capability, and retain original content/count/notice in both the
+message projection and contributing summary.
 Task17 full cryptographic evidence revalidation remains deferred.
+
+That correction had its own behavioral RED before production change:
+`test_hidden_only_canned_v2_requires_guard_and_preserves_original_projection`
+failed because the missing-capability request returned 200 rather than 409.
+After the shared liveness correction it passed `1 passed in 0.38s`.
 
 First focused GREEN was `9 passed, 23 deselected in 1.90s`; the complete
 capability suite then passed `32 passed in 5.23s`. Assistant/API/auth regression
@@ -223,7 +231,7 @@ Task16 contracts, complete Assistant API/service/models/evidence writer,
 authentication, direct RAG delivery, V1 response contracts, and V2 input, was:
 
 ```text
-207 passed in 70.37s
+207 passed in 69.95s
 ```
 
 Static, compilation, diff, and credential hygiene results are recorded below

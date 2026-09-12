@@ -692,7 +692,7 @@ def test_missing_parent_v2_is_redacted_before_message_guard_and_summary(
     assert 'cache-control' not in conversations_response.headers
 
 
-def test_already_redacted_hidden_v2_does_not_trigger_guard_or_summary(
+def test_hidden_only_canned_v2_requires_guard_and_preserves_original_projection(
     client: TestClient,
     db_session: Session,
 ) -> None:
@@ -701,26 +701,45 @@ def test_already_redacted_hidden_v2_does_not_trigger_guard_or_summary(
     db_session.commit()
     message = _add_v2_canned_message(db_session, conversation, 'HIDDEN_V2_SENTINEL')
     message.hidden_match_count = 1
+    message.permission_notice = 'Some sources may be hidden by permissions.'
     db_session.commit()
 
-    messages_response = client.get(
+    refused_messages = client.get(
         f'/api/v1/assistant/conversations/{conversation.id}/messages',
         headers={'X-Demo-User': 'viewer'},
     )
-    conversations_response = client.get(
+    refused_conversations = client.get(
         '/api/v1/assistant/conversations',
         headers={'X-Demo-User': 'viewer'},
     )
-
-    assert messages_response.status_code == 200
-    assert b'HIDDEN_V2_SENTINEL' not in messages_response.content
-    assert messages_response.json()['messages'][0]['permission_notice'] == (
-        'evidence_unavailable'
+    messages_response = client.get(
+        f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        headers=CAPABILITY_HEADERS,
     )
-    assert 'cache-control' not in messages_response.headers
+    conversations_response = client.get(
+        '/api/v1/assistant/conversations',
+        headers=CAPABILITY_HEADERS,
+    )
+
+    assert refused_messages.status_code == 409
+    assert b'HIDDEN_V2_SENTINEL' not in refused_messages.content
+    _assert_no_store(refused_messages)
+    assert refused_conversations.status_code == 409
+    assert b'HIDDEN_V2_SENTINEL' not in refused_conversations.content
+    _assert_no_store(refused_conversations)
+    assert messages_response.status_code == 200
+    projected = messages_response.json()['messages'][0]
+    assert projected['content'] == 'HIDDEN_V2_SENTINEL'
+    assert projected['hidden_match_count'] == 1
+    assert projected['permission_notice'] == (
+        'Some sources may be hidden by permissions.'
+    )
+    _assert_no_store(messages_response)
     assert conversations_response.status_code == 200
-    assert b'HIDDEN_V2_SENTINEL' not in conversations_response.content
-    assert 'cache-control' not in conversations_response.headers
+    assert conversations_response.json()['conversations'][0]['summary'] == (
+        'HIDDEN_V2_SENTINEL'
+    )
+    _assert_no_store(conversations_response)
 
 
 def test_message_get_ignores_live_v2_row_in_unrelated_conversation(

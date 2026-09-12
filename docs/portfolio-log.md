@@ -10,9 +10,10 @@
   is unchanged.
 - GET guards and serializers now share one minimal projection-liveness
   decision, so structurally invalid parents redact without leaking V2 bytes
-  while already-redacted hidden rows do not cause a needless 409. Final
-  proportional review-fix gate: 207 passed with local SQLite/fakes. The result
-  remains a candidate awaiting rereview, not a CLEAN claim.
+  while valid hidden-only canned rows remain live: missing capability refuses,
+  and capable reads retain the original content, bounded count, notice, and
+  contributing summary. Final proportional review-fix gate is recorded in the
+  Task16 report. The result remains a candidate awaiting rereview, not CLEAN.
 - Task16 adds a frozen, construction-validated `AssistantDeliveryResult`
   algebra and the permanent refusal-only Assistant render-capability guard.
   The header cannot activate a stage, authenticate a client, select legacy,

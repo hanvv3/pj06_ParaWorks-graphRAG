@@ -474,10 +474,11 @@ def assistant_message_projection_is_live(
     """Return whether the current serializer may expose stored message bytes."""
     if message.content_write_mode != 'rag_v2_exact':
         return _message_evidence_is_live(db, user=user, message=message)
-    return bool(
-        _assistant_message_has_valid_v2_structure(db, message=message)
-        and _message_evidence_is_live(db, user=user, message=message)
-    )
+    if not _assistant_message_has_valid_v2_structure(db, message=message):
+        return False
+    if message.content_origin == 'rag_canned':
+        return True
+    return _message_evidence_is_live(db, user=user, message=message)
 
 
 def _assistant_message_has_valid_v2_structure(
@@ -511,10 +512,12 @@ def _assistant_message_has_valid_v2_structure(
         return bool(
             message.evidence_contract_version == 'none-v1'
             and message.serving_dependency_count == 0
+            and message.permission_level is None
             and not message.citations
             and not message.source_ids
             and not message.source_links
             and not message.source_snippets
+            and _canned_hidden_projection_is_valid(message)
             and (message.metadata_ or {}).get('evidence_derived') is not True
             and message.dependency_set_hmac_schema_version is None
             and message.dependency_set_hmac is None
@@ -522,6 +525,18 @@ def _assistant_message_has_valid_v2_structure(
             and message.model_influence_set_hmac is None
         )
     return message.content_origin == 'rag_assembled'
+
+
+def _canned_hidden_projection_is_valid(message: AssistantMessage) -> bool:
+    hidden_count = message.hidden_match_count
+    if type(hidden_count) is not int or not 0 <= hidden_count <= 20:
+        return False
+    if hidden_count > 0:
+        return (
+            message.permission_notice
+            == 'Some sources may be hidden by permissions.'
+        )
+    return message.permission_notice in {None, 'evidence_unavailable'}
 
 
 def _is_lower_hmac(value: object) -> bool:
