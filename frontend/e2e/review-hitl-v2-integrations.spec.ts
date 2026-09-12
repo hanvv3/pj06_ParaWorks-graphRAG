@@ -1,6 +1,15 @@
 import { expect, test, type Page } from "@playwright/test";
 import { parseReviewWorkflowQuery } from "../src/app/review/reviewWorkflowContext";
 
+type HttpFixtureFailure = {
+  status: number;
+  code?: string;
+};
+
+function isHttpFixtureFailure(value: object): value is HttpFixtureFailure {
+  return "status" in value && typeof value.status === "number";
+}
+
 const serverIssuedWorkflowThreadId = "89abcdef0123456789abcdef01234567";
 
 const sourceRefs = [
@@ -231,7 +240,7 @@ async function installIntegrationsRoutes(
   await page.route("**/api/v1/orchestration/v2/company-memory/dry-run", async (route) => {
     options.onDryRun?.(route.request().postDataJSON());
     const next = dryRunResponses.shift() ?? dryRun;
-    if (next.status === 500) {
+    if (isHttpFixtureFailure(next) && next.status === 500) {
       await route.fulfill({ status: 500, contentType: "application/json", json: { detail: "preview lost" } });
       return;
     }
@@ -240,7 +249,7 @@ async function installIntegrationsRoutes(
   await page.route("**/api/v1/orchestration/v2/company-memory/runs", async (route) => {
     options.onLaunch?.(route.request().postDataJSON());
     const next = launchStatuses.shift() ?? awaitingReviewStatus();
-    if (typeof next.status === "number") {
+    if (isHttpFixtureFailure(next)) {
       await route.fulfill({
         status: next.status,
         contentType: "application/json",

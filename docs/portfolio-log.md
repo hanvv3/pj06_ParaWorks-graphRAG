@@ -6471,3 +6471,27 @@ Cost/security note:
   existing rollback warnings. Static/import/security checks passed. This
   remains a candidate for independent rereview; Task 14 and real PostgreSQL
   release verification remain pending.
+
+## 2026-09-12 Deliverable D Core Task 19 frontend contract candidate
+
+- Aligned the existing Assistant/search TypeScript DTOs with the exact backend
+  wire contract: nullable fields remain required when the server emits explicit
+  null, and search/citation source URLs remain required non-null strings.
+- Centralized Assistant GET/POST transport behind typed wrappers and declared
+  `rag-v2-plain-text-citations:v1` exactly once per Assistant request. Shared
+  auth, CSRF, and content-type headers remain intact; unrelated APIs do not
+  claim the render capability.
+- Replaced raw response text exposure with a typed `ApiError` whose code is
+  retained only for exact public RAG or Review Workflow allowlists and whose
+  message is always bounded Korean copy. Unknown, English, and inherited object
+  property names are not surfaced to users.
+- RED evidence covered 13 compile-contract failures, four initial browser
+  contract failures, four Review Workflow compatibility regressions, and one
+  prototype-property allowlist failure. Current frontend evidence is full
+  TypeScript and lint success, Task 19 `5 passed`, Assistant regression
+  `5 passed`, Review Workflow integration `22 passed`, and the final combined
+  Chromium gate `28 passed`. Diff and redacted credential-pattern checks pass.
+- This is a local implementation candidate awaiting independent review, not a
+  rollout or release claim. Tests use mocked browser routes; no backend,
+  provider, network, paid-model, Task 18 release-gate, or Task 20 UX behavior
+  changed.

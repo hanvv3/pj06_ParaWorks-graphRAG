@@ -1,4 +1,4 @@
-import { apiGet, apiPost } from "./client";
+import { ApiError, apiGet, apiPost } from "./client";
 import type {
   ReviewWorkflowDiagnostic,
   ReviewWorkflowDryRun,
@@ -59,6 +59,11 @@ function readSerializedCode(value: unknown): ReviewWorkflowErrorCode | null {
 
 /** Converts bounded V2 API failures into a stable, display-safe UI error. */
 export function readReviewWorkflowError(error: unknown): ReviewWorkflowClientError {
+  if (error instanceof ApiError) {
+    return new ReviewWorkflowClientError(
+      isKnownErrorCode(error.code) ? error.code : null,
+    );
+  }
   if (!(error instanceof Error) || error.message.length > MAX_SERIALIZED_ERROR_LENGTH) {
     return new ReviewWorkflowClientError(null);
   }

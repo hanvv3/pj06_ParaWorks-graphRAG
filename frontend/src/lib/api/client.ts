@@ -97,31 +97,104 @@ function csrfHeader(): Record<string, string> {
   return token ? { "X-CSRF-Token": token } : {};
 }
 
+const SAFE_API_ERROR_MESSAGES = {
+  input_safety_blocked: "민감한 정보로 보이는 내용이 포함되어 요청을 전송하지 않았습니다.",
+  input_scanner_unavailable: "요청 내용을 확인하는 기능을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+  permission_denied: "이 요청을 처리할 권한이 없습니다.",
+  budget_exceeded: "요청이 비용 한도를 초과해 답변을 생성하지 않았습니다.",
+  runtime_version_unavailable: "현재 답변 기능을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+  retriever_not_configured: "검색 기능이 준비되지 않았습니다.",
+  retriever_unavailable: "검색 기능을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+  model_unavailable: "답변 모델을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+  provider_safety_unavailable: "안전 확인 기능을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+  provider_response_identity_invalid: "답변을 안전하게 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+  provider_usage_overrun: "요청이 사용 한도를 초과해 중단되었습니다.",
+  provider_embedding_payload_invalid: "검색 요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+  model_provider_failed: "답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+  structured_output_invalid: "답변 형식을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+  citation_validation_failed: "답변의 근거를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+  persistence_failed: "요청 처리 상태를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+  unexpected_internal_error: "요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+  client_upgrade_required: "새 버전이 필요합니다. 페이지를 새로고침해 주세요.",
+} as const;
+
+const REVIEW_WORKFLOW_API_ERROR_CODES = {
+  invalid_input: true,
+  not_found: true,
+  idempotency_key_reused: true,
+  evidence_changed: true,
+  permission_denied: true,
+  checkpoint_unavailable: true,
+  checkpoint_failed: true,
+  review_unresolved: true,
+  runtime_version_unavailable: true,
+  model_unavailable: true,
+  budget_exceeded: true,
+  cost_preview_changed: true,
+  concurrent_resume: true,
+  invalid_state_transition: true,
+} as const;
+
+type PublicApiErrorCode = keyof typeof SAFE_API_ERROR_MESSAGES;
+type ReviewWorkflowApiErrorCode = keyof typeof REVIEW_WORKFLOW_API_ERROR_CODES;
+type KnownApiErrorCode = PublicApiErrorCode | ReviewWorkflowApiErrorCode;
+
+function hasOwnKey<T extends object>(value: T, key: PropertyKey): key is keyof T {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | null,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+const UNKNOWN_API_ERROR_MESSAGE = "요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.";
+
+function publicErrorCode(payload: unknown): KnownApiErrorCode | null {
+  if (typeof payload !== "object" || payload === null || !("detail" in payload)) return null;
+  const detail = payload.detail;
+  if (typeof detail !== "object" || detail === null || !("code" in detail)) return null;
+  const code = detail.code;
+  if (typeof code !== "string") return null;
+  if (hasOwnKey(SAFE_API_ERROR_MESSAGES, code) || hasOwnKey(REVIEW_WORKFLOW_API_ERROR_CODES, code)) {
+    return code;
+  }
+  return null;
+}
+
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const detail = await response.text();
-    let message = detail;
-    try {
-      const parsed = JSON.parse(detail) as { detail?: unknown };
-      if (typeof parsed.detail === "string") {
-        message = parsed.detail;
-      } else if (parsed.detail !== undefined) {
-        message = JSON.stringify(parsed.detail);
-      }
-    } catch {
-      // Keep the original response text when the body is not JSON.
-    }
-    throw new Error(message || `Request failed with ${response.status}`);
+    const payload = await response.json().catch(() => undefined) as unknown;
+    const code = publicErrorCode(payload);
+    throw new ApiError(
+      response.status,
+      code,
+      code !== null && hasOwnKey(SAFE_API_ERROR_MESSAGES, code)
+        ? SAFE_API_ERROR_MESSAGES[code]
+        : UNKNOWN_API_ERROR_MESSAGE,
+    );
   }
 
   return response.json() as Promise<T>;
 }
 
-export async function apiGet<T>(path: string, demoUser?: string): Promise<T> {
+export async function apiGet<T>(
+  path: string,
+  demoUser?: string,
+  additionalHeaders?: HeadersInit,
+): Promise<T> {
+  const headers = new Headers({
+    "X-Demo-User": demoUserHeader(demoUser),
+  });
+  new Headers(additionalHeaders).forEach((value, name) => headers.set(name, value));
   const response = await fetch(apiUrl(path), {
-    headers: {
-      "X-Demo-User": demoUserHeader(demoUser),
-    },
+    headers,
     credentials: "include",
     cache: "no-store",
   });
@@ -133,14 +206,17 @@ export async function apiPost<T>(
   path: string,
   body?: unknown,
   demoUser?: string,
+  additionalHeaders?: HeadersInit,
 ): Promise<T> {
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    "X-Demo-User": demoUserHeader(demoUser),
+    ...csrfHeader(),
+  });
+  new Headers(additionalHeaders).forEach((value, name) => headers.set(name, value));
   const response = await fetch(apiUrl(path), {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Demo-User": demoUserHeader(demoUser),
-      ...csrfHeader(),
-    },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
     credentials: "include",
     cache: "no-store",

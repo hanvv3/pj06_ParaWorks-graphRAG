@@ -676,15 +676,15 @@ export type SearchResult = {
   source_id: string;
   text: string;
   source_snippet: string;
-  source_url?: string | null;
-  source_type?: string | null;
+  source_url: string;
+  source_type: string | null;
   permission_level: string;
   relevance_score: number;
   matched_terms: string[];
   citation: RagCitation;
-  parser_status?: string | null;
-  parser_status_reason?: string | null;
-  revision_id?: string | null;
+  parser_status: string | null;
+  parser_status_reason: string | null;
+  revision_id: string | null;
 };
 
 export type SearchResponse = {
@@ -724,7 +724,7 @@ export type DocumentVersionSummary = {
 export type RagCitation = {
   source_id: string;
   source_url: string;
-  source_type?: string | null;
+  source_type: string | null;
   permission_level: string;
   source_snippet: string;
   relevance_score: number;
@@ -740,10 +740,10 @@ export type AskResponse = {
   source_links: string[];
   source_snippets: string[];
   citations: RagCitation[];
-  permission_level: string;
+  permission_level: string | null;
   hidden_match_count: number;
-  permission_notice?: string | null;
-  agent_run_id?: number | null;
+  permission_notice: string | null;
+  agent_run_id: number | null;
   cache_key: string;
   model_name: string;
   estimated_cost_usd: number;
@@ -757,7 +757,7 @@ export type AskResponse = {
 export type AssistantConversation = {
   id: number;
   title: string;
-  summary?: string | null;
+  summary: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -771,10 +771,10 @@ export type AssistantMessage = {
   source_ids: string[];
   source_links: string[];
   source_snippets: string[];
-  permission_level?: string | null;
+  permission_level: string | null;
   hidden_match_count: number;
-  permission_notice?: string | null;
-  agent_run_id?: number | null;
+  permission_notice: string | null;
+  agent_run_id: number | null;
   metadata: Record<string, unknown>;
   created_at: string;
 };

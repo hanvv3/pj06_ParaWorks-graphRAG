@@ -5042,3 +5042,36 @@ tests passed with 53 tests; ruff passed.
   `uv run --no-cache --locked --offline --no-sync` with the explicitly selected
   existing `.venv-task4-r3-review` interpreter; tests used that interpreter
   directly with `Settings.model_config['env_file']=None` and fresh basetemp.
+
+## 2026-09-12 Deliverable D Core Task 19 frontend contract candidate
+
+- Worktree/branch: `.worktrees/review-hitl-v2-design` on
+  `codex/rag-orchestrator-agent`; Task 19 started from
+  `92c46fd13026d4bce4a054760918dd2681c74552`.
+- The frontend now consumes the exact backend Assistant/RAG DTO nullability and
+  source URL contracts. `frontend/src/lib/api/assistant.ts` is the sole typed
+  Assistant transport boundary and sends
+  `rag-v2-plain-text-citations:v1` once on Assistant GET/POST only.
+- `ApiError(status, code, safeMessage)` parses JSON structurally, preserves only
+  exact public RAG plus Review Workflow allowlisted codes, and never exposes raw
+  response/detail text. Review Workflow revalidates the typed code with its own
+  bounded set; its older serialized-Error parser remains compatibility-only.
+- Approved prerequisite scope: two test fixture unions in
+  `review-hitl-v2-integrations.spec.ts` now use a grounded local type guard so
+  full `tsc` is green. The Review Workflow compatibility change was separately
+  RED-proven after safe ApiError removed its historical raw-JSON dependency.
+- Verification: scoped contract fixture and full `npx tsc --noEmit` exit 0;
+  lint exit 0; Task 19 Chromium `5 passed`; Task 19 plus existing Assistant
+  memory regression `5 passed`; Review Workflow targeted `4 passed` and full
+  integration `22 passed`; the final combined Chromium gate is `28 passed`.
+  Diff and redacted credential-pattern checks pass. Browser routes are mocked
+  and no live backend or provider is used.
+- On this Windows host, managed Playwright completed test bodies but could not
+  terminate its npm/Next child tree inside the filesystem sandbox. The unchanged
+  repository command exits 0 when executed with approved process permission;
+  no `playwright.config.ts` workaround is retained. Existing integration tests
+  emit harmless notification-proxy `ECONNREFUSED` noise because that unrelated
+  route is not mocked.
+- Candidate status is `DONE_WITH_CONCERNS` pending independent Task 19 review.
+  Do not start Task 20 from a self-review. No push, merge, deploy, Task 18
+  release gate, backend, Slack, CDC, Redis/D.1, or paid-model work is included.

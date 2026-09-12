@@ -16,15 +16,17 @@ import {
 } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { FormEvent, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { apiGet, apiPost } from "@/lib/api/client";
+import {
+  createAssistantConversation,
+  createAssistantMessage,
+  getAssistantMessages,
+  listAssistantConversations,
+  sendAssistantEmailDraft,
+} from "@/lib/api/assistant";
+import { ApiError } from "@/lib/api/client";
 import type {
   AssistantConversation,
-  AssistantConversationCreatedResponse,
-  AssistantConversationsResponse,
-  AssistantEmailSendResponse,
   AssistantMessage,
-  AssistantMessagesResponse,
-  AssistantTurnResponse,
   RagCitation,
 } from "@/lib/api/types";
 
@@ -79,9 +81,9 @@ function SearchPageContent() {
 
   const createConversation = useCallback(async (title?: string) => {
     const requestId = ++loadMessagesRequestRef.current;
-    const response = await apiPost<AssistantConversationCreatedResponse>("/api/v1/assistant/conversations", {
-      title: title?.trim() || DEFAULT_CONVERSATION_TITLE,
-    });
+    const response = await createAssistantConversation(
+      title?.trim() || DEFAULT_CONVERSATION_TITLE,
+    );
     if (requestId === loadMessagesRequestRef.current) {
       activeConversationIdRef.current = response.conversation.id;
       setActiveConversation(response.conversation);
@@ -127,9 +129,7 @@ function SearchPageContent() {
     activeConversationIdRef.current = conversation.id;
     setActiveConversation(conversation);
     try {
-      const response = await apiGet<AssistantMessagesResponse>(
-        `/api/v1/assistant/conversations/${conversation.id}/messages`,
-      );
+      const response = await getAssistantMessages(conversation.id);
       if (requestId !== loadMessagesRequestRef.current) return [];
 
       activeConversationIdRef.current = response.conversation.id;
@@ -140,7 +140,7 @@ function SearchPageContent() {
       return response.messages;
     } catch (caught) {
       if (requestId === loadMessagesRequestRef.current) {
-        setError(caught instanceof Error ? caught.message : "대화 내용을 불러오지 못했습니다.");
+        setError(caught instanceof ApiError ? caught.message : "대화 내용을 불러오지 못했습니다.");
       }
       return [];
     }
@@ -150,7 +150,7 @@ function SearchPageContent() {
     setBooting(true);
     setError(undefined);
     try {
-      const response = await apiGet<AssistantConversationsResponse>("/api/v1/assistant/conversations");
+      const response = await listAssistantConversations();
       const sortedConversations = sortConversationsByUpdatedAt(response.conversations);
       setConversations(sortedConversations);
       if (sortedConversations.length > 0) {
@@ -159,7 +159,7 @@ function SearchPageContent() {
         await createConversation(initialQuery || DEFAULT_CONVERSATION_TITLE);
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "AI 비서 대화를 준비하지 못했습니다.");
+      setError(caught instanceof ApiError ? caught.message : "AI 비서 대화를 준비하지 못했습니다.");
     } finally {
       setBooting(false);
     }
@@ -182,10 +182,7 @@ function SearchPageContent() {
       );
       // 사용자가 보낸 말은 서버 응답을 기다리지 않고 바로 대화창에 올린다.
       setMessages((currentMessages) => [...currentMessages, optimisticMessage]);
-      const response = await apiPost<AssistantTurnResponse>(
-        `/api/v1/assistant/conversations/${conversation.id}/messages`,
-        { content: trimmedContent },
-      );
+      const response = await createAssistantMessage(conversation.id, trimmedContent);
       if (activeConversationIdRef.current !== conversation.id) return;
 
       activeConversationIdRef.current = response.conversation.id;
@@ -199,7 +196,7 @@ function SearchPageContent() {
       upsertConversationByUpdatedAt(response.conversation);
       revealAssistantMessage(response.assistant_message);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "메시지를 보내지 못했습니다.");
+      setError(caught instanceof ApiError ? caught.message : "메시지를 보내지 못했습니다.");
     } finally {
       loadingRef.current = false;
       setLoading(false);
@@ -228,7 +225,7 @@ function SearchPageContent() {
 
       await createConversation(DEFAULT_CONVERSATION_TITLE);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "새 대화를 만들지 못했습니다.");
+      setError(caught instanceof ApiError ? caught.message : "새 대화를 만들지 못했습니다.");
     } finally {
       creatingConversationRef.current = false;
     }
@@ -260,12 +257,12 @@ function SearchPageContent() {
     setSendingEmailMessageId(messageId);
     setError(undefined);
     try {
-      const response = await apiPost<AssistantEmailSendResponse>(`/api/v1/assistant/messages/${messageId}/email/send`);
+      const response = await sendAssistantEmailDraft(messageId);
       setMessages((currentMessages) => currentMessages.map((message) => (
         message.id === messageId ? response.message : message
       )));
     } catch (caught) {
-      setError(caught instanceof Error ? formatEmailSendError(caught.message) : "메일을 보내지 못했습니다.");
+      setError(caught instanceof ApiError ? caught.message : "메일을 보내지 못했습니다.");
     } finally {
       setSendingEmailMessageId(undefined);
     }
@@ -848,34 +845,6 @@ function getEmailDraftView(message: AssistantMessage): { status: string } | unde
   return {
     status: typeof message.metadata.status === "string" ? message.metadata.status : "pending_approval",
   };
-}
-
-function formatEmailSendError(message: string) {
-  if (message.includes("gmail_connection_required")) {
-    return "Gmail 연동이 필요합니다. 연동 관리에서 Gmail을 먼저 연결해 주세요.";
-  }
-  if (message.includes("gmail_send_scope_required")) {
-    return "Gmail 전송 권한이 없습니다. Gmail을 다시 연결해 gmail.send 권한을 승인해 주세요.";
-  }
-  if (message.includes("gmail_token_unavailable")) {
-    return "저장된 Gmail 인증 토큰을 찾을 수 없습니다. Gmail을 다시 연결해 주세요.";
-  }
-  if (message.includes("gmail_refresh_credentials_required")) {
-    return "Google OAuth client id/secret 설정이 없어 Gmail 토큰을 갱신할 수 없습니다.";
-  }
-  if (message.includes("gmail_refresh_failed")) {
-    return "Gmail 인증이 만료되었거나 거절되었습니다. Gmail을 다시 연결한 뒤 보내 주세요.";
-  }
-  if (message.includes("gmail_api_send_failed:403")) {
-    return "Gmail API가 전송을 거절했습니다. gmail.send 권한을 다시 승인했는지 확인해 주세요.";
-  }
-  if (message.includes("gmail_api_send_failed")) {
-    return "Gmail API 전송 요청이 실패했습니다. 잠시 후 다시 시도하거나 Gmail 연동을 다시 확인해 주세요.";
-  }
-  if (message.includes("email draft is not pending approval")) {
-    return "이미 처리된 메일 초안입니다. 최신 초안에서 다시 시도해 주세요.";
-  }
-  return message || "메일을 보내지 못했습니다.";
 }
 
 function isReusableActiveConversation(
