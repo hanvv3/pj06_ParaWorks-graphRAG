@@ -413,7 +413,12 @@ function SearchPageContent() {
       await createConversation(DEFAULT_CONVERSATION_TITLE);
     } catch (caught) {
       if (mountedRef.current) {
-        setError(caught instanceof ApiError ? caught.message : "새 대화를 만들지 못했습니다.");
+        if (isClientUpgradeError(caught)) {
+          assistantClientUpgradeLatch.activate();
+          setError(CLIENT_UPGRADE_COPY);
+        } else {
+          setError(caught instanceof ApiError ? caught.message : "새 대화를 만들지 못했습니다.");
+        }
       }
     } finally {
       creatingConversationRef.current = false;
