@@ -178,9 +178,9 @@ function SearchPageContent() {
       upsertConversationByUpdatedAt(response.conversation);
       return response.messages;
     } catch (caught) {
+      const clientUpgrade = activateClientUpgradeIfNeeded(caught);
       if (mountedRef.current && requestId === loadMessagesRequestRef.current) {
-        if (isClientUpgradeError(caught)) {
-          assistantClientUpgradeLatch.activate();
+        if (clientUpgrade) {
           setError(CLIENT_UPGRADE_COPY);
         } else {
           setError(caught instanceof ApiError ? caught.message : "대화 내용을 불러오지 못했습니다.");
@@ -208,9 +208,9 @@ function SearchPageContent() {
         await createConversation(DEFAULT_CONVERSATION_TITLE);
       }
     } catch (caught) {
+      const clientUpgrade = activateClientUpgradeIfNeeded(caught);
       if (!mountedRef.current) return;
-      if (isClientUpgradeError(caught)) {
-        assistantClientUpgradeLatch.activate();
+      if (clientUpgrade) {
         setError(CLIENT_UPGRADE_COPY);
       } else {
         setError(caught instanceof ApiError ? caught.message : "AI 비서 대화를 준비하지 못했습니다.");
@@ -249,8 +249,9 @@ function SearchPageContent() {
         ? "답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요."
         : undefined);
     } catch (caught) {
+      const clientUpgrade = activateClientUpgradeIfNeeded(caught);
       if (!mountedRef.current) return;
-      if (isClientUpgradeError(caught)) {
+      if (clientUpgrade) {
         const currentDelivery = isCurrentDelivery(
           owner,
           deliveryRequestTokenRef.current,
@@ -260,7 +261,6 @@ function SearchPageContent() {
           setMessages((currentMessages) => markOwnedOptimisticUnknown(currentMessages, owner));
         }
         setUnknownDelivery(undefined);
-        assistantClientUpgradeLatch.activate();
         setError(CLIENT_UPGRADE_COPY);
         return;
       }
@@ -327,8 +327,9 @@ function SearchPageContent() {
       upsertConversationByUpdatedAt(response.conversation);
       revealAssistantMessage(response.assistant_message);
     } catch (caught) {
+      const clientUpgrade = activateClientUpgradeIfNeeded(caught);
       if (!mountedRef.current) return;
-      if (isClientUpgradeError(caught)) {
+      if (clientUpgrade) {
         const upgradeOwner = owner;
         const currentDelivery = upgradeOwner !== undefined && isCurrentDelivery(
           upgradeOwner,
@@ -339,7 +340,6 @@ function SearchPageContent() {
           setMessages((currentMessages) => removeOwnedOptimistic(currentMessages, upgradeOwner));
         }
         setUnknownDelivery(undefined);
-        assistantClientUpgradeLatch.activate();
         setError(CLIENT_UPGRADE_COPY);
         return;
       }
@@ -412,8 +412,8 @@ function SearchPageContent() {
 
       await createConversation(DEFAULT_CONVERSATION_TITLE);
     } catch (caught) {
-      if (isClientUpgradeError(caught)) {
-        assistantClientUpgradeLatch.activate();
+      const clientUpgrade = activateClientUpgradeIfNeeded(caught);
+      if (clientUpgrade) {
         if (mountedRef.current) setError(CLIENT_UPGRADE_COPY);
       } else if (mountedRef.current) {
         setError(caught instanceof ApiError ? caught.message : "새 대화를 만들지 못했습니다.");
@@ -469,9 +469,9 @@ function SearchPageContent() {
         message.id === messageId ? response.message : message
       )));
     } catch (caught) {
+      const clientUpgrade = activateClientUpgradeIfNeeded(caught);
       if (!mountedRef.current) return;
-      if (isClientUpgradeError(caught)) {
-        assistantClientUpgradeLatch.activate();
+      if (clientUpgrade) {
         setError(CLIENT_UPGRADE_COPY);
       } else {
         setError(caught instanceof ApiError ? caught.message : "메일을 보내지 못했습니다.");
@@ -1228,4 +1228,10 @@ function isClientUpgradeError(error: unknown): error is ApiError {
   return error instanceof ApiError
     && error.status === 409
     && error.code === "client_upgrade_required";
+}
+
+function activateClientUpgradeIfNeeded(error: unknown): error is ApiError {
+  if (!isClientUpgradeError(error)) return false;
+  assistantClientUpgradeLatch.activate();
+  return true;
 }

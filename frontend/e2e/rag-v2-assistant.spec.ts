@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Request } from "@playwright/test";
+import { expect, test, type Page, type Request, type Route } from "@playwright/test";
 import { ApiError, apiGet, decodeApiErrorEnvelope } from "../src/lib/api/client";
 import { assistantClientUpgradeLatch } from "../src/lib/assistant/compatibilityLatch";
 import { ephemeralSearchHandoff } from "../src/lib/assistant/searchHandoff";
@@ -1088,6 +1088,162 @@ test("late non-upgrade conversation-create failure after unmount does not latch"
   expect(createPostCount).toBe(1);
 });
 
+const heldAssistantIngresses = [
+  "conversation-list",
+  "message-list",
+  "message-create",
+  "reconciliation-get",
+  "email-send",
+] as const;
+
+for (const ingress of heldAssistantIngresses) {
+  for (const outcome of ["client-upgrade", "non-upgrade"] as const) {
+    test(`late ${ingress} ${outcome} response preserves the browser compatibility boundary`, async ({ page }, testInfo) => {
+      test.skip(testInfo.project.name.includes("mobile"), "desktop shell navigation drives this ingress matrix");
+      let releaseFailure!: () => void;
+      let signalFailureStarted!: () => void;
+      const failureGate = new Promise<void>((resolve) => { releaseFailure = resolve; });
+      const failureStarted = new Promise<void>((resolve) => { signalFailureStarted = resolve; });
+      let failureCompleted = false;
+      let observeReentryTransport = false;
+      let assistantRequestCount = 0;
+      let assistantRequestsOnReentry = 0;
+      let messageGetCount = 0;
+      const otherRequests: Request[] = [];
+      await fulfillShellApis(page, otherRequests);
+
+      const fulfillHeldFailure = async (route: Route) => {
+        signalFailureStarted();
+        await failureGate;
+        failureCompleted = true;
+        if (outcome === "client-upgrade") {
+          await route.fulfill({
+            status: 409,
+            contentType: "application/json",
+            json: { detail: { code: "client_upgrade_required" } },
+          });
+        } else {
+          await route.fulfill({
+            status: 500,
+            contentType: "text/plain",
+            body: `private late ${ingress} failure`,
+          });
+        }
+      };
+      const observeAssistantRequest = () => {
+        assistantRequestCount += 1;
+        if (observeReentryTransport) assistantRequestsOnReentry += 1;
+      };
+
+      await page.route("**/api/v1/assistant/conversations", async (route, request) => {
+        observeAssistantRequest();
+        if (request.method() !== "GET") throw new Error("unexpected conversation POST in ingress matrix");
+        if (ingress === "conversation-list" && !failureCompleted) {
+          await fulfillHeldFailure(route);
+          return;
+        }
+        await route.fulfill({ json: { conversations: [conversation] } });
+      });
+      await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+        observeAssistantRequest();
+        if (request.method() === "GET") {
+          messageGetCount += 1;
+          const shouldHold = !failureCompleted && (
+            ingress === "message-list"
+            || (ingress === "reconciliation-get" && messageGetCount > 1)
+          );
+          if (shouldHold) {
+            await fulfillHeldFailure(route);
+            return;
+          }
+          await route.fulfill({
+            json: {
+              conversation,
+              messages: ingress === "email-send" ? [emailDraftMessage] : [],
+            },
+          });
+          return;
+        }
+        if (ingress === "message-create") {
+          await fulfillHeldFailure(route);
+          return;
+        }
+        if (ingress === "reconciliation-get") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            json: { detail: { code: "persistence_failed" } },
+          });
+          return;
+        }
+        throw new Error("unexpected message POST in ingress matrix");
+      });
+      await page.route("**/api/v1/assistant/messages/192/email/send", async (route) => {
+        observeAssistantRequest();
+        if (ingress !== "email-send") throw new Error("unexpected email POST in ingress matrix");
+        await fulfillHeldFailure(route);
+      });
+
+      await page.goto("/search");
+      await page.evaluate(() => {
+        const taskWindow = window as unknown as Window & { __task20IngressStorageWrites: number };
+        const originalSetItem = Storage.prototype.setItem;
+        taskWindow.__task20IngressStorageWrites = 0;
+        Storage.prototype.setItem = function setItem(key: string, value: string) {
+          taskWindow.__task20IngressStorageWrites += 1;
+          return originalSetItem.call(this, key, value);
+        };
+      });
+
+      if (ingress === "message-create" || ingress === "reconciliation-get") {
+        const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+        await expect(input).toBeEnabled();
+        await input.fill(`held ${ingress}`);
+        await input.press("Enter");
+      } else if (ingress === "email-send") {
+        await expect(page.getByText(emailDraftMessage.content)).toBeVisible();
+        await page.getByRole("button", { name: "승인하고 보내기" }).click();
+      }
+      await failureStarted;
+
+      await page.getByRole("link", { name: "대시보드", exact: true }).first().click();
+      await expect(page).toHaveURL(/\/dashboard$/);
+      releaseFailure();
+      await page.waitForTimeout(100);
+      await expect(page.getByRole("button", { name: "페이지 새로고침" })).toHaveCount(0);
+      await expect(page.locator("body")).not.toContainText("client_upgrade_required");
+      await expect(page.locator("body")).not.toContainText(`private late ${ingress} failure`);
+      observeReentryTransport = true;
+
+      await page.getByRole("link", { name: "AI 비서", exact: true }).first().click();
+      await expect(page).toHaveURL(/\/search$/);
+      if (outcome === "client-upgrade") {
+        await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+        await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeDisabled();
+        await page.waitForTimeout(100);
+        expect(assistantRequestsOnReentry).toBe(0);
+      } else {
+        await expect(page.getByRole("button", { name: "페이지 새로고침" })).toHaveCount(0);
+        await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeEnabled();
+        expect(assistantRequestsOnReentry).toBeGreaterThan(0);
+      }
+      await expect(page.locator("body")).not.toContainText("client_upgrade_required");
+      await expect(page.locator("body")).not.toContainText(`private late ${ingress} failure`);
+      expect(await page.evaluate(() => (
+        window as unknown as Window & { __task20IngressStorageWrites: number }
+      ).__task20IngressStorageWrites)).toBe(0);
+
+      if (outcome === "client-upgrade") {
+        const beforeReload = assistantRequestCount;
+        observeReentryTransport = false;
+        await page.reload();
+        await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeEnabled();
+        expect(assistantRequestCount).toBeGreaterThan(beforeReload);
+      }
+    });
+  }
+}
+
 test("POST client-upgrade survives client navigation and blocks Assistant transport until hard reload", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "desktop shell navigation drives this client-lifetime probe");
   let latchObserved = false;
@@ -1484,7 +1640,7 @@ test("late Assistant success after Search unmount creates no typing interval or 
   await expect(page.getByText("언마운트 뒤 나타나면 안 되는 응답")).toHaveCount(0);
 });
 
-test("late Assistant failure after Search unmount cannot latch a later Search mount", async ({ page }, testInfo) => {
+test("late Assistant client-upgrade after Search unmount latches without updating the departed page", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "desktop shell navigation drives this unmount probe");
 
   let releasePost!: () => void;
@@ -1509,11 +1665,14 @@ test("late Assistant failure after Search unmount cannot latch a later Search mo
   await expect(page).toHaveURL(/\/dashboard$/);
   releasePost();
   await page.waitForTimeout(100);
+  await expect(page.getByText("새 버전이 필요합니다. 페이지를 새로고침해 주세요.")).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText("client_upgrade_required");
   await page.getByRole("link", { name: "AI 비서", exact: true }).first().click();
   await expect(page).toHaveURL(/\/search$/);
 
-  await expect(page.getByText("새 버전이 필요합니다. 페이지를 새로고침해 주세요.")).toHaveCount(0);
-  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeEnabled();
+  await expect(page.getByText("새 버전이 필요합니다. 페이지를 새로고침해 주세요.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeDisabled();
 });
 
 test("copy feedback clears normally while Search remains mounted", async ({ context, page }) => {
