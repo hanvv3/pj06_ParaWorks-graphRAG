@@ -34,7 +34,7 @@ from backend.tests.test_rag_v2_costs import _snapshot
 
 REVISION = 'e2b3c4d5f6a7'
 TRANSITION_REVISION = 'f3c4d5e6a7b8'
-HEAD_REVISION = 'b5e6f7a8b9c0'
+HEAD_REVISION = 'c6f7a8b9c0d1'
 PREVIOUS_REVISION = 'd1a2b3c4e5f6'
 MIGRATION_PATH = Path(
     'backend/migrations/versions/e2b3c4d5f6a7_add_rag_runtime_safety.py'

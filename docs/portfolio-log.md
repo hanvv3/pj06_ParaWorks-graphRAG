@@ -1,5 +1,33 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Task18 legacy-v3 database hardening candidate
+
+- Independent round-3 review confirmed F1-F5 but found two database enforcement
+  gaps and an incomplete golden matrix. The retained reviewer probe first
+  reproduced both SQLite gaps with foreign keys off while its foreign-key-on
+  controls passed. Runtime and migration guards now reject deleting a published
+  v3 parent from its OLD state and validate a new evidence reference against
+  both its claimed owner and the dependency's actual signed owner/effect/link.
+- New successor migration `c6f7a8b9c0d1` leaves applied revision
+  `b5e6f7a8b9c0` unchanged. PostgreSQL emitted SQL replaces tuple-`xmin`
+  inference with parent/dependency INSERT-only, transaction-owned registration,
+  exact owner/count checks, atomic publish-time consumption, and deferred
+  rejection of any unconsumed registration. Trigger-depth RLS, forced RLS and
+  revoked PUBLIC table privileges block ordinary app-role registration DML.
+  Database superuser/BYPASSRLS administration remains a trusted operational
+  boundary. This is emitted-SQL/static structural evidence only; no PostgreSQL
+  server or concurrency execution is claimed.
+- Seven independent fixed canonical-byte/HMAC vectors now cover raw, explicit
+  trusted, legacy-human, genuinely-unbound, uncited email, selected citation and
+  ordered multi-child inputs without using the production payload builder.
+  Fresh gates: 58 v3/reviewer-probe tests, 23 offline migration tests (94 real-
+  PostgreSQL-named tests deselected), and 359 affected Assistant/retained-probe
+  tests passed. An adjacent Ask/RAG/search SQLite gate passed 1,085 tests with
+  two skips and 33 PostgreSQL-named deselections; its seven PG-bootstrap static
+  cases were then isolated behind a non-connecting dummy PostgreSQL locator and
+  all passed. Existing Alembic configuration warnings remain. This remains a
+  local candidate pending independent rereview, not CLEAN or rollout-ready.
+
 ## 2026-09-12 D Core Task18 approved legacy-integrity v3 candidate
 
 - The user approved F2's exact-provenance legacy-only schema on 2026-09-12.
@@ -11,14 +39,16 @@
 - A successor Alembic migration widens only the legacy integrity union and
   adds published-state guards. Actual SQLite upgrade/downgrade tests preserve
   historical rows and refuse downgrade with v3 rows. PostgreSQL emitted SQL is
-  checked, including the predecessor append-only/exactness integration: only
-  newly inserted same-transaction staging rows may receive signature columns.
+  checked, but independent review later showed its tuple-`xmin` staging proof
+  was not INSERT-specific. The hardening entry above supersedes that claim.
   No applied migration is rewritten; no actual PostgreSQL claim is made.
 - Original F2 behavioral RED and retained probes now pass. Affected offline
   gate: 583 passed, one opt-in PG skip, 120 `postgresql`-named deselections.
   Follow-up gate including keyword/pgvector SQL tests, immutable readers and
   all retained probes: 264 passed. Golden vectors use an independent standard-
-  library HMAC calculation. Existing Alembic configuration warnings remain.
+  library HMAC calculation for one production-built case; the hardening entry
+  above records the now-complete independent case matrix. Existing Alembic
+  configuration warnings remain.
   Final API/email/local-migration gate: 193 passed; final marker-guard/
   Task18/reader/writer gate: 204 passed. Ruff, compile and diff checks pass;
   credential-pattern scans have zero matches.

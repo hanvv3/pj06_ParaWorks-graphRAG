@@ -1,9 +1,13 @@
 """Approved legacy-only integrity: actual new writes, current authority and bytes."""
 
 import copy
+import importlib
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from backend.app.agents.rag_orchestrator_agent.service import (
     RagEvidenceCandidate,
@@ -17,7 +21,11 @@ from backend.app.assistant.service import (
     serialize_message,
 )
 from backend.app.core.demo_auth import USERS
-from backend.app.models import AssistantMessage, AssistantMessageEvidenceDependency
+from backend.app.models import (
+    AssistantMessage,
+    AssistantMessageEvidenceDependency,
+    AssistantMessageKnowledgeEvidenceRef,
+)
 from backend.tests.test_assistant_service import _seed_explicit_history
 from backend.tests.test_rag_v2_runtime_migration import sqlite_migration  # noqa: F401
 
@@ -242,13 +250,11 @@ def test_ordered_selected_and_uncited_legacy_dependencies_remain_bound(
 
 
 def test_legacy_v3_sqlite_model_and_frozen_migration_parity():
-    import importlib
-
     from backend.app.db.assistant_legacy_guards import sqlite_guard_statements
     from backend.app.models import AssistantMessageEvidenceDependency
 
     migration = importlib.import_module(
-        'backend.migrations.versions.b5e6f7a8b9c0_add_legacy_v3_integrity'
+        'backend.migrations.versions.c6f7a8b9c0d1_harden_legacy_v3_database_guards'
     )
     assert tuple(migration._sqlite_statements()) == sqlite_guard_statements()
     constraints = {
@@ -263,6 +269,110 @@ def test_legacy_v3_sqlite_model_and_frozen_migration_parity():
     assert all(
         constraints[name] == value for name, value in migration.NEW_CHECKS.items()
     )
+
+
+@pytest.mark.parametrize('foreign_keys', (False, True))
+def test_published_v3_parent_delete_rejects_surviving_authority(
+    db_session, foreign_keys
+):
+    message, *_ = write_explicit(db_session)
+    identifier = message.id
+    db_session.commit()
+    db_session.connection().exec_driver_sql(
+        f'PRAGMA foreign_keys={int(foreign_keys)}'
+    )
+
+    with pytest.raises(IntegrityError):
+        db_session.execute(
+            delete(AssistantMessage).where(AssistantMessage.id == identifier)
+        )
+        db_session.commit()
+
+
+@pytest.mark.parametrize('foreign_keys', (False, True))
+def test_new_reference_must_match_signed_dependency_actual_owner_and_effect(
+    db_session, foreign_keys
+):
+    message, *_ = write_explicit(db_session)
+    unsigned = AssistantMessage(
+        conversation_id=message.conversation_id,
+        role='assistant',
+        content='independent',
+    )
+    db_session.add(unsigned)
+    db_session.commit()
+    db_session.connection().exec_driver_sql(
+        f'PRAGMA foreign_keys={int(foreign_keys)}'
+    )
+    ref = db_session.scalar(select(AssistantMessageKnowledgeEvidenceRef))
+    db_session.add(
+        AssistantMessageKnowledgeEvidenceRef(
+            dependency_id=ref.dependency_id,
+            assistant_message_id=unsigned.id,
+            approval_link_id=ref.approval_link_id,
+            trusted_knowledge_evidence_link_id=999999,
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_postgres_successor_uses_insert_registration_not_tuple_xmin(monkeypatch):
+    migration = importlib.import_module(
+        'backend.migrations.versions.c6f7a8b9c0d1_harden_legacy_v3_database_guards'
+    )
+    emitted = []
+    monkeypatch.setattr(
+        migration,
+        'op',
+        SimpleNamespace(
+            get_bind=lambda: SimpleNamespace(
+                dialect=SimpleNamespace(name='postgresql'), scalar=lambda sql: 0
+            ),
+            batch_alter_table=lambda name: nullcontext(SimpleNamespace()),
+            execute=lambda sql: emitted.append(str(sql)),
+            create_table=lambda *args, **kwargs: None,
+            drop_table=lambda *args, **kwargs: None,
+        ),
+    )
+
+    migration.upgrade()
+    sql = '\n'.join(emitted)
+    assert 'xmin' not in migration.PG_STAGING
+    assert 'assistant_legacy_v3_parent_staging' in sql
+    assert 'assistant_legacy_v3_dependency_staging' in sql
+    assert 'FORCE ROW LEVEL SECURITY' in sql
+    assert 'pg_trigger_depth() > 0' in sql
+    assert 'REVOKE ALL' in sql and 'FROM PUBLIC' in sql
+    assert sql.count('SECURITY DEFINER SET search_path FROM CURRENT') >= 6
+    assert 'AFTER INSERT ON assistant_messages' in sql
+    assert 'AFTER INSERT ON assistant_message_evidence_dependencies' in sql
+    assert sql.count('DEFERRABLE INITIALLY DEFERRED') == 2
+    assert 'parent_id=OLD.assistant_message_id' in migration.PG_STAGING
+    assert 'dependency_id=OLD.id' in migration.PG_STAGING
+    assert migration.PG_STAGING.count('transaction_id=txid_current()') >= 2
+    assert 'DELETE FROM assistant_legacy_v3_parent_staging' in sql
+    mutable = migration.PG_STAGING.split('ARRAY[', 1)[1].split('];', 1)[0]
+    assert {item.strip().strip("'") for item in mutable.split(',')} == {
+        'dependency_set_hmac',
+        'dependency_serving_scope',
+        'dependency_role',
+        'dependency_child_hmac',
+        'legacy_dependency_identity_hmac',
+        'model_content_hmac',
+        'canonical_citation_projection_hmac',
+        'selected_v1_citation_projection_hmac',
+        'approval_provenance_hmac',
+        'evidence_link_set_hmac',
+    }
+
+    migration.downgrade()
+    downgraded = '\n'.join(emitted)
+    assert migration.predecessor.PG_STAGING in downgraded
+    assert downgraded.index(
+        'DROP TABLE assistant_legacy_v3_dependency_staging'
+    ) < downgraded.index('DROP TABLE assistant_legacy_v3_parent_staging')
 
 
 def test_legacy_v3_postgres_upgrade_emits_deferred_parent_child_ref_contract(
@@ -816,7 +926,7 @@ def test_legacy_v3_migration_upgrades_and_refuses_lossy_downgrade(sqlite_migrati
     command.upgrade(config, 'head')
     with engine.connect() as db:
         assert (
-            db.scalar(text('SELECT version_num FROM alembic_version')) == 'b5e6f7a8b9c0'
+            db.scalar(text('SELECT version_num FROM alembic_version')) == 'c6f7a8b9c0d1'
         )
         assert (
             db.scalar(text('SELECT content_write_mode FROM assistant_messages')) is None
@@ -829,5 +939,5 @@ def test_legacy_v3_migration_upgrades_and_refuses_lossy_downgrade(sqlite_migrati
         command.downgrade(config, 'a4d5e6f7b8c9')
     with engine.connect() as db:
         assert (
-            db.scalar(text('SELECT version_num FROM alembic_version')) == 'b5e6f7a8b9c0'
+            db.scalar(text('SELECT version_num FROM alembic_version')) == 'c6f7a8b9c0d1'
         )

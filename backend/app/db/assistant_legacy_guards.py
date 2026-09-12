@@ -115,8 +115,15 @@ def sqlite_guard_statements():
             conditions = ' OR '.join(
                 f'EXISTS ({query.format(target=target)})' for target in targets
             )
+            if table == 'assistant_messages' and action == 'DELETE':
+                conditions += " OR (OLD.dependency_set_hmac_schema_version='assistant-dependency-set-hmac:v3' AND (EXISTS (SELECT 1 FROM assistant_message_evidence_dependencies d WHERE d.assistant_message_id=OLD.id) OR EXISTS (SELECT 1 FROM assistant_message_knowledge_evidence_refs r WHERE r.assistant_message_id=OLD.id)))"
             if table == 'assistant_messages' and action == 'UPDATE':
                 conditions += " OR (OLD.dependency_set_hmac_schema_version='assistant-dependency-set-hmac:v3' AND NEW.dependency_set_hmac_schema_version IS DISTINCT FROM 'assistant-dependency-set-hmac:v3')"
+            if (
+                table == 'assistant_message_knowledge_evidence_refs'
+                and action in {'INSERT', 'UPDATE'}
+            ):
+                conditions += " OR (((EXISTS (SELECT 1 FROM assistant_messages claimed WHERE claimed.id=NEW.assistant_message_id AND claimed.dependency_set_hmac_schema_version='assistant-dependency-set-hmac:v3')) OR (EXISTS (SELECT 1 FROM assistant_message_evidence_dependencies actual JOIN assistant_messages owner ON owner.id=actual.assistant_message_id WHERE actual.id=NEW.dependency_id AND owner.dependency_set_hmac_schema_version='assistant-dependency-set-hmac:v3'))) AND NOT EXISTS (SELECT 1 FROM assistant_message_evidence_dependencies actual JOIN assistant_messages owner ON owner.id=actual.assistant_message_id JOIN trusted_knowledge_evidence_links evidence ON evidence.id=NEW.trusted_knowledge_evidence_link_id WHERE actual.id=NEW.dependency_id AND actual.assistant_message_id=NEW.assistant_message_id AND owner.id=NEW.assistant_message_id AND owner.dependency_set_hmac_schema_version='assistant-dependency-set-hmac:v3' AND actual.approval_link_id IS NOT NULL AND actual.approval_link_id=NEW.approval_link_id AND evidence.approval_link_id=actual.approval_link_id))"
             result.append(
                 f"CREATE TRIGGER IF NOT EXISTS legacy_v3_{table}_{action.lower()} AFTER {action} ON {table} BEGIN SELECT CASE WHEN {conditions} THEN RAISE(ABORT,'legacy v3 published integrity mismatch') END; END"
             )

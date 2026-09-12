@@ -2,6 +2,37 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 Task18 F6-F8 hardening candidate
+
+- Round-3 candidate `94710128` is superseded by an unreviewed local fix-round-4
+  candidate. The reviewer F6 probe was observed RED at 2 failed/2 FK-enabled
+  controls passed. Runtime model-created SQLite and the new frozen successor
+  install equivalent OLD-parent-delete and actual dependency-owner/effect/link
+  guards; the full probe is now green.
+- New migration head `c6f7a8b9c0d1` follows frozen `b5e6f7a8b9c0`. On
+  PostgreSQL it replaces the predecessor's `xmin` inference with private parent
+  and child INSERT registration. Registration is exact-owner/transaction bound,
+  consumed atomically by v3 parent publication, and a deferred constraint
+  rejects any registration left at commit. Forced trigger-depth RLS plus PUBLIC
+  privilege removal prevents ordinary direct app DML. Superuser/BYPASSRLS and
+  migration administration remain trusted; `SET search_path FROM CURRENT`
+  assumes the migration search path contains no app-writable schema. Only SQL
+  emission/structure was checked; real PostgreSQL transaction behavior remains
+  a release-gate gap.
+- Downgrade refuses while v3 parents exist. Empty-v3 SQLite downgrade restores
+  the predecessor guards before re-upgrade; dependency staging table deletion
+  precedes parent staging deletion. Seven test-owned fixed canonical UTF-8/HMAC
+  vectors cover the approved raw/trusted/legacy/email/ordering matrix separately
+  from real liveness/drift tests.
+- Fresh verification so far: v3+golden+round3 reviewer probe 58 passed; offline
+  migration gate 23 passed/94 PostgreSQL-named deselected; affected Assistant
+  and all retained Task18 probes 359 passed. The adjacent Ask/RAG/search SQLite
+  run passed 1,085 with two skips/33 PostgreSQL-named deselections. Its seven
+  PG-bootstrap static cases were rerun separately with a non-connecting dummy
+  PostgreSQL locator and all passed. Existing Alembic path warning only. No live
+  provider, network, Docker, real PG, push, merge or rollout. Independent
+  cumulative rereview is still required before Task18 can be called CLEAN.
+
 ## 2026-09-12 Task18 F2 v3 approved implementation candidate
 
 - The user approved `2026-09-12-task18-legacy-integrity-contract-proposal.md`;
@@ -20,13 +51,15 @@ Updated: 2026-09-12
 - Reviewer focus: canonical HMAC payloads and exact UTF-8, selected-effect
   revocation with another approval live, uncited email influence and tamper
   guards, no D promotion, transaction rollback, and predecessor PG triggers.
-  The PG append-only exception is signature-only, old NULL-scope, same-current-
-  transaction parent AND child; signed/historical updates remain rejected.
+  The predecessor PG append-only exception attempted a signature-only,
+  same-transaction rule but used tuple `xmin`; the F6-F8 entry above supersedes
+  it with INSERT-only registration. Signed/historical updates remain rejected.
   Existing raw/explicit exactness SQL is retained, with only a v3 pre-provenance
   branch. PostgreSQL SQL is inspected/emission-tested, not server-executed.
 - Offline affected gate: 583 passed, one PG skip, 120 `postgresql`-named
   deselections; follow-up full keyword/pgvector/reader/service/v3/probe gate:
-  264 passed. Retained F2 is included, not deselected.
+  264 passed. Retained F2 is included, not deselected. The independent round-3
+  review later found F6-F8; use the newer entry above for current status.
   Final scoped API/email/model/local-migration gate: 193 passed; final monotonic
   marker/Task18/reader/writer gate: 204 passed (42 v3 tests). Published v3 markers
   cannot be stripped to historical NULL or downgraded. Static/credential checks
