@@ -2,6 +2,28 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 Task18 F11 supported-schema closeout candidate
+
+- Round-5 independent review retained F1–F10 but found d7 accepted legal quoted
+  schema spellings that its fixed `$function$` delimiter and SQLAlchemy
+  `sa.text` path cannot represent safely. Pre-edit evidence was 2 failed/2
+  controls passed in the unchanged reviewer probe and 7 failed/5 supported-name
+  controls passed in the tracked replacement.
+- d7 is still unpushed, undeployed and never applied to real PostgreSQL, so this
+  pre-release closeout changes only d7. Frozen b5/c6 remain byte-unchanged.
+  `_trusted_schema` rejects any name containing `:` or exact `$function$` before
+  upgrade/downgrade generates DDL/query text. The stable ValueError does not echo
+  the name. Supported spellings include `public`, single/double quotes, spaces
+  and Unicode; arbitrary PostgreSQL-legal schema names are not claimed.
+- Fresh green: d7/F11 16 passed; v3/golden/applicable retained probes 86 passed
+  with seven superseded cases deselected; affected Assistant/Task18/local
+  migrations 237 passed with 94 PostgreSQL-named deselected; offline migrations
+  alone 23 passed with the same 94 deselections. Existing Alembic path warnings
+  remain. Independent rereview is required before CLEAN or Task19.
+- Real PostgreSQL parser/server, TEMP/direct-execute, deferred commit,
+  concurrency and deployment-role verification remain release gaps. No
+  provider/network/Docker/push/merge/rollout was used.
+
 ## 2026-09-12 Task18 F9-F10 PostgreSQL authority hardening candidate
 
 - Independent review of `ea558223` retained F1-F6/F8 but found c6 did not prove

@@ -4,6 +4,7 @@ import importlib
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import text
 
 MIGRATION = (
     'backend.migrations.versions.'
@@ -82,6 +83,68 @@ def test_trusted_schema_is_quoted_and_temporary_or_system_names_are_refused():
         bind = SimpleNamespace(scalar=lambda _statement, value=value: value)
         with pytest.raises(ValueError):
             migration._trusted_schema(bind)
+
+
+@pytest.mark.parametrize(
+    'schema',
+    ('public', 'tenant"blue', "tenant'blue", 'tenant blue', '회사'),
+)
+def test_trusted_schema_keeps_supported_quoted_names(schema):
+    migration = importlib.import_module(MIGRATION)
+    bind = SimpleNamespace(scalar=lambda _statement: schema)
+
+    assert migration._trusted_schema(bind) == schema
+    sql = migration._hardened_sql(schema)
+    function_body = sql.split(' AS $function$', 1)[1].split('$function$', 1)[0]
+    assert function_body.rstrip().endswith('END')
+    assert not text(sql).compile().params
+
+
+@pytest.mark.parametrize(
+    'schema',
+    ('tenant:blue', ':tenant', 'tenant$function$blue'),
+)
+def test_trusted_schema_rejects_names_unsafe_for_generated_sql(schema):
+    migration = importlib.import_module(MIGRATION)
+    bind = SimpleNamespace(scalar=lambda _statement: schema)
+
+    with pytest.raises(ValueError) as exc_info:
+        migration._trusted_schema(bind)
+
+    assert exc_info.value.args == (
+        'unsupported PostgreSQL application schema spelling',
+    )
+
+
+@pytest.mark.parametrize('operation', ('upgrade', 'downgrade'))
+@pytest.mark.parametrize('schema', (':tenant', 'tenant$function$blue'))
+def test_unsafe_schema_is_refused_before_any_generated_sql(
+    monkeypatch,
+    operation,
+    schema,
+):
+    migration = importlib.import_module(MIGRATION)
+    emitted: list[str] = []
+    bind = SimpleNamespace(
+        dialect=SimpleNamespace(name='postgresql'),
+        scalar=lambda _statement: schema,
+    )
+    monkeypatch.setattr(
+        migration,
+        'op',
+        SimpleNamespace(
+            get_bind=lambda: bind,
+            execute=lambda statement: emitted.append(str(statement)),
+        ),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        getattr(migration, operation)()
+
+    assert exc_info.value.args == (
+        'unsupported PostgreSQL application schema spelling',
+    )
+    assert emitted == []
 
 
 def test_definer_functions_reject_foreign_trigger_relations_and_operations(monkeypatch):

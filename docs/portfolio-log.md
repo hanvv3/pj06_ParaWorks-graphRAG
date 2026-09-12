@@ -1,5 +1,25 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Task18 supported-schema closeout candidate
+
+- Independent review found two uncommon schema spellings that d7 accepted but
+  could not safely pass through every generation layer: `$function$` could close
+  the fixed PL/pgSQL body delimiter and `:` could become a SQLAlchemy TextClause
+  bind. The unchanged reviewer probe reproduced both failures before the edit.
+- Because d7 remains an unpushed, undeployed, never-real-PG-applied pre-release
+  candidate, this closeout minimally tightens d7's `_trusted_schema`; frozen
+  b5/c6 remain unchanged. Upgrade and downgrade now reject any colon-containing
+  name or exact `$function$` substring before generated SQL, with a stable error
+  that does not echo the input. `public`, quoted names, spaces and Unicode remain
+  supported. This documented spelling limit replaces the earlier blanket claim
+  that every PostgreSQL-legal schema identifier is supported.
+- Fresh local evidence: 16 d7/F11 tests; 86 v3/golden/applicable retained probes;
+  237 affected Assistant/Task18 and offline-migration tests; and the isolated 23
+  offline migration tests passed. PostgreSQL-named server tests remain deselected
+  and no actual PostgreSQL parser/server, role, commit or concurrency check was
+  run. This is a local candidate pending independent rereview, not CLEAN or
+  rollout-ready; no push, deploy, provider, network or Docker action occurred.
+
 ## 2026-09-12 D Core Task18 PostgreSQL authority hardening candidate
 
 - Independent round-4 review found that the c6 INSERT registration still left

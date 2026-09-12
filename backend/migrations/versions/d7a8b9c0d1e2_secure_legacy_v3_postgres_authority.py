@@ -56,6 +56,8 @@ def _trusted_schema(bind) -> str:
     schema = bind.scalar(sa.text('SELECT pg_catalog.current_schema()'))
     if not isinstance(schema, str) or not schema or '\x00' in schema:
         raise ValueError('trusted PostgreSQL application schema is required')
+    if ':' in schema or '$function$' in schema:
+        raise ValueError('unsupported PostgreSQL application schema spelling')
     if schema in {'pg_catalog', 'information_schema'} or schema.startswith(
         ('pg_temp_', 'pg_toast_temp_')
     ):
