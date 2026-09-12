@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Generic, Literal, TypeVar, get_args
@@ -238,6 +238,7 @@ class RagApplicationFacade:
         repr=False
     )
     _graph_registry: RagGraphRegistry = field(repr=False)
+    _shadow_runner: Callable[..., object | None] = field(repr=False)
     _rollout: RagRolloutPolicy = field(default_factory=RagRolloutPolicy)
 
     @staticmethod
@@ -438,11 +439,22 @@ class RagApplicationFacade:
             )
         except (RagInputSafetyError, RagInputScannerUnavailableError) as exc:
             return direct_rag_error(exc.code)
-        if self.execution_owner(surface) != 'v2':
-            # Task21 owns shadow comparison. Public ownership remains legacy.
-            return self._invoke_legacy(
+        owner = self.execution_owner(surface)
+        if owner != 'v2':
+            legacy = self._invoke_legacy(
                 actor=actor, caller_text=caller_text, surface=surface
             )
+            if owner == 'shadow':
+                # Shadow is observational. Its release gate becomes red, but
+                # keyword comparison cannot replace a V1 response.
+                with suppress(Exception):
+                    self._shadow_runner(
+                        actor=actor,
+                        surface=surface,
+                        prepared_text=prepared,
+                        legacy_delivery=legacy,
+                    )
+            return legacy
         from backend.app.agent_runtime.rag_cost_ledger import RagCostPersistenceError
         from backend.app.agent_runtime.rag_cost_policy import RagBudgetExceededError
         from backend.app.agent_runtime.rag_finalization import RagFinalizationError

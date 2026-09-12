@@ -39,6 +39,7 @@ from backend.app.rag.retrieval import build_query_embedding_model_config_snapsho
 @dataclass(frozen=True, slots=True)
 class RagRuntimeDependencies:
     request_factory: Callable[..., AbstractContextManager[RagRequestServices]]
+    shadow_runner: Callable[..., object | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +97,29 @@ def build_rag_v2_runtime(
                 else default_rag_request_factory
             ),
             registry,
+            (
+                dependencies.shadow_runner
+                if dependencies and dependencies.shadow_runner is not None
+                else _default_shadow_runner(
+                    session_factory=session_factory,
+                    settings=settings,
+                )
+            ),
         ),
+    )
+
+
+def _default_shadow_runner(*, session_factory, settings):
+    from functools import partial
+
+    from backend.app.rag.shadow import run_keyword_shadow
+
+    if settings.rag_retrieval_backend != 'keyword':
+        return lambda **_kwargs: None
+    return partial(
+        run_keyword_shadow,
+        session_factory=session_factory,
+        settings=settings,
     )
 
 

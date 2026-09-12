@@ -552,3 +552,179 @@ def _tier_orders_v2(result, common_ids):
         tuple(row.evidence.serving_identity_hmac for row in result.visible if row.evidence.serving_identity_hmac in common and row.evidence.serving_kind == tier)
         for tier in ('trusted_knowledge', 'raw_chunk')
     )
+
+
+def run_keyword_shadow(
+    *,
+    session_factory,
+    settings: Settings,
+    actor,
+    surface: RagSurface,
+    prepared_text,
+    legacy_delivery,
+) -> ShadowComparison | None:
+    """Run a real provider-free lexical comparison after V1 is committed."""
+    if settings.rag_retrieval_backend != 'keyword':
+        raise ValueError('keyword shadow runner requires keyword configuration')
+    if surface not in {'ask', 'search'}:
+        return None
+    from backend.app.agent_runtime.rag_v2_identity import (
+        ServerRagSecurityScopeResolver,
+    )
+    from backend.app.agents.rag_orchestrator_agent import service
+    from backend.app.permissions.service import can_access_permission
+    from backend.app.rag.keyword_retriever import KeywordEvidenceRetriever
+    from backend.app.rag.retrieval import RetrievalRequest
+    from backend.app.rag.search_store import SqlAlchemyKeywordSearchStore
+
+    started = perf_counter_ns()
+    with session_factory() as db:
+        scope = ServerRagSecurityScopeResolver(settings).resolve(db=db, actor=actor)
+        scope_hmac = security_scope_fingerprint(scope, settings=settings)
+        candidates = service.retrieve_matching_evidence_candidates(
+            db=db,
+            question=prepared_text.retrieval_query_text,
+        )
+        candidates = service.filter_live_serving_candidates(
+            db=db,
+            candidates=candidates,
+        )[:50]
+        rows = tuple(
+            _observe_legacy_candidate(
+                db=db,
+                settings=settings,
+                actor=actor,
+                candidate=candidate,
+                ordinal=ordinal,
+                can_access_permission=can_access_permission,
+            )
+            for ordinal, candidate in enumerate(candidates)
+        )
+        projection = getattr(legacy_delivery, 'projection', None)
+        public_run_id = getattr(projection, 'agent_run_id', None)
+        correlation = (
+            _fingerprint(
+                {'legacy_public_run_id': public_run_id},
+                settings=settings,
+                schema='rag-shadow-legacy-public-run-correlation:v1',
+            )
+            if type(public_run_id) is int and public_run_id > 0
+            else None
+        )
+        legacy = LegacyRetrievalObservation.build(
+            surface=surface,
+            configured_backend='keyword',
+            effective_backend='deterministic_lexical',
+            query_context_version='direct-query:v1',
+            retrieval_query_hmac=prepared_text.retrieval_query_hmac,
+            security_scope_fingerprint=scope_hmac,
+            candidate_window=rows,
+            hidden_match_count=sum(row.visibility == 'denied_known' for row in rows),
+            hidden_count_capped=False,
+            query_embedding_attempt_fence_hmac=None,
+            public_agent_run_correlation_hmac=correlation,
+            latency_ms=max(0, (perf_counter_ns() - started) // 1_000_000),
+            settings=settings,
+        )
+        request = RetrievalRequest(
+            retrieval_query_text=prepared_text.retrieval_query_text,
+            security_scope=scope,
+            security_scope_fingerprint=scope_hmac,
+            query_embedding_result=None,
+            candidate_scan_limit=50,
+            visible_limit=5 if surface == 'search' else 8,
+            relevance_policy_version='rag-retrieval-policy:v2.0',
+        )
+        v2 = KeywordEvidenceRetriever(
+            store=SqlAlchemyKeywordSearchStore(db=db, settings=settings),
+            settings=settings,
+        ).invoke(request, config={'callbacks': [], 'metadata': {}})
+        comparison = ShadowComparator(settings).compare(
+            legacy=legacy,
+            v2=v2,
+            scope=scope,
+        )
+        ShadowAuditWriter(settings).append(db, comparison)
+        db.commit()
+        return comparison
+
+
+def _observe_legacy_candidate(
+    *, db, settings: Settings, actor, candidate, ordinal: int, can_access_permission
+) -> LegacyRetrievalCandidateObservation:
+    from backend.app.rag.source_observations import CanonicalSourceObservationResolver
+    from backend.app.rag.trusted_evidence import TrustedServingEnvelopeResolver
+
+    chunk_id = candidate.metadata.get('chunk_id')
+    serving_document_id = (
+        f'chunk:{chunk_id}' if type(chunk_id) is int else candidate.source_id
+    )
+    prefix, separator, raw_identifier = serving_document_id.partition(':')
+    canonical = None
+    if separator and raw_identifier.isascii() and raw_identifier.isdecimal():
+        identifier = int(raw_identifier)
+        if identifier > 0 and str(identifier) == raw_identifier:
+            if prefix == 'chunk':
+                resolved = CanonicalSourceObservationResolver(
+                    db=db, settings=settings
+                ).resolve_for_index(identifier)
+                canonical = None if resolved is None else resolved.evidence
+            elif prefix in {'decision_record', 'history_event', 'timeline_event', 'todo'}:
+                resolved = TrustedServingEnvelopeResolver(
+                    db=db, settings=settings
+                ).resolve_for_index(prefix, identifier)
+                canonical = None if resolved is None else resolved.evidence
+    if canonical is None:
+        candidate_hmac = _fingerprint(
+            {'legacy_serving_document_id_bytes': exact_utf8_bytes(serving_document_id)},
+            settings=settings,
+            schema='rag-shadow-unresolved-legacy-candidate:v1',
+        )
+        public_hmac = _fingerprint(
+            {
+                'source_id_bytes': exact_utf8_bytes(candidate.source_id),
+                'source_url_bytes': exact_utf8_bytes(candidate.source_url),
+                'source_snippet_bytes': exact_utf8_bytes(candidate.source_snippet),
+            },
+            settings=settings,
+            schema='rag-shadow-unresolved-legacy-projection:v1',
+        )
+        support_class = (
+            'raw_candidate' if prefix == 'chunk' else 'trusted_candidate'
+        )
+    else:
+        candidate_hmac = canonical.serving_identity_hmac
+        public_hmac = (
+            canonical.canonical_citation_projection_hmac
+            if candidate.source_id == canonical.public_source_id
+            else _fingerprint(
+                {
+                    'legacy_public_source_id_bytes': exact_utf8_bytes(
+                        candidate.source_id
+                    )
+                },
+                settings=settings,
+                schema='rag-shadow-legacy-public-identity:v1',
+            )
+        )
+        support_class = (
+            'trusted_candidate'
+            if canonical.serving_kind == 'trusted_knowledge'
+            else 'raw_candidate'
+        )
+    return LegacyRetrievalCandidateObservation(
+        ordinal=ordinal,
+        legacy_serving_document_id=serving_document_id,
+        visibility=(
+            'visible'
+            if can_access_permission(actor, candidate.permission_level)
+            else 'denied_known'
+        ),
+        legacy_public_source_id=candidate.source_id,
+        support_class=support_class,
+        effective_permission=candidate.permission_level,
+        relevance_score=float(candidate.relevance_score),
+        matched_terms=tuple(candidate.matched_terms),
+        public_projection_hmac=public_hmac,
+        candidate_identity_hmac=candidate_hmac,
+    )

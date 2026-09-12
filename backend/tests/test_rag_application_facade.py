@@ -11,6 +11,113 @@ from backend.app.agents.rag_orchestrator_agent.v2_input import (
 from backend.tests.test_rag_v2_graph import _context
 
 
+def test_keyword_shadow_returns_exact_legacy_delivery_and_runs_observer_once(
+    tmp_path, monkeypatch,
+):
+    """Catches shadow replacing public bytes/run or invoking V2 generation."""
+    from backend.app.agent_runtime.rag_application import DirectRagDeliveryResult
+    from backend.app.agent_runtime.rag_v2_composition import (
+        RagRuntimeDependencies,
+        build_rag_v2_runtime,
+    )
+    from backend.app.schemas.rag import SearchV1Projection
+
+    context = _context(tmp_path)
+    settings = context.settings.model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'search',
+        'rag_retrieval_backend': 'keyword',
+    })
+    legacy = DirectRagDeliveryResult(
+        200,
+        'success',
+        'search_projected',
+        SearchV1Projection(
+            retrieval_backend='deterministic_lexical',
+            cost_policy={
+                'embedding_query_call': False,
+                'paid_llm_call': False,
+                'requires_pgvector_flag': True,
+            },
+            hidden_match_count=0,
+            permission_notice=None,
+            results=[],
+        ),
+        None,
+    )
+    calls = []
+
+    def shadow_runner(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError('comparison failure must not replace legacy')
+
+    bundle = build_rag_v2_runtime(
+        settings=settings,
+        session_factory=lambda: None,
+        dependencies=RagRuntimeDependencies(
+            request_factory=lambda **kwargs: None,
+            shadow_runner=shadow_runner,
+        ),
+    )
+    monkeypatch.setattr(type(bundle.facade), '_invoke_legacy', lambda *args, **kwargs: legacy)
+
+    delivered = bundle.facade.invoke_search(actor=context.actor, caller_text='exact bytes')
+
+    assert delivered is legacy
+    assert len(calls) == 1
+    assert calls[0]['surface'] == 'search'
+    assert calls[0]['legacy_delivery'] is legacy
+    assert calls[0]['prepared_text'].caller_text == 'exact bytes'
+
+
+@pytest.mark.parametrize(
+    ('mode', 'stage', 'calls'),
+    (('disabled', 'assistant', 0), ('shadow', 'none', 0), ('enforce', 'search', 0)),
+)
+def test_shadow_observer_has_no_disabled_noncutover_or_enforce_background_work(
+    tmp_path, monkeypatch, mode, stage, calls,
+):
+    """Catches a shadow callback surviving rollback or enforce cutover."""
+    from backend.app.agent_runtime.rag_application import DirectRagDeliveryResult
+    from backend.app.agent_runtime.rag_v2_composition import (
+        RagRuntimeDependencies,
+        build_rag_v2_runtime,
+    )
+    from backend.app.schemas.rag import SearchV1Projection
+
+    context = _context(tmp_path)
+    settings = context.settings.model_copy(update={
+        'langgraph_rag_v2_mode': mode,
+        'langgraph_rag_v2_stage': stage,
+        'rag_retrieval_backend': 'keyword',
+    })
+    legacy = DirectRagDeliveryResult(
+        200, 'success', 'search_projected', SearchV1Projection(
+            retrieval_backend='deterministic_lexical',
+            cost_policy={'embedding_query_call': False, 'paid_llm_call': False,
+                         'requires_pgvector_flag': True},
+            hidden_match_count=0, permission_notice=None, results=[],
+        ), None,
+    )
+    observed = []
+    bundle = build_rag_v2_runtime(
+        settings=settings,
+        session_factory=lambda: None,
+        dependencies=RagRuntimeDependencies(
+            request_factory=lambda **kwargs: None,
+            shadow_runner=lambda **kwargs: observed.append(kwargs),
+        ),
+    )
+    monkeypatch.setattr(type(bundle.facade), '_invoke_legacy', lambda *args, **kwargs: legacy)
+    if mode == 'enforce' and stage == 'search':
+        monkeypatch.setattr(type(bundle.facade), 'invoke_graph', lambda *args, **kwargs: {
+            'outcome': 'unexpected_internal_error',
+        })
+
+    bundle.facade.invoke_search(actor=context.actor, caller_text='rollback')
+    assert len(observed) == calls
+
+
 @pytest.mark.parametrize('mode', ('disabled', 'shadow', 'enforce'))
 @pytest.mark.parametrize('stage', ('none', 'ask', 'search', 'assistant'))
 @pytest.mark.parametrize('surface', ('ask', 'search', 'assistant'))

@@ -292,3 +292,58 @@ def test_tampered_legacy_observation_is_rejected_before_comparison():
             v2=_result(_evidence(1)),
             scope=_scope(),
         )
+
+
+def test_default_keyword_shadow_runs_real_retriever_and_writes_one_audit(
+    db_session,
+):
+    """Catches a production shadow runner that is only a fake/no-op seam."""
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.app.agents.rag_orchestrator_agent.v2_input import (
+        prepare_direct_request_text,
+    )
+    from backend.app.core.demo_auth import DemoUser
+    from backend.app.models import AuditLog
+    from backend.app.rag.shadow import run_keyword_shadow
+    from backend.tests.test_rag_v2_keyword_retriever import (
+        _seed_sqlite_raw_projection,
+        _settings,
+    )
+
+    _seed_sqlite_raw_projection(db_session)
+    settings = _settings().model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'ask',
+        'rag_retrieval_backend': 'keyword',
+    })
+    actor = DemoUser(
+        id='shadow-user', email='shadow@example.test', role='admin',
+        permission_levels={'public', 'internal', 'restricted'},
+        name='Shadow User', title='Tester', department='Platform',
+    )
+    prepared = prepare_direct_request_text(
+        'Exact raw observation',
+        key=settings.agent_runtime_fingerprint_secret.encode(),
+    )
+    result = run_keyword_shadow(
+        session_factory=sessionmaker(bind=db_session.get_bind(), expire_on_commit=False),
+        settings=settings,
+        actor=actor,
+        surface='ask',
+        prepared_text=prepared,
+        legacy_delivery=SimpleNamespace(projection=SimpleNamespace(agent_run_id=41)),
+    )
+
+    assert result is not None
+    assert result.outcome == 'shadow_match'
+    assert result.v2_candidate_count == 1
+    db_session.expire_all()
+    audits = tuple(db_session.scalars(select(AuditLog).where(
+        AuditLog.action == 'rag_shadow_compared'
+    )))
+    assert len(audits) == 1
+    assert audits[0].metadata_['comparison_hmac'] == result.comparison_hmac
