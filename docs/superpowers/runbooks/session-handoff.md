@@ -2,6 +2,37 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 Task18 F9-F10 PostgreSQL authority hardening candidate
+
+- Independent review of `ea558223` retained F1-F6/F8 but found c6 did not prove
+  F7's authentic INSERT origin: SECURITY DEFINER functions retained PUBLIC
+  execute, did not bind canonical trigger relation/operation, and could resolve
+  implicit pg_temp shadows. Its shared deferred consumer could also prepare
+  `NEW.dependency_id` for a parent row and roll back a valid commit.
+- New head `d7a8b9c0d1e2` follows frozen c6. At PostgreSQL upgrade it resolves and
+  validates the migration-selected application schema, quotes every identifier,
+  drops the c6 triggers/functions to retire old explicit grants, and recreates
+  seven routines. Every routine uses a fixed
+  `pg_catalog, <quoted-app-schema>, pg_temp` path, fully qualified relations,
+  exact canonical `TG_RELID`/`TG_OP` checks before row access, and immediate
+  PUBLIC execute revocation. Parent/dependency deferred consumers are separate.
+- The supported runtime must be a least-privileged role: not DB/object owner,
+  superuser or BYPASSRLS, with no application-schema CREATE or staging-table DML
+  grant. Those administrative identities can change/bypass the authority and
+  remain trusted. If production uses its migration/owner role at runtime, role
+  separation is a release prerequisite rather than a guarantee supplied here.
+- d7 downgrade refuses while v3 parents exist. Without v3 data it restores the
+  frozen, known-unsafe c6 intermediate and therefore is an offline recovery
+  operation only; continued serving requires re-upgrade to d7. SQLite behavior
+  is unchanged except Alembic head progression.
+- Pre-edit evidence: unchanged round-4 reviewer probes had 11 controls pass and
+  three F9/F10 static failures; tracked d7/head tests had four failures. Fresh
+  green: 77 v3/golden/retained probes, 363 affected Assistant/Task18, 23 offline
+  migrations (94 PG-named deselected), 1,085 adjacent Ask/RAG/search with two
+  skips/40 deselections, and seven isolated PG-bootstrap static tests. Actual
+  PostgreSQL, TEMP-role attacks, deferred commit, concurrency and deployment
+  roles remain unexecuted. No network/provider/Docker/push/merge/rollout.
+
 ## 2026-09-12 Task18 F6-F8 hardening candidate
 
 - Round-3 candidate `94710128` is superseded by an unreviewed local fix-round-4
@@ -10,15 +41,11 @@ Updated: 2026-09-12
   install equivalent OLD-parent-delete and actual dependency-owner/effect/link
   guards; the full probe is now green.
 - New migration head `c6f7a8b9c0d1` follows frozen `b5e6f7a8b9c0`. On
-  PostgreSQL it replaces the predecessor's `xmin` inference with private parent
-  and child INSERT registration. Registration is exact-owner/transaction bound,
-  consumed atomically by v3 parent publication, and a deferred constraint
-  rejects any registration left at commit. Forced trigger-depth RLS plus PUBLIC
-  privilege removal prevents ordinary direct app DML. Superuser/BYPASSRLS and
-  migration administration remain trusted; `SET search_path FROM CURRENT`
-  assumes the migration search path contains no app-writable schema. Only SQL
-  emission/structure was checked; real PostgreSQL transaction behavior remains
-  a release-gate gap.
+  PostgreSQL it replaces the predecessor's `xmin` inference with parent and
+  child INSERT registration. Independent review later found function ACL,
+  caller/search-path and deferred-row-shape gaps; use the F9-F10 entry above for
+  current PostgreSQL status. Only SQL emission/structure was checked; real
+  PostgreSQL transaction behavior remains a release-gate gap.
 - Downgrade refuses while v3 parents exist. Empty-v3 SQLite downgrade restores
   the predecessor guards before re-upgrade; dependency staging table deletion
   precedes parent staging deletion. Seven test-owned fixed canonical UTF-8/HMAC

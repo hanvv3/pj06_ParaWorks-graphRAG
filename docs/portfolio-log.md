@@ -1,5 +1,35 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Task18 PostgreSQL authority hardening candidate
+
+- Independent round-4 review found that the c6 INSERT registration still left
+  privileged trigger routines publicly executable, trusted unqualified names
+  vulnerable to TEMP shadowing, and one shared deferred routine unsafe for its
+  parent row shape. Successor `d7a8b9c0d1e2` keeps b5/c6 frozen and replaces
+  those routines and triggers under the migration-selected application schema.
+- Every replacement SECURITY DEFINER routine has a fixed
+  `pg_catalog, <quoted-app-schema>, pg_temp` search path, schema-qualified
+  authority relations, and an exact real-table `TG_RELID` plus `TG_OP` guard
+  before reading row fields. Dropping and recreating the routines retires their
+  old ACLs; PUBLIC execute is revoked immediately. Parent and dependency stale-
+  registration checks are separate deferred functions, so the parent path
+  cannot prepare a dependency-only record field.
+- These controls assume a least-privileged runtime role that is not the database
+  or object owner and lacks superuser/BYPASSRLS, application-schema CREATE, and
+  staging-table DML authority. An owner or equivalent administrative role can
+  alter or bypass database policy and remains a trusted operational boundary;
+  deployment must separate it from the application runtime before claiming the
+  database guarantee. Downgrade without v3 rows restores the known-unsafe c6
+  intermediate and is suitable only for offline migration recovery, not
+  continued serving.
+- Fresh local evidence: 77 v3/golden/retained-probe tests, 363 affected
+  Assistant/Task18 tests, and 23 offline migration tests passed. The adjacent
+  Ask/RAG/search SQLite gate passed 1,085 tests with two skips and 40
+  deselections; seven backend-selection PG-static tests passed separately with
+  a non-connecting dummy PostgreSQL locator. No actual PostgreSQL/TEMP-role/
+  commit-time execution or concurrency test was run, so this remains static SQL
+  and SQLite evidence pending independent rereview, not CLEAN or rollout-ready.
+
 ## 2026-09-12 D Core Task18 legacy-v3 database hardening candidate
 
 - Independent round-3 review confirmed F1-F5 but found two database enforcement
@@ -11,12 +41,11 @@
 - New successor migration `c6f7a8b9c0d1` leaves applied revision
   `b5e6f7a8b9c0` unchanged. PostgreSQL emitted SQL replaces tuple-`xmin`
   inference with parent/dependency INSERT-only, transaction-owned registration,
-  exact owner/count checks, atomic publish-time consumption, and deferred
-  rejection of any unconsumed registration. Trigger-depth RLS, forced RLS and
-  revoked PUBLIC table privileges block ordinary app-role registration DML.
-  Database superuser/BYPASSRLS administration remains a trusted operational
-  boundary. This is emitted-SQL/static structural evidence only; no PostgreSQL
-  server or concurrency execution is claimed.
+  exact owner/count checks, and intended publish-time consumption. Later review
+  found its function ACL/caller/search-path and shared-deferred-row defects; the
+  d7 entry above supersedes its PostgreSQL guarantee. This was emitted-SQL/static
+  structural evidence only; no PostgreSQL server or concurrency execution was
+  claimed.
 - Seven independent fixed canonical-byte/HMAC vectors now cover raw, explicit
   trusted, legacy-human, genuinely-unbound, uncited email, selected citation and
   ordered multi-child inputs without using the production payload builder.

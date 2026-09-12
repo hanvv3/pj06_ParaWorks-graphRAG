@@ -926,7 +926,7 @@ def test_legacy_v3_migration_upgrades_and_refuses_lossy_downgrade(sqlite_migrati
     command.upgrade(config, 'head')
     with engine.connect() as db:
         assert (
-            db.scalar(text('SELECT version_num FROM alembic_version')) == 'c6f7a8b9c0d1'
+            db.scalar(text('SELECT version_num FROM alembic_version')) == 'd7a8b9c0d1e2'
         )
         assert (
             db.scalar(text('SELECT content_write_mode FROM assistant_messages')) is None
@@ -939,5 +939,5 @@ def test_legacy_v3_migration_upgrades_and_refuses_lossy_downgrade(sqlite_migrati
         command.downgrade(config, 'a4d5e6f7b8c9')
     with engine.connect() as db:
         assert (
-            db.scalar(text('SELECT version_num FROM alembic_version')) == 'c6f7a8b9c0d1'
+            db.scalar(text('SELECT version_num FROM alembic_version')) == 'd7a8b9c0d1e2'
         )
