@@ -26,6 +26,7 @@ from backend.app.agent_runtime.rag_v2_contracts import (
 from backend.app.agent_runtime.rag_v2_identity import StrictUnicodeScalarValidator
 from backend.app.agent_runtime.rag_v2_registry import RagGraphRegistry
 from backend.app.agent_runtime.rag_v2_state import (
+    AssistantExecutionDisposition,
     RagGraphOutput,
     RagRequestServices,
     RagRuntimeContext,
@@ -349,9 +350,11 @@ class RagApplicationFacade:
                 return _assistant_unknown()
         except Exception:
             return _assistant_unknown()
+        execution = AssistantExecutionDisposition()
         try:
             result = self.invoke_graph(actor=actor, surface='assistant',
-                prepared_text=prepared_ingress.prepared_text, assistant_target=target)
+                prepared_text=prepared_ingress.prepared_text, assistant_target=target,
+                assistant_execution=execution)
             record = result.get('assistant_finalization')
             if type(record) is AssistantFinalizationRecord:
                 return _assistant_committed(record)
@@ -365,18 +368,18 @@ class RagApplicationFacade:
                     effective_backend=result.get('effective_backend'),
                     fallback_category=result.get('fallback_category'))
             # A preflight budget refusal opens neither request services nor a claim.
-            if result.get('outcome') == 'budget_exceeded' and not result.get('run_id'):
+            if (result.get('outcome') == 'budget_exceeded'
+                and execution.phase == 'preflight' and not result.get('run_id')):
                 return AssistantPreDispatchFailureFinalizer(
                     settings=self._settings, session_factory=self._session_factory, actor=actor,
                 ).finalize(target=target, prepared_text=prepared_ingress.prepared_text,
                            outcome='budget_exceeded')
             return _assistant_unknown()
         except RagApplicationError as exc:
-            # Graph failures carry their disposition. Only an explicit pre-claim
-            # exception may create a fresh zero-provider product.
-            if getattr(exc, 'delivery', None) is not None:
-                return exc.delivery
-            if getattr(exc, 'run_id', None) is not None:
+            # Only the same exception positively recorded at a request-owned
+            # preclaim boundary may authorize a new parent. Cleanup replacements
+            # and failures after admission/result publication are unknown.
+            if execution.preclaim_failure is not exc:
                 return _assistant_unknown()
             if exc.code in {'runtime_version_unavailable', 'retriever_not_configured',
                             'retriever_unavailable', 'model_unavailable',
@@ -403,7 +406,7 @@ class RagApplicationFacade:
                        else 'budget_exceeded' if isinstance(exc, RagBudgetExceededError)
                        else 'retriever_unavailable' if isinstance(exc, QueryEmbeddingReadinessError)
                        else None)
-            if outcome is not None and getattr(exc, 'run_id', None) is None:
+            if outcome is not None and execution.preclaim_failure is exc:
                 return AssistantPreDispatchFailureFinalizer(settings=self._settings,
                     session_factory=self._session_factory, actor=actor).finalize(
                         target=target, prepared_text=prepared_ingress.prepared_text, outcome=outcome)
@@ -608,7 +611,10 @@ class RagApplicationFacade:
         surface: RagSurface,
         prepared_text: PreparedRagRequestText,
         assistant_target: AssistantProjectionTarget | None = None,
+        assistant_execution: AssistantExecutionDisposition | None = None,
     ) -> RagGraphOutput:
+        if assistant_execution is not None:
+            assistant_execution.phase = 'preflight'
         if self.execution_owner(surface) != 'v2':
             # The later shadow bridge owns comparison; this never invokes the
             # product graph or silently substitutes for the legacy service.
@@ -624,12 +630,19 @@ class RagApplicationFacade:
             surface != 'assistant' or assistant_target.owner_user_id != actor.id
         ):
             raise ValueError('assistant target does not match request owner')
-        graph = self._graph_registry.resolve(
-            COMPANY_MEMORY_RAG_WORKFLOW, COMPANY_MEMORY_RAG_GRAPH_VERSION
-        )
+        try:
+            graph = self._graph_registry.resolve(
+                COMPANY_MEMORY_RAG_WORKFLOW, COMPANY_MEMORY_RAG_GRAPH_VERSION
+            )
+        except Exception as exc:
+            if assistant_execution is not None:
+                assistant_execution.record_preclaim_failure(exc)
+            raise
         request_actor = replace(
             actor, permission_levels=frozenset(actor.permission_levels)
         )
+        if assistant_execution is not None:
+            assistant_execution.phase = 'factory_entry'
         with (
             tracing_context(enabled=False),
             self._request_factory(
@@ -638,22 +651,37 @@ class RagApplicationFacade:
                 actor=request_actor,
                 surface=surface,
                 assistant_target=assistant_target,
+                **({'assistant_execution': assistant_execution} if assistant_execution is not None else {}),
             ) as services,
         ):
             if type(services) is not RagRequestServices:
                 raise RagApplicationError('runtime_version_unavailable')
+            if assistant_execution is not None:
+                assistant_execution.phase = 'graph_preclaim'
             context = RagRuntimeContext(
                 actor=request_actor,
                 surface=surface,
                 settings=settings,
                 services=services,
                 assistant_target=assistant_target,
+                assistant_execution=assistant_execution,
             )
-            return graph.invoke(
-                {'prepared_text': prepared_text},
-                context=context,
-                config={'callbacks': [], 'metadata': {}, 'recursion_limit': 40},
-            )
+            try:
+                result = graph.invoke(
+                    {'prepared_text': prepared_text},
+                    context=context,
+                    config={'callbacks': [], 'metadata': {}, 'recursion_limit': 40},
+                )
+            except Exception as exc:
+                if assistant_execution is not None:
+                    assistant_execution.record_preclaim_failure(exc)
+                    assistant_execution.phase = 'graph_failed'
+                raise
+            if assistant_execution is not None:
+                assistant_execution.phase = 'graph_returned'
+        if assistant_execution is not None:
+            assistant_execution.phase = 'request_exited'
+        return result
 
 
 def _legacy_pgvector_search_store(*, db, settings):

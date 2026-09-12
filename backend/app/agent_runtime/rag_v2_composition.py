@@ -102,7 +102,25 @@ def build_rag_v2_runtime(
 
 @contextmanager
 def default_rag_request_factory(
-    *, session_factory, settings, actor, surface, assistant_target
+    *, session_factory, settings, actor, surface, assistant_target,
+    assistant_execution=None,
+):
+    if assistant_execution is not None:
+        assistant_execution.phase = 'factory_preclaim'
+    try:
+        with _default_rag_request_services(session_factory=session_factory,
+            settings=settings, actor=actor, surface=surface,
+            assistant_target=assistant_target) as services:
+            yield services
+    except Exception as exc:
+        if assistant_execution is not None:
+            assistant_execution.record_preclaim_failure(exc)
+        raise
+
+
+@contextmanager
+def _default_rag_request_services(
+    *, session_factory, settings, actor, surface, assistant_target,
 ):
     from pathlib import Path
 

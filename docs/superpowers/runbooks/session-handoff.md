@@ -2,6 +2,36 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task18 F1/F3 fixes; F2 remains Important blocker
+
+- The earlier DONE_WITH_CONCERNS label is superseded: Task18 is INCOMPLETE /
+  BLOCKED on full future keyed legacy coverage. Independent review is NOT CLEAN.
+  The retained future explicit-approval tampered-content probe still fails;
+  preserve it and the selected-effect revocation regression without weakening.
+- F1 adds invocation-owned execution disposition in `rag_v2_state.py`, facade,
+  graph and default request composition. Only an identical exception positively
+  recorded at a preclaim boundary can authorize a fresh safe terminal parent.
+  Mark admission before SQLite/PG allocation and graph return before context
+  exit. Typed cleanup exceptions or missing run IDs never prove no prior claim.
+  Existing finalizers still own transactions; unknown delivery makes no writes.
+  Review before-state-publication failures and exact cost/terminal identity.
+- F3 defers enforce user persistence until a definitive non-RAG write or full
+  RAG ingress preparation. All prior non-RAG inputs remain immutable eligible
+  reader views. Contact, email and recipient correction can ignore stale RAG
+  rows; composer fallthrough cannot downgrade to legacy or bypass the RAG gate.
+  Review callbacks that persist the user immediately before non-RAG writes and
+  safe failure writes. Existing non-RAG email planning stays on its own path.
+- Fresh affected gate: 237 passed, one opt-in PG skip; retained probes: five
+  F1/F3 pass, only F2 fails. Full commands and later gates are in the local report.
+  Adjacent graph/ask/email/reader/writer gate: 255 passed. Final Task18 and
+  retained F1/F3 gate: 54 passed, F2 alone deselected; static checks passed.
+- Human decision proposal (NOT accepted specification or implementation):
+  `docs/superpowers/specs/2026-09-12-task18-legacy-integrity-contract-proposal.md`.
+  Reuse existing exact raw/trusted provenance and approval reference fields under
+  legacy-only scope, version its keyed contract, and cover zero-public-citation
+  legacy evidence influences without granting D eligibility. Do not implement
+  this schema/trust-boundary extension until approved. No historical backfill.
+
 ## 2026-09-12 D Core Task18 candidate; independent review required
 
 - `PreparedAssistantIngress` and `invoke_assistant` own non-email enforce V2 RAG.

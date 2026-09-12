@@ -131,7 +131,9 @@ def test_post_user_registry_failure_commits_safe_parent_and_message(
             raise QueryEmbeddingReadinessError('unavailable')
         raise RagApplicationError('runtime_version_unavailable')
 
-    monkeypatch.setattr(RagApplicationFacade, 'invoke_graph', unavailable)
+    # Exercise the real affirmative preclaim boundary, not an unproven arbitrary
+    # invoke_graph exception (which could equally be raised after commit).
+    monkeypatch.setattr(type(client.app.state.rag_application_facade._graph_registry), 'resolve', unavailable)
     response = client.post(
         f'/api/v1/assistant/conversations/{conversation.id}/messages',
         json={'content': 'question'}, headers=CAPABILITY_HEADERS,
@@ -274,14 +276,41 @@ def test_projectionless_terminal_run_gets_one_safe_message(client, db_session, m
     assert payloads[-1]['effective_backend'] == ('pgvector' if backend == 'pgvector' else 'deterministic_lexical')
 
 
-def test_post_commit_factory_exception_preserves_one_message(client, db_session):
+@pytest.mark.parametrize('failure_kind', ('generic', 'application', 'registry', 'budget', 'readiness'))
+def test_post_commit_factory_exception_preserves_one_message(client, db_session, failure_kind):
     from contextlib import contextmanager
     facade = enforce(client)
     original = facade._request_factory
+    committed = []
+    def snapshot(db):
+        parent = db.scalar(select(AgentRun))
+        children = list(db.scalars(select(AgentRunCostComponent).order_by(AgentRunCostComponent.component_ordinal)))
+        return (parent.id, parent.status, parent.run_record_phase, parent.cache_key,
+            parent.source_window, parent.total_charged_cost_usd, dict(parent.metadata_),
+            [(child.id, child.dispatch_state, child.dispatch_count, child.charged_cost_usd,
+              child.charge_basis, child.authorized_model_config_snapshot_hmac) for child in children])
     @contextmanager
     def lose_ack(**kwargs):
         with original(**kwargs) as services:
             yield services
+        with facade._session_factory() as db:
+            committed.append(snapshot(db))
+        if failure_kind == 'application':
+            from backend.app.agent_runtime.rag_application import RagApplicationError
+            raise RagApplicationError('runtime_version_unavailable')
+        if failure_kind == 'registry':
+            from backend.app.agent_runtime.rag_v2_registry import (
+                RagRuntimeVersionUnavailableError,
+            )
+            raise RagRuntimeVersionUnavailableError('cleanup')
+        if failure_kind == 'budget':
+            from backend.app.agent_runtime.rag_cost_policy import RagBudgetExceededError
+            raise RagBudgetExceededError()
+        if failure_kind == 'readiness':
+            from backend.app.agents.rag_orchestrator_agent.v2_embedding import (
+                QueryEmbeddingReadinessError,
+            )
+            raise QueryEmbeddingReadinessError('cleanup')
         raise RuntimeError('private post-commit bytes')
     client.app.state.rag_application_facade = replace(facade, _request_factory=lose_ack)
     conversation = create_conversation(db_session, USERS['viewer'])
@@ -291,6 +320,73 @@ def test_post_commit_factory_exception_preserves_one_message(client, db_session)
     db_session.expire_all()
     assert db_session.query(AgentRun).count() == 1
     assert db_session.query(AssistantMessage).count() == 2
+    assert snapshot(db_session) == committed[0]
+
+
+def test_failure_after_admission_before_state_publish_never_authorizes_new_parent(client, db_session, monkeypatch):
+    from backend.app.agent_runtime.rag_application import RagApplicationError
+    from backend.app.agent_runtime.rag_sqlite_smoke import SQLiteRagGraphScope
+    enforce(client)
+    original = SQLiteRagGraphScope.admit
+    def admit_then_fail(self, **kwargs):
+        original(self, **kwargs)
+        raise RagApplicationError('runtime_version_unavailable')
+    monkeypatch.setattr(SQLiteRagGraphScope, 'admit', admit_then_fail)
+    conversation = create_conversation(db_session, USERS['viewer'])
+    response = client.post(f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        json={'content': 'question'}, headers=CAPABILITY_HEADERS)
+    assert response.status_code == 500
+    assert db_session.query(AgentRun).count() == 0
+    assert db_session.query(AssistantMessage).count() == 1
+
+
+@pytest.mark.parametrize('mode', ('disabled', 'enforce'))
+@pytest.mark.parametrize('action', ('contact', 'email', 'email_fallthrough'))
+def test_stale_rag_prior_is_not_independent_action_authority(client, db_session, monkeypatch, mode, action):
+    from backend.app.api.v1 import assistant
+    from backend.tests.test_assistant_api import _email_intent, _patch_email_flow
+    if mode == 'enforce':
+        enforce(client)
+    conversation = create_conversation(db_session, USERS['viewer'])
+    message = helpers.write_canned(db_session, conversation, 'old safe answer')
+    message.content = 'unavailable prior must not enter any model'
+    db_session.commit()
+    def compose(**kwargs):
+        assert 'unavailable prior' not in str(kwargs)
+        return assistant.EmailActionDecision(action_type='not_email' if action == 'email_fallthrough' else 'email_draft',
+            to=['partner@example.com'], subject='회의 취소 안내', body='오늘 회의가 취소되었습니다.')
+    _patch_email_flow(monkeypatch, intent_decision=_email_intent(email_intent=True), draft_decision=compose)
+    text = '김종우님 이메일 알려줘.' if action == 'contact' else 'partner@example.com에 오늘 회의 취소됐다고 메일 보내줘.'
+    response = client.post(f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        json={'content': text}, headers=CAPABILITY_HEADERS)
+    if mode == 'enforce' and action == 'email_fallthrough':
+        assert response.status_code == 502
+        assert db_session.query(AssistantMessage).count() == 1
+    else:
+        assert response.status_code == 200, response.text
+        if action != 'email_fallthrough':
+            assert response.json()['assistant_message']['metadata']['action_type'] == ('contact_lookup' if action == 'contact' else 'email_draft')
+
+
+@pytest.mark.parametrize('mode', ('disabled', 'enforce'))
+def test_recipient_correction_uses_eligible_draft_not_stale_rag_prior(client, db_session, mode):
+    from backend.app.assistant.service import append_assistant_message
+    if mode == 'enforce':
+        enforce(client)
+    conversation = create_conversation(db_session, USERS['viewer'])
+    stale = helpers.write_canned(db_session, conversation, 'old safe answer')
+    stale.content = 'tampered unrelated RAG answer'
+    db_session.commit()
+    append_assistant_message(db_session, USERS['viewer'], conversation,
+        content='메일 초안', citations=[], source_ids=[], source_links=[], source_snippets=[],
+        permission_level=None, hidden_match_count=0, permission_notice=None, agent_run_id=None,
+        metadata={'action_type': 'email_draft', 'status': 'pending_approval',
+            'email_draft': {'to': ['partner@example.com'], 'subject': '회의', 'body': '오늘 회의 취소'}})
+    response = client.post(f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        json={'content': '수신자가 잘못됐어요.'}, headers=CAPABILITY_HEADERS)
+    assert response.status_code == 200, response.text
+    assert response.json()['assistant_message']['metadata']['reason'] == 'recipient_correction_requested'
+    assert db_session.query(AssistantMessage).count() == 4
 
 
 def test_real_writer_rollback_removes_allocated_row(db_session):

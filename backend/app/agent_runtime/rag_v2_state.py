@@ -127,6 +127,22 @@ class RagRequestServices:
     provider_transport_factory: Callable[[], RagProviderDispatchAuthority] | None = None
 
 
+@dataclass(slots=True)
+class AssistantExecutionDisposition:
+    """Invocation-owned proof; exception type/absence of run_id is not authority."""
+
+    phase: str = 'unproven'
+    preclaim_failure: Exception | None = field(default=None, repr=False)
+
+    def begin_admission(self) -> None:
+        self.phase = 'admission_started'
+        self.preclaim_failure = None
+
+    def record_preclaim_failure(self, failure: Exception) -> None:
+        if self.phase in {'preflight', 'factory_preclaim', 'graph_preclaim'}:
+            self.preclaim_failure = failure
+
+
 @dataclass(frozen=True, slots=True)
 class RagRuntimeContext:
     actor: DemoUser
@@ -134,6 +150,7 @@ class RagRuntimeContext:
     settings: Settings
     services: RagRequestServices = field(repr=False)
     assistant_target: AssistantProjectionTarget | None = None
+    assistant_execution: AssistantExecutionDisposition | None = None
 
 
 class RagGraphInput(TypedDict):

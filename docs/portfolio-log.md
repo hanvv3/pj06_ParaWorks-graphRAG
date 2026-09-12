@@ -1,5 +1,27 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Task18 review fixes; F2 blocks completion
+
+- Independent review found three Important issues. F1/F3 fixes now distinguish
+  proven preclaim failures from post-admission/commit exceptions, preserving
+  the original parent/message/cost/breaker identity and using unknown delivery
+  without a second write when the outcome is uncertain.
+- Full RAG prior-context gating now occurs at RAG fallthrough. Independent
+  contact, eligible recipient correction and email branches use immutable
+  eligible views without depending on stale unrelated RAG evidence. Enforce
+  RAG fallthrough still refuses before its new user or graph-provider mutation.
+- Affected verification: 237 passed, one opt-in PostgreSQL skip. Five retained
+  F1/F3 probes pass; the retained F2 new-write content-tamper probe still fails.
+  Adjacent graph/ask/email/reader/writer gate: 255 passed; final Task18 plus
+  unchanged F1/F3 probes: 54 passed, only F2 deselected. Static checks passed.
+  Task18 is INCOMPLETE/BLOCKED, not DONE or CLEAN, despite the earlier candidate
+  label below. No schema expansion or rollout is authorized by these fixes.
+- The proposed exact-provenance legacy scope/role/schema extension is recorded
+  in `docs/superpowers/specs/2026-09-12-task18-legacy-integrity-contract-proposal.md`
+  for human decision. It preserves selected-approval revocation and excludes D
+  eligibility; future explicit-approval and zero-citation evidence-email keyed
+  coverage remains unimplemented until that decision.
+
 ## 2026-09-12 D Core Task18 Assistant sole-writer candidate
 
 - The Assistant V2 RAG path now prepares owner-bound, scanner-checked immutable

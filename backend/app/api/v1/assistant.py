@@ -1,6 +1,7 @@
 import json
 import unicodedata
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -364,6 +365,7 @@ def _answer_question_or_raise(
     settings: Settings,
     vector_store,
     tool_logger: AssistantToolLogger,
+    before_failure_write=None,
 ):
     try:
         return answer_question_with_rag(
@@ -376,6 +378,8 @@ def _answer_question_or_raise(
             commit_agent_run=False,
         )
     except Exception as exc:
+        if before_failure_write is not None:
+            before_failure_write()
         append_failed_assistant_message(
             db,
             user,
@@ -471,6 +475,7 @@ def _append_source_email_draft_message(
     email_context: str,
     source_context,
     resolved_recipients: list[dict[str, object]],
+    before_write=None,
 ):
     source_rag_context = render_email_source_context(
         source_context,
@@ -501,6 +506,8 @@ def _append_source_email_draft_message(
         )
 
     if email_draft is not None:
+        if before_write is not None:
+            before_write()
         return append_assistant_message(
             db,
             user,
@@ -528,6 +535,8 @@ def _append_source_email_draft_message(
         email_decision.action_type == 'needs_clarification'
         and email_decision.clarification_question
     ):
+        if before_write is not None:
+            before_write()
         return append_assistant_message(
             db,
             user,
@@ -647,33 +656,42 @@ def create_assistant_message(
     _require_assistant_ingress_scan(request.content)
     facade = raw_request.app.state.rag_application_facade
     prepared_ingress = None
-    if facade.execution_owner('assistant') == 'v2':
-        try:
-            prepared_ingress = facade.prepare_assistant_ingress(
-                actor=user, conversation_id=conversation.id, caller_text=request.content,
-            )
-        except AssistantIngressError as exc:
-            _map_assistant_delivery(exc.result)
-    try:
-        user_message = append_user_message(db, user, conversation, request.content)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    v2_rag_owner = facade.execution_owner('assistant') == 'v2'
+    # Non-RAG planning sees only eligible immutable prior snapshots and current
+    # input. Defer the V2 user INSERT until an action actually writes a product,
+    # or until RAG-only ingress has passed. A tentative email decision cannot
+    # downgrade a later RAG fallback or leave an invalid-prior user row behind.
+    user_message = SimpleNamespace(id=None, content=request.content.strip())
+
+    def persist_user_message():
+        nonlocal user_message
+        if user_message.id is None:
+            try:
+                user_message = append_user_message(db, user, conversation, request.content)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return user_message
+
+    if not v2_rag_owner:
+        persist_user_message()
 
     messages = list_messages(db, user, conversation.id)
     messages = eligible_context_messages(db, user, messages)
+    prior_messages = messages if v2_rag_owner else messages[:-1]
     tool_logger = AssistantToolLogger()
     email_context = render_email_action_context(
-        messages=messages[:-1],
+        messages=prior_messages,
         max_chars=settings.assistant_email_agent_max_input_chars,
     )
     recent_assistant_context = render_recent_assistant_context_for_email(
-        messages=messages[:-1],
+        messages=prior_messages,
         max_chars=settings.assistant_email_agent_max_input_chars,
     )
     if is_pending_draft_recipient_problem(
-        messages=messages[:-1],
+        messages=prior_messages,
         latest_message=user_message.content,
     ):
+        persist_user_message()
         assistant_message = _append_recipient_clarification_message(
             db=db,
             user=user,
@@ -705,6 +723,7 @@ def create_assistant_message(
                 f'lookup_reason={contact_lookup.reason}'
             ),
         )
+        persist_user_message()
         assistant_message = append_assistant_message(
             db,
             user,
@@ -746,6 +765,7 @@ def create_assistant_message(
         )
         resolved_recipients = recipient_resolution.resolved_recipients
         if recipient_resolution.status != 'resolved':
+            persist_user_message()
             assistant_message = _append_recipient_clarification_message(
                 db=db,
                 user=user,
@@ -775,6 +795,7 @@ def create_assistant_message(
             settings=settings,
             vector_store=build_pgvector_search_store(db=db, settings=settings),
             tool_logger=tool_logger,
+            before_failure_write=persist_user_message,
         )
         source_context = EmailSourceContext(
             should_route=True,
@@ -791,6 +812,7 @@ def create_assistant_message(
             email_context=email_context,
             source_context=source_context,
             resolved_recipients=resolved_recipients,
+            before_write=persist_user_message,
         )
         if assistant_message is not None:
             return {
@@ -802,7 +824,7 @@ def create_assistant_message(
             }
 
     source_context = build_email_source_context(
-        messages=messages[:-1],
+        messages=prior_messages,
         latest_message=user_message.content,
     )
     if source_context.should_route:
@@ -816,6 +838,7 @@ def create_assistant_message(
             source_context,
         )
         if not resolved_recipients:
+            persist_user_message()
             assistant_message = _append_recipient_clarification_message(
                 db=db,
                 user=user,
@@ -848,6 +871,7 @@ def create_assistant_message(
             email_context=email_context,
             source_context=source_context,
             resolved_recipients=resolved_recipients,
+            before_write=persist_user_message,
         )
         if assistant_message is not None:
             return {
@@ -884,14 +908,14 @@ def create_assistant_message(
         user=user,
     )
     vector_store = (build_pgvector_search_store(db=db, settings=settings)
-                    if prepared_ingress is None else None)
+                    if not v2_rag_owner else None)
     confident_email_intent = (
         email_intent.email_intent
         and email_intent.confidence_score
         >= settings.assistant_email_agent_min_confidence
     )
     if confident_email_intent:
-        if prepared_ingress is not None:
+        if v2_rag_owner:
             vector_store = build_pgvector_search_store(db=db, settings=settings)
         recipient_resolution = resolve_email_recipients(
             db=db,
@@ -918,6 +942,7 @@ def create_assistant_message(
                 settings=settings,
                 vector_store=vector_store,
                 tool_logger=tool_logger,
+                before_failure_write=persist_user_message,
             )
             rag_context = _render_rag_answer_for_email(answer)
             email_serving_dependencies = answer.serving_dependencies
@@ -947,6 +972,7 @@ def create_assistant_message(
 
         email_draft = email_decision.to_draft()
         if email_draft is not None:
+            persist_user_message()
             assistant_message = append_assistant_message(
                 db,
                 user,
@@ -982,6 +1008,7 @@ def create_assistant_message(
             email_decision.action_type == 'needs_clarification'
             and email_decision.clarification_question
         ):
+            persist_user_message()
             assistant_message = append_assistant_message(
                 db,
                 user,
@@ -1013,7 +1040,14 @@ def create_assistant_message(
                 ),
             }
 
-    if prepared_ingress is not None:
+    if v2_rag_owner:
+        try:
+            prepared_ingress = facade.prepare_assistant_ingress(
+                actor=user, conversation_id=conversation.id, caller_text=request.content,
+            )
+        except AssistantIngressError as exc:
+            _map_assistant_delivery(exc.result)
+        persist_user_message()
         # Close route reads before the facade opens its finalizer transaction.
         db.rollback()
         result = facade.invoke_assistant(

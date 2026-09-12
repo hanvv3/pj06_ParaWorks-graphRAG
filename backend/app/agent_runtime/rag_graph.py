@@ -173,6 +173,8 @@ def preflight_retrieval_paid_cost_ceiling(
     services = context.services
     backend = state['configured_backend']
     if services.sqlite_scope is not None:
+        if context.assistant_execution is not None:
+            context.assistant_execution.begin_admission()
         run_id, generations = services.sqlite_scope.admit(
             prepared_text=state['prepared_text'],
             surface=context.surface,
@@ -189,6 +191,19 @@ def preflight_retrieval_paid_cost_ceiling(
             _request(state),
             services.index_readiness.inspect(db=services.db),
         )
+    components = tuple(
+        (
+            snapshot,
+            services.cost_policy.reserve_answer_generation()
+            if snapshot.component == 'answer_generation' and context.surface != 'search'
+            else prepared_embedding.budget
+            if snapshot.component == 'query_embedding' and prepared_embedding is not None
+            else services.cost_policy.reserve_unused_component(snapshot.component),
+        )
+        for snapshot in services.policy_snapshots
+    )
+    if context.assistant_execution is not None:
+        context.assistant_execution.begin_admission()
     run_id = services.allocate_run_id()
     services.cost_ledger.create_admission(
         agent_run_id=run_id,
@@ -202,19 +217,7 @@ def preflight_retrieval_paid_cost_ceiling(
         security_scope_fingerprint=state['scope_fingerprint'],
         admission_cache_identity_hmac=None,
         source_window=f'rag-v2:admission:{resolved_rag_mode(context.settings)}:{context.surface}:{backend}',
-        components=tuple(
-            (
-                snapshot,
-                services.cost_policy.reserve_answer_generation()
-                if snapshot.component == 'answer_generation'
-                and context.surface != 'search'
-                else prepared_embedding.budget
-                if snapshot.component == 'query_embedding'
-                and prepared_embedding is not None
-                else services.cost_policy.reserve_unused_component(snapshot.component),
-            )
-            for snapshot in services.policy_snapshots
-        ),
+        components=components,
     )
     return {
         'run_id': run_id,
