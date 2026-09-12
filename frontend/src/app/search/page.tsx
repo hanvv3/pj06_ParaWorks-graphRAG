@@ -24,6 +24,7 @@ import {
   sendAssistantEmailDraft,
 } from "@/lib/api/assistant";
 import { ApiError } from "@/lib/api/client";
+import { assistantClientUpgradeLatch } from "@/lib/assistant/compatibilityLatch";
 import { ephemeralSearchHandoff } from "@/lib/assistant/searchHandoff";
 import {
   type DeliveryOwner,
@@ -53,6 +54,7 @@ const SUGGESTED_QUESTIONS = [
 ];
 const ASSISTANT_TYPING_INTERVAL_MS = 18;
 const ASSISTANT_TYPING_CHUNK_SIZE = 2;
+const CLIENT_UPGRADE_COPY = "새 버전이 필요합니다. 페이지를 새로고침해 주세요.";
 
 export default function SearchPage() {
   return (
@@ -65,6 +67,7 @@ export default function SearchPage() {
 function SearchPageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
+  const initialClientUpgradeRequired = assistantClientUpgradeLatch.get();
   const [conversations, setConversations] = useState<AssistantConversation[]>([]);
   const [activeConversation, setActiveConversation] = useState<AssistantConversation>();
   const [messages, setMessages] = useState<AssistantMessage[]>([]);
@@ -72,13 +75,15 @@ function SearchPageContent() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [booting, setBooting] = useState(true);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useState<string | undefined>(() => (
+    initialClientUpgradeRequired ? CLIENT_UPGRADE_COPY : undefined
+  ));
   const [unknownDelivery, setUnknownDelivery] = useState<{
     owner: DeliveryOwner;
     failureStatus: number;
     failureCopy: string;
   }>();
-  const [clientUpgradeRequired, setClientUpgradeRequired] = useState(false);
+  const [clientUpgradeRequired, setClientUpgradeRequired] = useState(initialClientUpgradeRequired);
   const [copiedMessageId, setCopiedMessageId] = useState<number>();
   const [sendingEmailMessageId, setSendingEmailMessageId] = useState<number>();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
@@ -175,8 +180,8 @@ function SearchPageContent() {
     } catch (caught) {
       if (mountedRef.current && requestId === loadMessagesRequestRef.current) {
         if (isClientUpgradeError(caught)) {
-          setClientUpgradeRequired(true);
-          setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+          assistantClientUpgradeLatch.activate();
+          setError(CLIENT_UPGRADE_COPY);
         } else {
           setError(caught instanceof ApiError ? caught.message : "대화 내용을 불러오지 못했습니다.");
         }
@@ -186,6 +191,10 @@ function SearchPageContent() {
   }, [upsertConversationByUpdatedAt]);
 
   const loadConversations = useCallback(async () => {
+    if (assistantClientUpgradeLatch.get()) {
+      if (mountedRef.current) setBooting(false);
+      return;
+    }
     setBooting(true);
     setError(undefined);
     try {
@@ -201,8 +210,8 @@ function SearchPageContent() {
     } catch (caught) {
       if (!mountedRef.current) return;
       if (isClientUpgradeError(caught)) {
-        setClientUpgradeRequired(true);
-        setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+        assistantClientUpgradeLatch.activate();
+        setError(CLIENT_UPGRADE_COPY);
       } else {
         setError(caught instanceof ApiError ? caught.message : "AI 비서 대화를 준비하지 못했습니다.");
       }
@@ -251,8 +260,8 @@ function SearchPageContent() {
           setMessages((currentMessages) => markOwnedOptimisticUnknown(currentMessages, owner));
         }
         setUnknownDelivery(undefined);
-        setClientUpgradeRequired(true);
-        setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+        assistantClientUpgradeLatch.activate();
+        setError(CLIENT_UPGRADE_COPY);
         return;
       }
       if (!isCurrentDelivery(
@@ -273,6 +282,7 @@ function SearchPageContent() {
       || !trimmedContent
       || loadingRef.current
       || unknownDelivery !== undefined
+      || assistantClientUpgradeLatch.get()
       || clientUpgradeRequired
     ) return;
 
@@ -329,8 +339,8 @@ function SearchPageContent() {
           setMessages((currentMessages) => removeOwnedOptimistic(currentMessages, upgradeOwner));
         }
         setUnknownDelivery(undefined);
-        setClientUpgradeRequired(true);
-        setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+        assistantClientUpgradeLatch.activate();
+        setError(CLIENT_UPGRADE_COPY);
         return;
       }
       if (
@@ -385,6 +395,7 @@ function SearchPageContent() {
       !mountedRef.current
       || creatingConversationRef.current
       || unknownDelivery !== undefined
+      || assistantClientUpgradeLatch.get()
       || clientUpgradeRequired
     ) return;
     creatingConversationRef.current = true;
@@ -440,7 +451,12 @@ function SearchPageContent() {
   }
 
   async function approveEmailDraft(messageId: number) {
-    if (!mountedRef.current || clientUpgradeRequired || unknownDelivery !== undefined) return;
+    if (
+      !mountedRef.current
+      || assistantClientUpgradeLatch.get()
+      || clientUpgradeRequired
+      || unknownDelivery !== undefined
+    ) return;
     setSendingEmailMessageId(messageId);
     setError(undefined);
     try {
@@ -452,8 +468,8 @@ function SearchPageContent() {
     } catch (caught) {
       if (!mountedRef.current) return;
       if (isClientUpgradeError(caught)) {
-        setClientUpgradeRequired(true);
-        setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+        assistantClientUpgradeLatch.activate();
+        setError(CLIENT_UPGRADE_COPY);
       } else {
         setError(caught instanceof ApiError ? caught.message : "메일을 보내지 못했습니다.");
       }
@@ -463,7 +479,12 @@ function SearchPageContent() {
   }
 
   async function retryUnknownDelivery() {
-    if (!mountedRef.current || unknownDelivery === undefined || loadingRef.current) return;
+    if (
+      !mountedRef.current
+      || assistantClientUpgradeLatch.get()
+      || unknownDelivery === undefined
+      || loadingRef.current
+    ) return;
     loadingRef.current = true;
     setLoading(true);
     await reconcileDelivery(
@@ -477,7 +498,13 @@ function SearchPageContent() {
 
   useEffect(() => {
     mountedRef.current = true;
+    const unsubscribeClientUpgrade = assistantClientUpgradeLatch.subscribe(() => {
+      if (!mountedRef.current) return;
+      setClientUpgradeRequired(true);
+      setError(CLIENT_UPGRADE_COPY);
+    });
     return () => {
+      unsubscribeClientUpgrade();
       mountedRef.current = false;
       deliveryRequestTokenRef.current += 1;
       loadMessagesRequestRef.current += 1;

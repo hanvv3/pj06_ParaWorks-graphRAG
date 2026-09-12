@@ -1,5 +1,6 @@
 import { expect, test, type Page, type Request } from "@playwright/test";
 import { ApiError, apiGet, decodeApiErrorEnvelope } from "../src/lib/api/client";
+import { assistantClientUpgradeLatch } from "../src/lib/assistant/compatibilityLatch";
 import { ephemeralSearchHandoff } from "../src/lib/assistant/searchHandoff";
 import {
   getDeliveryStatus,
@@ -62,6 +63,52 @@ const emailDraftMessage = {
   content: "검토 후 보낼 메일 초안입니다.",
   metadata: { action_type: "email_draft", status: "pending_approval" },
 };
+
+test("client compatibility latch is boolean-only, monotonic, and subscription-race safe", () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Reflect.deleteProperty(globalThis, "window");
+  let serverNotificationCount = 0;
+  const unsubscribeServer = assistantClientUpgradeLatch.subscribe(() => {
+    serverNotificationCount += 1;
+  });
+  assistantClientUpgradeLatch.activate();
+  expect(assistantClientUpgradeLatch.get()).toBe(false);
+  expect(serverNotificationCount).toBe(0);
+  unsubscribeServer();
+
+  Object.defineProperty(globalThis, "window", {
+    value: {},
+    configurable: true,
+  });
+  try {
+    expect(assistantClientUpgradeLatch.get()).toBe(false);
+    const notifications: unknown[][] = [];
+    const unsubscribeFirst = assistantClientUpgradeLatch.subscribe((...args: unknown[]) => {
+      notifications.push(args);
+    });
+    const unsubscribeSecond = assistantClientUpgradeLatch.subscribe((...args: unknown[]) => {
+      notifications.push(args);
+    });
+
+    assistantClientUpgradeLatch.activate();
+    assistantClientUpgradeLatch.activate();
+    expect(assistantClientUpgradeLatch.get()).toBe(true);
+    expect(notifications).toEqual([[], []]);
+
+    const lateNotifications: unknown[][] = [];
+    const unsubscribeLate = assistantClientUpgradeLatch.subscribe((...args: unknown[]) => {
+      lateNotifications.push(args);
+    });
+    expect(lateNotifications).toEqual([[]]);
+    unsubscribeFirst();
+    unsubscribeSecond();
+    unsubscribeLate();
+    expect("reset" in assistantClientUpgradeLatch).toBe(false);
+  } finally {
+    Reflect.deleteProperty(globalThis, "window");
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+  }
+});
 
 async function captureApiGetError(body: string, status = 409) {
   const originalFetch = globalThis.fetch;
@@ -837,6 +884,120 @@ test("client-upgrade on authoritative GET blocks every POST and offers hard relo
   await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "새 대화 만들기", includeHidden: true })).toBeDisabled();
   expect(postCount).toBe(0);
+});
+
+test("POST client-upgrade survives client navigation and blocks Assistant transport until hard reload", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "desktop shell navigation drives this client-lifetime probe");
+  let latchObserved = false;
+  let assistantRequestsAfterLatch = 0;
+  let assistantRequestCount = 0;
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", async (route) => {
+    assistantRequestCount += 1;
+    if (latchObserved) assistantRequestsAfterLatch += 1;
+    await route.fulfill({ json: { conversations: [conversation] } });
+  });
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    assistantRequestCount += 1;
+    if (latchObserved) assistantRequestsAfterLatch += 1;
+    if (request.method() === "GET") {
+      await route.fulfill({ json: { conversation, messages: [] } });
+      return;
+    }
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      json: { detail: { code: "client_upgrade_required" } },
+    });
+  });
+
+  await page.goto("/search");
+  await page.evaluate(() => {
+    const taskWindow = window as unknown as Window & { __task20StorageWrites: number };
+    const originalSetItem = Storage.prototype.setItem;
+    taskWindow.__task20StorageWrites = 0;
+    Storage.prototype.setItem = function setItem(key: string, value: string) {
+      taskWindow.__task20StorageWrites += 1;
+      return originalSetItem.call(this, key, value);
+    };
+  });
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await input.fill("문서 수명 업그레이드 요청");
+  await input.press("Enter");
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(input).toBeDisabled();
+  latchObserved = true;
+
+  await page.getByRole("link", { name: "대시보드", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await page.getByRole("link", { name: "AI 비서", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/search$/);
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "상태 다시 확인" })).toHaveCount(0);
+  await page.waitForTimeout(100);
+  expect(assistantRequestsAfterLatch).toBe(0);
+  expect(await page.evaluate(() => (
+    window as unknown as Window & { __task20StorageWrites: number }
+  ).__task20StorageWrites)).toBe(0);
+
+  const beforeReload = assistantRequestCount;
+  latchObserved = false;
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeEnabled();
+  expect(assistantRequestCount).toBeGreaterThan(beforeReload);
+});
+
+test("reconciliation GET client-upgrade survives client navigation without another Assistant request", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "desktop shell navigation drives this client-lifetime probe");
+  let getCount = 0;
+  let latchObserved = false;
+  let assistantRequestsAfterLatch = 0;
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", async (route) => {
+    if (latchObserved) assistantRequestsAfterLatch += 1;
+    await route.fulfill({ json: { conversations: [conversation] } });
+  });
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    if (latchObserved) assistantRequestsAfterLatch += 1;
+    if (request.method() === "POST") {
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        json: { detail: { code: "persistence_failed" } },
+      });
+      return;
+    }
+    getCount += 1;
+    if (getCount === 1 || latchObserved) {
+      await route.fulfill({ json: { conversation, messages: [] } });
+      return;
+    }
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      json: { detail: { code: "client_upgrade_required" } },
+    });
+  });
+
+  await page.goto("/search");
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await input.fill("조정 GET 업그레이드 요청");
+  await input.press("Enter");
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  latchObserved = true;
+
+  await page.getByRole("link", { name: "대시보드", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await page.getByRole("link", { name: "AI 비서", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/search$/);
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "새 대화 만들기", includeHidden: true })).toBeDisabled();
+  await page.waitForTimeout(100);
+  expect(assistantRequestsAfterLatch).toBe(0);
 });
 
 test("a delayed stale POST client-upgrade latches globally without replacing the selected conversation", async ({ page }) => {

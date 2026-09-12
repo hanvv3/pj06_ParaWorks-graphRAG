@@ -6623,3 +6623,30 @@ Cost/security note:
   independent rereview; no backend, provider, external network, paid model,
   database, release gate, push, merge, deploy, Slack, CDC, Redis/D.1, or E work
   occurred.
+
+## 2026-09-13 Deliverable D Core Task 20 fix round 3 candidate
+
+- Cumulative rereview approved F1-F7 but reproduced a client-navigation bypass:
+  component-local upgrade state reset when Dashboard → Search remounted without
+  a document reload. Tracked POST-upgrade and reconciliation-GET-upgrade probes
+  both failed on the expected second reload-only assertion before product edits;
+  the wished-for helper also produced one missing-module TypeScript RED.
+- Added a browser-document-lifetime compatibility latch with `get`, idempotent
+  `activate`, and race-safe `subscribe`; there is deliberately no reset API.
+  State contains only a boolean and listener set on browser `window` under a
+  shared symbol. Server rendering uses no shared global state: get is false and
+  activate/subscribe are no-ops.
+- Search reads the latch before effects or transport, subscribes before its load
+  effect, and turns every exact client-upgrade branch into a global activation.
+  A latched client-side re-entry renders stable hard-reload-only Korean copy and
+  issues zero Assistant GET/POST requests. Only a true document reload creates
+  a new realm and restores normal loading.
+- Fresh evidence: focused F8 `3 passed`; managed desktop Task 20 plus Assistant
+  memory `35 passed`; mobile Task 20 `26 passed, 8 desktop-only skipped`;
+  mock-only visual handoff `2 passed`; AutoReview trust/badge `5 passed`; tsc,
+  lint, and production build exit 0. Tests also prove zero latch-related storage
+  writes and listener payloads, multi/late subscription, SSR isolation, and hard
+  reload reset. Normal live-seed visual and the known broad Review polling
+  baseline remain unrun. This local candidate is **DONE_WITH_CONCERNS** pending
+  independent rereview; no backend, network, provider, database, push, merge,
+  deploy, Slack, CDC, Redis/D.1, or E work occurred.

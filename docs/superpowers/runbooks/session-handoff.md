@@ -5196,3 +5196,23 @@ tests passed with 53 tests; ruff passed.
   **DONE_WITH_CONCERNS** pending independent rereview. Normal live-seed visual
   and the known broad Review polling baseline are not claimed; no backend,
   provider, database, release, push, merge, or deploy.
+- Task20 fix round 3 addresses cumulative rereview F8. Two tracked managed
+  browser probes first failed after POST/GET exact upgrade → Dashboard → Search:
+  the second reload-only assertion was absent. The new helper import separately
+  produced one missing-module TypeScript RED.
+- `lib/assistant/compatibilityLatch.ts` stores only boolean/listeners in the
+  browser Window realm under `Symbol.for`; SSR has no shared state and there is
+  no reset API. Idempotent activation notifies multiple subscribers once, late
+  subscription observes active state synchronously, and listener calls carry no
+  payload.
+- Search initializes from the latch before effects, subscribes in its first
+  lifecycle effect, skips all Assistant transport on a latched re-entry, and
+  routes all five exact upgrade branches through global activation. Client
+  navigation preserves reload-only state; a real document reload resets via a
+  new JS realm.
+- Fix-round-3 green: focused `3 passed`; desktop Task20+Assistant memory `35
+  passed`; mobile `26 passed, 8 intended skips`; mock visual `2 passed`;
+  AutoReview trust/badge `5 passed`; tsc/lint/build exit 0. Candidate remains
+  **DONE_WITH_CONCERNS** pending independent rereview. Normal live-seed visual
+  and known Review polling baseline are not claimed; no backend, network,
+  provider, database, release, push, merge, or deploy.
