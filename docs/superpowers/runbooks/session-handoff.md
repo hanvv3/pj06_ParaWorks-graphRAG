@@ -5160,3 +5160,23 @@ tests passed with 53 tests; ruff passed.
   **DONE_WITH_CONCERNS** pending independent
   Task 20 review. No backend, provider, external network, paid model, database,
   release gate, Slack, CDC, Redis/D.1, E, push, merge, or deploy work occurred.
+- Task20 fix round 1 addresses independent review F1-F5. Tracked RED covered
+  same-route/multiple handoff retention, exact client-upgrade from guarded GET,
+  a delayed stale POST upgrade race, parser-normalized and decoded-control URL
+  variants, and late success/failure after unmount. One initial stale-race RED
+  was test setup only (conversation ordering) and was corrected before the
+  product RED was recorded.
+- Implementation uses a raw-free same-realm notification over the existing
+  in-memory consume-once handoff; no raw value enters event detail or persistent
+  state. Exact upgrade errors latch globally before stale-owner filtering,
+  while message ownership remains conversation/request scoped. Citation URLs
+  fail closed after exact escape decoding, and Search invalidates request
+  ownership plus typing timers on unmount.
+- Fix-round green: non-incremental tsc, lint and build exit 0; managed desktop
+  Task20+Assistant memory `27 passed`; mobile `21 passed, 5 intended skips`;
+  mock-only visual handoff `2 passed`; AutoReview trust/badge `5 passed`.
+  Windows sandbox-only web-server teardown delays were superseded by the
+  unchanged managed commands exiting 0 with approved process permission.
+  Candidate remains **DONE_WITH_CONCERNS** pending independent rereview. Normal
+  live-seed visual smoke and the unchanged broad Review polling baseline were
+  not rerun; no backend, provider, database, release, push, merge, or deploy.

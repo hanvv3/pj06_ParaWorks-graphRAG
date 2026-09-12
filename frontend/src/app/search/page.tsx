@@ -90,7 +90,7 @@ function SearchPageContent() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const nextOptimisticMessageIdRef = useRef(-1);
   const deliveryRequestTokenRef = useRef(0);
-  const handoffConsumedRef = useRef(false);
+  const mountedRef = useRef(false);
   const typingTimerRef = useRef<number | undefined>(undefined);
 
   const upsertConversationByUpdatedAt = useCallback((conversation: AssistantConversation) => {
@@ -106,7 +106,7 @@ function SearchPageContent() {
     const response = await createAssistantConversation(
       title?.trim() || DEFAULT_CONVERSATION_TITLE,
     );
-    if (requestId === loadMessagesRequestRef.current) {
+    if (mountedRef.current && requestId === loadMessagesRequestRef.current) {
       activeConversationIdRef.current = response.conversation.id;
       setActiveConversation(response.conversation);
       setMessages([]);
@@ -119,6 +119,7 @@ function SearchPageContent() {
   }, [upsertConversationByUpdatedAt]);
 
   const revealAssistantMessage = useCallback((message: AssistantMessage) => {
+    if (!mountedRef.current) return;
     if (typingTimerRef.current !== undefined) {
       window.clearInterval(typingTimerRef.current);
     }
@@ -132,6 +133,13 @@ function SearchPageContent() {
     ]);
 
     typingTimerRef.current = window.setInterval(() => {
+      if (!mountedRef.current) {
+        if (typingTimerRef.current !== undefined) {
+          window.clearInterval(typingTimerRef.current);
+          typingTimerRef.current = undefined;
+        }
+        return;
+      }
       visibleLength = Math.min(fullContent.length, visibleLength + ASSISTANT_TYPING_CHUNK_SIZE);
       const nextContent = fullContent.slice(0, visibleLength);
       const done = visibleLength >= fullContent.length;
@@ -156,7 +164,7 @@ function SearchPageContent() {
     setUnknownDelivery(undefined);
     try {
       const response = await getAssistantMessages(conversation.id);
-      if (requestId !== loadMessagesRequestRef.current) return [];
+      if (!mountedRef.current || requestId !== loadMessagesRequestRef.current) return [];
 
       activeConversationIdRef.current = response.conversation.id;
       setActiveConversation(response.conversation);
@@ -166,7 +174,7 @@ function SearchPageContent() {
       upsertConversationByUpdatedAt(response.conversation);
       return response.messages;
     } catch (caught) {
-      if (requestId === loadMessagesRequestRef.current) {
+      if (mountedRef.current && requestId === loadMessagesRequestRef.current) {
         if (isClientUpgradeError(caught)) {
           setClientUpgradeRequired(true);
           setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
@@ -183,6 +191,7 @@ function SearchPageContent() {
     setError(undefined);
     try {
       const response = await listAssistantConversations();
+      if (!mountedRef.current) return;
       const sortedConversations = sortConversationsByUpdatedAt(response.conversations);
       setConversations(sortedConversations);
       if (sortedConversations.length > 0) {
@@ -191,6 +200,7 @@ function SearchPageContent() {
         await createConversation(DEFAULT_CONVERSATION_TITLE);
       }
     } catch (caught) {
+      if (!mountedRef.current) return;
       if (isClientUpgradeError(caught)) {
         setClientUpgradeRequired(true);
         setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
@@ -198,7 +208,7 @@ function SearchPageContent() {
         setError(caught instanceof ApiError ? caught.message : "AI 비서 대화를 준비하지 못했습니다.");
       }
     } finally {
-      setBooting(false);
+      if (mountedRef.current) setBooting(false);
     }
   }, [createConversation, loadMessages]);
 
@@ -207,7 +217,7 @@ function SearchPageContent() {
     failureStatus: number,
     failureCopy: string,
   ) => {
-    if (!isCurrentDelivery(
+    if (!mountedRef.current || !isCurrentDelivery(
       owner,
       deliveryRequestTokenRef.current,
       activeConversationIdRef.current,
@@ -215,7 +225,7 @@ function SearchPageContent() {
 
     try {
       const response = await getAssistantMessages(owner.conversationId);
-      if (!isCurrentDelivery(
+      if (!mountedRef.current || !isCurrentDelivery(
         owner,
         deliveryRequestTokenRef.current,
         activeConversationIdRef.current,
@@ -230,7 +240,22 @@ function SearchPageContent() {
       setError(failureStatus === 502
         ? "답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요."
         : undefined);
-    } catch {
+    } catch (caught) {
+      if (!mountedRef.current) return;
+      if (isClientUpgradeError(caught)) {
+        const currentDelivery = isCurrentDelivery(
+          owner,
+          deliveryRequestTokenRef.current,
+          activeConversationIdRef.current,
+        );
+        if (currentDelivery) {
+          setMessages((currentMessages) => markOwnedOptimisticUnknown(currentMessages, owner));
+        }
+        setUnknownDelivery(undefined);
+        setClientUpgradeRequired(true);
+        setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+        return;
+      }
       if (!isCurrentDelivery(
         owner,
         deliveryRequestTokenRef.current,
@@ -245,7 +270,8 @@ function SearchPageContent() {
   const sendMessage = useCallback(async (content: string) => {
     const trimmedContent = content.trim();
     if (
-      !trimmedContent
+      !mountedRef.current
+      || !trimmedContent
       || loadingRef.current
       || unknownDelivery !== undefined
       || clientUpgradeRequired
@@ -258,6 +284,7 @@ function SearchPageContent() {
     let owner: DeliveryOwner | undefined;
     try {
       const conversation = activeConversation ?? await createConversation(trimmedContent);
+      if (!mountedRef.current) return;
       const requestToken = ++deliveryRequestTokenRef.current;
       const optimisticMessage = createOptimisticUserMessage(
         conversation.id,
@@ -273,7 +300,7 @@ function SearchPageContent() {
       // 사용자가 보낸 말은 서버 응답을 기다리지 않고 바로 대화창에 올린다.
       setMessages((currentMessages) => [...currentMessages, optimisticMessage]);
       const response = await createAssistantMessage(conversation.id, trimmedContent);
-      if (!isCurrentDelivery(
+      if (!mountedRef.current || !isCurrentDelivery(
         owner,
         deliveryRequestTokenRef.current,
         activeConversationIdRef.current,
@@ -291,6 +318,22 @@ function SearchPageContent() {
       upsertConversationByUpdatedAt(response.conversation);
       revealAssistantMessage(response.assistant_message);
     } catch (caught) {
+      if (!mountedRef.current) return;
+      if (isClientUpgradeError(caught)) {
+        const upgradeOwner = owner;
+        const currentDelivery = upgradeOwner !== undefined && isCurrentDelivery(
+          upgradeOwner,
+          deliveryRequestTokenRef.current,
+          activeConversationIdRef.current,
+        );
+        if (currentDelivery && upgradeOwner !== undefined) {
+          setMessages((currentMessages) => removeOwnedOptimistic(currentMessages, upgradeOwner));
+        }
+        setUnknownDelivery(undefined);
+        setClientUpgradeRequired(true);
+        setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+        return;
+      }
       if (
         owner === undefined
         || !isCurrentDelivery(
@@ -300,22 +343,13 @@ function SearchPageContent() {
         )
       ) {
         if (owner === undefined) {
-          if (isClientUpgradeError(caught)) {
-            setClientUpgradeRequired(true);
-            setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
-          } else {
-            setError(caught instanceof ApiError ? caught.message : "메시지를 보내지 못했습니다.");
-          }
+          setError(caught instanceof ApiError ? caught.message : "메시지를 보내지 못했습니다.");
         }
         return;
       }
       const caughtOwner = owner;
 
-      if (caught instanceof ApiError && caught.status === 409 && caught.code === "client_upgrade_required") {
-        setMessages((currentMessages) => removeOwnedOptimistic(currentMessages, caughtOwner));
-        setClientUpgradeRequired(true);
-        setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
-      } else if (caught instanceof ApiError && [403, 404, 422].includes(caught.status)) {
+      if (caught instanceof ApiError && [403, 404, 422].includes(caught.status)) {
         setMessages((currentMessages) => removeOwnedOptimistic(currentMessages, caughtOwner));
         setError(definiteRefusalCopy(caught));
       } else {
@@ -329,7 +363,7 @@ function SearchPageContent() {
       }
     } finally {
       loadingRef.current = false;
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }, [
     activeConversation,
@@ -348,7 +382,12 @@ function SearchPageContent() {
   }
 
   async function handleNewConversation() {
-    if (creatingConversationRef.current || unknownDelivery !== undefined || clientUpgradeRequired) return;
+    if (
+      !mountedRef.current
+      || creatingConversationRef.current
+      || unknownDelivery !== undefined
+      || clientUpgradeRequired
+    ) return;
     creatingConversationRef.current = true;
     try {
       setError(undefined);
@@ -363,7 +402,9 @@ function SearchPageContent() {
 
       await createConversation(DEFAULT_CONVERSATION_TITLE);
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : "새 대화를 만들지 못했습니다.");
+      if (mountedRef.current) {
+        setError(caught instanceof ApiError ? caught.message : "새 대화를 만들지 못했습니다.");
+      }
     } finally {
       creatingConversationRef.current = false;
     }
@@ -384,22 +425,26 @@ function SearchPageContent() {
   async function copyMessage(message: AssistantMessage) {
     try {
       await navigator.clipboard.writeText(message.content);
+      if (!mountedRef.current) return;
       setCopiedMessageId(message.id);
       window.setTimeout(() => setCopiedMessageId((current) => current === message.id ? undefined : current), 1600);
     } catch {
-      setError("메시지를 복사하지 못했습니다.");
+      if (mountedRef.current) setError("메시지를 복사하지 못했습니다.");
     }
   }
 
   async function approveEmailDraft(messageId: number) {
+    if (!mountedRef.current || clientUpgradeRequired || unknownDelivery !== undefined) return;
     setSendingEmailMessageId(messageId);
     setError(undefined);
     try {
       const response = await sendAssistantEmailDraft(messageId);
+      if (!mountedRef.current) return;
       setMessages((currentMessages) => currentMessages.map((message) => (
         message.id === messageId ? response.message : message
       )));
     } catch (caught) {
+      if (!mountedRef.current) return;
       if (isClientUpgradeError(caught)) {
         setClientUpgradeRequired(true);
         setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
@@ -407,12 +452,12 @@ function SearchPageContent() {
         setError(caught instanceof ApiError ? caught.message : "메일을 보내지 못했습니다.");
       }
     } finally {
-      setSendingEmailMessageId(undefined);
+      if (mountedRef.current) setSendingEmailMessageId(undefined);
     }
   }
 
   async function retryUnknownDelivery() {
-    if (unknownDelivery === undefined || loadingRef.current) return;
+    if (!mountedRef.current || unknownDelivery === undefined || loadingRef.current) return;
     loadingRef.current = true;
     setLoading(true);
     await reconcileDelivery(
@@ -421,19 +466,39 @@ function SearchPageContent() {
       unknownDelivery.failureCopy,
     );
     loadingRef.current = false;
-    setLoading(false);
+    if (mountedRef.current) setLoading(false);
   }
 
   useEffect(() => {
-    if (handoffConsumedRef.current) return;
-    handoffConsumedRef.current = true;
-    if (searchParams.has("q")) {
-      ephemeralSearchHandoff.consume();
-      setQuery("");
-      router.replace("/search");
-      return;
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      deliveryRequestTokenRef.current += 1;
+      loadMessagesRequestRef.current += 1;
+      loadingRef.current = false;
+      if (typingTimerRef.current !== undefined) {
+        window.clearInterval(typingTimerRef.current);
+        typingTimerRef.current = undefined;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    function consumeSearchHandoff() {
+      if (!mountedRef.current) return;
+      if (searchParams.has("q")) {
+        ephemeralSearchHandoff.consume();
+        setQuery("");
+        router.replace("/search");
+        return;
+      }
+      const rawInput = ephemeralSearchHandoff.consume();
+      if (rawInput !== null) setQuery(rawInput);
     }
-    setQuery(ephemeralSearchHandoff.consume() ?? "");
+
+    const unsubscribe = ephemeralSearchHandoff.subscribe(consumeSearchHandoff);
+    consumeSearchHandoff();
+    return unsubscribe;
   }, [router, searchParams]);
 
   useEffect(() => {
@@ -443,12 +508,6 @@ function SearchPageContent() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages.length, loading]);
-
-  useEffect(() => () => {
-    if (typingTimerRef.current !== undefined) {
-      window.clearInterval(typingTimerRef.current);
-    }
-  }, []);
 
   useEffect(() => {
     setHydrated(true);

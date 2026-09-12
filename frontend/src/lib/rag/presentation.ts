@@ -1,7 +1,8 @@
 const RAG_AGENT_NAME = "rag_orchestrator_agent";
 const LEGACY_RAG_PROMPT_VERSION = "rag-answer:v1";
-const ABSOLUTE_HTTP_URL = /^https?:\/\//i;
+const ABSOLUTE_HTTP_URL = /^https?:\/\/[^/]/i;
 const UNSAFE_URL_CHARACTERS = /[\s\u0000-\u001f\u007f-\u009f]/u;
+const MALFORMED_PERCENT_ESCAPE = /%(?![0-9a-f]{2})/iu;
 
 export type RagPresentationMetadata = {
   agent_name?: unknown;
@@ -24,11 +25,15 @@ export function isSafeCitationUrl(value: unknown): value is string {
     || value.length === 0
     || !ABSOLUTE_HTTP_URL.test(value)
     || UNSAFE_URL_CHARACTERS.test(value)
+    || value.includes("\\")
+    || MALFORMED_PERCENT_ESCAPE.test(value)
   ) {
     return false;
   }
 
   try {
+    const decoded = decodeURIComponent(value);
+    if (UNSAFE_URL_CHARACTERS.test(decoded)) return false;
     const parsed = new URL(value);
     return (parsed.protocol === "http:" || parsed.protocol === "https:")
       && parsed.username === ""

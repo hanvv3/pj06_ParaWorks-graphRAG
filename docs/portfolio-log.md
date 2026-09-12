@@ -6563,3 +6563,36 @@ Cost/security note:
   unrun. This is a local candidate awaiting independent review; no push, merge,
   deploy, database, paid-model, Task 18 release gate, Slack, CDC, Redis/D.1, or
   E work is claimed.
+
+## 2026-09-13 Deliverable D Core Task 20 fix round 1 candidate
+
+- Independent review of `f1442699` found five client-side gaps: same-route
+  handoff retention, exact client-upgrade classification during reconciliation
+  and stale POST races, URL parser normalization/decoded-control cases, and
+  unmount cleanup. Each reproduction was added to tracked tests and observed
+  RED before production edits; the first stale-race failure also exposed and
+  corrected an older-conversation test-fixture ordering issue.
+- Search handoff now emits a raw-free same-realm notification so an already
+  mounted `/search` consumes the module-memory value immediately. Multiple puts
+  remain last-write/consume-once, raw whitespace never enters the event, URL,
+  storage, analytics, or an automatic POST, and a later route entry sees no
+  stale value.
+- Exact `client_upgrade_required` from either the guarded GET or a delayed POST
+  is classified before generic or stale-owner handling and enters the global
+  hard-reload-only latch. A stale response cannot replace the newly selected
+  conversation; Assistant POST controls and navigation stay disabled. Other
+  stale results remain ignored.
+- Citation validation now rejects slash-normalized schemes, backslashes,
+  malformed escapes, malformed UTF-8, and percent-decoded ASCII/Unicode
+  whitespace or controls. Component lifecycle ownership invalidates late
+  requests and clears the typing interval, so unmounted Assistant continuations
+  cannot update later screens.
+- Fresh green evidence: non-incremental TypeScript, warning-free lint, and
+  production build exit 0; desktop Task 20 plus Assistant memory `27 passed`;
+  mobile Task 20 `21 passed, 5 desktop-only skipped`; mock-only visual handoff
+  `2 passed`; AutoReview trust/badge regression `5 passed`. The original broad
+  Review auto-approval polling baseline remains out of scope, normal live-seed
+  visual smoke remains unrun, and this local result is
+  **DONE_WITH_CONCERNS** pending independent rereview. No backend, provider,
+  external network, paid model, database, release gate, push, merge, deploy,
+  Slack, CDC, Redis/D.1, or E work occurred.

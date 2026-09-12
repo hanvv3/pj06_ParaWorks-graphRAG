@@ -121,7 +121,8 @@ test("Task20 pure presentation, handoff, and reconciliation contracts are fail-c
   expect([
     "https://example.test/path",
     "http://example.test/path?q=1#section",
-  ].map(isSafeCitationUrl)).toEqual([true, true]);
+    "https://example.test/%E2%9C%93?q=%2F#ok",
+  ].map(isSafeCitationUrl)).toEqual([true, true, true]);
   for (const unsafe of [
     "javascript:alert(1)",
     "data:text/html,unsafe",
@@ -132,7 +133,14 @@ test("Task20 pure presentation, handoff, and reconciliation contracts are fail-c
     "https://example.test/nonbreaking\u00a0space",
     "https://example.test/control\u0085character",
     "https:example.test/path",
+    "https:////evil.example.test/path",
     "https:\\example.test/path",
+    "https://evil.example.test/%00",
+    "https://evil.example.test/%0a",
+    "https://evil.example.test/%C2%A0",
+    "https://evil.example.test/%C2%85",
+    "https://evil.example.test/%E0%A4%A",
+    "https://evil.example.test/%ZZ",
   ]) {
     expect(isSafeCitationUrl(unsafe), unsafe).toBe(false);
   }
@@ -144,6 +152,15 @@ test("Task20 pure presentation, handoff, and reconciliation contracts are fail-c
   ephemeralSearchHandoff.consume();
   ephemeralSearchHandoff.put("  raw input  ");
   expect(ephemeralSearchHandoff.consume()).toBe("  raw input  ");
+  expect(ephemeralSearchHandoff.consume()).toBeNull();
+  const notifiedValues: Array<string | null> = [];
+  const unsubscribe = ephemeralSearchHandoff.subscribe(() => {
+    notifiedValues.push(ephemeralSearchHandoff.consume());
+  });
+  ephemeralSearchHandoff.put("first notification");
+  ephemeralSearchHandoff.put("  second notification  ");
+  unsubscribe();
+  expect(notifiedValues).toEqual(["first notification", "  second notification  "]);
   expect(ephemeralSearchHandoff.consume()).toBeNull();
 
   const owner = { requestToken: 7, conversationId: 19, optimisticMessageId: -7 };
@@ -419,6 +436,15 @@ test("V2 and unknown RAG answers stay literal while only validated citations can
         relevance_score: 0.9,
         matched_terms: [],
       },
+      {
+        source_id: "normalized-malformed-source",
+        source_url: "https:////evil.example.test/%0a",
+        source_type: "drive",
+        permission_level: "internal",
+        source_snippet: "정규화하면 안 되는 URL 근거",
+        relevance_score: 0.8,
+        matched_terms: [],
+      },
     ],
     source_links: ["https://legacy.example.test/must-not-link", "javascript:alert(2)"],
     source_snippets: ["검증된 근거", "추가 발췌"],
@@ -462,6 +488,9 @@ test("V2 and unknown RAG answers stay literal while only validated citations can
   await expect(safeLink).toHaveAttribute("rel", "noopener noreferrer");
   await expect(v2Article.getByText("unsafe-source", { exact: true })).toBeVisible();
   await expect(v2Article.getByText("unsafe-source", { exact: true }).locator("xpath=ancestor::a")).toHaveCount(0);
+  await expect(v2Article.getByText("normalized-malformed-source", { exact: true })).toBeVisible();
+  await expect(v2Article.getByText("normalized-malformed-source", { exact: true }).locator("xpath=ancestor::a")).toHaveCount(0);
+  await expect(v2Article).not.toContainText("https:////evil.example.test/%0a");
   await expect(v2Article.locator("a")).toHaveCount(1);
   await expect(v2Article.locator('a[href*="legacy.example"]')).toHaveCount(0);
 });
@@ -499,6 +528,73 @@ test("shell hands raw search input to /search once without URL or automatic POST
   await page.reload();
   await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toHaveValue("");
   expect(messagePostCount).toBe(0);
+});
+
+test("same-route shell search is consumed immediately and never reappears after client navigation", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "mobile shell has no global search input");
+
+  let messagePostCount = 0;
+  await installSingleConversation(page, [], async (route) => {
+    messagePostCount += 1;
+    await route.fulfill({ status: 500, body: "must not send" });
+  });
+  const authResponse = page.waitForResponse("**/api/v1/auth/me");
+  await page.goto("/search");
+  await authResponse;
+  const assistantInput = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  const shellSearch = page.getByRole("textbox", { name: "회사 메모리 검색" });
+  await page.evaluate(() => {
+    const taskWindow = window as unknown as Window & { __task20HandoffEvents: number };
+    taskWindow.__task20HandoffEvents = 0;
+    window.addEventListener("paraworks:ephemeral-search-handoff-ready", () => {
+      taskWindow.__task20HandoffEvents += 1;
+    });
+  });
+
+  await shellSearch.fill("  same-route-secret  ");
+  await shellSearch.press("Enter");
+  await expect(page).toHaveURL(/\/search$/);
+  expect(await page.evaluate(() => (
+    window as unknown as Window & { __task20HandoffEvents: number }
+  ).__task20HandoffEvents)).toBe(1);
+  await expect(assistantInput).toHaveValue("  same-route-secret  ");
+
+  await shellSearch.fill("  last-write-only  ");
+  await shellSearch.press("Enter");
+  await expect(assistantInput).toHaveValue("  last-write-only  ");
+
+  await page.getByRole("link", { name: "대시보드", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await page.getByRole("link", { name: "AI 비서", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/search$/);
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toHaveValue("");
+  expect(messagePostCount).toBe(0);
+});
+
+test("rapid other-route handoffs expose only the last raw value and leave no stale re-entry", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "mobile shell has no global search input");
+
+  await installSingleConversation(page, []);
+  const authResponse = page.waitForResponse("**/api/v1/auth/me");
+  await page.goto("/dashboard");
+  await authResponse;
+  const shellSearch = page.getByRole("textbox", { name: "회사 메모리 검색" });
+  await shellSearch.fill("  first-route-value  ");
+  await shellSearch.evaluate((input) => {
+    const form = input.closest("form");
+    if (!(input instanceof HTMLInputElement) || !(form instanceof HTMLFormElement)) {
+      throw new Error("expected the existing shell search form");
+    }
+    form.requestSubmit();
+    input.value = "  last-route-value  ";
+    form.requestSubmit();
+  });
+
+  await expect(page).toHaveURL(/\/search$/);
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toHaveValue("  last-route-value  ");
+  await page.getByRole("link", { name: "대시보드", exact: true }).first().click();
+  await page.getByRole("link", { name: "AI 비서", exact: true }).first().click();
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toHaveValue("");
 });
 
 test("legacy inbound q is discarded and never copied or auto-sent", async ({ page }) => {
@@ -582,6 +678,45 @@ test("500 leaves one unknown row when guarded GET fails and retry is GET-only", 
   await expect(input).toBeEnabled();
   expect(postCount).toBe(1);
   expect(getCount).toBe(3);
+});
+
+test("an exact client-upgrade reconciliation GET enters reload-only without a GET retry", async ({ page }) => {
+  let getCount = 0;
+  let postCount = 0;
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", (route) => route.fulfill({
+    json: { conversations: [conversation] },
+  }));
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    if (request.method() === "POST") {
+      postCount += 1;
+      await route.fulfill({ status: 500, contentType: "application/json", json: { detail: { code: "persistence_failed" } } });
+      return;
+    }
+    getCount += 1;
+    if (getCount === 1) {
+      await route.fulfill({ json: { conversation, messages: [] } });
+      return;
+    }
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      json: { detail: { code: "client_upgrade_required" } },
+    });
+  });
+
+  await page.goto("/search");
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await input.fill("조정 중 업그레이드 요청");
+  await input.press("Enter");
+  await expect(page.getByText("새 버전이 필요합니다. 페이지를 새로고침해 주세요.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "상태 다시 확인" })).toHaveCount(0);
+  await expect(page.getByText("조정 중 업그레이드 요청", { exact: true })).toHaveCount(1);
+  await expect(input).toBeDisabled();
+  expect(postCount).toBe(1);
+  expect(getCount).toBe(2);
 });
 
 test("502 generation failure performs guarded GET and never renders raw failure text", async ({ page }) => {
@@ -704,6 +839,70 @@ test("client-upgrade on authoritative GET blocks every POST and offers hard relo
   expect(postCount).toBe(0);
 });
 
+test("a delayed stale POST client-upgrade latches globally without replacing the selected conversation", async ({ page }) => {
+  const secondConversation = {
+    ...createdConversation,
+    id: 21,
+    title: "업그레이드 중 선택한 대화",
+    created_at: "2026-09-11T00:00:00+00:00",
+    updated_at: "2026-09-11T00:00:00+00:00",
+  };
+  const secondEmailDraft = {
+    ...emailDraftMessage,
+    id: 621,
+    conversation_id: 21,
+    content: "새 대화의 보존할 메일 초안",
+  };
+  let releasePost!: () => void;
+  let signalPostStarted!: () => void;
+  const postGate = new Promise<void>((resolve) => { releasePost = resolve; });
+  const postStarted = new Promise<void>((resolve) => { signalPostStarted = resolve; });
+  let postCount = 0;
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", (route) => route.fulfill({
+    json: { conversations: [conversation, secondConversation] },
+  }));
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    if (request.method() === "GET") {
+      await route.fulfill({ json: { conversation, messages: [] } });
+      return;
+    }
+    postCount += 1;
+    signalPostStarted();
+    await postGate;
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      json: { detail: { code: "client_upgrade_required" } },
+    });
+  });
+  await page.route("**/api/v1/assistant/conversations/21/messages", (route) => route.fulfill({
+    json: { conversation: secondConversation, messages: [secondEmailDraft] },
+  }));
+
+  await page.goto("/search");
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await input.fill("늦은 업그레이드 요청");
+  await input.press("Enter");
+  await postStarted;
+  const openConversationList = page.getByRole("button", { name: "대화 목록 펼치기" });
+  if (await openConversationList.isVisible()) await openConversationList.click();
+  await page.getByRole("button", { name: secondConversation.title, exact: true }).click();
+  await expect(page.getByText(secondEmailDraft.content)).toBeVisible();
+  releasePost();
+
+  await expect(page.getByText("새 버전이 필요합니다. 페이지를 새로고침해 주세요.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(page.getByText(secondEmailDraft.content)).toBeVisible();
+  await expect(page.getByText("늦은 업그레이드 요청", { exact: true })).toHaveCount(0);
+  await expect(input).toBeDisabled();
+  await expect(page.getByRole("button", { name: "승인하고 보내기" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "새 대화 만들기" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: secondConversation.title, exact: true })).toBeDisabled();
+  expect(postCount).toBe(1);
+});
+
 test("a stale reconciliation GET cannot overwrite a newly selected conversation", async ({ page }) => {
   const secondConversation = {
     ...createdConversation,
@@ -752,4 +951,80 @@ test("a stale reconciliation GET cannot overwrite a newly selected conversation"
   await page.waitForTimeout(100);
   await expect(page.getByText(secondMessage.content)).toBeVisible();
   await expect(page.getByText("이전 대화의 늦은 응답")).toHaveCount(0);
+});
+
+test("late Assistant success after Search unmount creates no typing interval or unrelated UI", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "desktop shell navigation drives this unmount probe");
+
+  let releasePost!: () => void;
+  let signalPostStarted!: () => void;
+  const postGate = new Promise<void>((resolve) => { releasePost = resolve; });
+  const postStarted = new Promise<void>((resolve) => { signalPostStarted = resolve; });
+  await installSingleConversation(page, [], async (route) => {
+    signalPostStarted();
+    await postGate;
+    await route.fulfill({
+      contentType: "application/json",
+      json: {
+        conversation,
+        user_message: assistantRow({ id: 701, role: "user", content: "언마운트 지연 요청" }),
+        assistant_message: assistantRow({ id: 702, content: "언마운트 뒤 나타나면 안 되는 응답" }),
+      },
+    });
+  });
+  await page.goto("/search");
+  await page.evaluate(() => {
+    const taskWindow = window as unknown as Window & { __task20TypingIntervals: number };
+    const originalSetInterval = window.setInterval.bind(window);
+    taskWindow.__task20TypingIntervals = 0;
+    window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      if (timeout === 18) taskWindow.__task20TypingIntervals += 1;
+      return originalSetInterval(handler, timeout, ...args);
+    }) as typeof window.setInterval;
+  });
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await input.fill("언마운트 지연 요청");
+  await input.press("Enter");
+  await postStarted;
+  await page.getByRole("link", { name: "대시보드", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  releasePost();
+  await page.waitForTimeout(100);
+
+  expect(await page.evaluate(() => (
+    window as unknown as Window & { __task20TypingIntervals: number }
+  ).__task20TypingIntervals)).toBe(0);
+  await expect(page.getByText("언마운트 뒤 나타나면 안 되는 응답")).toHaveCount(0);
+});
+
+test("late Assistant failure after Search unmount cannot latch a later Search mount", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "desktop shell navigation drives this unmount probe");
+
+  let releasePost!: () => void;
+  let signalPostStarted!: () => void;
+  const postGate = new Promise<void>((resolve) => { releasePost = resolve; });
+  const postStarted = new Promise<void>((resolve) => { signalPostStarted = resolve; });
+  await installSingleConversation(page, [], async (route) => {
+    signalPostStarted();
+    await postGate;
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      json: { detail: { code: "client_upgrade_required" } },
+    });
+  });
+  await page.goto("/search");
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await input.fill("언마운트 지연 실패");
+  await input.press("Enter");
+  await postStarted;
+  await page.getByRole("link", { name: "대시보드", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  releasePost();
+  await page.waitForTimeout(100);
+  await page.getByRole("link", { name: "AI 비서", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/search$/);
+
+  await expect(page.getByText("새 버전이 필요합니다. 페이지를 새로고침해 주세요.")).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeEnabled();
 });
