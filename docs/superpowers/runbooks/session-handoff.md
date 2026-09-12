@@ -2,6 +2,29 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task15 CLEAN; resume at Task16 implementation
+
+- Task14 and Task15 are complete. Cumulative independent Task15 review is
+  CLEAN at `d678552`, including the full `84fb4f9` review and fixes `dec62ac`,
+  `7df773c`, `d678552`. No unresolved Task15 review finding remains.
+- Direct Ask/Search routes now use the facade, preserve exact V1 DTOs and
+  legacy rollout behavior, and deliver only committed canonical results.
+  Permission includes all model influence; generation usage and total actual
+  charges remain distinct. Typed readiness/safety/persistence errors preserve
+  refusal provenance without publishing uncommitted results or retrying calls.
+- Final relevant implementer gate:79 passed, no warnings/skips. Controller
+  independently reran low-level I/O cases on `d678552`:10 passed,58 deselected
+  in18.08s. Earlier broad evidence and subsequent supplements remain detailed
+  below; do not describe the entire repository suite as green.
+- Next: Task16 of the approved D Core implementation plan, Assistant delivery
+  algebra and render-capability guard. This is implementation, not a new
+  planning/approval stage. Task17 evidence reader and Task18 sole-writer cutover
+  follow; Task18 also owns remaining terminal-error Korean literal alignment.
+- Remaining gates: actual PostgreSQL locking/concurrency has not been tested;
+  known Slack baseline failures remain deferred. Task16 onward and full D Core
+  release are unfinished. Rollout stays unchanged. No paid calls, remote push,
+  merge, D.1 cache, Redis, CDC, Slack or E work was performed.
+
 ## 2026-09-12 D Core Task15 review fix round 3
 
 - Round2 preclaim/failure-only accounting was addressed. Scoped rereview found

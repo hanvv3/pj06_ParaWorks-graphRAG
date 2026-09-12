@@ -1,5 +1,19 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core direct API integration reviewed and complete
+
+- Task15 cumulative independent review is CLEAN at `d678552`. Ask/Search use
+  the common application facade while retaining exact V1 response shape and
+  legacy rollout behavior. Committed evidence, strictest influence permission,
+  actual costs and typed failure delivery survive the API boundary unchanged.
+- Final relevant gate:79 passed without warnings/skips. Controller final
+  low-level I/O regression:10 passed in18.08s. Earlier broad gates retain their
+  documented PostgreSQL skip and known Slack failures; no real PostgreSQL or
+  whole-repository release proof is claimed.
+- Task14/15 are complete; next is approved Task16 implementation for Assistant
+  delivery/capability protection. D Core overall remains in progress, with no
+  rollout activation, paid provider execution or remote push.
+
 ## 2026-09-12 D Core low-level safety inspection provenance
 
 - Task15 round3 separates operational authority-file read/stat/close errors
