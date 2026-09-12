@@ -190,11 +190,13 @@ def append_assistant_message(
     normalized_content = content.strip()
     if not normalized_content:
         raise ValueError('assistant message content is required')
-    if evidence_derived and not serving_dependencies:
+    if (evidence_derived or metadata.get('evidence_derived')) and not serving_dependencies:
         raise ValueError(
             'evidence-derived message requires complete serving dependencies'
         )
 
+    if (citations or source_ids or source_links or source_snippets) and not serving_dependencies:
+        raise ValueError('evidence-backed message requires complete serving dependencies')
     stored_metadata = dict(metadata)
     if evidence_derived:
         stored_metadata['evidence_derived'] = True
@@ -226,23 +228,16 @@ def append_assistant_message(
         _persist_serving_dependencies(
             db, message=message, dependencies=serving_dependencies
         )
-        if serving_dependencies and not _message_evidence_is_live(
+        if (serving_dependencies
+            and all(snapshot.dependency_kind != 'legacy_unbound' for snapshot in serving_dependencies)
+            and not _message_evidence_is_live(
             db, user=user, message=message
-        ):
+        )):
             raise ValueError('assistant serving dependency changed before commit')
-        # The approved legacy-unbound signature cannot represent an exact
-        # selected approval link. Preserve that existing stronger dependency
-        # contract until the team approves a keyed explicit-provenance union.
-        legacy_signature_representable = all(
-            dependency.dependency_kind == 'raw_chunk'
-            or (dependency.legacy_human_base
-                and dependency.legacy_source_review_item_id is None)
-            for dependency in serving_dependencies
-        )
-        if serving_dependencies and citations and legacy_signature_representable:
+        if serving_dependencies:
             from backend.app.assistant.legacy_evidence import sign_legacy_message
             from backend.app.core.config import get_settings
-            sign_legacy_message(db=db, message=message, settings=get_settings())
+            sign_legacy_message(db=db, message=message, settings=get_settings(), actor=user)
         db.commit()
     except Exception:
         db.rollback()

@@ -1,8 +1,18 @@
 # Task18 F2: proposed exact-provenance legacy integrity contract
 
-Status: PROPOSED, NOT APPROVED OR IMPLEMENTED. Human schema/trust-boundary
-decision required. Task18 remains incomplete while F2 is open. This document
-does not amend the accepted D Core specification or authorize rollout.
+Status: APPROVED for implementation, 2026-09-12. The user explicitly approved
+this v3 legacy integrity schema/security proposal through the Task18 controller
+instruction for fix round 3. The frozen definitions below amend the legacy-only
+integrity contract; they do not authorize rollout or claim implementation complete.
+
+PostgreSQL predecessor-trigger integration: the successor must preserve the C.5
+append-only guard except for a single NULL-scope staging-to-v3 signing update of
+a dependency and its unsigned parent both inserted in the current transaction.
+Only signature/scope/role columns may change; existing provenance, references,
+owner and ordinal may not. Published rows and historical rows remain immutable.
+The exactness trigger retains existing raw and explicit-effect checks and adds
+only v3 genuine/pre-provenance current-approved knowledge authority; it must not
+infer human approval from missing provenance or admit those rows to D.
 
 ## Problem and recommendation
 
@@ -151,3 +161,125 @@ Approve or revise this scope-specific union and new legacy marker/role before
 implementation. It changes a shared output-integrity schema and trust boundary,
 so it is not authorized by the F1/F3 bug-fix round. Until approved, implemented,
 verified and independently reviewed, F2 blocks Task18 completion and rollout.
+
+## Frozen implementation contract (2026-09-12 approval)
+
+This section supersedes tentative wording above. No applied migration is edited.
+Successor revision: `b5e6f7a8b9c0`, predecessor `a4d5e6f7b8c9`. No new columns.
+Every future evidence-backed legacy write uses marker
+`assistant-dependency-set-hmac:v3`; v2 and historical null are read compatibility
+only. Ordinary non-evidence actions are not signed. Missing dependencies for an
+evidence-shaped new write are rejected, never committed as historical data.
+
+### Canonical encoding and payload allowlists
+
+All signatures use existing `keyed_fingerprint` canonical JSON/HMAC-SHA256 and
+policy `assistant-evidence:v1`, except existing citation/projection helpers retain
+their existing domains/policies. Strings representing stored/user/source bytes
+are encoded with existing `exact_utf8_bytes` (no Unicode normalization). In the
+provenance and action objects below this transformation applies recursively to
+every string value; object keys remain the literal field names. Integers, booleans,
+JSON null and list order retain their types. No arbitrary object/string fallback.
+All optional fields are included as null, never omitted. Dates are not authority
+payload fields; current revocation/status checks remain mandatory independently.
+
+`snapshot` contains exactly these persisted V1 fields: `document_chunk_id`,
+`document_version_id`, `source_id`, `parser_run_id`, `current_document_version_id`,
+`server_content_signature_schema`, `server_content_signature`,
+`parser_policy_version`, `parser_version`, `chunk_policy_version`, `knowledge_type`,
+`knowledge_id`, `approval_link_id`, `legacy_human_base`,
+`legacy_source_review_item_id`. All are bound, including required NULLs.
+
+`provenance` contains exactly `snapshot`, `approval`, `review`, `evidence_links`.
+`approval` is null except explicit trusted, where it has exactly `id`,
+`knowledge_type`, `knowledge_id`, `review_item_id`, `security_scope_id`,
+`promotion_effect_kind`, `resolution_source`, `claim_fingerprint`,
+`permission_level`, `fingerprint_key_version`, `fingerprint_key_material_verifier`,
+`active`. `review` is null except bound legacy-human or explicit trusted, where
+the current selected review has exactly `id`, `status`, `permission_level`,
+`resolution_source`, `candidate_contract_version`, `source_links`,
+`source_snippets`. `evidence_links` is empty except explicit trusted: every current
+selected-effect link, sorted by integer `id`, has exactly `id`, `approval_link_id`,
+`canonical_source_kind`, `canonical_source_id`, `canonical_version_or_signature`,
+`evidence_hash`, `fingerprint_key_version`, `fingerprint_key_material_verifier`.
+Its IDs must equal the persisted exact approval-bound reference set, not a union.
+
+`assistant-legacy-dependency-snapshot:v2` payload has exactly:
+`serving_document_id_bytes`, `dependency_kind`, `dependency_role`,
+`effective_permission`, `serving_version_fingerprint` (fresh V1 content hash),
+`model_content_hmac`, `canonical_citation_projection_hmac`,
+`legacy_public_source_id_bytes`, `legacy_source_links_bytes`,
+`legacy_source_snippets_bytes`, `provenance`. Raw identities are compared with
+current chunk/source/parser/document values before signing/verifying. Trusted
+identities retain exact selected-effect or legacy-human liveness. A genuine
+unbound child must resolve to pre-provenance knowledge with no source review or
+approval rows; it cannot stand in for raw or selected-approval authority.
+
+`assistant-dependency-child-hmac:v3` retains the exact v2 child payload field set
+listed in `sign_legacy_message`/Task17's legacy verifier, but fills raw/trusted IDs,
+actual kind/role, and exact sorted evidence IDs. `approval_provenance_hmac` is the
+HMAC of `{approval, review}` under `assistant-legacy-approval-provenance:v1` for
+explicit trusted only; `evidence_link_set_hmac` is the HMAC of `{evidence_links}`
+under `assistant-legacy-evidence-links:v1` for explicit trusted only. Both are NULL
+for other legacy branches. `legacy_dependency_identity_hmac` is always nonnull;
+D serving identity/version/support columns and payload values remain NULL.
+
+Public citation validation and `rag-v1-evidence-projection:citation:v1` signatures
+remain exact, including binary64 score and matched-term order. Assign each public
+citation to exactly one distinct dependency by canonical public ID/type/URL/snippet/
+permission, preserving public citation order. Unselected dependencies use
+`legacy_evidence_influence` and NULL selected citation HMAC. The parent projection
+HMAC binds ordered citation HMACs plus its three exact public arrays. Require those
+arrays to equal the ordered unique ID/link/snippet projections of public citations;
+zero citations means all three arrays empty. Reject missing/duplicate/extra citation
+ownership. Dependency ordinals remain resolver order and contiguous from zero.
+
+`assistant-legacy-action-payload:v1` payload has exactly `action_type`,
+`evidence_derived`, `email_draft`. `action_type` is string or null;
+`evidence_derived` is a strict boolean, default false only if absent;
+`email_draft` is null or exactly `{to, subject, body}`, with `to` an ordered string
+list and subject/body exact strings. An evidence-derived email requires a complete
+nonempty draft; no extra draft keys are accepted. Changing status/sent timestamps
+does not alter authority; changing protected bytes requires a new authorized write.
+
+`assistant-legacy-evidence-origin:v2` retains all v1 origin fields and adds exactly
+`legacy_action_payload_hmac`, `hidden_match_count`, `permission_notice_bytes`.
+Nullable permission/notice are bound; a legacy email's existing NULL public
+permission does not waive the per-dependency current actor permission gate.
+`assistant-message-content-hmac:v1` keeps its existing exact payload unchanged.
+`assistant-dependency-set-hmac:v3` keeps the existing v2 legacy whole-set payload
+unchanged, but uses the new domain and ordered v3 child HMACs. Current key/runtime
+identity is mandatory. No v3 material may be interpreted under a v2 domain.
+If absent on an evidence-backed write, server metadata defaults `agent_name` to
+`rag_orchestrator_agent`, `effective_backend` to `deterministic_lexical`, and
+`prompt_version` remains null; supplied values are never overwritten. Backend
+must be `deterministic_lexical` or `pgvector`. Unknown agent types fail closed.
+
+### Model and cross-row invariants
+
+Parent v3 marker is allowed only for `legacy_trimmed / legacy_evidence`,
+`assistant-evidence:v1`, positive dependency count, complete content/key/origin/
+set/projection HMACs, NULL linked D run/result and NULL D influence-set HMAC.
+Existing D parent markers/XOR remain unchanged. Child legacy scope permits all
+three existing exact-kind shapes, selected/influence roles, NULL D columns and
+nonnull legacy identity. Exact raw/trusted composite FKs and approval reference
+FKs are retained. Explicit v3 trusted rows require both provenance HMACs; other
+v3 rows require them NULL. Hashes use lowercase hexadecimal SHA256 text.
+
+V3 selected count equals JSON citation count. Zero selection requires strict
+metadata `evidence_derived=true` and all three public arrays empty. Every child
+matches parent scope, key and whole-set HMAC, with positive count and contiguous
+ordinals. V2 legacy remains selected-only/all-null authority and D exclusions
+remain unchanged. PostgreSQL deferred validation covers parent, children and
+approval refs. SQLite validates v3 publication and subsequent child/ref mutations
+using immediate triggers; the writer stages under an unsigned private parent,
+flushes complete children/refs, then publishes the signed parent in the same
+transaction. This is staging, never an unsigned commit or fallback. SQLite does
+not emulate PostgreSQL deferred timing; both enforce the same published v3 state.
+Downgrade refuses while any v3 parent exists; it never strips or backfills markers.
+
+Golden vectors must independently pin canonical JSON/HMAC results for raw,
+explicit trusted, legacy-human/unbound, uncited email and ordered whole-set cases.
+Tests must also exercise real current-authority drift; a vector alone is not an
+authorization or provenance-liveness proof. Approval authorizes this frozen
+contract's implementation and verification, not D eligibility or activation.

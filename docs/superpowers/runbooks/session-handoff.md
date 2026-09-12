@@ -2,6 +2,38 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 Task18 F2 v3 approved implementation candidate
+
+- The user approved `2026-09-12-task18-legacy-integrity-contract-proposal.md`;
+  its frozen section is normative. Round 3 supersedes the F2 blocked status
+  below. Candidate status is DONE_WITH_CONCERNS pending independent rereview.
+- New writes dispatch to `assistant/legacy_integrity_v3.py`; old signed v2
+  and null historical rows keep their existing read paths. No historical
+  backfill/re-signing or unsigned future fallback is authorized. Email-send
+  authority is checked before reading the mutable evidence flag or send status.
+- New migration head is `b5e6f7a8b9c0` after `a4d5e6f7b8c9`. Downgrade refuses
+  any v3 parent. SQLite publishes signed parent last, after children/references.
+  Model-created SQLite DBs install equivalent guards; Alembic installs its own
+  frozen SQL. No old migration was edited. Three intentionally partial legacy
+  migration fixtures now target their original predecessor boundary rather
+  than claiming a complete application schema; full-schema head coverage stays.
+- Reviewer focus: canonical HMAC payloads and exact UTF-8, selected-effect
+  revocation with another approval live, uncited email influence and tamper
+  guards, no D promotion, transaction rollback, and predecessor PG triggers.
+  The PG append-only exception is signature-only, old NULL-scope, same-current-
+  transaction parent AND child; signed/historical updates remain rejected.
+  Existing raw/explicit exactness SQL is retained, with only a v3 pre-provenance
+  branch. PostgreSQL SQL is inspected/emission-tested, not server-executed.
+- Offline affected gate: 583 passed, one PG skip, 120 `postgresql`-named
+  deselections; follow-up full keyword/pgvector/reader/service/v3/probe gate:
+  264 passed. Retained F2 is included, not deselected.
+  Final scoped API/email/model/local-migration gate: 193 passed; final monotonic
+  marker/Task18/reader/writer gate: 204 passed (42 v3 tests). Published v3 markers
+  cannot be stripped to historical NULL or downgraded. Static/credential checks
+  pass. Existing Alembic
+  `path_separator` warnings remain. See local Task18 report for REDs, final
+  scoped checks and candidate SHA. No rollout, live provider, PG, push or merge.
+
 ## 2026-09-12 D Core Task18 F4/F5 candidate; F2 still blocks
 
 - Fix round 2 supersedes the ambiguous-provider planning allowance in round 1.

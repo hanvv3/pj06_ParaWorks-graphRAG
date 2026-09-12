@@ -654,7 +654,7 @@ def test_disabled_evidence_write_is_keyed_and_still_readable(client, db_session,
     db_session.expire_all()
     message = db_session.get(AssistantMessage, body['id'])
     assert message.content_origin == 'legacy_evidence'
-    assert message.dependency_set_hmac_schema_version == 'assistant-dependency-set-hmac:v2'
+    assert message.dependency_set_hmac_schema_version == 'assistant-dependency-set-hmac:v3'
     child = db_session.scalar(select(AssistantMessageEvidenceDependency).where(
         AssistantMessageEvidenceDependency.assistant_message_id == message.id))
     assert child.dependency_serving_scope == 'legacy_v1_only'

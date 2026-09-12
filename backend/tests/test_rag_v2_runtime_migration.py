@@ -34,7 +34,7 @@ from backend.tests.test_rag_v2_costs import _snapshot
 
 REVISION = 'e2b3c4d5f6a7'
 TRANSITION_REVISION = 'f3c4d5e6a7b8'
-HEAD_REVISION = 'a4d5e6f7b8c9'
+HEAD_REVISION = 'b5e6f7a8b9c0'
 PREVIOUS_REVISION = 'd1a2b3c4e5f6'
 MIGRATION_PATH = Path(
     'backend/migrations/versions/e2b3c4d5f6a7_add_rag_runtime_safety.py'
@@ -333,6 +333,7 @@ def test_sqlite_revision_declares_exact_new_columns_indexes_and_foreign_keys(
 def test_transition_guard_upgrades_an_already_stamped_e2_database(
     sqlite_migration: tuple[Config, str],
 ) -> None:
+    # Transition-only historical fixture: not a full Assistant application DB.
     config, database_url = sqlite_migration
     engine = create_engine(database_url)
     with engine.begin() as connection:
@@ -358,7 +359,7 @@ def test_transition_guard_upgrades_an_already_stamped_e2_database(
             {'revision': REVISION},
         )
 
-    command.upgrade(config, 'head')
+    command.upgrade(config, 'a4d5e6f7b8c9')
 
     checks_at_head = {
         item['name']: item['sqltext']
@@ -374,7 +375,7 @@ def test_transition_guard_upgrades_an_already_stamped_e2_database(
     with engine.connect() as connection:
         assert (
             connection.scalar(text('SELECT version_num FROM alembic_version'))
-            == HEAD_REVISION
+            == 'a4d5e6f7b8c9'
         )
 
     command.downgrade(config, REVISION)

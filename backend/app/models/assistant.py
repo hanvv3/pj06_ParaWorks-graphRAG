@@ -12,7 +12,10 @@ from sqlalchemy import (
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from backend.app.db.assistant_legacy_guards import register_sqlite_guards
 from backend.app.db.base import Base
+
+register_sqlite_guards(Base.metadata)
 
 
 class AssistantConversation(Base):
@@ -51,7 +54,8 @@ class AssistantMessage(Base):
         ),
         CheckConstraint(
             "dependency_set_hmac_schema_version IS NULL OR "
-            "dependency_set_hmac_schema_version = 'assistant-dependency-set-hmac:v2'",
+            "dependency_set_hmac_schema_version IN ('assistant-dependency-set-hmac:v2', "
+            "'assistant-dependency-set-hmac:v3')",
             name='ck_assistant_messages_dependency_set_schema',
         ),
         CheckConstraint(
@@ -117,7 +121,8 @@ class AssistantMessage(Base):
             "'assistant-evidence:v1' AND serving_dependency_count IS NOT NULL AND "
             'serving_dependency_count > 0 AND '
             'dependency_set_hmac_schema_version IS NOT NULL AND '
-            "dependency_set_hmac_schema_version = 'assistant-dependency-set-hmac:v2' AND "
+            "dependency_set_hmac_schema_version IN ('assistant-dependency-set-hmac:v2', "
+            "'assistant-dependency-set-hmac:v3') AND "
             'dependency_set_hmac IS NOT NULL AND length(dependency_set_hmac) = 64 AND '
             'parent_selected_evidence_projection_hmac IS NOT NULL AND '
             'length(parent_selected_evidence_projection_hmac) = 64 AND '

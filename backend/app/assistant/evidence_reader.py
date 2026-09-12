@@ -435,6 +435,10 @@ class AssistantEvidenceReader:
         The legacy snapshot's version fingerprint is the existing V1 serving
         content hash; the two D identity/version child columns remain NULL.
         """
+        if message.dependency_set_hmac_schema_version == 'assistant-dependency-set-hmac:v3':
+            from backend.app.assistant.legacy_integrity_v3 import is_live
+            return is_live(db=db, message=message, actor=actor,
+                           settings=self._settings or get_settings())
         from backend.app.rag.serving_contracts import (
             build_canonical_citation_projection_hmac,
             build_model_content_hmac,

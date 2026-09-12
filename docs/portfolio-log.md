@@ -1,5 +1,32 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Task18 approved legacy-integrity v3 candidate
+
+- The user approved F2's exact-provenance legacy-only schema on 2026-09-12.
+  Its frozen v3 HMAC contract now signs every new evidence-backed legacy answer
+  and uncited evidence-derived email. Raw lineage, the exact selected approval
+  and evidence references, legacy human authority, current permissions, ordered
+  citations/children and protected email recipient/subject/body/flag are bound.
+  Integrity still grants no D serving, retrieval or index eligibility.
+- A successor Alembic migration widens only the legacy integrity union and
+  adds published-state guards. Actual SQLite upgrade/downgrade tests preserve
+  historical rows and refuse downgrade with v3 rows. PostgreSQL emitted SQL is
+  checked, including the predecessor append-only/exactness integration: only
+  newly inserted same-transaction staging rows may receive signature columns.
+  No applied migration is rewritten; no actual PostgreSQL claim is made.
+- Original F2 behavioral RED and retained probes now pass. Affected offline
+  gate: 583 passed, one opt-in PG skip, 120 `postgresql`-named deselections.
+  Follow-up gate including keyword/pgvector SQL tests, immutable readers and
+  all retained probes: 264 passed. Golden vectors use an independent standard-
+  library HMAC calculation. Existing Alembic configuration warnings remain.
+  Final API/email/local-migration gate: 193 passed; final marker-guard/
+  Task18/reader/writer gate: 204 passed. Ruff, compile and diff checks pass;
+  credential-pattern scans have zero matches.
+- This supersedes the earlier unapproved/blocked F2 status. Task18 is a
+  DONE_WITH_CONCERNS candidate pending independent rereview, never CLEAN or
+  rollout-ready. F1/F3/F4/F5 and deterministic contact/email branch isolation
+  remain covered. No live provider, network, Docker, real PG, push or merge.
+
 ## 2026-09-12 D Core Task18 provider-ordering review fix
 
 - F4/F5 fixes add lazy, one-shot V2 ingress preflight before any ambiguous

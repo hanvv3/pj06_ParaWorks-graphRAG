@@ -19,7 +19,7 @@ from sqlalchemy.engine import Engine
 
 from backend.app.core.config import get_settings
 
-REVISION = 'a4d5e6f7b8c9'
+REVISION = 'b5e6f7a8b9c0'
 RUNTIME_REVISION = '2f6a8b9c0d1e'
 PREVIOUS_REVISION = 'b4b6d9f4d3e1'
 
@@ -251,19 +251,21 @@ def test_agent_runtime_migration_preserves_application_loggers(
 def test_agent_runtime_migration_upgrades_existing_schema_idempotently(
     migration_database: tuple[Config, str],
 ) -> None:
+    # This intentionally partial fixture has no Assistant tables; exercise its
+    # original migration boundary. Full-schema head coverage is tested separately.
     config, database_url = migration_database
     engine = _create_legacy_schema(database_url)
     _run_alembic(command.stamp, config, PREVIOUS_REVISION)
 
-    _run_alembic(command.upgrade, config, 'head')
+    _run_alembic(command.upgrade, config, 'a4d5e6f7b8c9')
 
-    _assert_revision(engine, REVISION)
+    _assert_revision(engine, 'a4d5e6f7b8c9')
     _assert_runtime_schema(engine)
     _assert_legacy_rows_remain(engine)
 
-    _run_alembic(command.upgrade, config, 'head')
+    _run_alembic(command.upgrade, config, 'a4d5e6f7b8c9')
 
-    _assert_revision(engine, REVISION)
+    _assert_revision(engine, 'a4d5e6f7b8c9')
     _assert_runtime_schema(engine)
     _assert_legacy_rows_remain(engine)
 
@@ -271,11 +273,13 @@ def test_agent_runtime_migration_upgrades_existing_schema_idempotently(
 def test_agent_runtime_migration_downgrade_removes_only_runtime_foundation(
     migration_database: tuple[Config, str],
 ) -> None:
+    # This intentionally partial fixture has no Assistant tables; exercise its
+    # original migration boundary. Full-schema head coverage is tested separately.
     config, database_url = migration_database
     engine = _create_legacy_schema(database_url)
     _run_alembic(command.stamp, config, PREVIOUS_REVISION)
-    _run_alembic(command.upgrade, config, 'head')
-    _assert_revision(engine, REVISION)
+    _run_alembic(command.upgrade, config, 'a4d5e6f7b8c9')
+    _assert_revision(engine, 'a4d5e6f7b8c9')
 
     _run_alembic(command.downgrade, config, PREVIOUS_REVISION)
 

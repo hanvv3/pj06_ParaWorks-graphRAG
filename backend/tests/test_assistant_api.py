@@ -194,20 +194,29 @@ def test_assistant_tool_middleware_logs_email_and_rag_tools_in_english(
     caplog.set_level(logging.INFO, logger='AssistantTool')
 
     def fake_rag_answer(**kwargs):
+        from backend.app.agents.rag_orchestrator_agent.service import (
+            build_serving_dependency_snapshot,
+            citation_from_candidate,
+            retrieve_matching_evidence_candidates,
+        )
+        seed_chunk(kwargs['db'], 'gmail', 'log-source', 'Redis source snippet', 'internal')
+        candidate = retrieve_matching_evidence_candidates(db=kwargs['db'], question='Redis')[0]
+        dependency = build_serving_dependency_snapshot(kwargs['db'], candidate)
         tool_logger = kwargs['tool_logger']
         tool_logger.log('rag_retrieval', 'result backend=keyword source_count=1 hidden_count=0')
         tool_logger.log('rag_answer', 'start model=gpt-5.4')
         tool_logger.log('rag_answer', 'result model=gpt-5.4 source_count=1')
         return SimpleNamespace(
             answer='RAG answer',
-            citations=[],
-            source_ids=['source-1'],
-            source_links=['https://source.example/1'],
-            source_snippets=['source snippet'],
+            citations=[citation_from_candidate(candidate)],
+            source_ids=[candidate.source_id],
+            source_links=[candidate.source_url],
+            source_snippets=[candidate.source_snippet],
+            serving_dependencies=(dependency,),
             permission_level='internal',
             hidden_match_count=0,
             permission_notice=None,
-            agent_run_id=123,
+            agent_run_id=None,
             agent_name='rag_orchestrator_agent',
             prompt_version='rag-answer:v1',
             question=kwargs['question'],
@@ -241,8 +250,8 @@ def test_assistant_tool_middleware_logs_email_and_rag_tools_in_english(
 
     assert turn_response.status_code == 200
     projected = turn_response.json()['assistant_message']
-    assert projected['source_links'] == []
-    assert projected['metadata']['status'] == 'evidence_unavailable'
+    assert projected['source_links'] == ['https://gmail.mock/log-source']
+    assert projected['metadata'].get('status') != 'evidence_unavailable'
     log_text = caplog.text
     assert '[Tool: email_intent_gate] start' in log_text
     assert '[Tool: email_intent_gate] result email_intent=False confidence=0.2 requires_rag_result=False model=gpt-4.1-nano' in log_text

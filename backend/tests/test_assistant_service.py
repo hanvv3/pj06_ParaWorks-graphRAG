@@ -6,6 +6,7 @@ from backend.app.agents.rag_orchestrator_agent import answer_question_with_rag
 from backend.app.agents.rag_orchestrator_agent.service import (
     RagEvidenceCandidate,
     build_serving_dependency_snapshot,
+    citation_from_candidate,
     retrieve_matching_knowledge_candidates,
 )
 from backend.app.assistant.service import (
@@ -282,10 +283,10 @@ def test_pre_c5_unbound_evidence_answer_is_audit_only_but_non_evidence_operation
 ) -> None:
     viewer = USERS['viewer']
     conversation = create_conversation(db_session, viewer, title='Legacy')
-    legacy_answer = append_assistant_message(
-        db_session,
-        viewer,
-        conversation,
+    # Historical fixture, not a newly authorized evidence-backed write.
+    legacy_answer = AssistantMessage(
+        conversation_id=conversation.id,
+        role='assistant',
         content='Legacy answer bytes',
         citations=[{'source_id': 'legacy'}],
         source_ids=['legacy'],
@@ -295,8 +296,10 @@ def test_pre_c5_unbound_evidence_answer_is_audit_only_but_non_evidence_operation
         hidden_match_count=1,
         permission_notice='legacy',
         agent_run_id=None,
-        metadata={},
+        metadata_={},
     )
+    db_session.add(legacy_answer)
+    db_session.commit()
     operational = append_assistant_message(
         db_session,
         viewer,
@@ -384,7 +387,7 @@ def test_rag_answer_persists_complete_exact_dependencies_with_message_atomically
         viewer,
         conversation,
         content='Bound answer',
-        citations=[{'source_id': f'history_event:{history.id}'}],
+        citations=[citation_from_candidate(candidate)],
         source_ids=[f'history_event:{history.id}'],
         source_links=history.source_links,
         source_snippets=history.source_snippets,
@@ -464,7 +467,7 @@ def test_canonical_decision_candidate_persists_exact_stored_link_dependency(
         viewer,
         conversation,
         content='Bound canonical decision answer',
-        citations=[{'source_id': candidate.source_id}],
+        citations=[citation_from_candidate(candidate)],
         source_ids=[candidate.source_id],
         source_links=[candidate.source_url],
         source_snippets=[candidate.source_snippet],
@@ -528,7 +531,7 @@ def test_assistant_dependency_source_drift_permission_narrowing_or_lookup_failur
         viewer,
         conversation,
         content='Bound answer',
-        citations=[{'source_id': candidate.source_id}],
+        citations=[citation_from_candidate(candidate)],
         source_ids=[candidate.source_id],
         source_links=[candidate.source_url],
         source_snippets=[candidate.source_snippet],
@@ -577,7 +580,7 @@ def test_assistant_dependency_rechecks_the_selected_effect_even_when_shared_prov
         viewer,
         conversation,
         content='Bound answer',
-        citations=[{'source_id': candidate.source_id}],
+        citations=[citation_from_candidate(candidate)],
         source_ids=[candidate.source_id],
         source_links=[candidate.source_url],
         source_snippets=[candidate.source_snippet],
@@ -681,7 +684,7 @@ def test_source_changes_between_rag_retrieval_and_message_commit_fail_closed_wit
             viewer,
             conversation,
             content='Must never be stored',
-            citations=[{'source_id': candidate.source_id}],
+            citations=[citation_from_candidate(candidate)],
             source_ids=[candidate.source_id],
             source_links=[candidate.source_url],
             source_snippets=[candidate.source_snippet],
@@ -722,7 +725,7 @@ def test_revoked_after_answer_leaks_nothing_to_message_list_context_summary_or_e
         viewer,
         conversation,
         content='Sensitive bound answer',
-        citations=[{'source_id': candidate.source_id}],
+        citations=[citation_from_candidate(candidate)],
         source_ids=[candidate.source_id],
         source_links=[candidate.source_url],
         source_snippets=[candidate.source_snippet],

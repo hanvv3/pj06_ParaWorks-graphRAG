@@ -1170,6 +1170,12 @@ def send_assistant_email_draft(
         ) from exc
 
     metadata = dict(message.metadata_ or {})
+    # Persisted authority, not a mutable email flag, gates evidence-backed sends.
+    if (message.content_write_mode is not None or message.serving_dependency_count
+        or message.evidence_contract_version == 'assistant-evidence:v1'
+        or metadata.get('evidence_derived') is True) and not (
+            assistant_message_evidence_is_live(db, user=user, message=message)):
+        raise HTTPException(status_code=409, detail='email draft evidence is unavailable')
     draft = metadata.get('email_draft')
     if metadata.get('action_type') != 'email_draft' or not isinstance(draft, dict):
         raise HTTPException(
