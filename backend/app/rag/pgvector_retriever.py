@@ -33,6 +33,14 @@ class PgVectorSearchRuntimeError(RuntimeError):
     """Sanitized PostgreSQL/pgvector read failure eligible for lexical fallback."""
 
 
+class PgVectorFallbackRequiredError(RuntimeError):
+    def __init__(self, category: str):
+        if category not in {'pgvector_storage_runtime_failure', 'serving_corpus_changed_during_pgvector_query'}:
+            raise ValueError('invalid pgvector fallback category')
+        self.category = category
+        super().__init__(category)
+
+
 class PgVectorSearchStorePort(Protocol):
     def search(
         self,
@@ -53,11 +61,18 @@ class PgVectorEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
         readiness: ReadinessSnapshotPort,
         keyword_retriever: Runnable[RetrievalRequest, RetrievalResult],
         settings: Settings,
+        defer_fallback: bool = False,
     ) -> None:
         self._store = store
         self._readiness = readiness
         self._keyword_retriever = keyword_retriever
         self._settings = settings
+        self._defer_fallback = defer_fallback
+
+    def with_graph_fallback(self) -> PgVectorEvidenceRetriever:
+        """Keep this request's ports, but let the graph execute lexical fallback."""
+        return PgVectorEvidenceRetriever(store=self._store, readiness=self._readiness,
+            keyword_retriever=self._keyword_retriever, settings=self._settings, defer_fallback=True)
 
     def invoke(
         self,
@@ -158,6 +173,8 @@ class PgVectorEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
         category: str,
         started_ns: int,
     ) -> RetrievalResult:
+        if self._defer_fallback:
+            raise PgVectorFallbackRequiredError(category)
         embedding = request.query_embedding_result
         assert embedding is not None
         lexical_request = replace(request, query_embedding_result=None)

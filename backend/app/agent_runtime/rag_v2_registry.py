@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from langgraph.graph.state import CompiledStateGraph
 
@@ -25,8 +26,15 @@ class RagGraphRegistration:
 class RagGraphRegistry:
     def __init__(self) -> None:
         self._graphs: dict[tuple[str, str], CompiledStateGraph] = {}
+        self._sealed = False
+
+    def seal(self) -> None:
+        self._graphs = MappingProxyType(dict(self._graphs))
+        self._sealed = True
 
     def register(self, registration: RagGraphRegistration) -> None:
+        if self._sealed:
+            raise ValueError('RAG graph registry is sealed')
         if not (
             registration.workflow_name.strip()
             and registration.graph_version.strip()
@@ -45,11 +53,18 @@ class RagGraphRegistry:
             raise RagRuntimeVersionUnavailableError(graph_version) from None
 
 
+class _SealedRagManifestRegistry(AgentRegistry):
+    def __init__(self, manifest) -> None:
+        super().__init__()
+        self._manifests = MappingProxyType({manifest.name: manifest})
+
+    def register(self, manifest) -> None:
+        raise ValueError('RAG manifest registry is sealed')
+
+
 def build_rag_manifest_registry() -> AgentRegistry:
     from backend.app.agents.rag_orchestrator_agent.agent import (
         RAG_ORCHESTRATOR_AGENT_MANIFEST,
     )
 
-    registry = AgentRegistry()
-    registry.register(RAG_ORCHESTRATOR_AGENT_MANIFEST)
-    return registry
+    return _SealedRagManifestRegistry(RAG_ORCHESTRATOR_AGENT_MANIFEST)

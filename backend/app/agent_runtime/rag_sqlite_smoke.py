@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import stat as stat_module
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -76,6 +77,7 @@ from backend.app.rag.search_store import SqlAlchemyKeywordSearchStore
 
 _ZERO = Decimal('0.000000')
 _SQLITE_RAG_SMOKE_MUTEX = sqlite_keyed_mutation_mutex()
+_SQLITE_GRAPH_SCOPE_SEAL = object()
 
 
 @dataclass(slots=True)
@@ -125,6 +127,29 @@ class SQLiteRagSmokeCoordinator:
         self._validate_engine_path()
         if self._path is not None:
             self._acquire_process_lock(self._path)
+
+    @contextmanager
+    def request_scope(self):
+        """One SQLite authority for all graph operations; no interim commits."""
+        with _SQLITE_RAG_SMOKE_MUTEX:
+            self._revalidate_file_authority()
+            with self._engine.connect() as connection:
+                connection.exec_driver_sql('BEGIN IMMEDIATE')
+                db = Session(bind=connection, join_transaction_mode='control_fully')
+                db.begin()
+                scope = SQLiteRagGraphScope(self, db, _seal=_SQLITE_GRAPH_SCOPE_SEAL)
+                try:
+                    yield scope
+                    if scope.result is None:
+                        raise SQLiteRagSmokeUnavailable('SQLite graph did not finalize a product')
+                    self._assert_final_invariants(db, scope.result)
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                finally:
+                    scope.active = False
+                    db.close()
 
     def run_keyword(
         self,
@@ -238,20 +263,25 @@ class SQLiteRagSmokeCoordinator:
         corpus_generation: int,
     ) -> tuple[AgentRun, tuple[AgentRunCostComponent, AgentRunCostComponent], RagProjectionPending]:
         surface = self._surface(prepared)
+        return self._create_zero_cost_parent(db, surface=surface, prepared_text=prepared.prepared_text,
+            scope_fingerprint=scope_fingerprint, corpus_generation=(prepared.prepared_model_influence.prepared_corpus_generation
+                if prepared.prepared_model_influence is not None else corpus_generation))
+
+    def _create_zero_cost_parent(self, db, *, surface, prepared_text, scope_fingerprint, corpus_generation):
         admission_hmac = admission_identity(
             {
                 'answer_provider_policy_snapshot_hmac': None,
                 'configured_backend': 'keyword',
-                'current_text_hmac': prepared.prepared_text.current_text_hmac,
+                'current_text_hmac': prepared_text.current_text_hmac,
                 'cutover_stage': surface,
                 'graph_version': 'company-memory-rag-answer-v2.0',
                 'mode': 'enforce',
                 'query_context_version_bytes': exact_utf8_bytes(
-                    prepared.prepared_text.query_context_version
+                    prepared_text.query_context_version
                 ),
                 'query_embedding_provider_policy_snapshot_hmac': None,
                 'retrieval_policy_version': 'rag-retrieval-policy:v2.0',
-                'retrieval_query_hmac': prepared.prepared_text.retrieval_query_hmac,
+                'retrieval_query_hmac': prepared_text.retrieval_query_hmac,
                 'security_scope_fingerprint': scope_fingerprint,
                 'surface': surface,
             },
@@ -298,9 +328,9 @@ class SQLiteRagSmokeCoordinator:
         )
         parent.metadata_ = {
             'configured_backend': 'keyword',
-            'current_text_hmac': prepared.prepared_text.current_text_hmac,
-            'query_context_version': prepared.prepared_text.query_context_version,
-            'retrieval_query_hmac': prepared.prepared_text.retrieval_query_hmac,
+            'current_text_hmac': prepared_text.current_text_hmac,
+            'query_context_version': prepared_text.query_context_version,
+            'retrieval_query_hmac': prepared_text.retrieval_query_hmac,
             'runtime_cost_snapshot_hmac': cost_hmac,
             'security_scope_fingerprint': scope_fingerprint,
             'surface': surface,
@@ -309,11 +339,7 @@ class SQLiteRagSmokeCoordinator:
             parent_agent_run_id=parent.id,
             projection_owner_fence_hmac=fence_hmac,
             security_scope_fingerprint=scope_fingerprint,
-            prepared_corpus_generation=(
-                prepared.prepared_model_influence.prepared_corpus_generation
-                if prepared.prepared_model_influence is not None
-                else corpus_generation
-            ),
+            prepared_corpus_generation=corpus_generation,
             prepared_vector_index_generation=None,
             terminal_cost_snapshot_hmac=cost_hmac,
         )
@@ -593,6 +619,7 @@ class SQLiteRagSmokeCoordinator:
             parent_agent_run_id=parent.id,
             application_outcome=projection.outcome,
             finalization_kind='substantive' if projection.model_influence else 'canned_safe',
+            canonical_projection=projection,
         )
 
     @staticmethod
@@ -829,3 +856,94 @@ class SQLiteRagSmokeCoordinator:
             if handle is not None:
                 handle.close()
             raise SQLiteRagSmokeUnavailable('SQLite smoke process lock is unavailable') from exc
+
+
+class SQLiteRagGraphScope:
+    """Request-local operations under the coordinator's existing SQLite lock."""
+
+    def __init__(self, coordinator: SQLiteRagSmokeCoordinator, db: Session, *, _seal):
+        if _seal is not _SQLITE_GRAPH_SCOPE_SEAL:
+            raise SQLiteRagSmokeUnavailable('SQLite graph scope is coordinator-owned')
+        self.coordinator = coordinator
+        self.db = db
+        self.active = True
+        self.parent = None
+        self.children = ()
+        self.pending = None
+        self.result = None
+        self.invocation = None
+        self.answer = None
+        self.answer_policy = None
+
+    def _require_active(self):
+        if not self.active or not self.db.in_transaction() or self.result is not None:
+            raise SQLiteRagSmokeUnavailable('SQLite graph scope is unavailable')
+
+    def admit(self, *, prepared_text, surface, security_scope):
+        self._require_active()
+        if self.parent is not None:
+            raise SQLiteRagSmokeUnavailable('SQLite graph admission is single-use')
+        generation = self.db.get(RagServingCorpusGeneration, 1)
+        if generation is None:
+            raise SQLiteRagSmokeUnavailable('SQLite smoke serving generation is unavailable')
+        self.parent, self.children, self.pending = self.coordinator._create_zero_cost_parent(
+            self.db, surface=surface, prepared_text=prepared_text,
+            scope_fingerprint=security_scope_fingerprint(security_scope, settings=self.coordinator._settings),
+            corpus_generation=generation.corpus_generation)
+        return self.parent.id, (generation.corpus_generation, None)
+
+    def mark_projection_pending(self, run_id):
+        self._require_active()
+        if self.parent is None or self.parent.id != run_id:
+            raise SQLiteRagSmokeUnavailable('SQLite graph parent is unavailable')
+        return self.pending
+
+    def bind_answer_invocation(self, invocation, influence, *, model, cost_policy):
+        self._require_active()
+        if self.parent is None or self.invocation is not None:
+            raise SQLiteRagSmokeUnavailable('SQLite answer preparation is single-use')
+        model.validate_prepared_invocation(invocation)
+        cost_policy.verify_answer_model_influence(invocation.evidence_slots, invocation.model_influence, prepared_set=influence)
+        if invocation.retrieval_query_hmac != self.parent.metadata_['retrieval_query_hmac'] or invocation.rendered_input_hmac != influence.rendered_input_hmac:
+            raise SQLiteRagSmokeUnavailable('SQLite answer identity changed')
+        self.parent.metadata_ = {**self.parent.metadata_,
+            'rendered_input_hmac': invocation.rendered_input_hmac,
+            'answer_model_config_snapshot_hmac': invocation.model_config_snapshot_hmac,
+            'prepared_model_influence_observation_hmac': influence.aggregate_observation_hmac}
+        self.invocation = invocation
+        self.answer_policy = cost_policy
+
+    def generate_deterministic_answer(self, invocation):
+        """Internal non-production fixture: no transport or external charge."""
+        from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
+            RagAnswerOutputValidator,
+        )
+        self._require_active()
+        if invocation is not self.invocation or self.answer is not None:
+            raise SQLiteRagSmokeUnavailable('SQLite deterministic answer authority is unavailable')
+        slot = invocation.evidence_slots[0]
+        self.answer = RagAnswerOutputValidator(signer=self.answer_policy.sign_answer_artifact).validate({
+            'answer_blocks': [{'text': slot.evidence.model_content[:350], 'evidence_slot_ids': [slot.slot_id], 'support_mode': slot.support_mode}],
+            'insufficient_evidence_reason': None}, slots=invocation.evidence_slots)
+        return self.answer
+
+    def finalize(self, pending, prepared, *, assistant_target=None):
+        self._require_active()
+        if (pending is not self.pending or prepared.query_embedding_result is not None
+            or prepared.validated_answer is not None and prepared.validated_answer is not self.answer):
+            raise SQLiteRagSmokeUnavailable('SQLite graph finalization authority is unavailable')
+        fresh = KeywordEvidenceRetriever(store=SqlAlchemyKeywordSearchStore(db=self.db, settings=self.coordinator._settings),
+            settings=self.coordinator._settings).invoke(RetrievalRequest(
+                retrieval_query_text=prepared.prepared_text.retrieval_query_text, security_scope=prepared.security_scope,
+                security_scope_fingerprint=pending.security_scope_fingerprint, query_embedding_result=None,
+                candidate_scan_limit=50, visible_limit=5 if prepared.product_kind == 'search' else 8,
+                relevance_policy_version='rag-retrieval-policy:v2.0'))
+        generation = self.db.get(RagServingCorpusGeneration, 1)
+        projection = self.coordinator._project(self.db, pending=pending, prepared=prepared, fresh=fresh,
+            current_corpus_generation=generation.corpus_generation,
+            drifted=not _same_retrieval_authority(fresh, prepared.retrieval_result))
+        _apply_parent_final(self.parent, projection, secret=self.coordinator._secret)
+        self.db.flush([self.parent, *self.children])
+        self.result = (projection if assistant_target is None else self.coordinator._append_assistant(
+            self.db, parent=self.parent, projection=projection, target=assistant_target, prepared=prepared))
+        return self.result

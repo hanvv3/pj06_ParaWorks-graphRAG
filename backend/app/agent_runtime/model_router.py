@@ -1,5 +1,6 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from backend.app.agent_runtime.auto_review_cost_policy import (
@@ -52,6 +53,35 @@ class RoutedRagAnswerModel:
     provider: Literal['openai']
     model_name: Literal['gpt-5.4-mini-2026-03-17']
     model_config_snapshot_hmac: str
+    close_owned_clients: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+
+
+def _rag_owned_http_closer(sync_client, async_client):
+    """Close only the two clients created for this synchronous RAG route."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    closed = False
+
+    def close():
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        try:
+            if sync_client is not None:
+                sync_client.close()
+        finally:
+            if async_client is not None:
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(async_client.aclose())
+                else:
+                    # The graph is synchronous even when called by an async
+                    # host. Its unused async HTTP pool has no request-loop work.
+                    with ThreadPoolExecutor(max_workers=1) as worker:
+                        worker.submit(lambda: asyncio.run(async_client.aclose())).result()
+    return close
 
 
 def build_rag_answer_model_route(*, settings: Settings) -> RoutedRagAnswerModel:
@@ -64,6 +94,7 @@ def build_rag_answer_model_route(*, settings: Settings) -> RoutedRagAnswerModel:
 
     if not settings.openai_api_key:
         raise ReviewModelUnavailableError('review model is unavailable')
+    sync_client = async_client = None
     try:
         assert_answer_contract_registry_ready()
         output_schema_hmac = build_answer_output_schema_hmac(settings)
@@ -76,6 +107,8 @@ def build_rag_answer_model_route(*, settings: Settings) -> RoutedRagAnswerModel:
         import httpx
         from langchain_openai import ChatOpenAI
 
+        sync_client = httpx.Client(trust_env=False)
+        async_client = httpx.AsyncClient(trust_env=False)
         raw_model = ChatOpenAI(
             model=RAG_ANSWER_MODEL,
             api_key=settings.openai_api_key,
@@ -91,8 +124,8 @@ def build_rag_answer_model_route(*, settings: Settings) -> RoutedRagAnswerModel:
             verbose=False,
             cache=False,
             callbacks=[],
-            http_client=httpx.Client(trust_env=False),
-            http_async_client=httpx.AsyncClient(trust_env=False),
+            http_client=sync_client,
+            http_async_client=async_client,
         )
         model = raw_model.with_structured_output(
             ANSWER_OUTPUT_SCHEMA_PROVIDER_FORMAT,
@@ -101,12 +134,16 @@ def build_rag_answer_model_route(*, settings: Settings) -> RoutedRagAnswerModel:
             include_raw=True,
         )
     except Exception:
+        with suppress(Exception):
+            _rag_owned_http_closer(sync_client, async_client)()
+        # Construction failure remains the primary sanitized outcome.
         raise ReviewModelUnavailableError('review model is unavailable') from None
     return RoutedRagAnswerModel(
         model=model,
         provider='openai',
         model_name=RAG_ANSWER_MODEL,
         model_config_snapshot_hmac=model_config_hmac,
+        close_owned_clients=_rag_owned_http_closer(sync_client, async_client),
     )
 
 

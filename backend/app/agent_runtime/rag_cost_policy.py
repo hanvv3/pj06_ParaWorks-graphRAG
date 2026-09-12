@@ -365,12 +365,30 @@ def _create_rag_cost_policy_type(
             def answer_influence_verifier(
                 slots: object,
                 observations: object,
+                prepared_set: object = None,
             ) -> None:
                 verify_answer_model_influence(
                     slots,
                     observations,
                     settings=influence_settings,
                 )
+                if prepared_set is not None:
+                    from backend.app.rag.evidence_projection import (
+                        PreparedModelInfluenceSet,
+                        ProjectionFence,
+                        _valid_prepared_influence_set,
+                    )
+                    if type(prepared_set) is not PreparedModelInfluenceSet or prepared_set.observations != observations:
+                        raise ValueError('prepared influence set is invalid')
+                    fence = ProjectionFence(
+                        prepared_corpus_generation=prepared_set.prepared_corpus_generation,
+                        current_corpus_generation=prepared_set.prepared_corpus_generation,
+                        prepared_index_generation=prepared_set.prepared_index_generation,
+                        current_index_generation=prepared_set.prepared_index_generation,
+                        prepared_readiness_hmac=prepared_set.prepared_readiness_hmac,
+                        current_readiness_hmac=prepared_set.prepared_readiness_hmac)
+                    if not _valid_prepared_influence_set(prepared_set, fence=fence, settings=influence_settings):
+                        raise ValueError('prepared influence set is invalid')
 
             def answer_artifact_signer(kind: str, payload: object) -> str:
                 domains = {
@@ -820,10 +838,11 @@ def _create_rag_cost_policy_type(
             self,
             slots: object,
             observations: object,
+            *, prepared_set: object = None,
         ) -> None:
             code = 'model_unavailable'
             state = get_state(self, code)
-            state.answer_influence_verifier(slots, observations)
+            state.answer_influence_verifier(slots, observations, prepared_set)
             invoke_hook('answer_influence_after_verify', self)
             require_same_state(self, state, code)
 

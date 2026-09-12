@@ -84,6 +84,49 @@ class _Client:
         return self.response
 
 
+@pytest.mark.parametrize('injected', (False, True))
+def test_direct_client_closes_owned_answer_route_but_not_injected_route(monkeypatch, injected):
+    from backend.app.agent_runtime import model_router
+    from backend.app.agent_runtime import rag_provider_transport as transport
+    events = []
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.http = kwargs['http_client']
+        def close(self):
+            events.append('embedding_closed')
+            self.http.close()
+    route = SimpleNamespace(model=object(), close_owned_clients=lambda: events.append('answer_closed'))
+    monkeypatch.setitem(sys.modules, 'openai', SimpleNamespace(OpenAI=FakeOpenAI))
+    monkeypatch.setattr(model_router, 'build_rag_answer_model_route', lambda **kwargs: route)
+    client = transport._DirectOpenAIProviderClient(Settings(_env_file=None, openai_api_key='fake-key'),
+        routed_model=route if injected else None)
+    client.close()
+    client.close()
+    assert events == (['embedding_closed'] if injected else ['embedding_closed', 'answer_closed'])
+
+
+def test_direct_client_sdk_construction_failure_closes_owned_http_without_masking_primary(monkeypatch):
+    import httpx
+
+    from backend.app.agent_runtime.rag_provider_transport import (
+        _DirectOpenAIProviderClient,
+    )
+    events = []
+    class HttpClient:
+        def __init__(self, **kwargs):
+            pass
+        def close(self):
+            events.append('http_closed')
+            raise RuntimeError('secondary close failure')
+    def fail_sdk(**kwargs):
+        raise RuntimeError('primary SDK failure')
+    monkeypatch.setattr(httpx, 'Client', HttpClient)
+    monkeypatch.setitem(sys.modules, 'openai', SimpleNamespace(OpenAI=fail_sdk))
+    with pytest.raises(RuntimeError, match='primary SDK failure'):
+        _DirectOpenAIProviderClient(Settings(_env_file=None, openai_api_key='fake-key'))
+    assert events == ['http_closed']
+
+
 _CLIENTS: dict[int, object] = {}
 _TEST_SETTINGS = Settings(
     _env_file=None,
@@ -174,6 +217,11 @@ def _admit_transport(ledger, run_id: int, *, surface='ask', scope_hmac='3' * 64)
             ),
         ),
     )
+    _seed_transport_corpus(ledger)
+    return query_budget
+
+
+def _seed_transport_corpus(ledger):
     if ledger._session.get(RagServingCorpusGeneration, 1) is None:
         ledger._session.add_all([
             AutoReviewRuntimeKeyState(
@@ -196,7 +244,6 @@ def _admit_transport(ledger, run_id: int, *, surface='ask', scope_hmac='3' * 64)
             ),
         ])
         ledger._session.commit()
-    return query_budget
 
 
 def _authority(

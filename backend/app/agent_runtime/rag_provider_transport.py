@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from time import monotonic_ns
 from typing import TypeVar
@@ -111,7 +112,7 @@ class _ClassifiedDelivery:
 class _DirectOpenAIProviderClient:
     """Exact direct-global OpenAI bindings owned only by runtime assembly."""
 
-    __slots__ = ('_answer_model', '_embedding_client')
+    __slots__ = ('_answer_model', '_embedding_client', '_owned_answer_close', '_closed')
 
     def __init__(self, settings: Settings, *, routed_model: object | None = None) -> None:
         if type(settings) is not Settings or not settings.openai_api_key:
@@ -123,15 +124,40 @@ class _DirectOpenAIProviderClient:
             build_rag_answer_model_route,
         )
 
-        self._embedding_client = OpenAI(
-            api_key=settings.openai_api_key,
-            base_url='https://api.openai.com/v1',
-            timeout=30,
-            max_retries=0,
-            http_client=httpx.Client(trust_env=False),
-        )
-        route = routed_model or build_rag_answer_model_route(settings=settings)
+        self._owned_answer_close = None
+        self._closed = False
+        http_client = httpx.Client(trust_env=False)
+        try:
+            self._embedding_client = OpenAI(
+                api_key=settings.openai_api_key,
+                base_url='https://api.openai.com/v1',
+                timeout=30,
+                max_retries=0,
+                http_client=http_client,
+            )
+        except BaseException:
+            with suppress(Exception):
+                http_client.close()
+            raise
+        try:
+            route = routed_model or build_rag_answer_model_route(settings=settings)
+        except BaseException:
+            with suppress(Exception):
+                self.close()
+            raise
+        if routed_model is None:
+            self._owned_answer_close = getattr(route, 'close_owned_clients', None)
         self._answer_model = route.model
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._embedding_client.close()
+        finally:
+            if self._owned_answer_close is not None:
+                self._owned_answer_close()
 
     def send(
         self,
@@ -338,17 +364,28 @@ def _assemble_rag_provider_dispatch_authority(
     ))
 
 
-def _assemble_direct_openai_rag_provider_dispatch_authority(
+@dataclass(frozen=True, slots=True)
+class RagRequestCostAuthority:
+    session: object
+    store: RagCostLedger
+    cost_policy: object
+    provider_safety: RagProviderSafetyService
+    provider_connection_factory: RagPostgresAdvisoryTransport
+    evidence_barrier: RagEvidenceSendBarrier
+    load_current_readiness: Callable[[], object]
+    runtime_health: TrustedPostgresRuntimeHealth
+    bootstrap_capability: object
+
+
+def _assemble_rag_request_cost_authority(
     *,
     settings: Settings,
-) -> RagProviderDispatchAuthority:
-    """Build the full production dispatch authority from frozen settings only."""
+    session=None,
+) -> RagRequestCostAuthority:
+    """Assemble request-owned DB/cost authority without constructing providers."""
     import socket
 
     from backend.app.agent_runtime.fingerprints import fingerprint_secret_bytes
-    from backend.app.agent_runtime.model_router import (
-        build_rag_answer_model_route,
-    )
     from backend.app.agent_runtime.provider_send_fence import (
         _assemble_rag_evidence_barrier,
     )
@@ -403,7 +440,7 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
     bootstrap_capability = load_application_capability(
         RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID
     )
-    session = SessionLocal()
+    session = SessionLocal() if session is None else session
     provider_connection_factory = _bind_rag_postgres_advisory_transport(
         session,
         trusted_bootstrap=RagPostgresDatabaseBootstrap,
@@ -477,17 +514,25 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
         registered_lock=evidence_advisory,
         advisory_transport=provider_connection_factory,
     )
+    return RagRequestCostAuthority(session, store, cost_policy, provider_safety, provider_connection_factory,
+        evidence_barrier, load_current_readiness, runtime_health, bootstrap_capability)
+
+
+def _assemble_direct_openai_rag_provider_dispatch_authority(*, settings: Settings) -> RagProviderDispatchAuthority:
+    """Compatibility entry point; graph assembly uses its request-owned cost slice."""
+    from backend.app.agent_runtime.model_router import build_rag_answer_model_route
+    assembly = _assemble_rag_request_cost_authority(settings=settings)
     routed_model = build_rag_answer_model_route(settings=settings)
     answer_model = StructuredRagAnswerModel(
         routed_model=routed_model,
-        cost_policy=cost_policy,
+        cost_policy=assembly.cost_policy,
     )
     return _assemble_rag_provider_dispatch_authority(
-        store=store,
-        provider_safety=provider_safety,
-        provider_connection_factory=provider_connection_factory,
-        evidence_barrier=evidence_barrier,
-        identity_secret=identity_secret,
+        store=assembly.store,
+        provider_safety=assembly.provider_safety,
+        provider_connection_factory=assembly.provider_connection_factory,
+        evidence_barrier=assembly.evidence_barrier,
+        identity_secret=fingerprint_secret_bytes(settings)[0],
         timeout_seconds=30,
         provider_client=_DirectOpenAIProviderClient(
             settings,
@@ -495,8 +540,8 @@ def _assemble_direct_openai_rag_provider_dispatch_authority(
         ),
         settings=settings,
         answer_model=answer_model,
-        load_current_readiness=load_current_readiness,
-        runtime_health=runtime_health,
+        load_current_readiness=assembly.load_current_readiness,
+        runtime_health=assembly.runtime_health,
     )
 
 

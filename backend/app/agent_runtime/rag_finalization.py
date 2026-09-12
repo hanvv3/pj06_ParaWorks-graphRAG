@@ -962,6 +962,7 @@ class AssistantFinalizationRecord:
     parent_agent_run_id: int
     application_outcome: AssistantPersistedOutcome
     finalization_kind: Literal['substantive', 'canned_safe', 'terminal_failure']
+    canonical_projection: CanonicalRagProjection | None = None
 
 
 RagFinalProjection: TypeAlias = CanonicalRagProjection | AssistantFinalizationRecord
@@ -1928,6 +1929,7 @@ class SqlAlchemyRagFinalizationBoundary:
             finalization_kind=(
                 'substantive' if projection.model_influence else 'canned_safe'
             ),
+            canonical_projection=projection,
         )
 
     def commit(self) -> None:

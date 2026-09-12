@@ -83,3 +83,50 @@ def test_route_fails_closed_on_renderer_registry_drift(monkeypatch) -> None:
 
     ANSWER_PROMPT_RENDERER_STATIC.clear()
     ANSWER_PROMPT_RENDERER_STATIC.update(original)
+
+
+@pytest.mark.parametrize('failure', (None, 'constructor', 'schema'))
+@pytest.mark.parametrize('async_host', (False, True))
+def test_answer_route_closes_only_owned_http_clients_even_on_build_failure(monkeypatch, failure, async_host):
+    import asyncio
+
+    from backend.app.agent_runtime.model_router import ReviewModelUnavailableError
+    events = []
+    class SyncClient:
+        def __init__(self, **kwargs):
+            pass
+        def close(self):
+            events.append('sync_closed')
+    class AsyncClient:
+        def __init__(self, **kwargs):
+            pass
+        async def aclose(self):
+            events.append('async_closed')
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            if failure == 'constructor':
+                raise RuntimeError('private constructor error')
+        def with_structured_output(self, *args, **kwargs):
+            if failure == 'schema':
+                raise RuntimeError('private schema error')
+            return object()
+    monkeypatch.setattr(httpx, 'Client', SyncClient)
+    monkeypatch.setattr(httpx, 'AsyncClient', AsyncClient)
+    monkeypatch.setitem(sys.modules, 'langchain_openai', SimpleNamespace(ChatOpenAI=FakeChatOpenAI))
+    settings = Settings(_env_file=None, openai_api_key='test-key-not-live')
+    if failure is not None:
+        with pytest.raises(ReviewModelUnavailableError):
+            build_rag_answer_model_route(settings=settings)
+    else:
+        route = build_rag_answer_model_route(settings=settings)
+        assert events == []
+        def close_twice():
+            route.close_owned_clients()
+            route.close_owned_clients()
+        if async_host:
+            async def run():
+                close_twice()
+            asyncio.run(run())
+        else:
+            close_twice()
+    assert events == ['sync_closed', 'async_closed']

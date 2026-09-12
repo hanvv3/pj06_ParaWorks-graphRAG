@@ -35,6 +35,54 @@ class _FakeCheckpointRuntime:
         self.events.append('close')
 
 
+@pytest.mark.parametrize('mode', ('disabled', 'shadow', 'enforce'))
+def test_default_rag_graph_and_facade_registered_without_paid_construction(
+    db_session, monkeypatch, mode,
+):
+    from langgraph.graph.state import CompiledStateGraph
+
+    from backend.app.agent_runtime.rag_application import RagApplicationFacade
+
+    monkeypatch.setenv('LANGGRAPH_RAG_V2_MODE', mode)
+    get_settings.cache_clear()
+    def no_provider(*args, **kwargs):
+        raise AssertionError('startup must not construct paid provider')
+    monkeypatch.setattr('backend.app.agent_runtime.rag_provider_transport._DirectOpenAIProviderClient', no_provider)
+    app = create_app(checkpoint_runtime_factory=lambda _: _FakeCheckpointRuntime([]),
+        workflow_session_factory=sessionmaker(bind=db_session.get_bind()))
+    try:
+        with TestClient(app):
+            graph = app.state.rag_graph_registry.resolve(COMPANY_MEMORY_RAG_WORKFLOW, COMPANY_MEMORY_RAG_GRAPH_VERSION)
+            assert isinstance(graph, CompiledStateGraph)
+            assert 'keyword_retrieval' in graph.nodes
+            assert graph.checkpointer is None
+            assert isinstance(app.state.rag_application_facade, RagApplicationFacade)
+            with pytest.raises(ValueError, match='sealed'):
+                app.state.rag_graph_registry.register(_build_test_rag_graph_registration())
+            manifest = app.state.agent_manifest_registry.get('rag_orchestrator_agent')
+            with pytest.raises(ValueError, match='sealed'):
+                app.state.agent_manifest_registry.register(manifest)
+    finally:
+        get_settings.cache_clear()
+
+
+def test_checkpoint_only_start_failure_keeps_default_rag_available(db_session, monkeypatch):
+    def unavailable_pool(_dsn):
+        raise RuntimeError('checkpoint service unavailable')
+    checkpoint_settings = Settings(_env_file=None).model_copy(update={'paraworks_demo_mode': False,
+        'database_url': 'postgresql://unused.invalid/test', 'paraworks_database_url': None,
+        'langgraph_review_v2_enabled': True, 'langgraph_strict_msgpack': True})
+    runtime = CheckpointRuntime(checkpoint_settings,
+        pool_factory=unavailable_pool)
+    app = create_app(checkpoint_runtime_factory=lambda _: runtime,
+        workflow_session_factory=sessionmaker(bind=db_session.get_bind()))
+    with TestClient(app) as client:
+        assert runtime.readiness.error_code == 'checkpoint_unavailable'
+        assert client.get('/health').status_code == 200
+        assert app.state.rag_graph_registry.resolve(COMPANY_MEMORY_RAG_WORKFLOW, COMPANY_MEMORY_RAG_GRAPH_VERSION)
+        assert app.state.rag_application_facade is not None
+
+
 def _build_test_rag_graph_registration() -> RagGraphRegistration:
     from langgraph.graph import END, START, StateGraph
     from typing_extensions import TypedDict

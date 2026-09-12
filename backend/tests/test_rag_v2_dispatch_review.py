@@ -36,20 +36,6 @@ def test_public_dispatch_boundary_has_no_raw_client_bytes_or_factory_hooks():
         production_assembler
     ).parameters
     assert tuple(inspect.signature(production_assembler).parameters) == ('settings',)
-    source = inspect.getsource(production_assembler)
-    for owned_authority in (
-        'SessionLocal',
-        'RagProviderSafetyService',
-        '_assemble_rag_cost_ledger',
-        '_assemble_rag_evidence_barrier',
-        'RagV2ServingIndexReadinessService',
-        'load_registered_advisory_capability',
-        '_DirectOpenAIProviderClient',
-        'RAG_PROJECTION_OWNER_REGISTRY_LOCK_ID',
-        'RAG_C5_KEY_CORPUS_AUTHORITY_LOCK_ID',
-        'RAG_AGENT_RUN_COST_AUTHORITY_LOCK_ID',
-    ):
-        assert owned_authority in source
     assert not hasattr(transport_module, 'RagProviderRequest')
     assert not hasattr(contracts_module, 'StrictProviderOutcome')
     assert not hasattr(RagCostLedger, '_transport_provider_client')
@@ -120,9 +106,11 @@ def test_paid_assembler_rejects_sqlite_before_artifact_or_provider_creation(
     assert not latch.exists()
 
 
+@pytest.mark.parametrize('cost_only', (False, True))
 def test_direct_paid_assembler_shares_one_exact_provider_connection_factory(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
+    cost_only,
 ) -> None:
     import backend.app.agent_runtime.model_router as router_module
     import backend.app.agent_runtime.provider_send_fence as fence_module
@@ -199,7 +187,10 @@ def test_direct_paid_assembler_shares_one_exact_provider_connection_factory(
         '_assemble_rag_evidence_barrier',
         assemble_barrier,
     )
-    monkeypatch.setattr(router_module, 'build_rag_answer_model_route', lambda **_kwargs: object())
+    def make_route(**_kwargs):
+        assert not cost_only, 'cost-only assembly must not construct provider models'
+        return object()
+    monkeypatch.setattr(router_module, 'build_rag_answer_model_route', make_route)
     monkeypatch.setattr(transport_module, 'StructuredRagAnswerModel', lambda **_kwargs: None)
     provider_client = SimpleNamespace(send=lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
@@ -223,15 +214,21 @@ def test_direct_paid_assembler_shares_one_exact_provider_connection_factory(
         assemble_dispatch,
     )
 
-    result = transport_module._assemble_direct_openai_rag_provider_dispatch_authority(
-        settings=Settings(
+    settings = Settings(
             _env_file=None,
             paraworks_provider_safety_latch_path=str(tmp_path / 'provider-safety.json'),
             openai_api_key='test-key-never-used',
         )
-    )
+    if cost_only:
+        request_session = object()
+        result = transport_module._assemble_rag_request_cost_authority(settings=settings, session=request_session)
+        assert result.session is request_session
+        assert result.store is store
+        assert result.provider_safety is safety
+    else:
+        result = transport_module._assemble_direct_openai_rag_provider_dispatch_authority(settings=settings)
 
-    assert result is assembled
+    assert cost_only or result is assembled
     assert len(provider_factories) == 1
     assert safety_assemblies[0]['advisory_transport'] is provider_transport
     assert barrier_assemblies[0]['advisory_transport'] is provider_transport

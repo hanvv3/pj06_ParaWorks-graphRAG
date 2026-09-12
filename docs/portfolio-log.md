@@ -1,5 +1,24 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core request-owned answer graph candidate
+
+- The actual LangGraph now composes permission-aware Runnable retrieval,
+  bounded answer generation, exact costs and fresh canonical finalization.
+  Concurrent graph invocations keep actors, sessions, models and billing state
+  separate. Evidence changes remove unsupported output without another call.
+- Concrete default SQLite flows exercise search, deterministic Ask and same-screen
+  Assistant product persistence with zero external charge. Durable citation JSON
+  reloads preserve source links, Korean snippets and strict permissions.
+- Default app startup registers the graph and sealed facade in every rollout
+  mode without paid client construction. PostgreSQL factories split request-owned
+  cost authority from lazy clients and fresh finalizer ownership. Existing legacy
+  behavior is untouched; shadow execution and terminal Assistant error persistence
+  remain their planned later tasks, not hidden background work.
+- Broad affected evidence: `661 passed, 1 PostgreSQL URL skip, 3 expected
+  rollback-fault warnings` in 264.53s; exact-final scoped supplement `195 passed`
+  in 152.01s. No live providers or database services were started. Candidate
+  awaits independent review; real PostgreSQL remains an unexecuted release gate.
+
 ## 2026-09-12 D Core embedding-finalizer bridge candidate
 
 - Bound a validated embedding result to its exact committed paid dispatch using

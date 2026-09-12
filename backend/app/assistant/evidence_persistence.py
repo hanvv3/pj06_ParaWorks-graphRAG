@@ -23,6 +23,7 @@ from backend.app.rag.evidence_projection import (
     ModelInfluenceDependencySnapshot,
     V1EvidenceProjection,
     build_model_influence_set_hmac,
+    projection_record_to_transport,
 )
 from backend.app.rag.serving_contracts import (
     ExplicitApprovalProvenance,
@@ -213,7 +214,7 @@ class AssistantEvidenceWriter:
             conversation_id=conversation.id,
             role='assistant',
             content=projection.content,
-            citations=list(projection.evidence.citations),
+            citations=[projection_record_to_transport(citation) for citation in projection.evidence.citations],
             source_ids=list(projection.evidence.source_ids),
             source_links=list(projection.evidence.source_links),
             source_snippets=list(projection.evidence.source_snippets),

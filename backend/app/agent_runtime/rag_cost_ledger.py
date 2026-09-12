@@ -59,6 +59,7 @@ from backend.app.agent_runtime.rag_safety_identity import (
 from backend.app.agent_runtime.rag_v2_identity import exact_utf8_bytes
 from backend.app.agents.rag_orchestrator_agent.v2_answer import (
     PreparedAnswerInvocation,
+    _prepared_invocation_authority_payload,
 )
 from backend.app.db.initialization import TrustedPostgresRuntimeHealth
 from backend.app.models.agent_runs import AgentRun
@@ -68,6 +69,7 @@ from backend.app.models.rag_serving import (
     RagLexicalServingProjection,
     RagServingCorpusGeneration,
 )
+from backend.app.rag.evidence_projection import PreparedModelInfluenceSet
 from backend.app.rag.retrieval import (
     PreparedPaidCallBudget,
     PreparedQueryEmbedding,
@@ -751,9 +753,28 @@ class RagCostLedger:
     @_runtime_health_effect
     def bind_answer_budget(
         self, *, run_id: int, prepared: PreparedPaidCallBudget,
+        invocation: PreparedAnswerInvocation | None = None,
+        model_influence: PreparedModelInfluenceSet | None = None,
     ) -> None:
         """Narrow an undispatched ceiling once; failed commit never grants dispatch."""
         self._cost_policy.validate_prepared_budget(prepared)
+        projection_identity = {}
+        if invocation is not None or model_influence is not None:
+            if (type(invocation) is not PreparedAnswerInvocation
+                or type(model_influence) is not PreparedModelInfluenceSet
+                or invocation.budget != prepared
+                or invocation.model_config_snapshot_hmac != self._cost_policy.answer_model_config_snapshot_hmac
+                or invocation.rendered_input_hmac != model_influence.rendered_input_hmac
+                or invocation.prepared_invocation_hmac != self._cost_policy.sign_answer_artifact(
+                    'prepared_invocation', _prepared_invocation_authority_payload(invocation))):
+                raise RagCostLedgerError('answer projection identity is invalid')
+            self._cost_policy.verify_answer_model_influence(
+                invocation.evidence_slots, invocation.model_influence, prepared_set=model_influence)
+            projection_identity = {
+                'rendered_input_hmac': invocation.rendered_input_hmac,
+                'answer_model_config_snapshot_hmac': invocation.model_config_snapshot_hmac,
+                'prepared_model_influence_observation_hmac': model_influence.aggregate_observation_hmac,
+            }
         with self._answer_binding_lock:
             reservation = self._answer_reservations.get(run_id)
             if (
@@ -766,6 +787,11 @@ class RagCostLedger:
             ):
                 raise RagCostLedgerError('answer ceiling binding is unavailable')
             parent, rows = self._locked_run(run_id)
+            if invocation is not None and (
+                invocation.retrieval_query_hmac != (parent.metadata_ or {}).get('retrieval_query_hmac')
+                or any((parent.metadata_ or {}).get(key) is not None for key in projection_identity)
+            ):
+                raise RagCostLedgerError('answer projection identity changed')
             query, answer = rows
             if (
                 parent.status != 'running'
@@ -794,6 +820,7 @@ class RagCostLedger:
             parent.estimated_cost_usd = float(sum((Decimal(row.reserved_cost_usd) for row in rows), _ZERO))
             parent.metadata_ = {
                 **parent.metadata_,
+                **projection_identity,
                 'runtime_cost_snapshot_hmac': self._runtime_cost_identity(
                     agent_run_id=run_id,
                     components=[self._row_runtime_component(row) for row in rows],
@@ -1421,18 +1448,19 @@ class RagCostLedger:
         )
 
     @contextmanager
-    def _safe_pending_owner(self, run_id: int, *, embedding_only: bool):
+    def _safe_pending_owner(self, run_id: int, *, embedding_only: bool, paid_components: tuple[str, ...] | None = None):
         order = begin_rag_lock_order('ordinary')
         sidecar = order.acquire('provider_stable_sidecar')
         safety = order.acquire('provider_safety_rows')
         with ExitStack() as stack:
-            if embedding_only:
-                binding = self._terminal_bindings.get((run_id, 'query_embedding'))
-                if binding is None:
-                    raise RagCostLedgerError('terminal embedding authority is unavailable')
+            components = paid_components if paid_components is not None else (('query_embedding',) if embedding_only else ())
+            if components:
+                bindings = tuple(self._terminal_bindings.get((run_id, component)) for component in components)
+                if any(binding is None for binding in bindings):
+                    raise RagCostLedgerError('terminal paid authority is unavailable')
                 connection = stack.enter_context(self._provider_connection_factory())
                 stack.enter_context(self._provider_safety.finalization_barrier(
-                    connection, ((binding.policy_snapshot, binding),),
+                    connection, tuple((binding.policy_snapshot, binding) for binding in bindings),
                     order=order, sidecar_capability=sidecar, safety_capability=safety,
                 ))
             # Zero dispatch skips provider singleton/family/latch entirely.
@@ -1444,6 +1472,53 @@ class RagCostLedger:
                 order.acquire(stage)
             order.finish()
             yield
+
+    @_runtime_health_effect
+    def finalize_inter_component_failure(self, *, run_id: int, outcome: str) -> RagRunTerminal:
+        """End this request between dispatches without changing any paid child."""
+        if outcome not in {
+            'budget_exceeded', 'retriever_not_configured', 'retriever_unavailable',
+            'runtime_version_unavailable', 'model_unavailable', 'model_provider_failed',
+            'provider_safety_unavailable', 'structured_output_invalid', 'citation_validation_failed',
+            'persistence_failed', 'unexpected_internal_error',
+        }:
+            raise ValueError('inter-component failure outcome is invalid')
+        if any((run_id, component) not in self._admission_snapshots for component in _COMPONENT_ORDER):
+            raise RagCostLedgerError('request-owned admission is unavailable')
+        paid = tuple(component for component in _COMPONENT_ORDER if (run_id, component) in self._terminal_bindings)
+        with self._answer_binding_lock, self._safe_pending_owner(run_id, embedding_only=False, paid_components=paid):
+            parent, rows = self._locked_run(run_id)
+            if (parent.status != 'running' or parent.completed_at is not None
+                or parent.run_record_phase not in {'admission', 'cost_finalized_pending_projection'}
+                or any((run_id, component) in self._active_grants for component in _COMPONENT_ORDER)):
+                raise RagCostLedgerError('inter-component terminalization is unavailable')
+            if parent.run_record_phase == 'cost_finalized_pending_projection':
+                expected = self._pending_projection_identities.get(run_id)
+                actual = (parent.projection_owner_fence_hmac,
+                          parent.metadata_.get('security_scope_fingerprint'),
+                          parent.metadata_.get('runtime_cost_snapshot_hmac'))
+                current_hmac = self._runtime_cost_identity(
+                    agent_run_id=run_id, components=[self._row_runtime_component(row) for row in rows],
+                    parent_outcome=None, parent_run_record_phase='cost_finalized_pending_projection',
+                    parent_status='running', snapshot_stage='pre_projection',
+                )
+                if expected is None or expected != actual or current_hmac != expected[2]:
+                    raise RagCostLedgerError('committed pending projection changed')
+            for row in rows:
+                if row.component in paid:
+                    self._require_terminal_cost_row(run_id, row)
+                elif (row.attempted is not False or row.dispatch_count != 0
+                      or row.dispatch_state not in {'not_attempted', 'terminal'}
+                      or row.charged_cost_usd != _ZERO or row.dispatch_fence_hmac is not None):
+                    raise RagCostLedgerError('undispatched component changed')
+            for row in rows:
+                if row.component not in paid:
+                    self._make_terminal_zero(row)
+            parent.projection_owner_fence_hmac = None
+            self._answer_reservations.pop(run_id, None)
+            self._admission_budgets.pop((run_id, 'answer_generation'), None)
+            self._pending_projection_identities.pop(run_id, None)
+            return self._finalize_failed_run(parent, rows, outcome=outcome, completed_at=None, admission_only=False)
 
     def _commit_safe_pending(
         self, *, run_id: int, corpus_generation: int,

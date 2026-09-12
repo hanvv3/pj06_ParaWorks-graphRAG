@@ -1,6 +1,42 @@
 # ParaWorks Harness Session Handoff
 
-Updated: 2026-09-01
+Updated: 2026-09-12
+
+## 2026-09-12 D Core Task14 graph integration candidate
+
+- Actual 26-node LangGraph is compiled once without checkpoints and registered
+  in every rollout mode. Main exposes sealed RAG registries and
+  `rag_application_facade`; legacy service and Review registries remain separate.
+  Checkpoint service failure does not block RAG, while key/bootstrap/static
+  failures remain fatal. Routes are not changed until Task15 review/approval.
+- Request factories own sessions, ledger state, provider clients and fresh
+  finalizers. Provider-free default construction is keyless; paid providers are
+  lazy. PostgreSQL phase2 uses a fresh pinned database authority and a new safety
+  service for the same durable root, not phase1's one-use connection transport.
+  Pending read transactions end before the finalizer. SQLite keeps the existing
+  one `BEGIN IMMEDIATE` coordinator scope and zero external costs.
+- Internal integration changes: concrete answer-budget binding atomically binds
+  existing invocation/influence metadata; inter-component failures preserve paid
+  children and zero untouched siblings; exact Assistant product returns the
+  committed canonical carrier. Citation JSON uses the existing canonical
+  transport converter, preserving durable objects/Korean snippets/permissions.
+  Per-request owned answer/embedding HTTP clients close without closing injected
+  external routes or replacing the primary failure.
+- Broad gate: `661 passed, 1 PostgreSQL URL skip, 3 rollback-fault SAWarnings` in
+  264.53s. Final Task14/router/transport supplement: `195 passed` in 152.01s,
+  covering late typed SQLite rollback and owned-client cleanup changes. Ruff,
+  compilation/import, diff and added-line credential checks passed. No
+  network/provider/Docker/.env access.
+- Candidate is awaiting independent review, **not CLEAN or release ready**.
+  Review integration diff after accepted `49e927b`; earlier `a5713ec`, `ca8d82b`,
+  `908f96d`, `49e927b` prerequisite slices already have accepted review evidence.
+  Detailed interfaces, tests and limitations:
+  `.superpowers/sdd/2026-08-31-deliverable-d-core-rag-answer-graph-v2/task-14-report.md`.
+- Explicit handoffs: Task16 delivery/HTTP algebra; Task18 post-user terminal
+  error-message persistence and phase1 final-message ACK/rollback; Task21 actual
+  shadow executor/comparison. Task14 covers successful/canned-safe Assistant
+  persistence, not terminal-error message persistence. Real PostgreSQL locking
+  and default-factory execution remain unverified without the disposable URL.
 
 ## 2026-09-01 Deliverable D Task 12 dispatch/accounting closure
 
