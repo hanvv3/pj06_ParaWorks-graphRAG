@@ -137,7 +137,8 @@ def resolve_current_permission_context(
         db=context.services.db, actor=context.actor
     )
     if not scope.allowed_permission_levels:
-        raise PermissionError('permission_denied')
+        from backend.app.agent_runtime.rag_application import RagApplicationError
+        raise RagApplicationError('permission_denied')
     return {
         'security_scope': scope,
         'scope_fingerprint': security_scope_fingerprint(
@@ -241,6 +242,7 @@ def prepare_and_call_query_embedding(
             outcome=delivery.component_final.terminal_outcome,
             charged_cost_usd=delivery.component_final.parent_total_charged_cost_usd,
             query_embedding_attempted=True,
+            error_component=delivery.component_final.component,
         )
         return output
     return {
@@ -497,6 +499,7 @@ def _finalize_provider_free(state, context):
 def _projection_output(state, projection, *, charge):
     projection = _committed_canonical(projection)
     return {
+        'committed_projection': projection,
         'outcome': projection.outcome,
         'answer_blocks': None,
         'selected_slot_ids': (),
@@ -666,6 +669,7 @@ def generate_structured_answer_blocks(
                 prepared
             ),
             'answer_generation_attempted': False,
+            'deterministic_answer_generated': True,
         }
     try:
         transport = _transport(services)
@@ -701,9 +705,13 @@ def generate_structured_answer_blocks(
             outcome=delivery.component_final.terminal_outcome,
             charged_cost_usd=delivery.component_final.parent_total_charged_cost_usd,
             answer_generation_attempted=True,
+            error_component=delivery.component_final.component,
         )
         return output
-    return {'validated_answer': delivery.output, 'answer_generation_attempted': True}
+    return {
+        'validated_answer': delivery.output, 'answer_generation_attempted': True,
+        'generation_component': delivery.component_final,
+    }
 
 
 @_node
@@ -831,6 +839,7 @@ def finalize_run_and_answer_projection_or_assistant_message(
         )
     projection = _committed_canonical(projection)
     return {
+        'committed_projection': projection,
         'outcome': projection.outcome,
         'answer_blocks': state['validated_answer']
         if projection.outcome == 'supported'

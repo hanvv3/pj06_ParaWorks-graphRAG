@@ -2,6 +2,33 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task15 direct API candidate
+
+- Ask/Search now invoke the app-state facade and shared HTTP mapper. Frozen V1
+  DTOs use immutable tuples internally and ordinary JSON/OpenAPI arrays. All
+  nullable keys remain present except conditional Search permission_notice.
+- Graph output carries the committed canonical projection and request-owned
+  run/component metadata. Delivery never rereads serving evidence or cost rows;
+  output permission includes all committed model influence. Actual generation
+  usage and total paid cost survive canned-answer conversion. Direct scanner
+  outage is typed503 before request dependencies or mutations.
+- Two safe200 finalizer literals were corrected to spec14/15.1 before hashing
+  and commit. Task18 must still correct the budget-failure and
+  generation-failure canned literals to spec14 when implementing terminal
+  Assistant persistence; Task16/18/21 remain outstanding.
+- API test fixture gives startup an isolated SQLite DB and facade requests
+  independent sessions on committed fixture data. Deleted route-builder test
+  injections moved to the facade/service boundary without changing assertions.
+- Verification: focused 88 passed in59.33s; affected20-file gate380 passed,
+  1 absent PostgreSQL URL skip, 2 exact known Slack baseline failures in262.66s,
+  no warnings. The failures are the two quality-suite checkpoint-count/cache
+  cases frozen in backend/tests/release_contracts.py. Do not hide or fix them
+  during D Core. Final legacy-outcome-only supplement32 passed,45 deselected
+  in13.68s; public legacy bytes unchanged. Static/compile/whitespace gates pass.
+- Independent review pending; no CLEAN/full D Core completion or rollout
+  activation. Full RED/GREEN commands, scope and caveats:
+  .superpowers/sdd/2026-08-31-deliverable-d-core-rag-answer-graph-v2/task15-report.md.
+
 ## 2026-09-12 D Core Task14 CLEAN; Task15 next
 
 - Independent integration review and both scoped fix reviews are complete.

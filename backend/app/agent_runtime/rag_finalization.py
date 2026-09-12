@@ -2072,9 +2072,9 @@ def _empty_search_projection(settings: Settings) -> V1EvidenceProjection:
 
 def _canned_text(identity: RagCannedMessageIdentity | None) -> str:
     values = {
-        'rag-canned-no-evidence:v1': '질문에 답할 수 있는 근거를 찾지 못했습니다.',
+        'rag-canned-no-evidence:v1': '권한 내에서 확인 가능한 근거를 찾지 못했습니다.',
         'rag-canned-evidence-unavailable:v1': (
-            '근거가 변경되어 안전하게 답변할 수 없습니다. 다시 시도해 주세요.'
+            '이 답변의 근거를 더 이상 확인할 수 없습니다. 다시 생성해 주세요.'
         ),
         'rag-canned-budget-failure:v1': '현재 비용 한도 내에서 답변할 수 없습니다.',
         'rag-canned-generation-failure:v1': '답변을 생성하지 못했습니다. 다시 시도해 주세요.',

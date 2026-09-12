@@ -1,5 +1,23 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core direct API delivery candidate
+
+- Task15 routes Ask/Search through the request-owned facade with frozen exact
+  V1 DTOs, recursive nullable-field preservation and an allowlisted HTTP error
+  contract. Enforce delivery copies committed evidence, run identity and actual
+  usage/cost; legacy and non-cutover values remain unchanged.
+- Real graph-to-HTTP tests cover evidence loss before/after paid generation,
+  embedding-only safe answers, fallback, strict output permissions, scanner
+  outage with zero mutation, and Unicode validation. The two safe canned
+  literals now match the approved spec before identity hashing and commit.
+- Focused gate: 88 passed. Broader affected gate: 380 passed, one absent
+  PostgreSQL URL skip and two exact deferred Slack baseline failures; zero new
+  non-Slack failures and no warnings. Final legacy classifier supplement:
+  32 passed, 45 deselected. Ruff, compilation and whitespace checks passed.
+- Candidate awaits independent review. No rollout activation, paid provider,
+  real PostgreSQL proof, Assistant delivery algebra, terminal-error persistence
+  or shadow executor is claimed.
+
 ## 2026-09-12 D Core answer graph review complete
 
 - Task14 integration and scoped corrections are independently CLEAN at

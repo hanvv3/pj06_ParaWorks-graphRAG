@@ -5,12 +5,13 @@ import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
+from backend.app.agent_runtime import rag_application as search_application
 from backend.app.agent_runtime.keyed_mutation_guard import (
     KeyedMutationGuard,
     acquire_projection,
     lock_runtime_state,
 )
-from backend.app.api.v1 import search as search_api
+from backend.app.agents.rag_orchestrator_agent import service as rag_service
 from backend.app.connectors.base import SourceEvent
 from backend.app.core.config import Settings
 from backend.app.documents.service import (
@@ -449,14 +450,14 @@ def test_hostile_connector_parser_metadata_never_reaches_chunk_index_or_search(
             )
 
     monkeypatch.setattr(
-        search_api,
-        '_pgvector_search_store',
+        search_application,
+        '_legacy_pgvector_search_store',
         lambda **_kwargs: SingleDocumentSearchStore(),
     )
     # This regression targets response projection only. The separate live-serving
     # boundary has its own schedule-heavy tests and is left real elsewhere.
     monkeypatch.setattr(
-        search_api,
+        rag_service,
         'filter_live_serving_candidates',
         lambda *, db, candidates: candidates,
     )

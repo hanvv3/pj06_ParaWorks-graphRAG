@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -48,14 +49,24 @@ def db_session() -> Generator[Session, None, None]:
 
 @pytest.fixture
 def client(db_session: Session) -> Generator[TestClient, None, None]:
-    app = create_app()
+    startup_engine = create_engine(
+        'sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(startup_engine)
+    app = create_app(workflow_session_factory=sessionmaker(bind=startup_engine))
 
     def override_get_db() -> Generator[Session, None, None]:
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:
-        test_client.cookies.set('paraworks_csrf', 'test-csrf-token', domain='testserver.local', path='/')
+        app.state.rag_application_facade = replace(
+            app.state.rag_application_facade,
+            _session_factory=sessionmaker(bind=db_session.get_bind(), autoflush=False),
+        )
+        test_client.cookies.set(
+            'paraworks_csrf', 'test-csrf-token', domain='testserver.local', path='/'
+        )
         original_request = test_client.request
 
         def csrf_cookie_token() -> str | None:
@@ -78,3 +89,4 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
         test_client.request = request_with_csrf
         yield test_client
     app.dependency_overrides.clear()
+    startup_engine.dispose()

@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from types import MappingProxyType
-from typing import Literal, Protocol, TypedDict
+from typing import Literal, NotRequired, Protocol, TypedDict
 
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from backend.app.agent_runtime.rag_cost_ledger import RagCostLedger
 from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
 from backend.app.agent_runtime.rag_finalization import (
     AssistantProjectionTarget,
+    CanonicalRagProjection,
     PreparedRagFinalization,
     RagFinalizationService,
     RagProjectionPending,
@@ -22,6 +23,7 @@ from backend.app.agent_runtime.rag_provider_transport import (
 )
 from backend.app.agent_runtime.rag_runtime_contracts import (
     AuthorizedProviderPolicySnapshot,
+    RagComponentFinal,
     RagPaidComponent,
 )
 from backend.app.agent_runtime.rag_sqlite_smoke import SQLiteRagGraphScope
@@ -138,6 +140,11 @@ class RagGraphInput(TypedDict):
 
 
 class RagGraphOutput(TypedDict):
+    committed_projection: NotRequired[CanonicalRagProjection]
+    run_id: NotRequired[int]
+    generation_component: NotRequired[RagComponentFinal]
+    deterministic_answer_generated: NotRequired[bool]
+    error_component: NotRequired[RagPaidComponent]
     outcome: RagResultOutcome
     answer_blocks: ValidatedAnswerBlocks | None
     selected_slot_ids: tuple[EvidenceSlotId, ...]

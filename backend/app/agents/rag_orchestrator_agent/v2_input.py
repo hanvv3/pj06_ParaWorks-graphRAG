@@ -43,6 +43,10 @@ class RagInputSafetyError(ValueError):
         super().__init__('rag input safety policy blocked the request')
 
 
+class RagInputScannerUnavailableError(RuntimeError):
+    code = 'input_scanner_unavailable'
+
+
 def prepare_direct_request_text(text: str, *, key: bytes) -> PreparedRagRequestText:
     caller_text = StrictUnicodeScalarValidator.validate(text)
     normalized = _normalized_copy(caller_text)
@@ -70,7 +74,9 @@ def prepare_assistant_request_text(
     if not answer_question:
         raise ValueError('assistant message content is invalid')
 
-    prior_user_messages = _validated_prior_user_messages(prior_messages, answer_question)
+    prior_user_messages = _validated_prior_user_messages(
+        prior_messages, answer_question
+    )
     context_lines = _context_lines(prior_user_messages)
     retrieval_query = _bounded_contextual_query(context_lines, answer_question)
     _scan_value(retrieval_query)
@@ -130,7 +136,13 @@ def _scan_current(caller_text: str, normalized: str) -> None:
 
 
 def _scan_value(value: str) -> None:
-    if not scan_auto_review_plaintext(value).allowed:
+    try:
+        allowed = scan_auto_review_plaintext(value).allowed
+        if type(allowed) is not bool:
+            raise TypeError('invalid scanner decision')
+    except Exception:
+        raise RagInputScannerUnavailableError() from None
+    if not allowed:
         raise RagInputSafetyError()
 
 
@@ -148,14 +160,18 @@ def _validated_prior_user_messages(
         StrictUnicodeScalarValidator.validate(message.content)
         validated.append(message)
     try:
-        ordered = sorted(validated, key=lambda message: (message.created_at, message.message_id))
+        ordered = sorted(
+            validated, key=lambda message: (message.created_at, message.message_id)
+        )
     except TypeError as exc:
         raise ValueError('assistant context ordering is invalid') from exc
     users = [message for message in ordered if message.role == 'user']
     if users and users[-1].content.strip() == answer_question:
         users.pop()
     return [
-        message for message in users if scan_auto_review_plaintext(message.content).allowed
+        message
+        for message in users
+        if scan_auto_review_plaintext(message.content).allowed
     ]
 
 
@@ -176,10 +192,16 @@ def _context_lines(messages: Sequence[AssistantContextMessage]) -> list[str]:
     return lines[-6:]
 
 
-def _bounded_contextual_query(context_lines: Sequence[str], answer_question: str) -> str:
+def _bounded_contextual_query(
+    context_lines: Sequence[str], answer_question: str
+) -> str:
     lines = list(context_lines)
     while True:
-        query_lines = (["최근 대화:"] if lines else []) + lines + [f'현재 질문: {answer_question}']
+        query_lines = (
+            (['최근 대화:'] if lines else [])
+            + lines
+            + [f'현재 질문: {answer_question}']
+        )
         query = '\n'.join(query_lines)
         if len(query) <= 8_000:
             return query

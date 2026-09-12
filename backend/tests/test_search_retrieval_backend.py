@@ -1,4 +1,4 @@
-from backend.app.api.v1 import search as search_api
+from backend.app.agent_runtime import rag_application as search_application
 from backend.app.core.demo_auth import DemoUser
 from backend.app.models import DocumentChunk
 from backend.app.rag.vector_store import VectorDocument, VectorMatch, VectorSearchResult
@@ -42,7 +42,9 @@ def test_search_uses_pgvector_adapter_when_available(
     chunk = db_session.query(DocumentChunk).one()
 
     class FakeVectorStore:
-        def search(self, *, query: str, user: DemoUser, limit: int = 5) -> VectorSearchResult:
+        def search(
+            self, *, query: str, user: DemoUser, limit: int = 5
+        ) -> VectorSearchResult:
             assert query == 'Redis vector query'
             assert user.id == 'employee-mina'
             assert limit == 5
@@ -69,7 +71,11 @@ def test_search_uses_pgvector_adapter_when_available(
                 hidden_match_count=1,
             )
 
-    monkeypatch.setattr(search_api, '_pgvector_search_store', lambda *, db, settings: FakeVectorStore())
+    monkeypatch.setattr(
+        search_application,
+        '_legacy_pgvector_search_store',
+        lambda *, db, settings: FakeVectorStore(),
+    )
 
     response = client.post(
         '/api/v1/search',
@@ -115,8 +121,8 @@ def test_search_pgvector_candidate_without_live_identity_is_dropped(
             )
 
     monkeypatch.setattr(
-        search_api,
-        '_pgvector_search_store',
+        search_application,
+        '_legacy_pgvector_search_store',
         lambda *, db, settings: FakeVectorStore(),
     )
 
@@ -158,8 +164,8 @@ def test_search_pgvector_candidate_with_stale_content_for_live_identity_is_dropp
             )
 
     monkeypatch.setattr(
-        search_api,
-        '_pgvector_search_store',
+        search_application,
+        '_legacy_pgvector_search_store',
         lambda *, db, settings: FakeVectorStore(),
     )
 

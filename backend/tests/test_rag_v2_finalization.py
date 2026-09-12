@@ -570,7 +570,7 @@ def test_post_generation_insufficient_requires_actual_answer_cost_and_discards_r
 
     assert projection.outcome == 'insufficient_evidence'
     assert projection.model_influence == ()
-    assert projection.answer_text == '질문에 답할 수 있는 근거를 찾지 못했습니다.'
+    assert projection.answer_text == '권한 내에서 확인 가능한 근거를 찾지 못했습니다.'
     assert 'raw provider reason' not in projection.answer_text
     assert answer.actual_input_tokens == 21
     assert answer.actual_output_tokens == 4
