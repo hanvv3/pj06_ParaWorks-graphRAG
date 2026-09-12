@@ -6781,3 +6781,23 @@ Cost/security note:
   `660 passed`, reviewer probes `7 passed`, and Ruff clean. This candidate is
   **DONE_WITH_CONCERNS** pending final independent rereview; no production
   runtime, rollout, Task 22+, push, merge, deploy, or Deliverable E work changed.
+
+## 2026-09-13 Deliverable D Core Task 21 review fix round 4
+
+- The final F10 review gap was proof coverage, not a runtime defect. A new
+  parameterized golden negative-control matrix reaches all seven guarded
+  socket, sync/async HTTP, direct-provider, and production-embedding seams from
+  a real LangChain keyword Runnable. Deterministic outer fakes or the guard
+  stop every attempt before live I/O and the expected network/provider category
+  records exactly one.
+- Success and injected-error paths restore the exact seven prior hooks. A
+  synchronized two-thread test proves the global `RLock` serializes cases,
+  isolates their counters, terminates without deadlock, and leaks no patch.
+  Removing all guards as a temporary mutation produced exactly `7 failed`;
+  restoring them produced `10 passed`.
+- Fresh local evidence is golden plus review probes `207 passed` and the
+  overlapping direct-impact Task 21 regression `609 passed in 80.50s`; Ruff is
+  rerun before commit. No production runtime, live provider/network, rollout,
+  PostgreSQL release validation, Task 22+, push, merge, deploy, or Deliverable
+  E work is included. Status remains **DONE_WITH_CONCERNS** pending independent
+  rereview.

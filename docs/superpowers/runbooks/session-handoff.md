@@ -5350,3 +5350,25 @@ tests passed with 53 tests; ruff passed.
   are green. Relevant Task 21 regression is `660 passed in 191.82s`. Await
   independent rereview. No production code, live I/O, rollout, Task 22+, push,
   merge, or deploy.
+
+## 2026-09-13 Task 21 review fix round 4 handoff
+
+- Rereview of `45a117af4c4415159e2459591ed30cd589409b7f`
+  resolved F9 and left Minor F10: only two of seven process-global guard seams
+  had negative controls, with no tracked restoration or concurrency proof.
+- The provider-free golden module now injects all seven socket, socket-connect,
+  sync/async HTTP, direct-provider, and production-embedding boundaries from
+  the real keyword Runnable. Every operation is blocked by deterministic test
+  code before live I/O and increments only its expected category.
+- Exact hook identities are restored after both normal and exceptional exits.
+  A coordinated two-thread test requires serialization, per-case count
+  isolation, no deadlock, and full restoration. Temporary removal of all seven
+  guard patches failed exactly seven cases; restored focused GREEN is
+  `10 passed`.
+- Fresh golden plus reviewer probes are `207 passed`; the overlapping
+  direct-impact Task 21 suite is `609 passed in 80.50s`. An inaccessible
+  default Windows pytest temp root caused setup-only errors in one broader
+  attempt; rerunning with an explicit writable `--basetemp` was clean and no
+  application assertion failed. Await independent rereview before Task 22.
+  No production code, live provider/network, paid model, rollout, PostgreSQL
+  release gate, push, merge, or deploy occurred.

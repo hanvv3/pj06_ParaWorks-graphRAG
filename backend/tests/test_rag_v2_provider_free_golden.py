@@ -24,6 +24,88 @@ _ORIGINAL_ASYNC_HTTPX_SEND = httpx.AsyncClient.send
 _EXTERNAL_GUARD_LOCK = threading.RLock()
 
 
+class _BlockedBeforeLiveIOError(RuntimeError):
+    pass
+
+
+_GUARDED_BOUNDARIES = (
+    ('socket.create_connection', 'network_calls'),
+    ('socket.socket.connect', 'network_calls'),
+    ('socket.socket.connect_ex', 'network_calls'),
+    ('httpx.Client.send', 'network_calls'),
+    ('httpx.AsyncClient.send', 'network_calls'),
+    ('_DirectOpenAIProviderClient.send', 'external_provider_calls'),
+    ('OpenAIEmbeddingModel.embed_many', 'external_provider_calls'),
+)
+
+
+def _guard_hooks():
+    return {
+        'socket.create_connection': socket.create_connection,
+        'socket.socket.connect': socket.socket.connect,
+        'socket.socket.connect_ex': socket.socket.connect_ex,
+        'httpx.Client.send': httpx.Client.send,
+        'httpx.AsyncClient.send': httpx.AsyncClient.send,
+        '_DirectOpenAIProviderClient.send': _DirectOpenAIProviderClient.send,
+        'OpenAIEmbeddingModel.embed_many': OpenAIEmbeddingModel.embed_many,
+    }
+
+
+def _set_guard_hook(monkeypatch, boundary, replacement):
+    owner, attribute = {
+        'socket.create_connection': (socket, 'create_connection'),
+        'socket.socket.connect': (socket.socket, 'connect'),
+        'socket.socket.connect_ex': (socket.socket, 'connect_ex'),
+        'httpx.Client.send': (httpx.Client, 'send'),
+        'httpx.AsyncClient.send': (httpx.AsyncClient, 'send'),
+        '_DirectOpenAIProviderClient.send': (_DirectOpenAIProviderClient, 'send'),
+        'OpenAIEmbeddingModel.embed_many': (OpenAIEmbeddingModel, 'embed_many'),
+    }[boundary]
+    monkeypatch.setattr(owner, attribute, replacement)
+
+
+def _call_guarded_boundary(boundary):
+    if boundary == 'socket.create_connection':
+        return socket.create_connection(('example.test', 443))
+    if boundary in {'socket.socket.connect', 'socket.socket.connect_ex'}:
+        connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            method = getattr(connection, boundary.rsplit('.', maxsplit=1)[1])
+            return method(('example.test', 443))
+        finally:
+            connection.close()
+    if boundary == 'httpx.Client.send':
+        return httpx.Client.send(object(), object())
+    if boundary == 'httpx.AsyncClient.send':
+        coroutine = httpx.AsyncClient.send(object(), object())
+        try:
+            return coroutine.send(None)
+        except StopIteration as stopped:
+            return stopped.value
+        finally:
+            coroutine.close()
+    if boundary == '_DirectOpenAIProviderClient.send':
+        return _DirectOpenAIProviderClient.send(
+            object(), b'{}', timeout_seconds=30, max_retries=0
+        )
+    if boundary == 'OpenAIEmbeddingModel.embed_many':
+        return OpenAIEmbeddingModel.embed_many(object(), ['golden'])
+    raise AssertionError(f'unknown guarded boundary: {boundary}')
+
+
+def _install_block_before_live_io(monkeypatch, boundary, blocked_calls):
+    if boundary == 'httpx.AsyncClient.send':
+        async def blocked(*_args, **_kwargs):
+            blocked_calls.append(boundary)
+            raise _BlockedBeforeLiveIOError(boundary)
+    else:
+        def blocked(*_args, **_kwargs):
+            blocked_calls.append(boundary)
+            raise _BlockedBeforeLiveIOError(boundary)
+    _set_guard_hook(monkeypatch, boundary, blocked)
+    return blocked
+
+
 def _cases():
     return json.loads(FIXTURE.read_text(encoding='utf-8'))['cases']
 
@@ -510,3 +592,173 @@ def test_injected_external_provider_send_is_observed_by_zero_call_gate(monkeypat
 
     assert len(actual_calls) == 1
     assert observation['external_provider_calls'] == 1
+
+
+@pytest.mark.parametrize(
+    ('boundary', 'counter_name'),
+    _GUARDED_BOUNDARIES,
+    ids=[boundary for boundary, _counter_name in _GUARDED_BOUNDARIES],
+)
+def test_every_external_boundary_is_counted_and_blocked_before_live_io(
+    monkeypatch,
+    boundary,
+    counter_name,
+):
+    """Catches removing any guarded seam while a real Runnable can reach it."""
+    from backend.app.rag.keyword_retriever import KeywordEvidenceRetriever
+
+    blocked_calls = []
+    _install_block_before_live_io(monkeypatch, boundary, blocked_calls)
+    original_invoke = KeywordEvidenceRetriever.invoke
+
+    def regressed_invoke(self, *args, **kwargs):
+        try:
+            _call_guarded_boundary(boundary)
+        except _BlockedBeforeLiveIOError:
+            pass
+        except RuntimeError as exc:
+            assert str(exc) == 'golden network call blocked'
+            blocked_calls.append(boundary)
+        else:
+            raise AssertionError(f'{boundary} was not blocked before live I/O')
+        return original_invoke(self, *args, **kwargs)
+
+    monkeypatch.setattr(KeywordEvidenceRetriever, 'invoke', regressed_invoke)
+    case = next(case for case in _cases() if case['backend'] == 'keyword')
+
+    observation = _execute_provider_free_case(case)
+
+    other_counter = (
+        'external_provider_calls'
+        if counter_name == 'network_calls'
+        else 'network_calls'
+    )
+    assert blocked_calls == [boundary]
+    assert observation[counter_name] == 1
+    assert observation[other_counter] == 0
+
+
+def test_external_guard_restores_all_prior_hooks_after_success(monkeypatch):
+    """Catches leaking any process-global guard after a successful Runnable."""
+    prior_hooks = {}
+    blocked_calls = []
+    for boundary, _counter_name in _GUARDED_BOUNDARIES:
+        prior_hooks[boundary] = _install_block_before_live_io(
+            monkeypatch, boundary, blocked_calls
+        )
+
+    case = next(case for case in _cases() if case['backend'] == 'keyword')
+    observation = _execute_provider_free_case(case)
+
+    assert observation['network_calls'] == 0
+    assert observation['external_provider_calls'] == 0
+    assert blocked_calls == []
+    assert _guard_hooks() == prior_hooks
+
+
+def test_external_guard_restores_all_prior_hooks_after_runnable_error(monkeypatch):
+    """Catches exceptional exit leaving a process-global guard installed."""
+    from backend.app.rag.keyword_retriever import KeywordEvidenceRetriever
+
+    prior_hooks = {}
+    blocked_calls = []
+    for boundary, _counter_name in _GUARDED_BOUNDARIES:
+        prior_hooks[boundary] = _install_block_before_live_io(
+            monkeypatch, boundary, blocked_calls
+        )
+
+    class ExpectedRunnableError(RuntimeError):
+        pass
+
+    def raise_from_runnable(self, *args, **kwargs):
+        raise ExpectedRunnableError('injected runnable failure')
+
+    monkeypatch.setattr(KeywordEvidenceRetriever, 'invoke', raise_from_runnable)
+    case = next(case for case in _cases() if case['backend'] == 'keyword')
+
+    with pytest.raises(ExpectedRunnableError, match='injected runnable failure'):
+        _execute_provider_free_case(case)
+
+    assert blocked_calls == []
+    assert _guard_hooks() == prior_hooks
+
+
+def test_concurrent_external_guards_serialize_and_keep_case_counts_isolated(
+    monkeypatch,
+):
+    """Catches cross-case counters, hook leakage, or deadlock under concurrency."""
+    from backend.app.rag.keyword_retriever import KeywordEvidenceRetriever
+
+    blocked_calls = []
+    create_blocker = _install_block_before_live_io(
+        monkeypatch, 'socket.create_connection', blocked_calls
+    )
+    provider_blocker = _install_block_before_live_io(
+        monkeypatch, '_DirectOpenAIProviderClient.send', blocked_calls
+    )
+    prior_hooks = _guard_hooks()
+    original_invoke = KeywordEvidenceRetriever.invoke
+    local = threading.local()
+    attempted = {
+        'network': threading.Event(),
+        'provider': threading.Event(),
+    }
+    state_lock = threading.Lock()
+    active_count = 0
+    max_active_count = 0
+    observations = {}
+    errors = []
+
+    def regressed_invoke(self, *args, **kwargs):
+        nonlocal active_count, max_active_count
+        mode = local.mode
+        other_mode = 'provider' if mode == 'network' else 'network'
+        with state_lock:
+            active_count += 1
+            max_active_count = max(max_active_count, active_count)
+        try:
+            assert attempted[other_mode].wait(timeout=5), 'peer never attempted case'
+            boundary = (
+                'socket.create_connection'
+                if mode == 'network'
+                else '_DirectOpenAIProviderClient.send'
+            )
+            with pytest.raises(_BlockedBeforeLiveIOError, match=boundary):
+                _call_guarded_boundary(boundary)
+            return original_invoke(self, *args, **kwargs)
+        finally:
+            with state_lock:
+                active_count -= 1
+
+    monkeypatch.setattr(KeywordEvidenceRetriever, 'invoke', regressed_invoke)
+    case = next(case for case in _cases() if case['backend'] == 'keyword')
+
+    def run_case(mode):
+        local.mode = mode
+        attempted[mode].set()
+        try:
+            observations[mode] = _execute_provider_free_case(case)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=run_case, args=('network',), daemon=True),
+        threading.Thread(target=run_case, args=('provider',), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert max_active_count == 1
+    assert observations['network']['network_calls'] == 1
+    assert observations['network']['external_provider_calls'] == 0
+    assert observations['provider']['network_calls'] == 0
+    assert observations['provider']['external_provider_calls'] == 1
+    assert blocked_calls.count('socket.create_connection') == 1
+    assert blocked_calls.count('_DirectOpenAIProviderClient.send') == 1
+    assert socket.create_connection is create_blocker
+    assert _DirectOpenAIProviderClient.send is provider_blocker
+    assert _guard_hooks() == prior_hooks
