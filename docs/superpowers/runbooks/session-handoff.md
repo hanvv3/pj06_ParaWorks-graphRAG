@@ -2,6 +2,38 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task15 review fix round 2
+
+- Round1 `dec62ac` addressed its three findings. Scoped rereview found the
+  earlier preclaim safety refusal still lost typed provenance and left an
+  admission running. Real blocked/drift refusals now have a dedicated ledger
+  type; graph nodes close the request-owned failed/final run before503. The
+  safety service's operational inspection subtype preserves base compatibility
+  while keeping actual SQL/OSError failures unexpected500, not policy503.
+- Paid embedding exposed an existing distinction: legitimate global safety
+  drift must block successful projection but still permit failed cost
+  accounting. The failure-only owner authenticates/locks the current whole-set
+  authority and checks the exact signed envelope across completion. It never
+  issues or refreshes bindings, readiness, grants, repairs or success projections.
+  Existing success/pending safety gates remain unchanged. Terminal paid
+  receipts and every paid-row field remain exact; only untouched children zero.
+- Safety-refusal closure checks current authority even without a paid child;
+  unrelated provider-free failures retain their prior no-authority dependency.
+  Missing/corrupt authority, forged/missing paid receipts, closure commit/ACK
+  failure or authority mutation across completion => persistence500, no503.
+- Self-review also found claim SELECT FOR UPDATE locks must be released before
+  restarting sidecar-first failure accounting. The authenticated preclaim
+  refusal now verifies no pending new/dirty/deleted writes, rolls back only its
+  read-only transaction once, and verifies release. Dirty writes remain intact;
+  rollback failure is persistence500 with no closure, retry or new claim.
+- Focused51 passed in89.58s; after-completion authority mutation4 passed in
+  11.04s; forged-binding followup1 passed in1.85s. Proportional8-file gate:
+  215 passed in324.71s, no warnings/skips. Subsequent read-release6 passed in
+  24.28s; final4-file gate150 passed in264.60s, no warnings/skips, after the
+  read-release patch. Ruff4 files, compile3 production, whitespace and staged
+  credential-pattern scan (zero matches) pass. No CLEAN claim; Task16/18/21
+  and prior PG/Slack caveats unchanged.
+
 ## 2026-09-12 D Core Task15 review fix round 1
 
 - Independent review of `84fb4f9` found three P2 real-path delivery gaps.

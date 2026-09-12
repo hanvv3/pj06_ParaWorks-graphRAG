@@ -204,3 +204,254 @@ def test_actual_paid_component_commit_failure_never_releases_or_resends(
     ).one()
     assert component.charged_cost_usd > 0
     assert component.charge_basis == ('actual' if unknown_ack else 'reserved')
+
+
+@pytest.mark.parametrize('case', ['query_ask', 'query_search', 'answer', 'paid_answer'])
+@pytest.mark.parametrize('failure', ['blocked', 'commit', 'unknown_ack', 'io', 'sql', 'after_barrier'])
+def test_actual_preclaim_safety_refusal_closes_only_authenticated_admission(
+    tmp_path, monkeypatch, case, failure
+):
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from backend.app.models.rag_runtime import AgentRunCostComponent
+
+    surface = 'search' if case == 'query_search' else 'ask'
+    if case.startswith('query'):
+        context, provider = _paid_context(tmp_path)
+        context = replace(context, surface=surface)
+        target = 'query_embedding'
+    else:
+        context, provider = _answer_context(tmp_path)
+        if case == 'paid_answer':
+            context = _with_paid_embedding_answer(context, provider)
+        target = 'answer_generation'
+    ledger = context.services.cost_ledger
+    transport = context.services.provider_transport
+    claim = ledger.claim_component
+    failures = []
+    finalization_transactions = []
+    finalize = ledger.finalize_inter_component_failure
+
+    def finalize_after_read_release(**kwargs):
+        finalization_transactions.append(ledger._session.in_transaction())
+        return finalize(**kwargs)
+
+    monkeypatch.setattr(ledger, 'finalize_inter_component_failure', finalize_after_read_release)
+
+    def fail(*args, **kwargs):
+        failures.append(failure)
+        if failure == 'sql':
+            raise SQLAlchemyError('private database error')
+        raise OSError('private storage error')
+
+    def mutate_after_commit():
+        from contextlib import contextmanager
+
+        @contextmanager
+        def already_locked():
+            # Fault injection on the owning thread: the outer barrier still
+            # owns the real sidecar. Avoid recursively acquiring its OS lock.
+            yield
+
+        failures.append(failure)
+        with monkeypatch.context() as patch:
+            patch.setattr(transport._safety._authority, 'locked', already_locked)
+            with transport._connection_factory() as connection:
+                transport._safety.block_remediation(
+                    connection,
+                    'answer_generation' if target == 'query_embedding' else 'query_embedding',
+                    category='provider_safety_unavailable', agent_run_id=161,
+                    input_tokens=0, output_tokens=0, cost_usd=Decimal('0'),
+                )
+
+    def block_before_claim(**kwargs):
+        if kwargs['component'] == target:
+            if failure in {'io', 'sql'}:
+                monkeypatch.setattr(transport._safety, '_binding', fail)
+            else:
+                with transport._connection_factory() as connection:
+                    transport._safety.block_remediation(
+                        connection, target, category='provider_safety_unavailable',
+                        agent_run_id=kwargs['run_id'], input_tokens=0, output_tokens=0,
+                        cost_usd=Decimal('0'),
+                    )
+                if failure == 'commit':
+                    monkeypatch.setattr(ledger._session, 'commit', fail)
+                elif failure == 'unknown_ack':
+                    monkeypatch.setattr(ledger, '_after_commit', fail)
+                elif failure == 'after_barrier':
+                    monkeypatch.setattr(ledger, '_after_commit', mutate_after_commit)
+        return claim(**kwargs)
+
+    monkeypatch.setattr(ledger, 'claim_component', block_before_claim)
+    with _graph_http(context) as http:
+        response = _post(http, surface)
+    expected = {
+        'blocked': (503, 'provider_safety_unavailable'),
+        'commit': (500, 'persistence_failed'),
+        'unknown_ack': (500, 'persistence_failed'),
+        'io': (500, 'unexpected_internal_error'),
+        'sql': (500, 'unexpected_internal_error'),
+        'after_barrier': (500, 'persistence_failed'),
+    }[failure]
+    assert response.status_code == expected[0]
+    assert response.json() == {'detail': {'code': expected[1]}}
+    assert len(provider.seen) == int(case == 'paid_answer')
+    assert len(failures) == int(failure != 'blocked')
+    assert finalization_transactions == ([] if failure in {'io', 'sql'} else [False])
+    parent = context.services.db.query(AgentRun).one()
+    if failure in {'blocked', 'unknown_ack', 'after_barrier'}:
+        assert parent.status == 'failed'
+        assert parent.run_record_phase == 'final'
+        assert parent.metadata_['outcome'] == 'provider_safety_unavailable'
+        assert parent.completed_at is not None
+    else:
+        assert parent.status == 'running'
+        assert parent.run_record_phase == 'admission'
+    rows = context.services.db.query(AgentRunCostComponent).all()
+    assert len(rows) == 2
+    for row in rows:
+        assert (row.agent_run_id, row.component) not in ledger._active_grants
+        if case == 'paid_answer' and row.component == 'query_embedding':
+            assert row.terminal_outcome == 'component_succeeded'
+            assert row.charged_cost_usd == Decimal('0.000001')
+            assert parent.total_charged_cost_usd == row.charged_cost_usd
+        else:
+            assert row.attempted is False
+            assert row.dispatch_count == 0
+            assert row.charged_cost_usd == 0
+            assert row.dispatch_state == (
+                'terminal' if failure in {'blocked', 'unknown_ack', 'after_barrier'} else 'not_attempted'
+            )
+    if failure == 'after_barrier':
+        # Both snapshots are authentic and whole-set-consistent. Only the
+        # changed envelope across the barrier prevents an acknowledged503.
+        with transport._connection_factory() as connection:
+            transport._safety._match_db_whole_set(
+                connection, transport._safety._read_unlocked(),
+            )
+
+
+@pytest.mark.parametrize('damage', [
+    None, 'missing_receipt', 'forged_receipt', 'missing_binding', 'forged_binding',
+    'paid_row', 'authority_missing', 'authority_changed',
+])
+def test_failure_only_accounting_preserves_paid_row_but_never_relaxes_success(
+    tmp_path, damage
+):
+    from backend.app.agent_runtime.rag_cost_ledger import RagCostPersistenceError
+    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+    from backend.app.models.rag_runtime import (
+        AgentRunCostComponent,
+        RagProviderSafetyAuthority,
+    )
+    from backend.tests.test_rag_task14_transport_delivery import _embedding_case
+
+    ledger, authority, grant, dispatch, provider, _ = _embedding_case(tmp_path)
+    authority.dispatch_and_finalize(grant=grant, prepared=dispatch)
+    row = ledger._session.query(AgentRunCostComponent).filter_by(
+        agent_run_id=141, component='query_embedding',
+    ).one()
+    before = {column.name: getattr(row, column.name) for column in row.__table__.columns}
+    with ledger.provider_connection_factory() as connection:
+        ledger.provider_safety_authority.block_remediation(
+            connection, 'answer_generation', agent_run_id=141,
+            category='provider_safety_unavailable', input_tokens=0, output_tokens=0,
+            cost_usd=Decimal('0'),
+        )
+    # The identical global/envelope drift must still refuse a success projection.
+    with pytest.raises(RagProviderSafetyError):
+        ledger.commit_embedding_only_pending(
+            run_id=141, corpus_generation=1, vector_index_generation=1,
+        )
+    if damage == 'missing_receipt':
+        ledger._terminal_cost_rows.pop((141, 'query_embedding'))
+    elif damage == 'forged_receipt':
+        ledger._terminal_cost_rows[(141, 'query_embedding')] = (('component', 'forged'),)
+    elif damage == 'missing_binding':
+        ledger._terminal_bindings.pop((141, 'query_embedding'))
+    elif damage == 'forged_binding':
+        ledger._terminal_bindings[(141, 'query_embedding')] = object()
+    elif damage == 'paid_row':
+        row.actual_input_tokens += 1
+        ledger._session.commit()
+    elif damage in {'authority_missing', 'authority_changed'}:
+        authority_row = ledger._session.get(RagProviderSafetyAuthority, 1)
+        if damage == 'authority_missing':
+            ledger._session.delete(authority_row)
+        else:
+            authority_row.envelope_digest = 'f' * 64
+        ledger._session.commit()
+    if damage is not None:
+        with pytest.raises(RagCostPersistenceError):
+            ledger.finalize_inter_component_failure(
+                run_id=141, outcome='provider_safety_unavailable',
+            )
+        assert ledger._session.get(AgentRun, 141).status == 'running'
+    else:
+        terminal = ledger.finalize_inter_component_failure(
+            run_id=141, outcome='provider_safety_unavailable',
+        )
+        assert terminal.status == 'failed'
+        assert terminal.run_record_phase == 'final'
+        ledger._session.refresh(row)
+        assert {column.name: getattr(row, column.name) for column in row.__table__.columns} == before
+    assert len(provider.seen) == 1
+
+
+@pytest.mark.parametrize('failure', ['rollback', 'dirty'])
+def test_preclaim_read_transaction_release_refuses_uncertainty_without_discard(
+    tmp_path, monkeypatch, failure
+):
+    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+
+    context, provider = _answer_context(tmp_path)
+    context = _with_paid_embedding_answer(context, provider)
+    ledger = context.services.cost_ledger
+    transport = context.services.provider_transport
+    claim = ledger.claim_component
+    ready = transport._safety.require_ready
+    rollbacks = []
+    closures = []
+    original_rollback = ledger._session.rollback
+
+    def rollback():
+        rollbacks.append('rollback')
+        raise OSError('private rollback error')
+
+    def dirty_ready(*args, **kwargs):
+        try:
+            return ready(*args, **kwargs)
+        except RagProviderSafetyError:
+            parent = ledger._session.get(AgentRun, 161)
+            parent.metadata_ = {**parent.metadata_, 'pending_test_write': True}
+            raise
+
+    def block(**kwargs):
+        if kwargs['component'] == 'answer_generation':
+            with transport._connection_factory() as connection:
+                transport._safety.block_remediation(
+                    connection, 'answer_generation', category='provider_safety_unavailable',
+                    agent_run_id=161, input_tokens=0, output_tokens=0, cost_usd=Decimal('0'),
+                )
+            if failure == 'rollback':
+                monkeypatch.setattr(ledger._session, 'rollback', rollback)
+            else:
+                monkeypatch.setattr(transport._safety, 'require_ready', dirty_ready)
+        return claim(**kwargs)
+
+    monkeypatch.setattr(ledger, 'claim_component', block)
+    monkeypatch.setattr(ledger, 'finalize_inter_component_failure', lambda **kwargs: closures.append(kwargs))
+    with _graph_http(context) as http:
+        response = _post(http, 'ask')
+    assert response.status_code == 500
+    assert response.json() == {'detail': {'code': 'persistence_failed'}}
+    assert len(provider.seen) == 1
+    assert closures == []
+    assert rollbacks == (['rollback'] if failure == 'rollback' else [])
+    assert ledger._session.in_transaction()
+    if failure == 'dirty':
+        assert ledger._session.dirty
+        with ledger._session.no_autoflush:
+            assert ledger._session.get(AgentRun, 161).metadata_['pending_test_write'] is True
+    original_rollback()

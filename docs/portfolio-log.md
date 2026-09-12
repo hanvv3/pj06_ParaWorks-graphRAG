@@ -1,5 +1,21 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core preclaim refusal accounting correction
+
+- Task15 round2 preserves authentic preclaim safety refusal through the graph
+  and acknowledges503 only after failed/final accounting. Operational SQL/I/O
+  errors remain distinct. Already-paid embedding cost and exact row identity
+  survive; undispatched work remains zero-call/zero-charge.
+- A failure-only authority barrier permits accounting after legitimate safety
+  drift without relaxing any successful serving/pending gate or refreshing a
+  paid binding. Invalid receipts, authority corruption and uncertain completion
+  return persistence500. Core215 cases passed. Read-lock release also guards
+  pending writes and rollback uncertainty; six focused cases and the final
+  150-test affected gate passed (no warnings/skips). Static/hygiene gates pass.
+  PostgreSQL lock-order behavior is not proven by these SQLite/fake tests.
+- Internal error-accounting correction only; scoped rereview required. No
+  rollout, live providers, PG proof or deferred Assistant/shadow work claimed.
+
 ## 2026-09-12 D Core direct API error-delivery review fixes
 
 - Task15 round1 fixes three independently identified real-path gaps: exact

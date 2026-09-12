@@ -33,7 +33,11 @@ from backend.app.agent_runtime.rag_cost_policy import (
 from backend.app.agent_runtime.rag_postgres_binding import (
     RagPostgresAdvisoryTransport,
 )
-from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
+from backend.app.agent_runtime.rag_provider_safety import (
+    RagProviderSafetyError,
+    RagProviderSafetyInspectionError,
+    RagProviderSafetyService,
+)
 from backend.app.agent_runtime.rag_runtime_contracts import (
     ADMISSION_SOURCE_WINDOWS,
     AuthorizedProviderPolicySnapshot,
@@ -92,7 +96,11 @@ class RagCostLedgerError(RuntimeError):
 
 
 class RagCostPersistenceError(RagCostLedgerError):
-    """A ledger commit or its acknowledgement failed; no authority may be retried."""
+    """Ledger persistence could not be acknowledged; no authority may be retried."""
+
+
+class RagPreclaimSafetyRefusalError(RagCostLedgerError):
+    """Authenticated safety refusal before this request creates a dispatch claim."""
 
 
 class RagServingEvidenceChangedError(RagCostLedgerError):
@@ -911,6 +919,20 @@ class RagCostLedger:
                     component,
                     snapshot,
                 )
+        except RagProviderSafetyInspectionError:
+            raise RagCostLedgerError('provider safety inspection failed') from None
+        except RagProviderSafetyError:
+            # This branch precedes every claim/charge mutation. Release its
+            # SELECT FOR UPDATE locks before failure closure starts lock order.
+            if self._session.new or self._session.dirty or self._session.deleted:
+                raise RagCostPersistenceError('preclaim transaction has pending writes') from None
+            try:
+                self._session.rollback()
+            except Exception:
+                raise RagCostPersistenceError('preclaim read transaction release failed') from None
+            if self._session.in_transaction():
+                raise RagCostPersistenceError('preclaim read transaction remains active') from None
+            raise RagPreclaimSafetyRefusalError('provider safety refused claim') from None
         except Exception as exc:
             raise RagCostLedgerError(
                 'provider safety authority is unavailable'
@@ -1493,6 +1515,33 @@ class RagCostLedger:
             order.finish()
             yield
 
+    @contextmanager
+    def _terminal_failure_owner(self, run_id: int, *, require_safety_authority: bool):
+        """Cost-only failure closure; never usable by pending/success projections."""
+        order = begin_rag_lock_order('ordinary')
+        sidecar = order.acquire('provider_stable_sidecar')
+        safety = order.acquire('provider_safety_rows')
+        try:
+            with ExitStack() as stack:
+                if require_safety_authority:
+                    connection = stack.enter_context(self._provider_connection_factory())
+                    stack.enter_context(self._provider_safety.accounting_failure_barrier(
+                        connection, order=order,
+                        sidecar_capability=sidecar, safety_capability=safety,
+                    ))
+                stack.enter_context(self.projection_owner_barrier(
+                    run_id, order=order,
+                    order_capability=order.acquire('projection_owner'),
+                ))
+                for stage in ('evidence_shared_barrier', 'c5_key_corpus', 'agent_run_cost', 'optional_assistant'):
+                    order.acquire(stage)
+                order.finish()
+                yield
+        except RagCostPersistenceError:
+            raise
+        except Exception:
+            raise RagCostPersistenceError('terminal failure persistence unavailable') from None
+
     @_runtime_health_effect
     def finalize_inter_component_failure(self, *, run_id: int, outcome: str) -> RagRunTerminal:
         """End this request between dispatches without changing any paid child."""
@@ -1506,7 +1555,9 @@ class RagCostLedger:
         if any((run_id, component) not in self._admission_snapshots for component in _COMPONENT_ORDER):
             raise RagCostLedgerError('request-owned admission is unavailable')
         paid = tuple(component for component in _COMPONENT_ORDER if (run_id, component) in self._terminal_bindings)
-        with self._answer_binding_lock, self._safe_pending_owner(run_id, embedding_only=False, paid_components=paid):
+        with self._answer_binding_lock, self._terminal_failure_owner(
+            run_id, require_safety_authority=bool(paid) or outcome == 'provider_safety_unavailable',
+        ):
             parent, rows = self._locked_run(run_id)
             if (parent.status != 'running' or parent.completed_at is not None
                 or parent.run_record_phase not in {'admission', 'cost_finalized_pending_projection'}
@@ -1526,6 +1577,12 @@ class RagCostLedger:
                     raise RagCostLedgerError('committed pending projection changed')
             for row in rows:
                 if row.component in paid:
+                    binding = self._terminal_bindings.get((run_id, row.component))
+                    if (
+                        type(binding) is not RagProviderSafetyBinding
+                        or binding.policy_snapshot != self._admission_snapshots.get((run_id, row.component))
+                    ):
+                        raise RagCostLedgerError('terminal paid receipt is unavailable')
                     self._require_terminal_cost_row(run_id, row)
                 elif (row.attempted is not False or row.dispatch_count != 0
                       or row.dispatch_state not in {'not_attempted', 'terminal'}

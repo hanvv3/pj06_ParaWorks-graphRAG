@@ -107,6 +107,10 @@ class RagProviderSafetyError(RuntimeError):
     pass
 
 
+class RagProviderSafetyInspectionError(RagProviderSafetyError):
+    """Operational inspection failure, not an authenticated authority refusal."""
+
+
 _REVIEW_CAPABILITY_SEAL = object()
 
 
@@ -1003,7 +1007,7 @@ class RagProviderSafetyService:
         except RagProviderSafetyError:
             raise
         except Exception as exc:
-            raise RagProviderSafetyError(
+            raise RagProviderSafetyInspectionError(
                 'provider safety authority is unavailable'
             ) from exc
 
@@ -1179,6 +1183,28 @@ class RagProviderSafetyService:
             )
             if after != fresh:
                 raise RagProviderSafetyError('provider safety binding changed')
+
+    @contextmanager
+    def accounting_failure_barrier(
+        self,
+        connection: Connection,
+        *,
+        order: RagLockOrderCoordinator,
+        sidecar_capability: RagLockOrderCapability,
+        safety_capability: RagLockOrderCapability,
+    ) -> Iterator[None]:
+        """Authenticate current authority for failed cost accounting, never serving."""
+        order.require(sidecar_capability, stage='provider_stable_sidecar')
+        order.require(safety_capability, stage='provider_safety_rows')
+        with self._authority.locked(), self._registered_advisory(connection):
+            body = self._read_unlocked()
+            self._match_db_whole_set(connection, body, for_update=True)
+            envelope = canonical_json_bytes(body['_envelope'])
+            yield
+            after = self._read_unlocked()
+            self._match_db_whole_set(connection, after, for_update=True)
+            if canonical_json_bytes(after['_envelope']) != envelope:
+                raise RagProviderSafetyError('failure accounting authority changed')
 
     def _blocker_agent_run_hmac(self, agent_run_id: int) -> str:
         return rag_identity_hmac(

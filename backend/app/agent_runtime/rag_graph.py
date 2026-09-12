@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 
+from backend.app.agent_runtime.rag_cost_ledger import RagPreclaimSafetyRefusalError
 from backend.app.agent_runtime.rag_finalization import (
     AssistantFinalizationRecord,
     CanonicalRagProjection,
@@ -231,9 +232,12 @@ def prepare_and_call_query_embedding(
         transport = _transport(services)
     except Exception:
         return _terminalize_failure(state, runtime.context, 'retriever_unavailable')
-    grant = services.cost_ledger.claim_component(
-        run_id=state['run_id'], component='query_embedding', prepared=prepared.budget
-    )
+    try:
+        grant = services.cost_ledger.claim_component(
+            run_id=state['run_id'], component='query_embedding', prepared=prepared.budget
+        )
+    except RagPreclaimSafetyRefusalError:
+        return _terminalize_failure(state, runtime.context, 'provider_safety_unavailable')
     dispatch = transport.prepare(grant=grant, prepared=prepared)
     delivery = transport.dispatch_and_finalize(grant=grant, prepared=dispatch)
     if delivery.output is None:
@@ -675,9 +679,12 @@ def generate_structured_answer_blocks(
         transport = _transport(services)
     except Exception:
         return _terminalize_failure(state, runtime.context, 'model_unavailable')
-    grant = services.cost_ledger.claim_component(
-        run_id=state['run_id'], component='answer_generation', prepared=prepared.budget
-    )
+    try:
+        grant = services.cost_ledger.claim_component(
+            run_id=state['run_id'], component='answer_generation', prepared=prepared.budget
+        )
+    except RagPreclaimSafetyRefusalError:
+        return _terminalize_failure(state, runtime.context, 'provider_safety_unavailable')
     dispatch = transport.prepare(grant=grant, prepared=prepared)
     from backend.app.agent_runtime.rag_provider_transport import (
         RagAnswerEvidenceChangedBeforeSendError,
