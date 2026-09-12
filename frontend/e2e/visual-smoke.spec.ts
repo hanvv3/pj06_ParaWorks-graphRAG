@@ -1,4 +1,4 @@
-import { expect, request, test } from "@playwright/test";
+import { expect, request, test, type Page } from "@playwright/test";
 
 const backendBaseURL = process.env.PLAYWRIGHT_API_BASE_URL ?? "http://127.0.0.1:8000";
 const pages = [
@@ -14,6 +14,8 @@ const pages = [
 ];
 
 test.beforeAll(async () => {
+  if (process.env.PLAYWRIGHT_SKIP_BACKEND_SEED === "1") return;
+
   const api = await request.newContext({ baseURL: backendBaseURL });
   try {
     await api.post("/api/v1/integrations/slack/sync");
@@ -23,6 +25,76 @@ test.beforeAll(async () => {
     await api.dispose();
   }
 });
+
+async function mockTask20ShellAndAssistantApis(page: Page) {
+  await page.route("**/api/v1/**", (route) => route.fulfill({
+    contentType: "application/json",
+    json: {},
+  }));
+  await page.route("**/api/v1/auth/me", (route) => route.fulfill({
+    contentType: "application/json",
+    json: {
+      user: {
+        id: "reviewer-task20",
+        email: "reviewer@paraworks.test",
+        role: "reviewer",
+        permission_levels: ["internal"],
+        name: "Task20 Reviewer",
+        title: "Reviewer",
+        department: "Product",
+      },
+    },
+  }));
+  await page.route("**/api/v1/dashboard", (route) => route.fulfill({
+    contentType: "application/json",
+    json: {
+      source_counts: {},
+      pending_review_count: 0,
+      recent_jobs: [],
+      pending_items: [],
+      today_todos: [],
+      recent_decisions: [],
+      recent_timeline: [],
+    },
+  }));
+  await page.route("**/api/v1/notifications", (route) => route.fulfill({
+    contentType: "application/json",
+    json: { notifications: [], counts: { total: 0 } },
+  }));
+  await page.route("**/api/v1/integrations", (route) => route.fulfill({
+    contentType: "application/json",
+    json: [],
+  }));
+  await page.route("**/api/v1/integrations/connections", (route) => route.fulfill({
+    contentType: "application/json",
+    json: [],
+  }));
+  await page.route("**/api/v1/assistant/conversations", (route) => route.fulfill({
+    contentType: "application/json",
+    json: {
+      conversations: [{
+        id: 90,
+        title: "새 대화",
+        summary: null,
+        created_at: "2026-09-13T00:00:00Z",
+        updated_at: "2026-09-13T00:00:00Z",
+      }],
+    },
+  }));
+  await page.route("**/api/v1/assistant/conversations/90/messages", (route) => route.fulfill({
+    contentType: "application/json",
+    json: {
+      conversation: {
+        id: 90,
+        title: "새 대화",
+        summary: null,
+        created_at: "2026-09-13T00:00:00Z",
+        updated_at: "2026-09-13T00:00:00Z",
+      },
+      messages: [],
+    },
+  }));
+}
 
 for (const target of pages) {
   test(`${target.path} renders Korean workspace UI without mojibake`, async ({ page }) => {
@@ -60,28 +132,34 @@ test("theme toggle switches between dark and light glass modes", async ({ page }
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 });
 
-test("sidebar search submits to the company memory search page", async ({ page }, testInfo) => {
+test("workspace search hands input to the company memory page without a query URL", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "desktop sidebar search is hidden on mobile");
+  await mockTask20ShellAndAssistantApis(page);
 
+  const authResponse = page.waitForResponse("**/api/v1/auth/me");
   await page.goto("/integrations");
-  await expect(page.getByTestId("app-shell")).toHaveAttribute("data-hydrated", "true");
-  await page.getByTestId("sidebar-global-search-input").fill("Redis queue state");
-  await page.getByTestId("sidebar-global-search-input").press("Enter");
+  await authResponse;
+  const shellSearch = page.getByRole("textbox", { name: "회사 메모리 검색" });
+  await shellSearch.fill("Redis queue state");
+  await shellSearch.press("Enter");
 
-  await expect(page).toHaveURL(/\/search\?q=Redis\+queue\+state/);
-  await expect(page.locator("#query")).toHaveValue("Redis queue state");
+  await expect(page).toHaveURL(/\/search$/);
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toHaveValue("Redis queue state");
 });
 
-test("top search submits to the company memory search page", async ({ page }, testInfo) => {
+test("top search preserves raw input only in the same-screen ephemeral handoff", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "desktop top search is hidden on mobile");
+  await mockTask20ShellAndAssistantApis(page);
 
+  const authResponse = page.waitForResponse("**/api/v1/auth/me");
   await page.goto("/dashboard");
-  await expect(page.getByTestId("app-shell")).toHaveAttribute("data-hydrated", "true");
-  await page.getByTestId("top-global-search-input").fill("PostgreSQL durable record");
-  await page.getByTestId("top-global-search-input").press("Enter");
+  await authResponse;
+  const shellSearch = page.getByRole("textbox", { name: "회사 메모리 검색" });
+  await shellSearch.fill("  PostgreSQL durable record  ");
+  await shellSearch.press("Enter");
 
-  await expect(page).toHaveURL(/\/search\?q=PostgreSQL\+durable\+record/);
-  await expect(page.locator("#query")).toHaveValue("PostgreSQL durable record");
+  await expect(page).toHaveURL(/\/search$/);
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toHaveValue("  PostgreSQL durable record  ");
 });
 
 test("demo login switches the active API user", async ({ page }) => {

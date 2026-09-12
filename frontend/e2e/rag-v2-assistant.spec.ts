@@ -1,5 +1,14 @@
 import { expect, test, type Page, type Request } from "@playwright/test";
 import { ApiError, apiGet, decodeApiErrorEnvelope } from "../src/lib/api/client";
+import { ephemeralSearchHandoff } from "../src/lib/assistant/searchHandoff";
+import {
+  getDeliveryStatus,
+  isCurrentDelivery,
+  markDelivery,
+  removeOwnedOptimistic,
+} from "../src/lib/assistant/reconciliation";
+import { isPlainTextRagMessage, isSafeCitationUrl } from "../src/lib/rag/presentation";
+import type { AssistantMessage } from "../src/lib/api/types";
 
 const CAPABILITY_HEADER = "x-paraworks-rag-render-capability";
 const CAPABILITY_VALUE = "rag-v2-plain-text-citations:v1";
@@ -107,6 +116,45 @@ async function capabilityValues(request: Request) {
     .filter(({ name }) => name.toLowerCase() === CAPABILITY_HEADER)
     .map(({ value }) => value);
 }
+
+test("Task20 pure presentation, handoff, and reconciliation contracts are fail-closed", () => {
+  expect([
+    "https://example.test/path",
+    "http://example.test/path?q=1#section",
+  ].map(isSafeCitationUrl)).toEqual([true, true]);
+  for (const unsafe of [
+    "javascript:alert(1)",
+    "data:text/html,unsafe",
+    "//example.test/path",
+    "https://user@example.test/path",
+    "https://example.test/white space",
+    "https://example.test/line\nbreak",
+    "https://example.test/nonbreaking\u00a0space",
+    "https://example.test/control\u0085character",
+    "https:example.test/path",
+    "https:\\example.test/path",
+  ]) {
+    expect(isSafeCitationUrl(unsafe), unsafe).toBe(false);
+  }
+  expect(isPlainTextRagMessage({ agent_name: "rag_orchestrator_agent", prompt_version: "rag-answer:v2" })).toBe(true);
+  expect(isPlainTextRagMessage({ agent_name: "rag_orchestrator_agent", prompt_version: "future" })).toBe(true);
+  expect(isPlainTextRagMessage({ agent_name: "rag_orchestrator_agent", prompt_version: "rag-answer:v1" })).toBe(false);
+  expect(isPlainTextRagMessage({ agent_name: "mail_agent", prompt_version: "future" })).toBe(false);
+
+  ephemeralSearchHandoff.consume();
+  ephemeralSearchHandoff.put("  raw input  ");
+  expect(ephemeralSearchHandoff.consume()).toBe("  raw input  ");
+  expect(ephemeralSearchHandoff.consume()).toBeNull();
+
+  const owner = { requestToken: 7, conversationId: 19, optimisticMessageId: -7 };
+  const optimistic = markDelivery({ ...userMessage, id: -7 }, "unknown", owner.requestToken);
+  expect(getDeliveryStatus(optimistic)).toBe("unknown");
+  expect(isCurrentDelivery(owner, 7, 19)).toBe(true);
+  expect(isCurrentDelivery(owner, 8, 19)).toBe(false);
+  expect(isCurrentDelivery(owner, 7, 20)).toBe(false);
+  expect(removeOwnedOptimistic([userMessage, optimistic], owner)).toEqual([userMessage]);
+  expect(removeOwnedOptimistic([userMessage, optimistic], { ...owner, requestToken: 8 })).toEqual([userMessage, optimistic]);
+});
 
 test("Assistant GET and POST declare one exact render capability without changing shared API headers", async ({
   context,
@@ -303,4 +351,405 @@ test("Assistant errors decode only an exact allowlisted code to stable Korean co
   const alert = page.locator(".border-red-200");
   await expect(alert).toContainText("민감한 정보로 보이는 내용이 포함되어 요청을 전송하지 않았습니다.");
   await expect(page.locator("body")).not.toContainText("input_safety_blocked");
+});
+
+function assistantRow(
+  overrides: Partial<AssistantMessage> & { id: number; content: string },
+): AssistantMessage {
+  return {
+    ...assistantMessage,
+    citations: [],
+    source_ids: [],
+    source_links: [],
+    source_snippets: [],
+    permission_level: null,
+    hidden_match_count: 0,
+    permission_notice: null,
+    agent_run_id: null,
+    metadata: {},
+    ...overrides,
+  };
+}
+
+async function installSingleConversation(
+  page: Page,
+  initialMessages: ReturnType<typeof assistantRow>[],
+  onMessagePost?: Parameters<Page["route"]>[1],
+) {
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", async (route) => {
+    await route.fulfill({ contentType: "application/json", json: { conversations: [conversation] } });
+  });
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    if (request.method() === "GET") {
+      await route.fulfill({ contentType: "application/json", json: { conversation, messages: initialMessages } });
+      return;
+    }
+    if (onMessagePost) {
+      await onMessagePost(route, request);
+      return;
+    }
+    throw new Error("unexpected Assistant message POST");
+  });
+}
+
+test("V2 and unknown RAG answers stay literal while only validated citations can navigate", async ({ page }) => {
+  const unsafeModelText = "# 제목\n**굵게** [보기](javascript:alert(1)) <a href=\"https://evil.test\">raw</a> https://plain.test";
+  const v2 = assistantRow({
+    id: 301,
+    content: unsafeModelText,
+    metadata: { agent_name: "rag_orchestrator_agent", prompt_version: "rag-answer:v2" },
+    citations: [
+      {
+        source_id: "safe-source",
+        source_url: "https://docs.example.test/source",
+        source_type: "drive",
+        permission_level: "internal",
+        source_snippet: "검증된 근거",
+        relevance_score: 0.98,
+        matched_terms: ["근거"],
+      },
+      {
+        source_id: "unsafe-source",
+        source_url: "https://user@example.test/private",
+        source_type: "drive",
+        permission_level: "internal",
+        source_snippet: "잘못된 URL 근거",
+        relevance_score: 0.9,
+        matched_terms: [],
+      },
+    ],
+    source_links: ["https://legacy.example.test/must-not-link", "javascript:alert(2)"],
+    source_snippets: ["검증된 근거", "추가 발췌"],
+    hidden_match_count: 2,
+    permission_notice: "Some sources may be hidden by permissions.",
+  });
+  const unknown = assistantRow({
+    id: 302,
+    content: "## 알 수 없는 버전\n[링크](https://unknown.test)",
+    metadata: { agent_name: "rag_orchestrator_agent", prompt_version: "rag-answer:future" },
+  });
+  const legacy = assistantRow({
+    id: 303,
+    content: "**레거시 강조**\n- 기존 목록",
+    metadata: { agent_name: "rag_orchestrator_agent", prompt_version: "rag-answer:v1" },
+  });
+  await installSingleConversation(page, [v2, unknown, legacy]);
+
+  await page.goto("/search");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const v2Article = page.locator("article").filter({ hasText: "javascript:alert(1)" });
+  const literal = v2Article.getByTestId("rag-plain-text-answer");
+  await expect(literal).toHaveText(unsafeModelText);
+  await expect(literal).toHaveCSS("white-space", "pre-wrap");
+  await expect(literal).toHaveCSS("overflow-wrap", "anywhere");
+  await expect(v2Article.locator("h3, strong, code, a")).toHaveCount(0);
+  await expect(v2Article.getByText("일부 근거는 권한에 따라 숨겨졌습니다.")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("Some sources may be hidden by permissions.");
+
+  const unknownArticle = page.locator("article").filter({ hasText: "알 수 없는 버전" });
+  await expect(unknownArticle.getByTestId("rag-plain-text-answer")).toContainText("[링크](https://unknown.test)");
+  await expect(unknownArticle.locator("h3, a")).toHaveCount(0);
+
+  const legacyArticle = page.locator("article").filter({ hasText: "레거시 강조" });
+  await expect(legacyArticle.locator("strong")).toHaveText("레거시 강조");
+  await expect(legacyArticle.locator("li")).toHaveText("기존 목록");
+
+  await v2Article.getByRole("button", { name: /근거와 출처/ }).click();
+  const safeLink = v2Article.getByRole("link", { name: /근거 1/ });
+  await expect(safeLink).toHaveAttribute("href", "https://docs.example.test/source");
+  await expect(safeLink).toHaveAttribute("rel", "noopener noreferrer");
+  await expect(v2Article.getByText("unsafe-source", { exact: true })).toBeVisible();
+  await expect(v2Article.getByText("unsafe-source", { exact: true }).locator("xpath=ancestor::a")).toHaveCount(0);
+  await expect(v2Article.locator("a")).toHaveCount(1);
+  await expect(v2Article.locator('a[href*="legacy.example"]')).toHaveCount(0);
+});
+
+test("shell hands raw search input to /search once without URL or automatic POST", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "mobile shell has no global search input");
+
+  const rawInput = "  민감할 수 있는 원문  ";
+  let messagePostCount = 0;
+  await installSingleConversation(page, [], async (route) => {
+    messagePostCount += 1;
+    await route.fulfill({ status: 500, body: "must not send" });
+  });
+
+  const authResponse = page.waitForResponse("**/api/v1/auth/me");
+  await page.goto("/dashboard");
+  await authResponse;
+  const shellSearch = page.getByRole("textbox", { name: "회사 메모리 검색" });
+  await shellSearch.fill(rawInput);
+  await shellSearch.press("Enter");
+
+  await expect(page).toHaveURL(/\/search$/);
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toHaveValue(rawInput);
+  expect(messagePostCount).toBe(0);
+  const browserStorage = await page.evaluate((secret) => ({
+    href: location.href,
+    history: JSON.stringify(history.state),
+    local: JSON.stringify(localStorage),
+    session: JSON.stringify(sessionStorage),
+    hasSecret: [location.href, JSON.stringify(history.state), JSON.stringify(localStorage), JSON.stringify(sessionStorage)]
+      .some((value) => value.includes(secret)),
+  }), rawInput.trim());
+  expect(browserStorage.hasSecret, JSON.stringify(browserStorage)).toBe(false);
+
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toHaveValue("");
+  expect(messagePostCount).toBe(0);
+});
+
+test("legacy inbound q is discarded and never copied or auto-sent", async ({ page }) => {
+  let messagePostCount = 0;
+  await installSingleConversation(page, [], async (route) => {
+    messagePostCount += 1;
+    await route.fulfill({ status: 500, body: "must not send" });
+  });
+
+  await page.goto("/search?q=credential-like-value");
+  await expect(page).toHaveURL(/\/search$/);
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toHaveValue("");
+  expect(messagePostCount).toBe(0);
+});
+
+for (const refusal of [
+  { status: 403, code: "permission_denied", copy: "이 요청을 처리할 권한이 없습니다." },
+  { status: 404, code: null, copy: "대화를 찾을 수 없습니다. 대화 목록을 새로고침해 주세요." },
+  { status: 422, code: "input_safety_blocked", copy: "민감한 정보로 보이는 내용이 포함되어 요청을 전송하지 않았습니다." },
+]) {
+  test(`${refusal.status} removes only the request-owned optimistic row with safe Korean copy`, async ({ page }) => {
+    await installSingleConversation(page, [], async (route) => {
+      await route.fulfill({
+        status: refusal.status,
+        contentType: "application/json",
+        json: refusal.code ? { detail: { code: refusal.code } } : { detail: "owner hidden" },
+      });
+    });
+    await page.goto("/search");
+    const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+    await input.fill("제거할 낙관적 메시지");
+    await input.press("Enter");
+    await expect(page.getByText(refusal.copy)).toBeVisible();
+    await expect(page.getByText("제거할 낙관적 메시지", { exact: true })).toHaveCount(0);
+    await expect(page.locator("body")).not.toContainText(refusal.code ?? "owner hidden");
+  });
+}
+
+test("500 leaves one unknown row when guarded GET fails and retry is GET-only", async ({ page }) => {
+  let getCount = 0;
+  let postCount = 0;
+  const persistedUser = assistantRow({ id: 401, role: "user", content: "상태가 불확실한 요청" });
+  const persistedAssistant = assistantRow({
+    id: 402,
+    content: "권한 내에서 확인 가능한 근거를 찾지 못했습니다.",
+    metadata: { agent_name: "rag_orchestrator_agent", prompt_version: "rag-answer:v2" },
+  });
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", (route) => route.fulfill({ json: { conversations: [conversation] } }));
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    if (request.method() === "POST") {
+      postCount += 1;
+      await route.fulfill({ status: 500, contentType: "application/json", json: { detail: { code: "persistence_failed" } } });
+      return;
+    }
+    getCount += 1;
+    if (getCount === 1) {
+      await route.fulfill({ json: { conversation, messages: [] } });
+    } else if (getCount === 2) {
+      await route.fulfill({ status: 503, body: "private GET failure" });
+    } else {
+      await route.fulfill({ json: { conversation, messages: [persistedUser, persistedAssistant] } });
+    }
+  });
+
+  await page.goto("/search");
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await input.fill(persistedUser.content);
+  await input.press("Enter");
+  await expect(page.getByText("요청 처리 상태를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.")).toBeVisible();
+  await expect(page.getByText(persistedUser.content, { exact: true })).toHaveCount(1);
+  await expect(page.getByLabel("AI 비서 입력").getByText("전송 상태를 확인하지 못했습니다.")).toBeVisible();
+  await expect(input).toBeDisabled();
+  await expect(page.getByRole("button", { name: "새 대화 만들기", includeHidden: true })).toBeDisabled();
+
+  await page.getByRole("button", { name: "상태 다시 확인" }).click();
+  await expect(page.getByText(persistedUser.content, { exact: true })).toHaveCount(1);
+  await expect(page.getByText(persistedAssistant.content)).toBeVisible();
+  await expect(page.getByRole("button", { name: "상태 다시 확인" })).toHaveCount(0);
+  await expect(input).toBeEnabled();
+  expect(postCount).toBe(1);
+  expect(getCount).toBe(3);
+});
+
+test("502 generation failure performs guarded GET and never renders raw failure text", async ({ page }) => {
+  let postCount = 0;
+  await installSingleConversation(page, [], async (route) => {
+    postCount += 1;
+    await route.fulfill({
+      status: 502,
+      contentType: "text/plain",
+      body: "private provider exception",
+    });
+  });
+  await page.goto("/search");
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await input.fill("생성 실패 요청");
+  await input.press("Enter");
+  await expect(page.getByText("답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.")).toBeVisible();
+  await expect(page.getByText("생성 실패 요청", { exact: true })).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText("private provider exception");
+  await expect(input).toBeEnabled();
+  expect(postCount).toBe(1);
+});
+
+test("budget conflict keeps its safe copy when authoritative reconciliation is unavailable", async ({ page }) => {
+  let getCount = 0;
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", (route) => route.fulfill({ json: { conversations: [conversation] } }));
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    if (request.method() === "POST") {
+      await route.fulfill({ status: 409, contentType: "application/json", json: { detail: { code: "budget_exceeded" } } });
+      return;
+    }
+    getCount += 1;
+    if (getCount === 1) {
+      await route.fulfill({ json: { conversation, messages: [] } });
+    } else {
+      await route.fulfill({ status: 503, body: "private reconciliation failure" });
+    }
+  });
+
+  await page.goto("/search");
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await input.fill("비용 한도 미확인 요청");
+  await input.press("Enter");
+  await expect(page.getByText("요청이 비용 한도를 초과해 답변을 생성하지 않았습니다.")).toBeVisible();
+  await expect(page.getByLabel("AI 비서 입력").getByText("전송 상태를 확인하지 못했습니다.")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("budget_exceeded");
+});
+
+test("budget conflict reconciles committed rows and client upgrade permits reload only", async ({ page }) => {
+  let postCount = 0;
+  let getCount = 0;
+  const budgetUser = assistantRow({ id: 501, role: "user", content: "비용 한도 질문" });
+  const budgetAssistant = assistantRow({
+    id: 502,
+    content: "요청이 비용 한도를 초과해 답변을 생성하지 않았습니다.",
+    metadata: { agent_name: "rag_orchestrator_agent", prompt_version: "rag-answer:v2", status: "failed" },
+  });
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", (route) => route.fulfill({ json: { conversations: [conversation] } }));
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    if (request.method() === "GET") {
+      getCount += 1;
+      await route.fulfill({ json: { conversation, messages: getCount === 1 ? [] : [budgetUser, budgetAssistant] } });
+      return;
+    }
+    postCount += 1;
+    await route.fulfill({ status: 409, contentType: "application/json", json: { detail: { code: "budget_exceeded" } } });
+  });
+
+  await page.goto("/search");
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await input.fill(budgetUser.content);
+  await input.press("Enter");
+  await expect(page.getByText(budgetUser.content, { exact: true })).toHaveCount(1);
+  await expect(page.getByText(budgetAssistant.content)).toBeVisible();
+  expect(postCount).toBe(1);
+  expect(getCount).toBe(2);
+
+  await page.unroute("**/api/v1/assistant/conversations/19/messages");
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    if (request.method() === "GET") {
+      await route.fulfill({ json: { conversation, messages: [budgetUser, budgetAssistant] } });
+      return;
+    }
+    postCount += 1;
+    await route.fulfill({ status: 409, contentType: "application/json", json: { detail: { code: "client_upgrade_required" } } });
+  });
+  await input.fill("새 클라이언트가 필요한 질문");
+  await input.press("Enter");
+  await expect(page.getByText("새 버전이 필요합니다. 페이지를 새로고침해 주세요.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "상태 다시 확인" })).toHaveCount(0);
+  await expect(input).toBeDisabled();
+  await expect(page.getByRole("button", { name: "기존 근거 대화", exact: true, includeHidden: true })).toBeDisabled();
+  expect(postCount).toBe(2);
+});
+
+test("client-upgrade on authoritative GET blocks every POST and offers hard reload only", async ({ page }) => {
+  let postCount = 0;
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", async (route, request) => {
+    if (request.method() === "POST") postCount += 1;
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      json: { detail: { code: "client_upgrade_required" } },
+    });
+  });
+
+  await page.goto("/search");
+  await expect(page.getByText("새 버전이 필요합니다. 페이지를 새로고침해 주세요.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "상태 다시 확인" })).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "새 대화 만들기", includeHidden: true })).toBeDisabled();
+  expect(postCount).toBe(0);
+});
+
+test("a stale reconciliation GET cannot overwrite a newly selected conversation", async ({ page }) => {
+  const secondConversation = {
+    ...createdConversation,
+    id: 21,
+    title: "새 대화 선택",
+    created_at: "2026-09-11T00:00:00+00:00",
+    updated_at: "2026-09-11T00:00:00+00:00",
+  };
+  const secondMessage = assistantRow({ id: 610, conversation_id: 21, content: "새 대화의 현재 내용" });
+  let releaseStale!: () => void;
+  const staleGate = new Promise<void>((resolve) => { releaseStale = resolve; });
+  let firstGetCount = 0;
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", (route) => route.fulfill({
+    json: { conversations: [conversation, secondConversation] },
+  }));
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    if (request.method() === "POST") {
+      await route.fulfill({ status: 500, contentType: "application/json", json: { detail: { code: "persistence_failed" } } });
+      return;
+    }
+    firstGetCount += 1;
+    if (firstGetCount === 1) {
+      await route.fulfill({ json: { conversation, messages: [] } });
+      return;
+    }
+    await staleGate;
+    await route.fulfill({
+      json: { conversation, messages: [assistantRow({ id: 611, content: "이전 대화의 늦은 응답" })] },
+    });
+  });
+  await page.route("**/api/v1/assistant/conversations/21/messages", (route) => route.fulfill({
+    json: { conversation: secondConversation, messages: [secondMessage] },
+  }));
+
+  await page.goto("/search");
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await input.fill("늦게 끝나는 요청");
+  await input.press("Enter");
+  const openConversationList = page.getByRole("button", { name: "대화 목록 펼치기" });
+  if (await openConversationList.isVisible()) await openConversationList.click();
+  await page.getByRole("button", { name: "새 대화 선택", exact: true }).click();
+  await expect(page.getByText(secondMessage.content)).toBeVisible();
+  releaseStale();
+  await page.waitForTimeout(100);
+  await expect(page.getByText(secondMessage.content)).toBeVisible();
+  await expect(page.getByText("이전 대화의 늦은 응답")).toHaveCount(0);
 });

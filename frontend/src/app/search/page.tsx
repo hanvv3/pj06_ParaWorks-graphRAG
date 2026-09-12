@@ -14,7 +14,7 @@ import {
   ShieldAlert,
   Sparkles,
 } from "lucide-react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   createAssistantConversation,
@@ -24,6 +24,20 @@ import {
   sendAssistantEmailDraft,
 } from "@/lib/api/assistant";
 import { ApiError } from "@/lib/api/client";
+import { ephemeralSearchHandoff } from "@/lib/assistant/searchHandoff";
+import {
+  type DeliveryOwner,
+  getDeliveryStatus,
+  isCurrentDelivery,
+  markDelivery,
+  markOwnedOptimisticUnknown,
+  removeOwnedOptimistic,
+} from "@/lib/assistant/reconciliation";
+import {
+  isPlainTextRagMessage,
+  isSafeCitationUrl,
+  publicPermissionNotice,
+} from "@/lib/rag/presentation";
 import type {
   AssistantConversation,
   AssistantMessage,
@@ -50,16 +64,21 @@ export default function SearchPage() {
 
 function SearchPageContent() {
   const searchParams = useSearchParams();
-  const initialQuery = searchParams.get("q")?.trim() || "";
+  const router = useRouter();
   const [conversations, setConversations] = useState<AssistantConversation[]>([]);
   const [activeConversation, setActiveConversation] = useState<AssistantConversation>();
   const [messages, setMessages] = useState<AssistantMessage[]>([]);
   const [openEvidenceMessageIds, setOpenEvidenceMessageIds] = useState<Set<number>>(new Set());
-  const [query, setQuery] = useState(initialQuery);
+  const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [booting, setBooting] = useState(true);
   const [error, setError] = useState<string>();
-  const [initialQuerySent, setInitialQuerySent] = useState(false);
+  const [unknownDelivery, setUnknownDelivery] = useState<{
+    owner: DeliveryOwner;
+    failureStatus: number;
+    failureCopy: string;
+  }>();
+  const [clientUpgradeRequired, setClientUpgradeRequired] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<number>();
   const [sendingEmailMessageId, setSendingEmailMessageId] = useState<number>();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
@@ -70,6 +89,8 @@ function SearchPageContent() {
   const activeConversationIdRef = useRef<number | undefined>(undefined);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const nextOptimisticMessageIdRef = useRef(-1);
+  const deliveryRequestTokenRef = useRef(0);
+  const handoffConsumedRef = useRef(false);
   const typingTimerRef = useRef<number | undefined>(undefined);
 
   const upsertConversationByUpdatedAt = useCallback((conversation: AssistantConversation) => {
@@ -80,6 +101,7 @@ function SearchPageContent() {
   }, []);
 
   const createConversation = useCallback(async (title?: string) => {
+    deliveryRequestTokenRef.current += 1;
     const requestId = ++loadMessagesRequestRef.current;
     const response = await createAssistantConversation(
       title?.trim() || DEFAULT_CONVERSATION_TITLE,
@@ -88,6 +110,8 @@ function SearchPageContent() {
       activeConversationIdRef.current = response.conversation.id;
       setActiveConversation(response.conversation);
       setMessages([]);
+      setUnknownDelivery(undefined);
+      setClientUpgradeRequired(false);
       setOpenEvidenceMessageIds(new Set());
       upsertConversationByUpdatedAt(response.conversation);
     }
@@ -124,10 +148,12 @@ function SearchPageContent() {
   }, []);
 
   const loadMessages = useCallback(async (conversation: AssistantConversation) => {
+    deliveryRequestTokenRef.current += 1;
     const requestId = ++loadMessagesRequestRef.current;
     setError(undefined);
     activeConversationIdRef.current = conversation.id;
     setActiveConversation(conversation);
+    setUnknownDelivery(undefined);
     try {
       const response = await getAssistantMessages(conversation.id);
       if (requestId !== loadMessagesRequestRef.current) return [];
@@ -135,12 +161,18 @@ function SearchPageContent() {
       activeConversationIdRef.current = response.conversation.id;
       setActiveConversation(response.conversation);
       setMessages(response.messages);
+      setClientUpgradeRequired(false);
       setOpenEvidenceMessageIds(new Set());
       upsertConversationByUpdatedAt(response.conversation);
       return response.messages;
     } catch (caught) {
       if (requestId === loadMessagesRequestRef.current) {
-        setError(caught instanceof ApiError ? caught.message : "대화 내용을 불러오지 못했습니다.");
+        if (isClientUpgradeError(caught)) {
+          setClientUpgradeRequired(true);
+          setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+        } else {
+          setError(caught instanceof ApiError ? caught.message : "대화 내용을 불러오지 못했습니다.");
+        }
       }
       return [];
     }
@@ -156,52 +188,158 @@ function SearchPageContent() {
       if (sortedConversations.length > 0) {
         await loadMessages(sortedConversations[0]);
       } else {
-        await createConversation(initialQuery || DEFAULT_CONVERSATION_TITLE);
+        await createConversation(DEFAULT_CONVERSATION_TITLE);
       }
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : "AI 비서 대화를 준비하지 못했습니다.");
+      if (isClientUpgradeError(caught)) {
+        setClientUpgradeRequired(true);
+        setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+      } else {
+        setError(caught instanceof ApiError ? caught.message : "AI 비서 대화를 준비하지 못했습니다.");
+      }
     } finally {
       setBooting(false);
     }
-  }, [createConversation, initialQuery, loadMessages]);
+  }, [createConversation, loadMessages]);
+
+  const reconcileDelivery = useCallback(async (
+    owner: DeliveryOwner,
+    failureStatus: number,
+    failureCopy: string,
+  ) => {
+    if (!isCurrentDelivery(
+      owner,
+      deliveryRequestTokenRef.current,
+      activeConversationIdRef.current,
+    )) return;
+
+    try {
+      const response = await getAssistantMessages(owner.conversationId);
+      if (!isCurrentDelivery(
+        owner,
+        deliveryRequestTokenRef.current,
+        activeConversationIdRef.current,
+      )) return;
+
+      activeConversationIdRef.current = response.conversation.id;
+      setActiveConversation(response.conversation);
+      setMessages(response.messages);
+      setOpenEvidenceMessageIds(new Set());
+      setUnknownDelivery(undefined);
+      upsertConversationByUpdatedAt(response.conversation);
+      setError(failureStatus === 502
+        ? "답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요."
+        : undefined);
+    } catch {
+      if (!isCurrentDelivery(
+        owner,
+        deliveryRequestTokenRef.current,
+        activeConversationIdRef.current,
+      )) return;
+      setMessages((currentMessages) => markOwnedOptimisticUnknown(currentMessages, owner));
+      setUnknownDelivery({ owner, failureStatus, failureCopy });
+      setError(failureCopy);
+    }
+  }, [upsertConversationByUpdatedAt]);
 
   const sendMessage = useCallback(async (content: string) => {
     const trimmedContent = content.trim();
-    if (!trimmedContent || loadingRef.current) return;
+    if (
+      !trimmedContent
+      || loadingRef.current
+      || unknownDelivery !== undefined
+      || clientUpgradeRequired
+    ) return;
 
     loadingRef.current = true;
     setLoading(true);
     setError(undefined);
     setQuery("");
+    let owner: DeliveryOwner | undefined;
     try {
       const conversation = activeConversation ?? await createConversation(trimmedContent);
+      const requestToken = ++deliveryRequestTokenRef.current;
       const optimisticMessage = createOptimisticUserMessage(
         conversation.id,
         trimmedContent,
         nextOptimisticMessageIdRef.current--,
+        requestToken,
       );
+      owner = {
+        requestToken,
+        conversationId: conversation.id,
+        optimisticMessageId: optimisticMessage.id,
+      };
       // 사용자가 보낸 말은 서버 응답을 기다리지 않고 바로 대화창에 올린다.
       setMessages((currentMessages) => [...currentMessages, optimisticMessage]);
       const response = await createAssistantMessage(conversation.id, trimmedContent);
-      if (activeConversationIdRef.current !== conversation.id) return;
+      if (!isCurrentDelivery(
+        owner,
+        deliveryRequestTokenRef.current,
+        activeConversationIdRef.current,
+      )) return;
 
       activeConversationIdRef.current = response.conversation.id;
       setActiveConversation(response.conversation);
       setMessages((currentMessages) => replaceOptimisticMessage(
         currentMessages,
         optimisticMessage.id,
-        response.user_message,
+        markDelivery(response.user_message, "persisted", requestToken),
       ));
+      setUnknownDelivery(undefined);
       setOpenEvidenceMessageIds(new Set());
       upsertConversationByUpdatedAt(response.conversation);
       revealAssistantMessage(response.assistant_message);
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : "메시지를 보내지 못했습니다.");
+      if (
+        owner === undefined
+        || !isCurrentDelivery(
+          owner,
+          deliveryRequestTokenRef.current,
+          activeConversationIdRef.current,
+        )
+      ) {
+        if (owner === undefined) {
+          if (isClientUpgradeError(caught)) {
+            setClientUpgradeRequired(true);
+            setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+          } else {
+            setError(caught instanceof ApiError ? caught.message : "메시지를 보내지 못했습니다.");
+          }
+        }
+        return;
+      }
+      const caughtOwner = owner;
+
+      if (caught instanceof ApiError && caught.status === 409 && caught.code === "client_upgrade_required") {
+        setMessages((currentMessages) => removeOwnedOptimistic(currentMessages, caughtOwner));
+        setClientUpgradeRequired(true);
+        setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+      } else if (caught instanceof ApiError && [403, 404, 422].includes(caught.status)) {
+        setMessages((currentMessages) => removeOwnedOptimistic(currentMessages, caughtOwner));
+        setError(definiteRefusalCopy(caught));
+      } else {
+        const failureStatus = caught instanceof ApiError ? caught.status : 500;
+        const failureCopy = caught instanceof ApiError
+          && caught.status === 409
+          && caught.code === "budget_exceeded"
+          ? caught.message
+          : deliveryFailureCopy(failureStatus);
+        await reconcileDelivery(caughtOwner, failureStatus, failureCopy);
+      }
     } finally {
       loadingRef.current = false;
       setLoading(false);
     }
-  }, [activeConversation, createConversation, revealAssistantMessage, upsertConversationByUpdatedAt]);
+  }, [
+    activeConversation,
+    clientUpgradeRequired,
+    createConversation,
+    reconcileDelivery,
+    revealAssistantMessage,
+    unknownDelivery,
+    upsertConversationByUpdatedAt,
+  ]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -210,7 +348,7 @@ function SearchPageContent() {
   }
 
   async function handleNewConversation() {
-    if (creatingConversationRef.current) return;
+    if (creatingConversationRef.current || unknownDelivery !== undefined || clientUpgradeRequired) return;
     creatingConversationRef.current = true;
     try {
       setError(undefined);
@@ -262,27 +400,45 @@ function SearchPageContent() {
         message.id === messageId ? response.message : message
       )));
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : "메일을 보내지 못했습니다.");
+      if (isClientUpgradeError(caught)) {
+        setClientUpgradeRequired(true);
+        setError("새 버전이 필요합니다. 페이지를 새로고침해 주세요.");
+      } else {
+        setError(caught instanceof ApiError ? caught.message : "메일을 보내지 못했습니다.");
+      }
     } finally {
       setSendingEmailMessageId(undefined);
     }
   }
 
+  async function retryUnknownDelivery() {
+    if (unknownDelivery === undefined || loadingRef.current) return;
+    loadingRef.current = true;
+    setLoading(true);
+    await reconcileDelivery(
+      unknownDelivery.owner,
+      unknownDelivery.failureStatus,
+      unknownDelivery.failureCopy,
+    );
+    loadingRef.current = false;
+    setLoading(false);
+  }
+
   useEffect(() => {
-    setQuery(initialQuery);
-    setInitialQuerySent(false);
-  }, [initialQuery]);
+    if (handoffConsumedRef.current) return;
+    handoffConsumedRef.current = true;
+    if (searchParams.has("q")) {
+      ephemeralSearchHandoff.consume();
+      setQuery("");
+      router.replace("/search");
+      return;
+    }
+    setQuery(ephemeralSearchHandoff.consume() ?? "");
+  }, [router, searchParams]);
 
   useEffect(() => {
     void loadConversations();
   }, [loadConversations]);
-
-  useEffect(() => {
-    if (booting || initialQuerySent || !initialQuery || !activeConversation) return;
-
-    setInitialQuerySent(true);
-    void sendMessage(initialQuery);
-  }, [activeConversation, booting, initialQuery, initialQuerySent, sendMessage]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: "end" });
@@ -337,7 +493,7 @@ function SearchPageContent() {
                 aria-label="새 대화 만들기"
                 onClick={() => void handleNewConversation()}
                 className="row-action h-9 w-9 p-0 transition-transform duration-200 group-hover:scale-105"
-                disabled={booting}
+                disabled={booting || unknownDelivery !== undefined || clientUpgradeRequired}
               >
                 <Plus className="h-4 w-4" aria-hidden="true" />
               </button>
@@ -352,11 +508,12 @@ function SearchPageContent() {
                   key={conversation.id}
                   type="button"
                   onClick={() => void loadMessages(conversation)}
+                  disabled={unknownDelivery !== undefined || clientUpgradeRequired}
                   className={`w-full truncate rounded-xl px-3 py-2 text-left text-[13px] font-bold transition ${
                     selected
                       ? "bg-[var(--primary-soft)] text-[var(--primary-dark)]"
                       : "text-[var(--ink)] hover:bg-[var(--glass-strong)]"
-                  }`}
+                  } disabled:cursor-not-allowed disabled:opacity-50`}
                 >
                   {conversation.title || DEFAULT_CONVERSATION_TITLE}
                 </button>
@@ -400,7 +557,16 @@ function SearchPageContent() {
           ) : null}
           {error ? (
             <div className="mx-auto mt-4 w-full max-w-3xl rounded-lg border border-red-200 bg-red-50 p-3 text-[13px] text-red-800">
-              {error}
+              <p>{error}</p>
+              {clientUpgradeRequired ? (
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="mt-2 rounded-full bg-red-700 px-3 py-2 text-[12px] font-bold text-white"
+                >
+                  페이지 새로고침
+                </button>
+              ) : null}
             </div>
           ) : null}
 
@@ -415,6 +581,7 @@ function SearchPageContent() {
                   copied={copiedMessageId === message.id}
                   onCopy={() => void copyMessage(message)}
                   sendingEmail={sendingEmailMessageId === message.id}
+                  emailActionBlocked={unknownDelivery !== undefined || clientUpgradeRequired}
                   onApproveEmail={() => void approveEmailDraft(message.id)}
                 />
               ))}
@@ -450,7 +617,7 @@ function SearchPageContent() {
                     key={question}
                     type="button"
                     onClick={() => void sendMessage(question)}
-                    disabled={loading || booting}
+                    disabled={loading || booting || unknownDelivery !== undefined || clientUpgradeRequired}
                     className="rounded-full bg-[var(--primary)] px-3 py-2 text-[12px] font-bold leading-5 text-white transition hover:bg-[var(--primary-dark)] disabled:bg-neutral-300"
                   >
                     {question}
@@ -472,18 +639,37 @@ function SearchPageContent() {
                   }}
                   className="max-h-32 min-h-11 min-w-0 flex-1 resize-none bg-transparent px-2 py-2 text-[14px] leading-6 outline-none"
                   placeholder="회사 기억에서 무엇을 찾아볼까요?"
-                  disabled={booting}
+                  disabled={booting || unknownDelivery !== undefined || clientUpgradeRequired}
                   rows={1}
                 />
                 <button
                   type="submit"
                   aria-label="전송"
-                  disabled={loading || booting || query.trim().length === 0}
+                  disabled={
+                    loading
+                    || booting
+                    || unknownDelivery !== undefined
+                    || clientUpgradeRequired
+                    || query.trim().length === 0
+                  }
                   className="row-action h-10 w-10 shrink-0 p-0 disabled:bg-neutral-300"
                 >
                   <Send className="h-4 w-4" aria-hidden="true" />
                 </button>
               </div>
+              {unknownDelivery ? (
+                <div className="mt-2 flex items-center justify-between gap-3 rounded-lg bg-amber-50 px-3 py-2 text-[12px] text-amber-900">
+                  <span>전송 상태를 확인하지 못했습니다.</span>
+                  <button
+                    type="button"
+                    onClick={() => void retryUnknownDelivery()}
+                    disabled={loading}
+                    className="shrink-0 rounded-full bg-amber-800 px-3 py-1.5 font-bold text-white disabled:bg-neutral-300"
+                  >
+                    상태 다시 확인
+                  </button>
+                </div>
+              ) : null}
             </div>
           </form>
         </main>
@@ -503,6 +689,7 @@ function AssistantBubble({
   copied,
   onCopy,
   sendingEmail,
+  emailActionBlocked,
   onApproveEmail,
 }: {
   message: AssistantMessage;
@@ -511,12 +698,16 @@ function AssistantBubble({
   copied: boolean;
   onCopy: () => void;
   sendingEmail: boolean;
+  emailActionBlocked: boolean;
   onApproveEmail: () => void;
 }) {
   const isAssistant = message.role === "assistant";
   const evidenceCount = evidenceItemCount(message);
   const isTyping = message.metadata?.ui_status === "typing";
   const emailDraft = getEmailDraftView(message);
+  const plainTextRag = isPlainTextRagMessage(message.metadata);
+  const permissionNotice = plainTextRag ? publicPermissionNotice(message) : null;
+  const deliveryStatus = getDeliveryStatus(message);
 
   return (
     <article className={`flex ${isAssistant ? "justify-start" : "justify-end"}`}>
@@ -530,7 +721,16 @@ function AssistantBubble({
         >
           {isAssistant ? (
             <>
-              <MarkdownContent content={message.content} />
+              {plainTextRag ? (
+                <p
+                  data-testid="rag-plain-text-answer"
+                  className="whitespace-pre-wrap [overflow-wrap:anywhere]"
+                >
+                  {message.content}
+                </p>
+              ) : (
+                <MarkdownContent content={message.content} />
+              )}
               {isTyping ? <span className="ml-0.5 animate-pulse text-[var(--primary)]">▍</span> : null}
             </>
           ) : (
@@ -538,10 +738,24 @@ function AssistantBubble({
           )}
         </div>
 
+        {isAssistant && permissionNotice ? (
+          <div className="mx-4 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-[12px] leading-5 text-amber-900">
+            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <p>{permissionNotice}</p>
+          </div>
+        ) : null}
+
+        {!isAssistant && deliveryStatus === "unknown" ? (
+          <p className="mt-1 text-right text-[11px] font-bold text-amber-800">
+            전송 상태를 확인하지 못했습니다.
+          </p>
+        ) : null}
+
         {isAssistant && emailDraft ? (
           <EmailDraftActions
             status={emailDraft.status}
             sending={sendingEmail}
+            blocked={emailActionBlocked}
             onApprove={onApproveEmail}
           />
         ) : null}
@@ -571,7 +785,13 @@ function AssistantBubble({
               )}
               근거와 출처 {evidenceCount.toLocaleString()}개 {evidenceOpen ? "접기" : "펼치기"}
             </button>
-            {evidenceOpen ? <EvidenceDisclosure message={message} /> : null}
+            {evidenceOpen ? (
+              <EvidenceDisclosure
+                message={message}
+                showPermissionNotice={!plainTextRag}
+                showLegacySourceLinks={!plainTextRag}
+              />
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -582,10 +802,12 @@ function AssistantBubble({
 function EmailDraftActions({
   status,
   sending,
+  blocked,
   onApprove,
 }: {
   status: string;
   sending: boolean;
+  blocked: boolean;
   onApprove: () => void;
 }) {
   if (status === "sent") {
@@ -598,7 +820,7 @@ function EmailDraftActions({
       <button
         type="button"
         onClick={onApprove}
-        disabled={sending}
+        disabled={sending || blocked}
         className="rounded-full bg-[var(--primary)] px-3 py-2 text-[12px] font-bold leading-5 text-white transition hover:bg-[var(--primary-dark)] disabled:bg-neutral-300"
       >
         {sending ? "전송 중" : "승인하고 보내기"}
@@ -681,15 +903,23 @@ function renderInlineMarkdown(text: string) {
   });
 }
 
-function EvidenceDisclosure({ message }: { message: AssistantMessage }) {
+function EvidenceDisclosure({
+  message,
+  showPermissionNotice,
+  showLegacySourceLinks,
+}: {
+  message: AssistantMessage;
+  showPermissionNotice: boolean;
+  showLegacySourceLinks: boolean;
+}) {
   const citations = message.citations ?? [];
   const citationSnippets = new Set(citations.map((citation) => citation.source_snippet));
   const snippets = (message.source_snippets ?? []).filter((snippet) => !citationSnippets.has(snippet));
-  const links = message.source_links ?? [];
+  const links = showLegacySourceLinks ? (message.source_links ?? []) : [];
 
   return (
     <div className="mt-2 max-h-72 overflow-y-auto rounded-lg border border-line bg-[var(--glass-elevated)] p-3">
-      {message.permission_notice ? (
+      {showPermissionNotice && message.permission_notice ? (
         <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-[12px] leading-5 text-amber-900">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
           <p>{message.permission_notice}</p>
@@ -752,14 +982,9 @@ function EvidenceCitationList({ citations }: { citations: RagCitation[] }) {
         인용 근거
       </h3>
       <div className="space-y-2">
-        {citations.map((citation, index) => (
-          <a
-            key={`${citation.source_id}-${index}`}
-            href={citation.source_url}
-            target="_blank"
-            rel="noreferrer"
-            className="block rounded-md border border-line bg-surface-soft p-3 text-[12px] hover:bg-[var(--glass-strong)]"
-          >
+        {citations.map((citation, index) => {
+          const content = (
+            <>
             <span className="font-bold text-[var(--primary-dark)]">근거 {index + 1}</span>
             <span className="mt-1 block break-all text-muted">{citation.source_id}</span>
             <span className="mt-1 block text-muted">관련도 {citation.relevance_score.toFixed(2)}</span>
@@ -773,14 +998,36 @@ function EvidenceCitationList({ citations }: { citations: RagCitation[] }) {
             <span className="mt-2 block border-l-2 border-line pl-3 leading-5 text-muted">
               {citation.source_snippet}
             </span>
-          </a>
-        ))}
+            </>
+          );
+          return isSafeCitationUrl(citation.source_url) ? (
+            <a
+              key={`${citation.source_id}-${index}`}
+              href={citation.source_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block rounded-md border border-line bg-surface-soft p-3 text-[12px] hover:bg-[var(--glass-strong)]"
+            >
+              {content}
+            </a>
+          ) : (
+            <div
+              key={`${citation.source_id}-${index}`}
+              className="block rounded-md border border-line bg-surface-soft p-3 text-[12px]"
+            >
+              {content}
+            </div>
+          );
+        })}
       </div>
     </section>
   );
 }
 
 function evidenceItemCount(message: AssistantMessage) {
+  if (isPlainTextRagMessage(message.metadata)) {
+    return Math.max(message.citations.length, message.source_snippets.length);
+  }
   return Math.max(
     message.citations.length,
     message.source_links.length,
@@ -796,8 +1043,9 @@ function createOptimisticUserMessage(
   conversationId: number,
   content: string,
   id: number,
+  requestToken: number,
 ): AssistantMessage {
-  return {
+  return markDelivery({
     id,
     conversation_id: conversationId,
     role: "user",
@@ -812,7 +1060,7 @@ function createOptimisticUserMessage(
     agent_run_id: null,
     metadata: { ui_status: "optimistic" },
     created_at: new Date().toISOString(),
-  };
+  }, "sending", requestToken);
 }
 
 function replaceOptimisticMessage(
@@ -859,4 +1107,26 @@ function sortConversationsByUpdatedAt(conversations: AssistantConversation[]) {
     const timeDiff = new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
     return timeDiff || right.id - left.id;
   });
+}
+
+function deliveryFailureCopy(status: number): string {
+  return status === 502
+    ? "답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요."
+    : "요청 처리 상태를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.";
+}
+
+function definiteRefusalCopy(error: ApiError): string {
+  if (error.status === 404) {
+    return "대화를 찾을 수 없습니다. 대화 목록을 새로고침해 주세요.";
+  }
+  if (error.status === 422 && error.code === null) {
+    return "요청 내용을 확인해 주세요.";
+  }
+  return error.message;
+}
+
+function isClientUpgradeError(error: unknown): error is ApiError {
+  return error instanceof ApiError
+    && error.status === 409
+    && error.code === "client_upgrade_required";
 }

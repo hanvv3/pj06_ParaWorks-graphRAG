@@ -6531,3 +6531,35 @@ Cost/security note:
 - Closure is local mocked-UI and static/type evidence only. No backend, live
   provider, external network, paid model, database, deploy, push, or merge is
   claimed.
+
+## 2026-09-13 Deliverable D Core Task 20 frontend delivery candidate
+
+- The Assistant now renders V2 and unknown-version RAG output as literal React
+  text with preserved whitespace and safe wrapping. It validates citation URLs
+  as absolute credential-free HTTP(S), leaves invalid citations as labels, and
+  keeps legacy V1 Markdown/source-link behavior isolated.
+- Global search input moves to `/search` through a consume-once in-memory
+  handoff. Raw input is never placed in the URL, browser history, storage, or an
+  automatic Assistant request; legacy inbound `?q=` is discarded.
+- Request-token plus conversation ownership now reconciles uncertain POST
+  delivery through guarded authoritative GETs. Definite 403/404/422 refusals
+  remove only their optimistic row; 500/502 and budget conflicts reconcile or
+  leave one GET-only unknown row; stale results cannot replace a newer
+  conversation. Client-upgrade conflicts expose hard reload only and disable
+  all Assistant POST affordances and conversation switching.
+- RED evidence covered eight browser behavior gaps, three missing helper
+  modules, Unicode URL whitespace, budget-copy preservation, GET-side client
+  upgrade, POST affordance blocking, and conversation switching after upgrade.
+  Final Task 20 evidence is non-incremental TypeScript, lint, and production
+  build success; desktop Task 20 plus Assistant memory `21 passed`; mobile Task
+  20 `19 passed, 1 desktop-only shell-search skipped`; mock-only no-network
+  visual handoff `2 passed`.
+- Existing Review/AutoReview broad regression was `51 passed, 1 failed`; the
+  unchanged automatic-approval test also fails alone while polling its
+  `resolution_source` request. A base-scoped diff over the four exercised specs
+  and `frontend/src/app/review` exits 0. Task 20 changes no Review/AutoReview source, so
+  this is retained as an independent baseline concern rather than widened
+  scope. Normal live-seed visual smoke and real backend/provider paths remain
+  unrun. This is a local candidate awaiting independent review; no push, merge,
+  deploy, database, paid-model, Task 18 release gate, Slack, CDC, Redis/D.1, or
+  E work is claimed.

@@ -5128,3 +5128,35 @@ tests passed with 53 tests; ruff passed.
 - Evidence remains local and mocked at UI/API routes. No backend or production
   data path was exercised; no live provider, external network, paid model,
   database, deployment, push, or merge occurred.
+
+## 2026-09-13 Deliverable D Core Task 20 implementation candidate
+
+- Worktree/branch: `.worktrees/review-hitl-v2-design` on
+  `codex/rag-orchestrator-agent`, based on
+  `24c1d8a0e3369e9d47501acf8f12e36d3f212a0e`.
+- New frontend boundaries are `lib/rag/presentation.ts` for fail-closed literal
+  rendering and citation URL validation, `lib/assistant/searchHandoff.ts` for
+  consume-once same-screen input transfer, and
+  `lib/assistant/reconciliation.ts` for request-owned delivery state.
+- Search never consumes inbound `?q=` and never auto-sends. V2/unknown RAG rows
+  ignore legacy `source_links`, show safe permission copy immediately below the
+  answer, and keep validated citations/snippets in the existing accordion.
+  Proven V1/non-RAG presentation remains unchanged.
+- Delivery UI is `sending | persisted | unknown`, guarded by request token and
+  conversation id. Unknown retry is GET-only. Client upgrade allows hard reload
+  only; inputs, suggested prompts, new conversation, conversation selection,
+  and email approval remain disabled until a successful Assistant GET proves
+  compatibility after reload.
+- Final green: `npx.cmd tsc --noEmit --incremental false`, warning-free lint,
+  and `next build` exit 0; desktop Task 20 plus Assistant memory `21 passed`;
+  mobile Task 20 `19 passed, 1 skipped`; explicit mock-only visual handoff `2
+  passed` with no backend requests. `PLAYWRIGHT_SKIP_BACKEND_SEED=1` changes only
+  the visual test harness; the default continues to seed the backend.
+- Limitations: full normal visual smoke was not run because no live backend seed
+  was available. The existing Review/AutoReview bundle is `51 passed, 1 failed`;
+  the unchanged automatic-approval polling failure reproduces alone and is not
+  modified here; `git diff --quiet` against the Task 20 base for the four specs
+  plus `frontend/src/app/review` exits 0. Candidate status is
+  **DONE_WITH_CONCERNS** pending independent
+  Task 20 review. No backend, provider, external network, paid model, database,
+  release gate, Slack, CDC, Redis/D.1, E, push, merge, or deploy work occurred.

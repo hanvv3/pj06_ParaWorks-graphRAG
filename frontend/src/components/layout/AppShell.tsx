@@ -21,6 +21,7 @@ import { apiGet, apiPost, clearStoredDemoUserId } from "@/lib/api/client";
 import { REVIEW_QUEUE_UPDATED_EVENT } from "@/lib/reviewQueueEvents";
 import type { AuthUserResponse, DashboardResponse, DemoUser, NotificationsResponse } from "@/lib/api/types";
 import { LanguageProvider } from "@/lib/i18n/LanguageProvider";
+import { ephemeralSearchHandoff } from "@/lib/assistant/searchHandoff";
 
 /**
  * 네비게이션 아이템의 타입 정의
@@ -188,8 +189,9 @@ function ShellContent({ children }: { children: ReactNode }) {
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
-    const query = String(formData.get("q") ?? "").trim();
-    router.push(query ? `/search?q=${encodeURIComponent(query)}` : "/search");
+    const rawQuery = String(formData.get("q") ?? "");
+    ephemeralSearchHandoff.put(rawQuery);
+    router.push("/search");
   }
 
   /**
