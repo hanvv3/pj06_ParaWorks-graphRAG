@@ -1,5 +1,17 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core pre-send audit-retention correction
+
+- Scoped review identified that an unsent prepared answer still needs its
+  audit identities. Safe evidence-changed results now retain exact prepared
+  observation, rendered-input and model-configuration HMACs through pending and
+  final commits, without exposing old evidence or granting it serving authority.
+- Real fake-provider regressions verify preserved costs, empty public output,
+  exact audit matching and forged-identity rejection. No new DB/public fields,
+  raw content persistence or provider calls. Awaiting scoped rereview.
+- Fresh affected verification: `179 passed, 1 PostgreSQL URL skip` in 149.95s,
+  no warnings; static, compile and diff checks passed.
+
 ## 2026-09-12 D Core Task14 evidence-boundary review fixes
 
 - Independent review found three integration gaps: filtered model slots could

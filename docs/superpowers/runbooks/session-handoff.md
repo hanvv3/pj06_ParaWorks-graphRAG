@@ -2,6 +2,22 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task14 audit-retention fix round 2
+
+- Scoped review accepted round-1 citation/configuration fixes and safe runtime
+  behavior, but rejected `f5fd6f9` audit erasure. Pre-send evidence-changed canned
+  results must retain prepared observation/rendered/model-config identities
+  under spec §7.4/§16. Ledger now leaves that exact authenticated triple intact.
+- The finalizer receives a hash-only audit carrier with no old serving slots,
+  model influence, selected evidence or output. It validates the triple against
+  the pending row and includes it in result identity with preparation=true;
+  public citations/dependencies remain empty. Partial/forged triples and old
+  serving state are rejected. Existing charges, locks and no-resend behavior
+  remain unchanged. This candidate still requires scoped independent rereview.
+- Exact affected gate: `179 passed, 1 PostgreSQL URL skip` in 149.95s, no
+  warnings. Four code/test Ruff targets, three production compile targets,
+  whitespace and added-line credential scan passed. No live APIs or dotenv.
+
 ## 2026-09-12 D Core Task14 review round 1 fixes
 
 - Review of integration candidate `a5fe4df` was NOT CLEAN. Scoped fixes preserve

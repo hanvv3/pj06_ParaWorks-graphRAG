@@ -1226,11 +1226,70 @@ def test_actual_answer_transport_pre_send_evidence_drift_commits_canned_product(
         context = _with_paid_embedding_answer(context, client)
     original = RagProviderDispatchAuthority.prepare
     prepared_calls = []
+    retired_invocations = []
+    audit_fields = (
+        'rendered_input_hmac',
+        'answer_model_config_snapshot_hmac',
+        'prepared_model_influence_observation_hmac',
+    )
+    audit = {}
+    pending_carriers = []
+    result_identities = []
+    from backend.app.agent_runtime import rag_finalization
+
+    fingerprint = rag_finalization.keyed_fingerprint
+
+    def capture_identity(payload, **kwargs):
+        if kwargs.get('schema_version') == 'rag-result:v1':
+            result_identities.append(payload)
+        return fingerprint(payload, **kwargs)
+
+    monkeypatch.setattr(rag_finalization, 'keyed_fingerprint', capture_identity)
+    finalizer_factory = context.services.finalizer_factory
+
+    def audit_finalizer(pending, prepared):
+        from sqlalchemy.orm import Session
+
+        with Session(context.services.db.get_bind()) as db:
+            parent = db.get(AgentRun, 161)
+            assert parent.run_record_phase == 'cost_finalized_pending_projection'
+            assert {field: parent.metadata_[field] for field in audit_fields} == audit
+        assert prepared.rendered_input_hmac == audit['rendered_input_hmac']
+        assert (
+            prepared.answer_model_config_snapshot_hmac
+            == audit['answer_model_config_snapshot_hmac']
+        )
+        assert (
+            prepared.audit_only_prepared_observation_hmac
+            == audit['prepared_model_influence_observation_hmac']
+        )
+        assert prepared.evidence_slots == prepared.model_influence_observations == ()
+        assert prepared.prepared_model_influence is None
+        for change in (
+            {'rendered_input_hmac': None},
+            {'answer_model_config_snapshot_hmac': None},
+            {'evidence_slots': retired_invocations[0].evidence_slots},
+            {'model_influence_observations': retired_invocations[0].model_influence},
+            {'tentative_outcome': 'no_match'},
+            {'selected_slot_ids': ('E1',)},
+        ):
+            with pytest.raises(ValueError, match='audit-only'):
+                replace(prepared, **change)
+        pending_carriers.append(prepared)
+        return finalizer_factory(pending, prepared)
+
+    context = replace(
+        context, services=replace(context.services, finalizer_factory=audit_finalizer)
+    )
 
     def drift_after_real_prepare(authority, **kwargs):
         dispatch = original(authority, **kwargs)
         if kwargs['grant'].component != 'answer_generation':
             return dispatch
+        parent = context.services.db.get(AgentRun, 161)
+        audit.update({field: parent.metadata_[field] for field in audit_fields})
+        assert all(type(value) is str and len(value) == 64 for value in audit.values())
+        retired_invocations.append(kwargs['prepared'])
         prepared_calls.append((kwargs['grant'], dispatch))
         if drift_kind == 'c5':
             row = context.services.db.query(RagLexicalServingProjection).one()
@@ -1273,6 +1332,30 @@ def test_actual_answer_transport_pre_send_evidence_drift_commits_canned_product(
     assert result['charged_cost_usd'] == (Decimal('0.000001') if paid_embedding else 0)
     parent = context.services.db.get(AgentRun, 161)
     assert parent.status == 'complete' and parent.run_record_phase == 'final'
+    assert {field: parent.metadata_[field] for field in audit_fields} == audit
+    assert 'Exact current source observation' not in str(parent.metadata_)
+    assert len(pending_carriers) == 1
+    assert result_identities
+    for identity in result_identities:
+        assert identity['answer_invocation_prepared'] is True
+        assert identity['rendered_input_hmac'] == audit['rendered_input_hmac']
+        assert (
+            identity['model_config_snapshot_hmac']
+            == audit['answer_model_config_snapshot_hmac']
+        )
+        assert (
+            identity['prepared_model_influence_observation_hmac']
+            == audit['prepared_model_influence_observation_hmac']
+        )
+        for field in (
+            'answer_block_audit_set_hmac',
+            'assembled_answer_hmac',
+            'joiner_version',
+            'model_influence_set_hmac',
+            'selected_evidence_projection_hmac',
+            'output_permission',
+        ):
+            assert identity[field] is None
     answer = (
         context.services.db.query(AgentRunCostComponent)
         .filter_by(agent_run_id=161, component='answer_generation')
@@ -1299,6 +1382,65 @@ def test_actual_answer_transport_pre_send_evidence_drift_commits_canned_product(
             vector_index_generation=1 if paid_embedding else None,
         )
     assert len(client.seen) == int(paid_embedding)
+
+
+@pytest.mark.parametrize(
+    'field',
+    (
+        'rendered_input_hmac',
+        'answer_model_config_snapshot_hmac',
+        'audit_only_prepared_observation_hmac',
+    ),
+)
+def test_pre_send_audit_identity_mismatch_cannot_finalize(tmp_path, monkeypatch, field):
+    from backend.app.agent_runtime.rag_finalization import RagFinalizationError
+    from backend.app.agent_runtime.rag_graph import (
+        build_company_memory_rag_answer_v2_graph,
+    )
+    from backend.app.agent_runtime.rag_provider_transport import (
+        RagProviderDispatchAuthority,
+    )
+    from backend.app.models import RagLexicalServingProjection
+
+    context, client = _answer_context(tmp_path)
+    factory = context.services.finalizer_factory
+
+    def forged_factory(pending, prepared):
+        service = factory(pending, prepared)
+        finalize = service.finalize_pre_generation_evidence_changed
+
+        def forged(carrier, original, **kwargs):
+            return finalize(carrier, replace(original, **{field: 'f' * 64}), **kwargs)
+
+        service.finalize_pre_generation_evidence_changed = forged
+        return service
+
+    context = replace(
+        context, services=replace(context.services, finalizer_factory=forged_factory)
+    )
+    prepare = RagProviderDispatchAuthority.prepare
+
+    def drift(authority, **kwargs):
+        dispatch = prepare(authority, **kwargs)
+        context.services.db.query(
+            RagLexicalServingProjection
+        ).one().model_content_hmac = 'f' * 64
+        context.services.db.commit()
+        return dispatch
+
+    monkeypatch.setattr(RagProviderDispatchAuthority, 'prepare', drift)
+    text = prepare_direct_request_text(
+        'observation', key=context.settings.agent_runtime_fingerprint_secret.encode()
+    )
+    with pytest.raises(RagFinalizationError, match='carrier changed'):
+        build_company_memory_rag_answer_v2_graph().invoke(
+            {'prepared_text': text}, context=context
+        )
+    assert client.seen == []
+    assert (
+        context.services.db.get(AgentRun, 161).run_record_phase
+        == 'cost_finalized_pending_projection'
+    )
 
 
 @pytest.mark.parametrize('failure', ('key', 'provider_safety', 'invalid_identity'))

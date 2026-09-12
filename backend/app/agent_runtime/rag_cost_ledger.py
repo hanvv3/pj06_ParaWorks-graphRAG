@@ -1618,13 +1618,6 @@ class RagCostLedger:
                 self._require_terminal_cost_row(run_id, query)
             for row in ((answer,) if embedding_only else rows):
                 self._make_terminal_zero(row)
-            if refused_grant is not None:
-                # No answer bytes were sent. Safe phase 2 has no model influence.
-                parent.metadata_ = {
-                    **parent.metadata_, 'rendered_input_hmac': None,
-                    'answer_model_config_snapshot_hmac': None,
-                    'prepared_model_influence_observation_hmac': None,
-                }
             parent.run_record_phase = 'cost_finalized_pending_projection'
             parent.total_charged_cost_usd = sum((Decimal(row.charged_cost_usd) for row in rows), _ZERO)
             parent.estimated_cost_usd = float(sum((Decimal(row.reserved_cost_usd) for row in rows), _ZERO))

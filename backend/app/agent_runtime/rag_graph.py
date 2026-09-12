@@ -549,6 +549,11 @@ def _safe_outcome(state, context, *, embedding_only):
             corpus_generation=corpus,
             vector_index_generation=index,
         )
+    audit = (
+        state.get('prepared_answer')
+        if state.get('safe_outcome') == 'evidence_unavailable'
+        else None
+    )
     prepared = PreparedRagFinalization(
         product_kind='answer',
         tentative_outcome=state.get('safe_outcome')
@@ -565,6 +570,15 @@ def _safe_outcome(state, context, *, embedding_only):
             'rag-canned-evidence-unavailable:v1'
             if state.get('safe_outcome') == 'evidence_unavailable'
             else 'rag-canned-no-evidence:v1'
+        ),
+        rendered_input_hmac=audit.rendered_input_hmac if audit is not None else None,
+        answer_model_config_snapshot_hmac=(
+            audit.model_config_snapshot_hmac if audit is not None else None
+        ),
+        audit_only_prepared_observation_hmac=(
+            state['prepared_model_influence'].aggregate_observation_hmac
+            if audit is not None
+            else None
         ),
     )
     return _finalize_provider_free(

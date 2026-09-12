@@ -984,6 +984,15 @@ class PreparedRagFinalization:
     prepared_model_influence: PreparedModelInfluenceSet | None = None
     rendered_input_hmac: str | None = None
     answer_model_config_snapshot_hmac: str | None = None
+    audit_only_prepared_observation_hmac: str | None = None
+
+    @property
+    def prepared_observation_hmac(self) -> str | None:
+        return (
+            self.prepared_model_influence.aggregate_observation_hmac
+            if self.prepared_model_influence is not None
+            else self.audit_only_prepared_observation_hmac
+        )
 
     def __post_init__(self) -> None:
         if self.product_kind not in {'answer', 'search'}:
@@ -994,6 +1003,18 @@ class PreparedRagFinalization:
             raise ValueError('prepared RAG security scope is invalid')
         if type(self.retrieval_result) is not RetrievalResult:
             raise ValueError('prepared RAG retrieval carrier is invalid')
+        if self.audit_only_prepared_observation_hmac is not None and (
+            self.product_kind != 'answer'
+            or self.tentative_outcome != 'evidence_unavailable'
+            or self.canned_message_identity != 'rag-canned-evidence-unavailable:v1'
+            or not _lower_hmac(self.audit_only_prepared_observation_hmac)
+            or not _lower_hmac(self.rendered_input_hmac)
+            or not _lower_hmac(self.answer_model_config_snapshot_hmac)
+            or self.evidence_slots or self.model_influence_observations
+            or self.prepared_model_influence is not None
+            or self.selected_slot_ids or self.validated_answer is not None
+        ):
+            raise ValueError('prepared audit-only identity is invalid')
         for value in (
             self.evidence_slots,
             self.model_influence_observations,
@@ -1688,11 +1709,7 @@ class SqlAlchemyRagFinalizationBoundary:
             or metadata.get('answer_model_config_snapshot_hmac')
             != prepared.answer_model_config_snapshot_hmac
             or metadata.get('prepared_model_influence_observation_hmac')
-            != (
-                prepared.prepared_model_influence.aggregate_observation_hmac
-                if prepared.prepared_model_influence is not None
-                else None
-            )
+            != prepared.prepared_observation_hmac
         ):
             raise RagFinalizationError('prepared RAG carrier changed')
 
@@ -2142,7 +2159,7 @@ def _build_result_hmac(
     search = prepared.product_kind == 'search'
     substantive = bool(dependencies)
     answer_prepared = (
-        None if search else bool(prepared.model_influence_observations)
+        None if search else prepared.prepared_observation_hmac is not None
     )
     canned = None
     if not search and not substantive:
@@ -2209,11 +2226,7 @@ def _build_result_hmac(
             schema_version='rag-permission-fingerprint:v1',
             policy_version='rag-permission-policy:v1',
         ),
-        'prepared_model_influence_observation_hmac': (
-            prepared.prepared_model_influence.aggregate_observation_hmac
-            if prepared.prepared_model_influence is not None
-            else None
-        ),
+        'prepared_model_influence_observation_hmac': prepared.prepared_observation_hmac,
         'prompt_version': None if search else 'rag-answer:v2',
         'rendered_input_hmac': prepared.rendered_input_hmac,
         'retrieval_policy_version': 'rag-retrieval-policy:v2.0',
