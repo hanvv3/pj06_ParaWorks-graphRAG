@@ -2,6 +2,30 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task15 review fix round 1
+
+- Independent review of `84fb4f9` found three P2 real-path delivery gaps.
+  Validated not-ready embedding snapshots now raise a dedicated readiness
+  refusal (direct503 retriever_unavailable); malformed snapshots and unrelated
+  ValueError/OSError remain unexpected500.
+- A real pre-send provider-safety barrier refusal now carries its acknowledged
+  immutable ledger terminal through transport to direct503. Generic transport
+  errors are not promoted to503 even if cleanup closes a safety-failed parent.
+- Ledger commit/ACK failures now propagate a dedicated sanitized persistence
+  error, including pre-finalizer answer binding and safety-refusal cleanup.
+  Unknown ACK never releases a projection, retries a commit, or resends a model;
+  committed actual charges and unresolved reserved charges remain intact.
+- Focused round1 gate:40 passed in43.58s; supplementary paid-component
+  commit/no-resend cases:4 passed,20 deselected in9.71s. Affected26-file gate:
+  524 passed,1 absent PostgreSQL URL skip,4 failed in378.56s (no warnings).
+  Two failures are the known Slack baseline; two were graph tests matching old
+  raw error text. Only their exception expectations changed. Final supplement:
+  46 passed in59.14s (24 new HTTP,20 staged-cost,2 graph variants), with all
+  no-retry/no-claim assertions unchanged. Ruff7 files, compile4 production,
+  whitespace and added-line credential-pattern scan pass (zero matches).
+- Candidate requires scoped rereview; no CLEAN claim. Task16/18/21 and prior
+  PostgreSQL/Slack caveats remain unchanged. Full evidence in task15-report.md.
+
 ## 2026-09-12 D Core Task15 direct API candidate
 
 - Ask/Search now invoke the app-state facade and shared HTTP mapper. Frozen V1

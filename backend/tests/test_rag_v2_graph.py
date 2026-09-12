@@ -1497,7 +1497,10 @@ def test_pre_send_authority_failure_is_not_canned_evidence_drift(
 def test_evidence_refusal_pending_commit_failure_has_no_product_or_resend(
     tmp_path, monkeypatch, unknown
 ):
-    from backend.app.agent_runtime.rag_cost_ledger import RagCostLedgerError
+    from backend.app.agent_runtime.rag_cost_ledger import (
+        RagCostLedgerError,
+        RagCostPersistenceError,
+    )
     from backend.app.agent_runtime.rag_graph import (
         build_company_memory_rag_answer_v2_graph,
     )
@@ -1533,7 +1536,7 @@ def test_evidence_refusal_pending_commit_failure_has_no_product_or_resend(
     text = prepare_direct_request_text(
         'observation', key=context.settings.agent_runtime_fingerprint_secret.encode()
     )
-    with pytest.raises(RuntimeError, match='pending commit acknowledgement failed'):
+    with pytest.raises(RagCostPersistenceError, match='commit acknowledgement unavailable'):
         build_company_memory_rag_answer_v2_graph().invoke(
             {'prepared_text': text}, context=context
         )

@@ -4,7 +4,7 @@ import hmac
 import secrets
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -89,6 +89,10 @@ RagAdmissionBudget = PreparedPaidCallBudget | RagAnswerCeilingReservation | RagU
 
 class RagCostLedgerError(RuntimeError):
     """A fail-closed durable cost authority refusal."""
+
+
+class RagCostPersistenceError(RagCostLedgerError):
+    """A ledger commit or its acknowledgement failed; no authority may be retried."""
 
 
 class RagServingEvidenceChangedError(RagCostLedgerError):
@@ -340,10 +344,16 @@ class RagCostLedger:
         try:
             self._session.commit()
         except Exception:
-            self._session.rollback()
-            raise
+            # Rollback cannot establish whether the server committed. Never retry,
+            # and do not let a broken connection's rollback mask this boundary.
+            with suppress(Exception):
+                self._session.rollback()
+            raise RagCostPersistenceError('ledger commit acknowledgement unavailable') from None
         if self._after_commit is not None:
-            self._after_commit()
+            try:
+                self._after_commit()
+            except Exception:
+                raise RagCostPersistenceError('ledger commit acknowledgement unavailable') from None
 
     @property
     def provider_safety_authority(self) -> RagProviderSafetyService:

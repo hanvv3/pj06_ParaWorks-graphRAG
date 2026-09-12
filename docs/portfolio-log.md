@@ -1,5 +1,20 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core direct API error-delivery review fixes
+
+- Task15 round1 fixes three independently identified real-path gaps: exact
+  readiness503, acknowledged safety-refusal503, and commit-failure500 delivery.
+  Generic exceptions remain distinct; no uncommitted result is published.
+- Real graph/facade/HTTP regressions use durable fake safety transitions and
+  actual ledger commit/ACK injection. They verify retained paid charges and
+  no retry/resend after uncertain persistence. Affected gate:524 passed,1 absent
+  PostgreSQL skip,2 known Slack failures and2 obsolete raw-error assertions.
+  After assertion-only adaptation, final46-case supplement passed. No state or
+  no-resend assertions were weakened. Static/hygiene checks pass; scoped
+  rereview required.
+- No policy/rollout changes, live providers, PostgreSQL proof or deferred
+  Assistant/shadow work is claimed.
+
 ## 2026-09-12 D Core direct API delivery candidate
 
 - Task15 routes Ask/Search through the request-owned facade with frozen exact

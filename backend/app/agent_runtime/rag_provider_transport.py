@@ -29,6 +29,7 @@ from backend.app.agent_runtime.rag_advisory_locks import begin_rag_lock_order
 from backend.app.agent_runtime.rag_cost_ledger import (
     RagCostLedger,
     RagCostLedgerError,
+    RagCostPersistenceError,
     RagServingEvidenceChangedError,
 )
 from backend.app.agent_runtime.rag_embedding_delivery import (
@@ -46,6 +47,7 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
     CommittedRagDispatchGrant,
     RagComponentFinal,
     RagProviderSafetyBinding,
+    RagRunTerminal,
     _ClassifiedProviderObservation,
     _issue_classified_provider_observation,
 )
@@ -97,6 +99,14 @@ class RagProviderTransportError(RuntimeError):
 
 class RagAnswerEvidenceChangedBeforeSendError(RagProviderTransportError):
     """Exact answer grant retired before send; graph must finalize safe projection."""
+
+
+class RagProviderSafetyRefusalError(RagProviderTransportError):
+    """Request-local, acknowledged terminal from an actual pre-send safety refusal."""
+
+    def __init__(self, terminal: RagRunTerminal) -> None:
+        super().__init__('provider safety refused dispatch')
+        self.terminal = terminal
 
 
 @dataclass(frozen=True, slots=True)
@@ -854,6 +864,8 @@ class RagProviderDispatchAuthority:
                 grant=grant,  # type: ignore[arg-type]
                 outcome=outcome,
             )
+        except RagCostPersistenceError:
+            raise
         except RagCostLedgerError:
             raise RagProviderTransportError(
                 'pre-send refusal could not be finalized'
@@ -1005,6 +1017,8 @@ class RagProviderDispatchAuthority:
                         evidence_capability=evidence_capability,
                         c5_capability=c5_capability,
                     )
+        except RagCostPersistenceError:
+            raise
         except (ProviderSendFenceError, RagCostLedgerError, RagProviderSafetyError) as exc:
             if getattr(grant, 'consumed', None) is False:
                 if grant.component == 'answer_generation' and isinstance(
@@ -1020,14 +1034,18 @@ class RagProviderDispatchAuthority:
                     else 'provider_safety_unavailable'
                 )
                 try:
-                    self._store.cancel_claim_before_dispatch(
+                    terminal = self._store.cancel_claim_before_dispatch(
                         grant=grant,
                         outcome=refusal_outcome,
                     )
+                except RagCostPersistenceError:
+                    raise
                 except RagCostLedgerError as cancel_exc:
                     raise RagProviderTransportError(
                         'pre-send refusal could not be finalized'
                     ) from cancel_exc
+                if isinstance(exc, RagProviderSafetyError):
+                    raise RagProviderSafetyRefusalError(terminal) from None
             message = (
                 'evidence provider-send fence refused dispatch'
                 if isinstance(exc, ProviderSendFenceError)

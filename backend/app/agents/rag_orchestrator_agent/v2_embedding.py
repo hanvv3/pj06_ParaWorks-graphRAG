@@ -74,6 +74,10 @@ class QueryEmbeddingDispatchError(RuntimeError):
         self.vector = None
 
 
+class QueryEmbeddingReadinessError(ValueError):
+    """A validated serving-index snapshot explicitly refuses query embedding."""
+
+
 class StrictQueryEmbeddingAdapter:
     def __init__(
         self,
@@ -105,7 +109,7 @@ class StrictQueryEmbeddingAdapter:
                 'serving index is not ready; serving index readiness is invalid'
             ) from None
         if readiness_snapshot[0] is not True:
-            raise ValueError('serving index is not ready for query embedding')
+            raise QueryEmbeddingReadinessError('serving index is not ready for query embedding')
         query_utf8 = request.retrieval_query_text.encode('utf-8', errors='strict')
         model_snapshot_hmac = build_query_embedding_model_config_snapshot_hmac(
             self._settings

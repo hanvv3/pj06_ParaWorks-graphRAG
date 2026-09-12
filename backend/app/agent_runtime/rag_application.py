@@ -233,11 +233,18 @@ class RagApplicationFacade:
             return self._invoke_legacy(
                 actor=actor, caller_text=caller_text, surface=surface
             )
+        from backend.app.agent_runtime.rag_cost_ledger import RagCostPersistenceError
         from backend.app.agent_runtime.rag_cost_policy import RagBudgetExceededError
         from backend.app.agent_runtime.rag_finalization import RagFinalizationError
         from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+        from backend.app.agent_runtime.rag_provider_transport import (
+            RagProviderSafetyRefusalError,
+        )
         from backend.app.agent_runtime.rag_v2_registry import (
             RagRuntimeVersionUnavailableError,
+        )
+        from backend.app.agents.rag_orchestrator_agent.v2_embedding import (
+            QueryEmbeddingReadinessError,
         )
 
         try:
@@ -260,9 +267,13 @@ class RagApplicationFacade:
             return direct_rag_error(exc.code)
         except RagBudgetExceededError:
             return direct_rag_error('budget_exceeded')
+        except QueryEmbeddingReadinessError:
+            return direct_rag_error('retriever_unavailable')
+        except RagProviderSafetyRefusalError as exc:
+            return direct_rag_error(exc.terminal.outcome)
         except RagProviderSafetyError:
             return direct_rag_error('provider_safety_unavailable')
-        except RagFinalizationError:
+        except (RagFinalizationError, RagCostPersistenceError):
             return direct_rag_error('persistence_failed')
         except Exception:
             return direct_rag_error('unexpected_internal_error')

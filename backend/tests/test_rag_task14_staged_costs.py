@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.agent_runtime.rag_cost_ledger import (
     RagCostLedgerError,
+    RagCostPersistenceError,
     _assemble_rag_cost_ledger,
 )
 from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
@@ -108,7 +109,7 @@ def test_failed_binding_commit_cannot_produce_a_claim_or_retry(tmp_path, monkeyp
         raise RuntimeError('commit failed')
 
     monkeypatch.setattr(ledger._session, 'commit', fail)
-    with pytest.raises(RuntimeError, match='commit failed'):
+    with pytest.raises(RagCostPersistenceError, match='commit acknowledgement unavailable'):
         ledger.bind_answer_budget(run_id=143, prepared=concrete)
     monkeypatch.setattr(ledger._session, 'commit', original)
     with pytest.raises(RagCostLedgerError):
@@ -250,7 +251,7 @@ def test_pending_commit_ack_failure_returns_no_dto_and_cannot_repeat(tmp_path):
         raise RuntimeError('pending ACK unavailable')
 
     ledger._after_commit = fail_ack
-    with pytest.raises(RuntimeError, match='pending ACK unavailable'):
+    with pytest.raises(RagCostPersistenceError, match='commit acknowledgement unavailable'):
         ledger.commit_provider_free_pending(run_id=143, corpus_generation=5, vector_index_generation=None)
     ledger._after_commit = None
     assert ledger._session.get(AgentRun, 143).run_record_phase == 'cost_finalized_pending_projection'
