@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Literal
 
+from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
 from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
@@ -54,12 +56,15 @@ class AssistantMessageProjection:
         if not set(self.metadata).issubset(
             {
                 'effective_backend',
+                'agent_name',
                 'fallback_category',
                 'graph_version',
                 'outcome',
                 'permission_notice',
                 'prompt_version',
                 'status',
+                'failure_reason',
+                'failure_class',
             }
         ):
             raise ValueError('V2 assistant metadata contains transient fields')
@@ -188,6 +193,11 @@ class AssistantEvidenceWriter:
         projection: AssistantMessageProjection,
         authority: AssistantExactWriteAuthority,
     ) -> AssistantMessage:
+        with db.no_autoflush if isinstance(db, Session) else nullcontext():
+            return self._append_final(db=db, conversation=conversation,
+                projection=projection, authority=authority)
+
+    def _append_final(self, *, db, conversation, projection, authority):
         if type(projection) is not AssistantMessageProjection:
             raise TypeError('server-issued V2 assistant projection is required')
         if type(authority) is not AssistantExactWriteAuthority:
@@ -242,11 +252,28 @@ class AssistantEvidenceWriter:
                 projection.evidence.projection_hmac if dependencies else None
             ),
             model_influence_set_hmac=None,
-            metadata_=dict(projection.metadata),
+            metadata_={'agent_name': 'rag_orchestrator_agent', 'prompt_version': 'rag-answer:v2',
+                       **dict(projection.metadata)},
         )
         conversation.updated_at = datetime.now(UTC)
-        db.add(message)
-        db.flush([message])
+        if isinstance(db, Session):
+            # Let the database allocate its own PK (SQLite rowid / PG sequence).
+            # The neutral row is private to the finalizer transaction; never
+            # publish an exact-mode row with incomplete mandatory integrity.
+            with db.no_autoflush:
+                allocated = db.scalars(
+                    insert(AssistantMessage).values(
+                        conversation_id=conversation.id, role='assistant', content='',
+                        evidence_contract_version='none-v1', serving_dependency_count=0,
+                    ).returning(AssistantMessage)
+                ).one()
+            for key, value in vars(message).items():
+                if key != '_sa_instance_state':
+                    setattr(allocated, key, value)
+            message = allocated
+        else:
+            db.add(message)
+            db.flush([message])
         message.assistant_message_content_hmac = keyed_fingerprint(
             {
                 'agent_name_bytes': exact_utf8_bytes('rag_orchestrator_agent'),
@@ -309,6 +336,7 @@ class AssistantEvidenceWriter:
             )
             for row in dependency_rows:
                 row.dependency_set_hmac = message.dependency_set_hmac
+            db.flush([message])
             db.add_all(dependency_rows)
             db.flush(dependency_rows)
             refs = []
@@ -461,6 +489,9 @@ class AssistantEvidenceWriter:
     ) -> AssistantMessage:
         if type(projection) is not LegacyAssistantMessageProjection:
             raise TypeError('legacy assistant projection is required')
+        if (projection.evidence.citations or projection.evidence.source_ids
+            or projection.evidence.source_links or projection.evidence.source_snippets):
+            raise ValueError('legacy evidence requires current serving snapshots')
         content = projection.content.strip()
         if not content:
             raise ValueError('legacy assistant content must be nonblank')

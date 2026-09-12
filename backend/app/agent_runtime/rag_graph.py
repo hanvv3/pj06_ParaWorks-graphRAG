@@ -50,7 +50,14 @@ def _node(function):
     @wraps(function)
     def measured(state: RagGraphState, runtime: Runtime[RagRuntimeContext]):
         started = monotonic_ns()
-        update = function(state, runtime)
+        try:
+            update = function(state, runtime)
+        except Exception as exc:
+            # Preserve evidence of an existing claim across the facade boundary.
+            # Losing it must never mint a second provider-free parent.
+            if state.get('run_id') is not None:
+                exc.run_id = state['run_id']
+            raise
         counts = {**state.get('node_counts', {}), function.__name__: 1}
         latencies = {
             **state.get('node_latency_ms', {}),
@@ -248,6 +255,8 @@ def prepare_and_call_query_embedding(
             query_embedding_attempted=True,
             error_component=delivery.component_final.component,
         )
+        if runtime.context.assistant_target is not None:
+            output['effective_backend'] = 'pgvector'
         return output
     return {
         'query_embedding_result': delivery.output,
@@ -319,6 +328,27 @@ def _terminalize_failure(state, context, outcome):
         ingress_budget_refusal,
     )
 
+    if context.assistant_target is not None:
+        from backend.app.agent_runtime.rag_finalization import (
+            AssistantInterComponentFailureFinalizer,
+        )
+        finalizer = AssistantInterComponentFailureFinalizer(settings=context.settings,
+            target=context.assistant_target, prepared_text=state['prepared_text'], outcome=outcome,
+            security_scope=state['security_scope'],
+            effective_backend=(state['retrieval'].effective_backend if state.get('retrieval')
+                else 'pgvector' if state.get('configured_backend') == 'pgvector' else 'deterministic_lexical'),
+            fallback_category=state.get('fallback_category'))
+        if context.services.sqlite_scope is not None:
+            record = context.services.sqlite_scope.finalize_failure(finalizer)
+            charge = Decimal('0.000000')
+        else:
+            terminal = context.services.cost_ledger.finalize_inter_component_failure(
+                run_id=state['run_id'], outcome=outcome, assistant_finalizer=finalizer)
+            record, charge = finalizer.record, terminal.total_charged_cost_usd
+        output = ingress_budget_refusal(context.settings)
+        output.update(outcome=outcome, charged_cost_usd=charge,
+                      assistant_finalization=record)
+        return output
     if context.services.sqlite_scope is not None:
         # SQLite has no phase1 commit: its coordinator rolls back the entire
         # request on a typed failure rather than imitating paid ledger authority.
@@ -501,8 +531,10 @@ def _finalize_provider_free(state, context):
 
 
 def _projection_output(state, projection, *, charge):
+    assistant_record = projection if type(projection) is AssistantFinalizationRecord else None
     projection = _committed_canonical(projection)
     return {
+        **({'assistant_finalization': assistant_record} if assistant_record else {}),
         'committed_projection': projection,
         'outcome': projection.outcome,
         'answer_blocks': None,
@@ -668,10 +700,14 @@ def generate_structured_answer_blocks(
     services = runtime.context.services
     prepared = state['prepared_answer']
     if services.sqlite_scope is not None:
+        try:
+            answer = services.sqlite_scope.generate_deterministic_answer(prepared)
+        except Exception:
+            if runtime.context.assistant_target is None:
+                raise
+            return _terminalize_failure(state, runtime.context, 'unexpected_internal_error')
         return {
-            'validated_answer': services.sqlite_scope.generate_deterministic_answer(
-                prepared
-            ),
+            'validated_answer': answer,
             'answer_generation_attempted': False,
             'deterministic_answer_generated': True,
         }
@@ -714,6 +750,9 @@ def generate_structured_answer_blocks(
             answer_generation_attempted=True,
             error_component=delivery.component_final.component,
         )
+        if runtime.context.assistant_target is not None:
+            output.update(effective_backend=state['retrieval'].effective_backend,
+                          fallback_category=state['retrieval'].trace.fallback_category)
         return output
     return {
         'validated_answer': delivery.output, 'answer_generation_attempted': True,
@@ -844,8 +883,10 @@ def finalize_run_and_answer_projection_or_assistant_message(
                 state['pending'], state['prepared_finalization']
             )
         )
+    assistant_record = projection if type(projection) is AssistantFinalizationRecord else None
     projection = _committed_canonical(projection)
     return {
+        **({'assistant_finalization': assistant_record} if assistant_record else {}),
         'committed_projection': projection,
         'outcome': projection.outcome,
         'answer_blocks': state['validated_answer']

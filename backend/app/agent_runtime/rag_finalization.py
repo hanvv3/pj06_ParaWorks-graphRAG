@@ -2076,8 +2076,8 @@ def _canned_text(identity: RagCannedMessageIdentity | None) -> str:
         'rag-canned-evidence-unavailable:v1': (
             '이 답변의 근거를 더 이상 확인할 수 없습니다. 다시 생성해 주세요.'
         ),
-        'rag-canned-budget-failure:v1': '현재 비용 한도 내에서 답변할 수 없습니다.',
-        'rag-canned-generation-failure:v1': '답변을 생성하지 못했습니다. 다시 시도해 주세요.',
+        'rag-canned-budget-failure:v1': '요청이 비용 한도를 초과해 답변을 생성하지 않았습니다.',
+        'rag-canned-generation-failure:v1': '답변 생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.',
     }
     try:
         return values[identity]
@@ -2380,6 +2380,332 @@ def assistant_message_projection(
     )
 
 
+class AssistantPreDispatchFailureFinalizer:
+    """One product transaction for an explicitly provider-free post-user refusal."""
+
+    def __init__(self, *, settings, session_factory, actor):
+        self.settings = settings
+        self.session_factory = session_factory
+        self.actor = actor
+
+    def finalize(self, *, target, prepared_text, outcome):
+        from backend.app.agent_runtime.rag_application import (
+            _assistant_committed,
+            _assistant_unknown,
+        )
+        from backend.app.assistant.delivery import AssistantDeliveryResult
+
+        commit_started = False
+        try:
+            with self.session_factory() as db:
+                from backend.app.agent_runtime.rag_safety_identity import (
+                    admission_identity,
+                    final_error_identity,
+                )
+                from backend.app.agent_runtime.rag_v2_contracts import (
+                    resolved_rag_backend,
+                    resolved_rag_stage,
+                )
+                from backend.app.agent_runtime.rag_v2_identity import (
+                    ServerRagSecurityScopeResolver,
+                )
+                scope = ServerRagSecurityScopeResolver(self.settings).resolve(db=db, actor=self.actor)
+                secret = fingerprint_secret_bytes(self.settings)[0]
+                backend = resolved_rag_backend(self.settings)
+                scope_hmac = security_scope_fingerprint(scope, settings=self.settings)
+                admission_hmac = admission_identity({
+                    'answer_provider_policy_snapshot_hmac': None,
+                    'configured_backend': backend,
+                    'current_text_hmac': prepared_text.current_text_hmac,
+                    'cutover_stage': resolved_rag_stage(self.settings),
+                    'graph_version': 'company-memory-rag-answer-v2.0', 'mode': 'enforce',
+                    'query_context_version_bytes': exact_utf8_bytes(prepared_text.query_context_version),
+                    'query_embedding_provider_policy_snapshot_hmac': None,
+                    'retrieval_policy_version': 'rag-retrieval-policy:v2.0',
+                    'retrieval_query_hmac': prepared_text.retrieval_query_hmac,
+                    'security_scope_fingerprint': scope_hmac, 'surface': 'assistant',
+                }, secret=secret)
+                parent = AgentRun(
+                    agent_name='rag_orchestrator_agent', prompt_version='rag-answer:v2',
+                    status='failed', run_contract_version='rag-run:v2',
+                    run_record_phase='final', completed_at=datetime.now(UTC),
+                    total_charged_cost_usd=Decimal('0.000000'),
+                    source_window=terminal_source_window(stage='final_error', surface='assistant', backend=backend),
+                    cache_key='rag-v2-admission:' + admission_hmac,
+                    model_name='rag-v2-provider-free', permission_level='restricted',
+                    metadata_={'outcome': outcome, 'configured_backend': backend,
+                        'current_text_hmac': prepared_text.current_text_hmac,
+                        'retrieval_query_hmac': prepared_text.retrieval_query_hmac,
+                        'security_scope_fingerprint': scope_hmac, 'surface': 'assistant'},
+                )
+                db.add(parent)
+                db.flush([parent])
+                children = tuple(assistant_terminal_zero_child(
+                    settings=self.settings, parent_id=parent.id, component=component,
+                ) for component in ('query_embedding', 'answer_generation'))
+                db.add_all(children)
+                db.flush()
+                cost_hmac = _pre_projection_cost_snapshot_hmac(agent_run_id=parent.id,
+                    children=children, secret=secret, terminal_outcome=outcome)
+                terminal_hmac = final_error_identity({
+                    'admission_cache_identity_hmac': admission_hmac,
+                    'answer_question_hmac': None, 'configured_backend': backend,
+                    'current_text_hmac': prepared_text.current_text_hmac,
+                    'fallback_category': None, 'graph_version': 'company-memory-rag-answer-v2.0',
+                    'outcome': outcome, 'prepared_model_influence_observation_hmac': None,
+                    'retrieval_query_hmac': prepared_text.retrieval_query_hmac,
+                    'runtime_cost_snapshot_hmac': cost_hmac,
+                    'security_scope_fingerprint': scope_hmac, 'surface': 'assistant',
+                }, secret=secret)
+                parent.cache_key = 'rag-v2-final-error:' + terminal_hmac
+                parent.metadata_ = {**parent.metadata_, 'runtime_cost_snapshot_hmac': cost_hmac,
+                                    'terminal_identity_hmac': terminal_hmac}
+                record = append_assistant_terminal_failure(
+                    db=db, settings=self.settings, parent=parent, target=target,
+                    prepared_text=prepared_text, outcome=outcome, security_scope=scope,
+                )
+                db.flush()
+                commit_started = True
+                db.commit()
+                return _assistant_committed(record)
+        except Exception:
+            if commit_started:
+                return _assistant_unknown()
+            return AssistantDeliveryResult('persistence_failed', None,
+                'persistence_error', 'not_persisted', None, 500)
+
+
+class AssistantInterComponentFailureFinalizer:
+    """Join the request-owned ledger's terminal transaction, without committing."""
+
+    def __init__(self, *, settings, target, prepared_text, outcome, security_scope,
+                 effective_backend=None, fallback_category=None):
+        self.settings, self.target = settings, target
+        self.prepared_text, self.outcome = prepared_text, outcome
+        self.security_scope = security_scope
+        self.effective_backend, self.fallback_category = effective_backend, fallback_category
+        self.record = None
+
+    def append(self, db, parent):
+        if self.record is not None:
+            raise RagFinalizationError('terminal assistant finalization is single-use')
+        self.record = append_assistant_terminal_failure(
+            db=db, settings=self.settings, parent=parent, target=self.target,
+            prepared_text=self.prepared_text, outcome=self.outcome,
+            security_scope=self.security_scope,
+            effective_backend=self.effective_backend, fallback_category=self.fallback_category,
+        )
+
+
+def finalize_assistant_failed_parent(
+    *, session_factory, settings, actor, target, prepared_text, parent_id, outcome,
+    effective_backend=None, fallback_category=None,
+):
+    """Attach a safe message to an acknowledged projectionless terminal run.
+
+    Provider safety transactions may already have committed its cost and breaker.
+    Preserve that parent exactly apart from the separate message/result identity.
+    """
+    from backend.app.agent_runtime.rag_application import (
+        _assistant_committed,
+        _assistant_unknown,
+    )
+    from backend.app.assistant.delivery import AssistantDeliveryResult
+
+    commit_started = False
+    try:
+        with session_factory() as db:
+            from backend.app.agent_runtime.rag_v2_identity import (
+                ServerRagSecurityScopeResolver,
+            )
+            scope = ServerRagSecurityScopeResolver(settings).resolve(db=db, actor=actor)
+            parent = db.scalar(select(AgentRun).where(AgentRun.id == parent_id).with_for_update())
+            children = list(db.scalars(select(AgentRunCostComponent).where(
+                AgentRunCostComponent.agent_run_id == parent_id,
+            ).order_by(AgentRunCostComponent.component_ordinal).with_for_update()))
+            if (parent is None or parent.status != 'failed' or parent.run_record_phase != 'final'
+                or parent.run_contract_version != 'rag-run:v2' or parent.completed_at is None
+                or parent.metadata_.get('outcome') != outcome
+                or [row.component for row in children] != ['query_embedding', 'answer_generation']
+                or any(row.dispatch_state != 'terminal' for row in children)):
+                return _assistant_unknown()
+            record = append_assistant_terminal_failure(db=db, settings=settings,
+                parent=parent, target=target, prepared_text=prepared_text, outcome=outcome,
+                security_scope=scope, effective_backend=effective_backend,
+                fallback_category=fallback_category)
+            db.flush()
+            commit_started = True
+            db.commit()
+            return _assistant_committed(record)
+    except Exception:
+        if commit_started:
+            return _assistant_unknown()
+        try:
+            with session_factory() as db:
+                parent = db.get(AgentRun, parent_id)
+                present = db.scalar(select(AssistantMessage.id).where(
+                    AssistantMessage.linked_agent_run_id == parent_id))
+                if (parent is not None and parent.status == 'failed'
+                    and parent.run_record_phase == 'final' and present is None):
+                    return AssistantDeliveryResult('persistence_failed', None,
+                        'persistence_error', 'committed_run_failure', parent_id, 500)
+        except Exception:
+            pass
+        return _assistant_unknown()
+
+
+def assistant_failed_parent_delivery(*, session_factory, parent_id, target):
+    """Read-only positive recovery proof; pending/ambiguous IDs grant no result."""
+    from backend.app.agent_runtime.rag_application import _assistant_unknown
+    from backend.app.assistant.delivery import AssistantDeliveryResult
+    if type(parent_id) is not int or parent_id <= 0:
+        return _assistant_unknown()
+    try:
+        with session_factory() as db:
+            parent = db.get(AgentRun, parent_id)
+            conversation = db.get(AssistantConversation, target.conversation_id)
+            user_message = db.get(AssistantMessage, target.user_message_id)
+            present = db.scalar(select(AssistantMessage.id).where(
+                AssistantMessage.linked_agent_run_id == parent_id))
+            if (parent is not None and parent.status == 'failed'
+                and parent.run_contract_version == 'rag-run:v2'
+                and parent.run_record_phase == 'final' and parent.completed_at is not None
+                and present is None and conversation is not None
+                and conversation.user_id == target.owner_user_id
+                and user_message is not None and user_message.role == 'user'
+                and user_message.conversation_id == target.conversation_id):
+                return AssistantDeliveryResult('persistence_failed', None,
+                    'persistence_error', 'committed_run_failure', parent_id, 500)
+    except Exception:
+        pass
+    return _assistant_unknown()
+
+
+def assistant_terminal_zero_child(*, settings, parent_id, component):
+    """No policy authority or paid claim: exact terminal-zero product accounting."""
+    from backend.app.agent_runtime.model_router import (
+        build_rag_answer_model_config_snapshot_hmac,
+    )
+    from backend.app.rag.retrieval import (
+        build_query_embedding_model_config_snapshot_hmac,
+    )
+
+    query = component == 'query_embedding'
+    secret = fingerprint_secret_bytes(settings)[0]
+    return AgentRunCostComponent(
+        agent_run_id=parent_id, component=component, component_ordinal=0 if query else 1,
+        dispatch_state='terminal', attempted=False, dispatch_count=0,
+        reserved_input_tokens=0, reserved_output_tokens=0,
+        actual_input_tokens=None, actual_output_tokens=None,
+        reserved_cost_usd=Decimal('0.000000'), charged_cost_usd=Decimal('0.000000'),
+        charge_basis='zero', overrun=False, provider='openai',
+        model=settings.openai_embedding_model if query else 'gpt-5.4-mini-2026-03-17',
+        authorized_model_config_version='rag-query-embedding-config:v1' if query else 'rag-answer-model-config:v1',
+        authorized_model_config_snapshot_hmac=(
+            build_query_embedding_model_config_snapshot_hmac(settings) if query else
+            build_rag_answer_model_config_snapshot_hmac(settings,
+                output_schema_hmac=build_answer_output_schema_hmac(settings),
+                prompt_renderer_hmac=build_answer_prompt_renderer_hmac(settings))),
+        authorized_cost_policy_version='rag-query-embedding-cost:v1' if query else 'rag-answer-cost:v1',
+        authorized_token_estimator_version='openai-cl100k-text-embedding-3-small:v1' if query else 'openai-o200k-rag-answer:v1',
+        authorized_policy_snapshot_hmac=keyed_fingerprint(
+            {'component': component, 'provider_dispatch_count': 0}, secret=secret,
+            schema_version='assistant-provider-free-policy:v1', policy_version='rag-run:v2'),
+        terminal_outcome=None,
+    )
+
+
+def append_assistant_terminal_failure(
+    *, db, settings, parent, target, prepared_text, outcome, security_scope,
+    effective_backend=None, fallback_category=None,
+) -> AssistantFinalizationRecord:
+    """Flush a terminal safe product; the calling finalizer alone commits."""
+    from backend.app.assistant.delivery import _SAFE_GENERATION_FAILURE_OUTCOMES
+
+    if outcome not in _SAFE_GENERATION_FAILURE_OUTCOMES | {'budget_exceeded'}:
+        raise RagFinalizationError('assistant terminal outcome is unavailable')
+    conversation = db.scalar(select(AssistantConversation).where(
+        AssistantConversation.id == target.conversation_id,
+        AssistantConversation.user_id == target.owner_user_id,
+    ).with_for_update())
+    user_message = db.get(AssistantMessage, target.user_message_id)
+    if (conversation is None or user_message is None or user_message.role != 'user'
+        or user_message.conversation_id != target.conversation_id
+        or parent.status != 'failed' or parent.run_record_phase != 'final'):
+        raise RagFinalizationError('assistant terminal target is unavailable')
+    existing = db.scalar(select(AssistantMessage.id).where(
+        AssistantMessage.linked_agent_run_id == parent.id,
+    ))
+    if existing is not None:
+        raise RagFinalizationError('assistant terminal product already exists')
+    secret, version = fingerprint_secret_bytes(settings)
+    identity = ('rag-canned-budget-failure:v1' if outcome == 'budget_exceeded'
+                else 'rag-canned-generation-failure:v1')
+    prepared_triple = tuple(parent.metadata_.get(key) for key in (
+        'rendered_input_hmac', 'answer_model_config_snapshot_hmac',
+        'prepared_model_influence_observation_hmac'))
+    if any(prepared_triple) and not all(_lower_hmac(value) for value in prepared_triple):
+        raise RagFinalizationError('terminal answer preparation identity is incomplete')
+    scope_hmac = security_scope_fingerprint(security_scope, settings=settings)
+    if parent.metadata_.get('security_scope_fingerprint', scope_hmac) != scope_hmac:
+        raise RagFinalizationError('terminal security scope changed')
+    configured_backend = parent.metadata_.get('configured_backend', 'keyword')
+    effective_backend = effective_backend or parent.metadata_.get('effective_backend') or (
+        'pgvector' if configured_backend == 'pgvector' else 'deterministic_lexical')
+    if effective_backend not in {'pgvector', 'deterministic_lexical'}:
+        raise RagFinalizationError('terminal backend identity is unavailable')
+    result_hmac = keyed_fingerprint({
+        'answer_block_audit_set_hmac': None,
+        'answer_invocation_prepared': bool(prepared_triple[0]),
+        'answer_output_schema_hmac': build_answer_output_schema_hmac(settings),
+        'answer_prompt_renderer_hmac': build_answer_prompt_renderer_hmac(settings),
+        'answer_question_hmac': prepared_text.answer_question_hmac,
+        'assembled_answer_hmac': None, 'canned_message_identity': identity,
+        'citation_projection_version': 'rag-citation-projection:v1',
+        'configured_backend': configured_backend,
+        'current_text_hmac': prepared_text.current_text_hmac,
+        'effective_backend': effective_backend,
+        'fallback_category': fallback_category or parent.metadata_.get('fallback_category'),
+        'graph_version': 'company-memory-rag-answer-v2.0',
+        'hidden_membership_hmac': None, 'joiner_version': None,
+        'model_config_snapshot_hmac': prepared_triple[1],
+        'model_influence_set_hmac': None, 'outcome': outcome, 'output_permission': None,
+        'permission_fingerprint': keyed_fingerprint({
+            'allowed_permission_levels': list(security_scope.allowed_permission_levels),
+            'permission_policy_version': security_scope.permission_policy_version,
+            'resource_scope_mode': security_scope.resource_scope_mode,
+            'workspace_scope_id': security_scope.workspace_scope_id,
+        }, secret=secret, schema_version='rag-permission-fingerprint:v1',
+            policy_version='rag-permission-policy:v1'),
+        'prepared_model_influence_observation_hmac': prepared_triple[2],
+        'prompt_version': 'rag-answer:v2', 'rendered_input_hmac': prepared_triple[0],
+        'retrieval_policy_version': 'rag-retrieval-policy:v2.0',
+        'retrieval_query_context_version': prepared_text.query_context_version,
+        'retrieval_query_hmac': prepared_text.retrieval_query_hmac,
+        'security_scope_fingerprint': scope_hmac,
+        'selected_evidence_projection_hmac': None, 'search_result_set_projection_hmac': None,
+        'surface': 'assistant',
+    }, secret=secret, schema_version='rag-result:v1',
+        policy_version='company-memory-rag-answer-v2.0')
+    parent.metadata_ = {**parent.metadata_, 'rag_result_hmac': result_hmac}
+    projection = AssistantMessageProjection(
+        content=_canned_text(identity), metadata={
+            'status': 'failed', 'failure_reason': outcome,
+            'failure_class': 'RagV2SafeFailure',
+        }, evidence=_empty_answer_projection(settings), permission_level=None,
+        permission_notice=None, hidden_match_count=0, assembled_answer_hmac=None,
+        canned_message_identity=identity, result_hmac=result_hmac,
+    )
+    message = AssistantEvidenceWriter(fingerprint_secret=secret,
+        fingerprint_key_version=version, settings=settings).append_final(
+        db=db, conversation=conversation, projection=projection,
+        authority=_mint_assistant_exact_write_authority(
+            parent_agent_run_id=parent.id, conversation_id=conversation.id,
+            projection=projection, parent_result_hmac=result_hmac),
+    )
+    return AssistantFinalizationRecord(message.id, parent.id, outcome, 'terminal_failure')
+
+
 def _lower_hmac(value: object) -> bool:
     return bool(
         type(value) is str
@@ -2393,6 +2719,7 @@ def _pre_projection_cost_snapshot_hmac(
     agent_run_id: int,
     children: tuple[AgentRunCostComponent, ...],
     secret: bytes,
+    terminal_outcome: str | None = None,
 ) -> str:
     components = [
         {
@@ -2440,11 +2767,11 @@ def _pre_projection_cost_snapshot_hmac(
         {
             'agent_run_id': agent_run_id,
             'components': components,
-            'parent_outcome': None,
-            'parent_run_record_phase': 'cost_finalized_pending_projection',
-            'parent_status': 'running',
+            'parent_outcome': terminal_outcome,
+            'parent_run_record_phase': 'final' if terminal_outcome else 'cost_finalized_pending_projection',
+            'parent_status': 'failed' if terminal_outcome else 'running',
             'run_contract_version': 'rag-run:v2',
-            'snapshot_stage': 'pre_projection',
+            'snapshot_stage': 'terminal' if terminal_outcome else 'pre_projection',
             'total_charged_cost_usd': format(total_charged, '.6f'),
             'total_reserved_cost_usd': format(total_reserved, '.6f'),
         },

@@ -1,5 +1,27 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Task18 Assistant sole-writer candidate
+
+- The Assistant V2 RAG path now prepares owner-bound, scanner-checked immutable
+  prior context before the user write and invokes the existing graph through the
+  facade. Only finalizers write V2 answers; the route maps typed delivery states
+  and reads an acknowledged committed message ID without a second append.
+- Provider-free and inter-component failures preserve one final parent, two cost
+  children and one exact Korean safe message. Unknown ACKs reconcile by GET;
+  failed-parent delivery requires a fresh read-only proof of message absence.
+- The ordinary writer now uses database-assigned IDs inside the finalizer's
+  transaction, with no reserved-ID or before-flush hook. Real SQLite constraints,
+  assembled/canned writes and rollback are exercised. PostgreSQL is not proven.
+- Raw V1 and genuinely pre-provenance knowledge answers now receive keyed
+  integrity-only legacy snapshots. Explicit approval-dependent legacy answers
+  retain their exact existing dependency path: the all-null legacy-unbound
+  schema cannot preserve selected-approval revocation authority. Full future
+  keyed coverage therefore remains a schema/spec decision, not a solved debt.
+- Candidate verification includes 514 passing affected tests and one opt-in
+  PostgreSQL skip, plus later focused delivery/backend/drift checks recorded in
+  the Task18 report. Status is DONE_WITH_CONCERNS, awaiting independent review;
+  no live providers, rollout activation, push, merge or production-PG claim.
+
 ## 2026-09-12 D Core Task17 evidence reader independently CLEAN
 
 - Addressed independent findings F1–F5: context, summary, email and capability

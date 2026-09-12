@@ -2,6 +2,44 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task18 candidate; independent review required
+
+- `PreparedAssistantIngress` and `invoke_assistant` own non-email enforce V2 RAG.
+  Prior rows must stay immutable `AssistantEvidenceReader` projections, including
+  owner-bound ordinary users. Their exact IDs/time/role/content/order enter the
+  ingress HMAC; revoked/tampered prior answers refuse before new user mutation.
+- Route V2 success/catch appends are removed. The facade returns the exact
+  delivery algebra after finalizer commit; the route performs only owner-bound
+  committed-ID lookup. Budget errors expose stable `detail.code`; unknown ACKs
+  do not retry or append. Existing contact/recipient/email and noncutover branches
+  keep their writers; email RAG context crosses the facade compatibility method.
+- Added Assistant pre-dispatch/inter-component finalizers and graph/ledger/SQLite
+  coordination because the inherited code did not implement these prerequisites.
+  Independent review should prioritize atomic parent/message closure, unchanged
+  paid embedding authority, projectionless error HMAC backend/prepared fields,
+  failed-parent proof, and commit-before-ACK behavior. No real PG was exercised.
+- Ordinary writer uses INSERT RETURNING to allocate a neutral private row in the
+  finalizer transaction, then computes all exact integrity before final flush.
+  It never commits. SQLite's reserved-ID/before_flush bridge is no longer used in
+  production; real constrained tests cover canned/assembled writes and rollback.
+- New `legacy_evidence.py` signs raw V1 and genuinely pre-provenance knowledge
+  snapshots as legacy_unbound/legacy_v1_only selected-citation children. Their D
+  identity/version/approval fields remain NULL; the legacy payload's named
+  serving_version_fingerprint is freshly recomputed V1 serving_content_hash.
+  V1 current authority never creates D eligibility. Drift redacts GET and blocks
+  future prior-context ingress. The projection-only helper rejects unsigned
+  evidence because it lacks resolver snapshots.
+- IMPORTANT unresolved debt: explicit approval-dependent legacy snapshots cannot
+  be reduced to this all-null schema without losing selected-effect revocation
+  when another effect still supports shared provenance. Keep their existing
+  exact dependency write/read path (including email's empty-citation evidence
+  behavior); do not weaken the historical production regression or invent an
+  approval-identity schema union. Human schema/spec decision is required for
+  full all-future keyed coverage. Candidate is DONE_WITH_CONCERNS, not CLEAN.
+- Verification commands, RED checkpoints and final gates are in the local
+  `.superpowers/sdd/2026-08-31-deliverable-d-core-rag-answer-graph-v2/task-18-report.md`.
+  No live/paid/provider/network/Docker/real-PG/push/merge or rollout activation.
+
 ## 2026-09-12 D Core Task17 CLEAN; resume at Task18 sole-writer cutover
 
 - `eligible_context_messages` now returns immutable `AssistantMessageView`

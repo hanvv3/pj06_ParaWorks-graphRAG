@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from threading import RLock
 
-from sqlalchemy import Engine, event, func, select
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from backend.app.agent_runtime.fingerprints import (
@@ -63,7 +63,6 @@ from backend.app.models import (
 from backend.app.rag.evidence_projection import (
     CanonicalEvidenceProjector,
     ProjectionFence,
-    build_model_influence_set_hmac,
     build_v1_selected_evidence_projection_hmac,
 )
 from backend.app.rag.keyword_retriever import KeywordEvidenceRetriever
@@ -560,60 +559,9 @@ class SQLiteRagSmokeCoordinator:
             fingerprint_key_version=self._key_version,
             settings=self._settings,
         )
-        reserved_message_id = (db.scalar(select(func.max(AssistantMessage.id))) or 0) + 1
-
-        def seed_sqlite_exact_insert(session, flush_context, instances) -> None:
-            del flush_context, instances
-            for candidate in session.new:
-                if (
-                    type(candidate) is AssistantMessage
-                    and candidate.linked_agent_run_id == parent.id
-                    and candidate.assistant_message_content_hmac is None
-                ):
-                    candidate.id = reserved_message_id
-                    candidate.assistant_message_content_hmac = keyed_fingerprint(
-                        {
-                            'agent_name_bytes': exact_utf8_bytes(
-                                'rag_orchestrator_agent'
-                            ),
-                            'assistant_message_id': reserved_message_id,
-                            'content_bytes': exact_utf8_bytes(candidate.content),
-                            'content_origin': candidate.content_origin,
-                            'content_origin_hmac': candidate.content_origin_hmac,
-                            'content_write_mode': 'rag_v2_exact',
-                            'conversation_id': conversation.id,
-                            'linked_agent_run_id': parent.id,
-                            'message_role': 'assistant',
-                            'prompt_version_bytes': exact_utf8_bytes('rag-answer:v2'),
-                            'rag_result_hmac': projection.result_hmac,
-                        },
-                        secret=self._secret,
-                        schema_version='assistant-message-content-hmac:v1',
-                        policy_version='assistant-evidence:v1',
-                    )
-                    if projection.model_influence:
-                        candidate.model_influence_set_hmac = (
-                            build_model_influence_set_hmac(
-                                dependencies=projection.model_influence,
-                                settings=self._settings,
-                            )
-                        )
-                        candidate.dependency_set_hmac = '0' * 64
-
-        event.listen(db, 'before_flush', seed_sqlite_exact_insert)
-        try:
-            message = writer.append_final(
-                db=db,
-                conversation=conversation,
-                projection=message_projection,
-                authority=authority,
-            )
-        finally:
-            event.remove(db, 'before_flush', seed_sqlite_exact_insert)
-        if projection.model_influence and message.dependency_set_hmac == '0' * 64:
-            raise SQLiteRagSmokeUnavailable(
-                'SQLite assistant dependency identity was not finalized'
-            )
+        message = writer.append_final(
+            db=db, conversation=conversation, projection=message_projection, authority=authority,
+        )
         return AssistantFinalizationRecord(
             assistant_message_id=message.id,
             parent_agent_run_id=parent.id,
@@ -639,7 +587,8 @@ class SQLiteRagSmokeCoordinator:
         )
         if (
             parent is None
-            or parent.status != 'complete'
+            or parent.status != ('failed' if type(result) is AssistantFinalizationRecord
+                                 and result.finalization_kind == 'terminal_failure' else 'complete')
             or parent.run_contract_version != 'rag-run:v2'
             or parent.run_record_phase != 'final'
             or Decimal(parent.total_charged_cost_usd) != _ZERO
@@ -687,7 +636,7 @@ class SQLiteRagSmokeCoordinator:
                 or message.linked_agent_run_id != parent_id
                 or message.agent_run_id != parent_id
                 or message.rag_result_hmac != parent.metadata_.get('rag_result_hmac')
-                or message.metadata_.get('status') != result.application_outcome
+                or message.metadata_.get('status') != ('failed' if result.finalization_kind == 'terminal_failure' else result.application_outcome)
                 or parent.metadata_.get('outcome') != result.application_outcome
                 or message.serving_dependency_count != len(dependencies)
                 or substantive != bool(dependencies)
@@ -897,6 +846,50 @@ class SQLiteRagGraphScope:
         if self.parent is None or self.parent.id != run_id:
             raise SQLiteRagSmokeUnavailable('SQLite graph parent is unavailable')
         return self.pending
+
+    def finalize_failure(self, finalizer):
+        from datetime import UTC, datetime
+
+        from backend.app.agent_runtime.rag_runtime_contracts import (
+            terminal_source_window,
+        )
+        from backend.app.agent_runtime.rag_safety_identity import final_error_identity
+        self._require_active()
+        if self.parent is None:
+            raise SQLiteRagSmokeUnavailable('SQLite graph parent is unavailable')
+        self.parent.status = 'failed'
+        self.parent.run_record_phase = 'final'
+        self.parent.completed_at = datetime.now(UTC)
+        self.parent.projection_owner_fence_hmac = None
+        cost_hmac = _pre_projection_cost_snapshot_hmac(
+            agent_run_id=self.parent.id, children=self.children,
+            secret=self.coordinator._secret, terminal_outcome=finalizer.outcome,
+        )
+        admission_hmac = self.parent.cache_key.removeprefix('rag-v2-admission:')
+        terminal_hmac = final_error_identity({
+            'admission_cache_identity_hmac': admission_hmac,
+            'answer_question_hmac': (finalizer.prepared_text.answer_question_hmac
+                if self.parent.metadata_.get('rendered_input_hmac') else None),
+            'configured_backend': 'keyword',
+            'current_text_hmac': finalizer.prepared_text.current_text_hmac,
+            'fallback_category': None, 'graph_version': 'company-memory-rag-answer-v2.0',
+            'outcome': finalizer.outcome,
+            'prepared_model_influence_observation_hmac': self.parent.metadata_.get(
+                'prepared_model_influence_observation_hmac'),
+            'retrieval_query_hmac': finalizer.prepared_text.retrieval_query_hmac,
+            'runtime_cost_snapshot_hmac': cost_hmac,
+            'security_scope_fingerprint': self.parent.metadata_['security_scope_fingerprint'],
+            'surface': 'assistant',
+        }, secret=self.coordinator._secret)
+        self.parent.source_window = terminal_source_window(
+            stage='final_error', surface='assistant', backend='keyword')
+        self.parent.cache_key = 'rag-v2-final-error:' + terminal_hmac
+        self.parent.metadata_ = {**self.parent.metadata_, 'outcome': finalizer.outcome,
+            'runtime_cost_snapshot_hmac': cost_hmac, 'terminal_identity_hmac': terminal_hmac}
+        finalizer.append(self.db, self.parent)
+        self.db.flush()
+        self.result = finalizer.record
+        return self.result
 
     def bind_answer_invocation(self, invocation, influence, *, model, cost_policy):
         self._require_active()

@@ -30,6 +30,7 @@ from backend.app.agent_runtime.rag_v2_state import (
     RagRequestServices,
     RagRuntimeContext,
     RagRunTrace,
+    SafeRagToolRecorder,
 )
 from backend.app.agents.rag_orchestrator_agent.v2_input import (
     PreparedRagRequestText,
@@ -37,6 +38,7 @@ from backend.app.agents.rag_orchestrator_agent.v2_input import (
     _scan_value,
     prepare_direct_request_text,
 )
+from backend.app.assistant.delivery import AssistantDeliveryResult
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
 from backend.app.rag.lexical_projection import tokenize_rag_lexical_query
@@ -130,6 +132,41 @@ class RagApplicationError(RuntimeError):
         super().__init__(code)
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedAssistantIngress:
+    conversation_id: int | None
+    owner_user_id: str
+    prepared_text: PreparedRagRequestText
+    prior_context_hmac: str
+    capability_version: Literal['rag-v2-plain-text-citations:v1']
+
+
+class AssistantIngressError(RuntimeError):
+    def __init__(self, result: AssistantDeliveryResult):
+        self.result = result
+        super().__init__(result.application_outcome)
+
+
+def _assistant_ingress_error(outcome):
+    status, kind = {
+        'invalid_input': (422, 'validation_error'),
+        'input_safety_blocked': (422, 'validation_error'),
+        'owner_not_found': (404, 'owner_not_found'),
+        'permission_denied': (403, 'permission_error'),
+        'runtime_version_unavailable': (502, 'generation_error'),
+        'input_scanner_unavailable': (500, 'persistence_error'),
+    }[outcome]
+    return AssistantIngressError(AssistantDeliveryResult(
+        outcome, None, kind, 'not_persisted', None, status,
+    ))
+
+
+def _assistant_unknown():
+    return AssistantDeliveryResult(
+        'commit_unknown', None, 'reconciliation_required', 'commit_unknown', None, 500,
+    )
+
+
 def validate_prepared_ingress(
     text: PreparedRagRequestText, *, surface: RagSurface, settings: Settings
 ) -> bool:
@@ -201,6 +238,176 @@ class RagApplicationFacade:
     )
     _graph_registry: RagGraphRegistry = field(repr=False)
     _rollout: RagRolloutPolicy = field(default_factory=RagRolloutPolicy)
+
+    @staticmethod
+    def invoke_legacy_assistant_context(**kwargs):
+        """Compatibility boundary for legacy answers and email RAG context."""
+        from backend.app.agents.rag_orchestrator_agent import answer_question_with_rag
+        return answer_question_with_rag(**kwargs)
+
+    def prepare_assistant_ingress(
+        self, *, actor: DemoUser, conversation_id: int | None, caller_text: str,
+    ) -> PreparedAssistantIngress:
+        return self._prepare_assistant_ingress(actor=actor,
+            conversation_id=conversation_id, caller_text=caller_text)
+
+    def _prepare_assistant_ingress(
+        self, *, actor, conversation_id, caller_text, current_message_id=None,
+    ):
+        from sqlalchemy import select
+
+        from backend.app.agent_runtime.fingerprints import keyed_fingerprint
+        from backend.app.agent_runtime.rag_v2_identity import (
+            ServerRagSecurityScopeResolver,
+        )
+        from backend.app.agents.rag_orchestrator_agent.v2_input import (
+            AssistantContextMessage,
+            RagInputSafetyError,
+            RagInputScannerUnavailableError,
+            prepare_assistant_request_text,
+        )
+        from backend.app.assistant.evidence_reader import AssistantEvidenceReader
+        from backend.app.models import AssistantConversation, AssistantMessage
+
+        try:
+            StrictUnicodeScalarValidator.validate(caller_text)
+            if not caller_text.strip() or len(caller_text) > 4000:
+                raise ValueError('invalid input')
+        except (TypeError, ValueError):
+            raise _assistant_ingress_error('invalid_input') from None
+        key = fingerprint_secret_bytes(self._settings)[0]
+        with self._session_factory() as db, db.no_autoflush:
+            if conversation_id is not None:
+                owner = db.scalar(select(AssistantConversation.user_id).where(
+                    AssistantConversation.id == conversation_id,
+                ))
+                if owner != actor.id:
+                    raise _assistant_ingress_error('owner_not_found')
+            try:
+                prepare_direct_request_text(caller_text, key=key)
+            except (RagInputSafetyError, RagInputScannerUnavailableError) as exc:
+                raise _assistant_ingress_error(exc.code) from None
+            scope = ServerRagSecurityScopeResolver(self._settings).resolve(db=db, actor=actor)
+            if not scope.allowed_permission_levels:
+                raise _assistant_ingress_error('permission_denied')
+            rows = list(db.scalars(select(AssistantMessage).where(
+                AssistantMessage.conversation_id == conversation_id,
+            ).order_by(AssistantMessage.created_at, AssistantMessage.id))) if conversation_id else []
+            if current_message_id is not None:
+                current = next((row for row in rows if row.id == current_message_id), None)
+                if (current is None or current.role != 'user'
+                    or current.content != caller_text.strip()):
+                    raise _assistant_ingress_error('runtime_version_unavailable')
+                rows = [row for row in rows if row.id != current_message_id]
+            reader = AssistantEvidenceReader(settings=self._settings)
+            views = [reader.project_message(db=db, actor=actor, message=row) for row in rows]
+            if any(not view.evidence_available for view in views):
+                raise _assistant_ingress_error('runtime_version_unavailable')
+            prior = [AssistantContextMessage(view.id, row.created_at, view.role, view.content)
+                     for row, view in zip(rows, views, strict=True)]
+            try:
+                prepared = prepare_assistant_request_text(caller_text, prior, key=key)
+            except RagInputScannerUnavailableError:
+                raise _assistant_ingress_error('input_scanner_unavailable') from None
+            except Exception:
+                raise _assistant_ingress_error('runtime_version_unavailable') from None
+            prior_hmac = keyed_fingerprint(
+                {'owner': actor.id, 'conversation_id': conversation_id,
+                 'retrieval_query_hmac': prepared.retrieval_query_hmac,
+                 'prior': [{'id': row.message_id, 'created_at': row.created_at.isoformat(),
+                            'role': row.role, 'content': row.content} for row in prior]},
+                secret=key, schema_version='assistant-prepared-ingress:v1',
+                policy_version='assistant-context:v1',
+            )
+        return PreparedAssistantIngress(conversation_id, actor.id, prepared, prior_hmac,
+                                        'rag-v2-plain-text-citations:v1')
+
+    def invoke_assistant(
+        self, *, actor: DemoUser, conversation_id: int, user_message_id: int,
+        prepared_ingress: PreparedAssistantIngress,
+        tool_recorder: SafeRagToolRecorder | None = None,
+    ) -> AssistantDeliveryResult:
+        from backend.app.agent_runtime.rag_finalization import (
+            AssistantFinalizationRecord,
+            AssistantPreDispatchFailureFinalizer,
+            RagFinalizationError,
+            assistant_failed_parent_delivery,
+            finalize_assistant_failed_parent,
+        )
+        from backend.app.assistant.delivery import _SAFE_GENERATION_FAILURE_OUTCOMES
+        if (type(prepared_ingress) is not PreparedAssistantIngress
+            or prepared_ingress.owner_user_id != actor.id
+            or prepared_ingress.conversation_id not in {None, conversation_id}
+            or prepared_ingress.capability_version != 'rag-v2-plain-text-citations:v1'):
+            return _assistant_unknown()
+        target = AssistantProjectionTarget(conversation_id, user_message_id, actor.id)
+        try:
+            expected = self._prepare_assistant_ingress(actor=actor,
+                conversation_id=conversation_id, caller_text=prepared_ingress.prepared_text.caller_text,
+                current_message_id=user_message_id)
+            if expected != prepared_ingress:
+                return _assistant_unknown()
+        except Exception:
+            return _assistant_unknown()
+        try:
+            result = self.invoke_graph(actor=actor, surface='assistant',
+                prepared_text=prepared_ingress.prepared_text, assistant_target=target)
+            record = result.get('assistant_finalization')
+            if type(record) is AssistantFinalizationRecord:
+                return _assistant_committed(record)
+            if (result.get('outcome') in _SAFE_GENERATION_FAILURE_OUTCOMES | {'budget_exceeded'}
+                and type(result.get('run_id')) is int):
+                return finalize_assistant_failed_parent(
+                    session_factory=self._session_factory, settings=self._settings,
+                    actor=actor,
+                    target=target, prepared_text=prepared_ingress.prepared_text,
+                    parent_id=result['run_id'], outcome=result['outcome'],
+                    effective_backend=result.get('effective_backend'),
+                    fallback_category=result.get('fallback_category'))
+            # A preflight budget refusal opens neither request services nor a claim.
+            if result.get('outcome') == 'budget_exceeded' and not result.get('run_id'):
+                return AssistantPreDispatchFailureFinalizer(
+                    settings=self._settings, session_factory=self._session_factory, actor=actor,
+                ).finalize(target=target, prepared_text=prepared_ingress.prepared_text,
+                           outcome='budget_exceeded')
+            return _assistant_unknown()
+        except RagApplicationError as exc:
+            # Graph failures carry their disposition. Only an explicit pre-claim
+            # exception may create a fresh zero-provider product.
+            if getattr(exc, 'delivery', None) is not None:
+                return exc.delivery
+            if getattr(exc, 'run_id', None) is not None:
+                return _assistant_unknown()
+            if exc.code in {'runtime_version_unavailable', 'retriever_not_configured',
+                            'retriever_unavailable', 'model_unavailable',
+                            'provider_safety_unavailable', 'budget_exceeded'}:
+                return AssistantPreDispatchFailureFinalizer(
+                    settings=self._settings, session_factory=self._session_factory, actor=actor,
+                ).finalize(target=target, prepared_text=prepared_ingress.prepared_text,
+                           outcome=exc.code)
+            return _assistant_unknown()
+        except Exception as exc:
+            if isinstance(exc, RagFinalizationError):
+                return assistant_failed_parent_delivery(
+                    session_factory=self._session_factory,
+                    parent_id=getattr(exc, 'run_id', None), target=target,
+                )
+            from backend.app.agent_runtime.rag_cost_policy import RagBudgetExceededError
+            from backend.app.agent_runtime.rag_v2_registry import (
+                RagRuntimeVersionUnavailableError,
+            )
+            from backend.app.agents.rag_orchestrator_agent.v2_embedding import (
+                QueryEmbeddingReadinessError,
+            )
+            outcome = ('runtime_version_unavailable' if isinstance(exc, RagRuntimeVersionUnavailableError)
+                       else 'budget_exceeded' if isinstance(exc, RagBudgetExceededError)
+                       else 'retriever_unavailable' if isinstance(exc, QueryEmbeddingReadinessError)
+                       else None)
+            if outcome is not None and getattr(exc, 'run_id', None) is None:
+                return AssistantPreDispatchFailureFinalizer(settings=self._settings,
+                    session_factory=self._session_factory, actor=actor).finalize(
+                        target=target, prepared_text=prepared_ingress.prepared_text, outcome=outcome)
+            return _assistant_unknown()
 
     def invoke_ask(
         self, *, actor: DemoUser, caller_text: str
@@ -453,6 +660,18 @@ def _legacy_pgvector_search_store(*, db, settings):
     from backend.app.rag.search_store import build_pgvector_search_store
 
     return build_pgvector_search_store(db=db, settings=settings)
+
+
+def _assistant_committed(record):
+    from backend.app.assistant.delivery import _SUCCESS_OUTCOMES
+    success = record.application_outcome in _SUCCESS_OUTCOMES
+    budget = record.application_outcome == 'budget_exceeded'
+    return AssistantDeliveryResult(
+        record.application_outcome, record.assistant_message_id,
+        'assistant_message' if success else 'budget_error' if budget else 'generation_error',
+        'committed_success' if success else 'committed_safe_failure',
+        record.parent_agent_run_id, 200 if success else 409 if budget else 502,
+    )
 
 
 def _permission_notice(hidden):

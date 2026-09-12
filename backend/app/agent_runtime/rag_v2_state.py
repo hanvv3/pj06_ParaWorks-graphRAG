@@ -12,6 +12,7 @@ from backend.app.agent_runtime.provider_usage import RagResultOutcome
 from backend.app.agent_runtime.rag_cost_ledger import RagCostLedger
 from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
 from backend.app.agent_runtime.rag_finalization import (
+    AssistantFinalizationRecord,
     AssistantProjectionTarget,
     CanonicalRagProjection,
     PreparedRagFinalization,
@@ -140,6 +141,7 @@ class RagGraphInput(TypedDict):
 
 
 class RagGraphOutput(TypedDict):
+    assistant_finalization: NotRequired[AssistantFinalizationRecord]
     committed_projection: NotRequired[CanonicalRagProjection]
     run_id: NotRequired[int]
     generation_component: NotRequired[RagComponentFinal]

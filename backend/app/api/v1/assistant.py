@@ -12,7 +12,10 @@ from sqlalchemy.orm import Session
 from starlette.datastructures import MutableHeaders
 from starlette.responses import PlainTextResponse, Response
 
-from backend.app.agents.rag_orchestrator_agent import answer_question_with_rag
+from backend.app.agent_runtime.rag_application import (
+    AssistantIngressError,
+    RagApplicationFacade,
+)
 from backend.app.agents.rag_orchestrator_agent.v2_input import (
     RagInputSafetyError,
     RagInputScannerUnavailableError,
@@ -29,6 +32,7 @@ from backend.app.assistant.contact_lookup import (
     contact_lookup_response_content,
     detect_contact_lookup_request,
 )
+from backend.app.assistant.delivery import AssistantDeliveryResult
 from backend.app.assistant.email_actions import (
     EMAIL_ACTION_PROMPT_VERSION,
     assistant_email_draft_content,
@@ -86,6 +90,28 @@ from backend.app.schemas.assistant import (
 )
 
 _CAPABILITY_DEPENDENT_STATE = 'assistant_rag_render_capability_dependent'
+
+
+def answer_question_with_rag(**kwargs):
+    return RagApplicationFacade.invoke_legacy_assistant_context(**kwargs)
+
+
+def _map_assistant_delivery(result: AssistantDeliveryResult):
+    """Map only the algebra's public status/body; never append or infer outcomes."""
+    if type(result) is not AssistantDeliveryResult:
+        raise HTTPException(status_code=500, detail='Internal Server Error')
+    if result.public_status == 200:
+        return result.assistant_message_id
+    detail = {
+        'budget_error': {'code': 'budget_exceeded'},
+        'generation_error': 'assistant answer generation failed',
+        'permission_error': 'Permission denied.',
+        'owner_not_found': 'assistant conversation not found',
+        'validation_error': 'assistant message content is invalid',
+        'persistence_error': 'Internal Server Error',
+        'reconciliation_required': 'Internal Server Error',
+    }[result.body_kind]
+    raise HTTPException(status_code=result.public_status, detail=detail)
 
 
 class _AssistantCapabilityHeadersRoute(APIRoute):
@@ -561,6 +587,13 @@ def create_assistant_conversation(
 ) -> dict:
     _require_post_capability(raw_request, settings)
     _require_assistant_ingress_scan(request.title or '새 대화')
+    facade = raw_request.app.state.rag_application_facade
+    if facade.execution_owner('assistant') == 'v2':
+        try:
+            facade.prepare_assistant_ingress(actor=user, conversation_id=None,
+                caller_text=request.title or '새 대화')
+        except AssistantIngressError as exc:
+            _map_assistant_delivery(exc.result)
     if request.title is None or request.title.strip() == '새 대화':
         reusable_conversation = find_reusable_empty_conversation(db, user)
         if reusable_conversation is not None:
@@ -612,6 +645,15 @@ def create_assistant_message(
     conversation = require_conversation(db, user, conversation_id)
     _require_post_capability(raw_request, settings)
     _require_assistant_ingress_scan(request.content)
+    facade = raw_request.app.state.rag_application_facade
+    prepared_ingress = None
+    if facade.execution_owner('assistant') == 'v2':
+        try:
+            prepared_ingress = facade.prepare_assistant_ingress(
+                actor=user, conversation_id=conversation.id, caller_text=request.content,
+            )
+        except AssistantIngressError as exc:
+            _map_assistant_delivery(exc.result)
     try:
         user_message = append_user_message(db, user, conversation, request.content)
     except ValueError as exc:
@@ -841,13 +883,16 @@ def create_assistant_message(
         db=db,
         user=user,
     )
-    vector_store = build_pgvector_search_store(db=db, settings=settings)
+    vector_store = (build_pgvector_search_store(db=db, settings=settings)
+                    if prepared_ingress is None else None)
     confident_email_intent = (
         email_intent.email_intent
         and email_intent.confidence_score
         >= settings.assistant_email_agent_min_confidence
     )
     if confident_email_intent:
+        if prepared_ingress is not None:
+            vector_store = build_pgvector_search_store(db=db, settings=settings)
         recipient_resolution = resolve_email_recipients(
             db=db,
             latest_message=user_message.content,
@@ -968,6 +1013,25 @@ def create_assistant_message(
                 ),
             }
 
+    if prepared_ingress is not None:
+        # Close route reads before the facade opens its finalizer transaction.
+        db.rollback()
+        result = facade.invoke_assistant(
+            actor=user, conversation_id=conversation_id, user_message_id=user_message.id,
+            prepared_ingress=prepared_ingress,
+        )
+        message_id = _map_assistant_delivery(result)
+        db.expire_all()
+        assistant_message = get_owned_message(db, user, message_id)
+        if (assistant_message.conversation_id != conversation_id
+            or assistant_message.linked_agent_run_id != result.parent_agent_run_id):
+            raise HTTPException(status_code=500, detail='Internal Server Error')
+        return {
+            'conversation': serialize_conversation(conversation, db=db, user=user),
+            'user_message': serialize_message(user_message, db=db, user=user),
+            'assistant_message': serialize_message(assistant_message, db=db, user=user),
+        }
+
     try:
         answer = answer_question_with_rag(
             db=db,
@@ -1009,6 +1073,7 @@ def create_assistant_message(
                 'agent_name': answer.agent_name,
                 'prompt_version': answer.prompt_version,
                 'question': answer.question,
+                'effective_backend': 'pgvector' if vector_store is not None else 'deterministic_lexical',
             },
             serving_dependencies=getattr(answer, 'serving_dependencies', ()),
         )

@@ -435,12 +435,6 @@ class AssistantEvidenceReader:
         The legacy snapshot's version fingerprint is the existing V1 serving
         content hash; the two D identity/version child columns remain NULL.
         """
-        from backend.app.assistant.service import _serving_content_hash
-        from backend.app.knowledge.serving_text import canonical_knowledge_text
-        from backend.app.knowledge.trusted_serving_eligibility import (
-            TrustedServingEligibilityService,
-            knowledge_model_for_type,
-        )
         from backend.app.rag.serving_contracts import (
             build_canonical_citation_projection_hmac,
             build_model_content_hmac,
@@ -535,62 +529,31 @@ class AssistantEvidenceReader:
                 )
             ):
                 return False
-            kind, identifier = child.serving_document_id.split(':')
-            if (
-                kind
-                not in {'decision_record', 'history_event', 'timeline_event', 'todo'}
-                or str(int(identifier)) != identifier
-                or int(identifier) <= 0
-            ):
+            from backend.app.assistant.legacy_evidence import current_legacy_evidence
+            public_id, kind, text, links, snippets, permission, legacy_hash, serving_kind = current_legacy_evidence(db, child.serving_document_id)
+            if permission != child.permission_level or permission not in actor.permission_levels:
                 return False
-            target = db.get(knowledge_model_for_type(kind), int(identifier))
-            current = TrustedServingEligibilityService(db).for_document(
-                child.serving_document_id
-            )
-            if (
-                target is None
-                or not current.eligible
-                or current.effective_permission != child.permission_level
-                or child.permission_level not in actor.permission_levels
-            ):
+            if db.scalar(select(AssistantMessageKnowledgeEvidenceRef.id).where(
+                AssistantMessageKnowledgeEvidenceRef.dependency_id == child.id
+            )) is not None:
                 return False
-            if (
-                db.scalar(
-                    select(AssistantMessageKnowledgeEvidenceRef.id).where(
-                        AssistantMessageKnowledgeEvidenceRef.dependency_id == child.id
-                    )
-                )
-                is not None
-            ):
-                return False
-            links, snippets = target.source_links, target.source_snippets
-            if not links or len(links) != len(snippets):
-                return False
-            text = canonical_knowledge_text(kind, target)
-            legacy_hash = _serving_content_hash(
-                source_id=child.serving_document_id,
-                text=text,
-                source_url=links[0],
-                source_snippet=snippets[0],
-                permission_level=current.effective_permission,
-            )
             model_hmac = build_model_content_hmac(
-                serving_kind='trusted_knowledge', model_content=text, settings=settings
+                serving_kind=serving_kind, model_content=text, settings=settings
             )
             canonical_hmac = build_canonical_citation_projection_hmac(
-                public_source_id=child.serving_document_id,
+                public_source_id=public_id,
                 public_source_type=kind,
                 source_url=links[0],
                 source_snippet=snippets[0],
-                effective_permission=current.effective_permission,
+                effective_permission=permission,
                 settings=settings,
             )
             identity = fp(
                 {
                     'canonical_citation_projection_hmac': canonical_hmac,
-                    'effective_permission': current.effective_permission,
+                    'effective_permission': permission,
                     'legacy_public_source_id_bytes': exact_utf8_bytes(
-                        child.serving_document_id
+                        public_id
                     ),
                     'legacy_source_links_bytes': [
                         exact_utf8_bytes(value) for value in links
@@ -612,10 +575,10 @@ class AssistantEvidenceReader:
                 return False
             citation = message.citations[ordinal]
             canonical_fields = {
-                'source_id': child.serving_document_id,
+                'source_id': public_id,
                 'source_url': links[0],
                 'source_type': kind,
-                'permission_level': current.effective_permission,
+                'permission_level': permission,
                 'source_snippet': snippets[0],
             }
             if any(
@@ -631,10 +594,10 @@ class AssistantEvidenceReader:
                 return False
             citation_hmac = fp(
                 {
-                    'source_id_bytes': exact_utf8_bytes(child.serving_document_id),
+                    'source_id_bytes': exact_utf8_bytes(public_id),
                     'source_url_bytes': exact_utf8_bytes(links[0]),
                     'source_type_bytes': exact_utf8_bytes(kind),
-                    'permission_level': current.effective_permission,
+                    'permission_level': permission,
                     'source_snippet_bytes': exact_utf8_bytes(snippets[0]),
                     'relevance_score_binary64_be_hex': struct.pack('>d', score).hex(),
                     'matched_terms_bytes': [exact_utf8_bytes(term) for term in terms],

@@ -1543,7 +1543,7 @@ class RagCostLedger:
             raise RagCostPersistenceError('terminal failure persistence unavailable') from None
 
     @_runtime_health_effect
-    def finalize_inter_component_failure(self, *, run_id: int, outcome: str) -> RagRunTerminal:
+    def finalize_inter_component_failure(self, *, run_id: int, outcome: str, assistant_finalizer=None) -> RagRunTerminal:
         """End this request between dispatches without changing any paid child."""
         if outcome not in {
             'budget_exceeded', 'retriever_not_configured', 'retriever_unavailable',
@@ -1595,7 +1595,8 @@ class RagCostLedger:
             self._answer_reservations.pop(run_id, None)
             self._admission_budgets.pop((run_id, 'answer_generation'), None)
             self._pending_projection_identities.pop(run_id, None)
-            return self._finalize_failed_run(parent, rows, outcome=outcome, completed_at=None, admission_only=False)
+            return self._finalize_failed_run(parent, rows, outcome=outcome, completed_at=None, admission_only=False,
+                                             assistant_finalizer=assistant_finalizer)
 
     def _defer_answer_evidence_refusal(self, grant: CommittedRagDispatchGrant) -> None:
         """Retire transport's exact unconsumed answer grant; never allow resend."""
@@ -2288,6 +2289,7 @@ class RagCostLedger:
         outcome: str,
         completed_at: datetime | None,
         admission_only: bool,
+        assistant_finalizer=None,
     ) -> RagRunTerminal:
         timestamp = completed_at or datetime.now(UTC)
         if timestamp.tzinfo is None:
@@ -2354,6 +2356,13 @@ class RagCostLedger:
             'runtime_cost_snapshot_hmac': terminal_runtime_hmac,
             'terminal_identity_hmac': terminal_hmac,
         }
+        if assistant_finalizer is not None:
+            from backend.app.agent_runtime.rag_finalization import (
+                AssistantInterComponentFailureFinalizer,
+            )
+            if type(assistant_finalizer) is not AssistantInterComponentFailureFinalizer or admission_only:
+                raise RagCostLedgerError('assistant finalization authority is invalid')
+            assistant_finalizer.append(self._session, parent)
         self._commit()
         finals = cast(
             tuple[RagComponentFinal, RagComponentFinal],
