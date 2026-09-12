@@ -1,5 +1,18 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Assistant capability boundary reviewed
+
+- Task16 is independently CLEAN at `a9da2eb`. Assistant clients must declare
+  the exact render capability before V2 content is written or returned, while
+  authentication, input validation and owner concealment keep precedence.
+- GET and serialization share one structural-liveness decision: stale/orphan
+  V2 content is redacted without leakage, and valid hidden-only canned answers
+  remain available to capable clients. Errors carry private/no-store cache
+  headers without hiding failures from dependency cleanup or server telemetry.
+- Final affected verification:208 passed; controller unwind regression:2 passed.
+  No rollout activation, live-provider use, PostgreSQL proof or Task18 cutover.
+  D Core continues with Task17 evidence revalidation.
+
 ## 2026-09-12 D Core Assistant delivery/capability candidate
 
 - Review fix round 2 moves unexpected-error delivery outside FastAPI's inner

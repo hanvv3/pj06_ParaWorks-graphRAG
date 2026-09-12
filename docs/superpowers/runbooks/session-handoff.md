@@ -2,6 +2,27 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task16 CLEAN; resume at Task17 implementation
+
+- Task16 cumulative independent review is CLEAN at `a9da2eb` (candidate
+  `24f470e`, fixes `1bad1ad`, `c92bff9`, `a9da2eb`). Exact Assistant delivery
+  algebra and refusal-only render capability are implemented without enabling
+  rollout or performing the Task18 sole-writer cutover.
+- Capability-dependent Assistant POST/GET responses use exact no-store/Vary
+  headers and preserve authentication, validation, owner404, capability409,
+  scanner and mutation precedence. Surrogate validation is ASCII-safe. GET
+  guard and serializer share structural liveness: orphan/stale V2 bytes redact,
+  while valid hidden-only canned answers remain intact and guarded.
+- Pre-body authentication reuses one overridden FastAPI dependency context.
+  Unexpected failures first reach yielding dependency cleanup, then normal
+  clients receive one sanitized500; server/test transports retain the original
+  exception. Cancellation and already-started responses are not duplicated.
+- Final implementer affected gate:208 passed. Controller independently reran
+  the exact unwind test:2 passed in0.53s. Reviewer found no remaining issue.
+- Next is Task17 evidence reading/revalidation, still actual implementation.
+  Task18 remains the Assistant V2 writer cutover. No paid/live calls, push,
+  merge, PostgreSQL proof, Slack, D.1, Redis, CDC or E work occurred.
+
 ## 2026-09-12 D Core Task16 Assistant capability candidate
 
 - Review fix round 2 closes the exception-unwinding gap in `c92bff9`.
