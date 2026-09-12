@@ -248,6 +248,8 @@ def _postgres_request_services(*, db, settings, session_factory):
     )
     from backend.app.rag.trusted_evidence import ServingEvidenceResolver
 
+    if settings.rag_retrieval_backend == 'pgvector' and not settings.openai_api_key:
+        raise RagApplicationError('retriever_not_configured')
     assembly = transport._assemble_rag_request_cost_authority(
         settings=settings, session=db
     )

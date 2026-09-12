@@ -1780,7 +1780,7 @@ class SqlAlchemyRagFinalizationBoundary:
         elif substantive:
             selected = prepared.validated_answer.selected_slot_ids
             evidence = projector.project_selected(
-                slots,
+                prepared.evidence_slots,
                 selected_slot_ids=selected,
                 scope=prepared.security_scope,
                 fence=fence,

@@ -619,7 +619,9 @@ def test_paid_ask_no_evidence_finalizes_embedding_only_without_answer_dispatch(
     assert context.services.db.get(AgentRun, 151).run_record_phase == 'final'
 
 
-def _answer_context(tmp_path, *, source_text='Exact current source observation'):
+def _answer_context(
+    tmp_path, *, source_text='Exact current source observation', mixed_sources=False
+):
     from langchain_core.messages import AIMessage
 
     from backend.app.agent_runtime.model_router import RoutedRagAnswerModel
@@ -702,17 +704,53 @@ def _answer_context(tmp_path, *, source_text='Exact current source observation')
         )
     )
     ledger._session.commit()
+    candidates = [
+        RetrievalCandidate(
+            evidence=evidence, relevance_score=0.9, matched_terms=('observation',)
+        )
+    ]
+    if mixed_sources:
+        *_, safe_chunk = _seed_source_chunk(
+            ledger._session, source_type='drive', text='Safe observation 한글'
+        )
+        safe = (
+            CanonicalSourceObservationResolver(
+                db=ledger._session, settings=context.settings
+            )
+            .resolve_for_index(safe_chunk.id)
+            .evidence
+        )
+        row = ledger._session.query(RagLexicalServingProjection).one()
+        values = {
+            column.name: getattr(row, column.name)
+            for column in RagLexicalServingProjection.__table__.columns
+            if column.name not in {'id', 'created_at', 'updated_at'}
+        }
+        for field in (
+            'serving_document_id',
+            'serving_kind',
+            'support_mode',
+            'effective_permission',
+            'serving_identity_hmac',
+            'serving_version_fingerprint',
+            'model_content_hmac',
+            'canonical_citation_projection_hmac',
+        ):
+            values[field] = getattr(safe, field)
+        ledger._session.add(RagLexicalServingProjection(**values))
+        ledger._session.commit()
+        candidates.append(
+            RetrievalCandidate(
+                evidence=safe, relevance_score=0.8, matched_terms=('observation',)
+            )
+        )
     retriever = RunnableLambda(
         lambda request: replace(
             _empty_retrieval(request),
-            visible=(
-                RetrievalCandidate(
-                    evidence=evidence,
-                    relevance_score=0.9,
-                    matched_terms=('observation',),
-                ),
+            visible=tuple(candidates),
+            trace=SanitizedRetrievalTrace(
+                len(candidates), len(candidates), 0, 0, 0, None
             ),
-            trace=SanitizedRetrievalTrace(1, 1, 0, 0, 0, None),
         )
     )
     registry = RagRetrieverRegistry()
@@ -752,7 +790,9 @@ def _answer_context(tmp_path, *, source_text='Exact current source observation')
 
 
 class _AnswerFinalizationPort(_KeywordFinalizationPort):
-    def __init__(self, ledger, pending, retriever, settings):
+    def __init__(
+        self, ledger, pending, retriever, settings, *, component='answer_generation'
+    ):
         super().__init__(ledger, pending, retriever, settings)
         from backend.app.agent_runtime.provider_send_fence import (
             _assemble_rag_evidence_barrier,
@@ -765,7 +805,12 @@ class _AnswerFinalizationPort(_KeywordFinalizationPort):
             _owner_capability,
         )
 
-        binding = ledger._terminal_bindings[(161, 'answer_generation')]
+        binding = ledger._terminal_bindings[(161, component)]
+        self._expected_branch = (
+            'paid_prepared'
+            if component == 'answer_generation'
+            else 'paid_embedding_only'
+        )
         self._phase2_authority = _assemble_paid_rag_phase2_authority(
             provider_safety=ledger._provider_safety,
             safety_connection_factory=ledger._provider_connection_factory,
@@ -778,9 +823,15 @@ class _AnswerFinalizationPort(_KeywordFinalizationPort):
             ),
             load_current_readiness=lambda: None,
         )
+        if component == 'query_embedding':
+            from backend.tests.test_rag_v2_provider_transport import _authority
+
+            readiness = _authority(ledger)._load_current_readiness()
+            self._phase2_authority._current_readiness = readiness
+            self._prefix_generations = (1, 1)
 
     def acquire_phase2(self, pending, prepared, *, branch):
-        assert branch == 'paid_prepared'
+        assert branch == self._expected_branch
         return nullcontext()
 
 
@@ -1126,3 +1177,342 @@ def test_graph_filters_credential_only_evidence_to_zero_provider_safe_product(tm
     assert result['evidence_projection'].citations == ()
     assert client.seen == []
     assert context.services.db.get(AgentRun, 161).run_record_phase == 'final'
+
+
+def test_filtered_model_slot_preserves_canonical_source_through_paid_finalizer(
+    tmp_path,
+):
+    from backend.app.agent_runtime.rag_graph import (
+        build_company_memory_rag_answer_v2_graph,
+    )
+
+    context, client = _answer_context(
+        tmp_path,
+        source_text='Authorization: Bearer test-secret-token-1234567890',
+        mixed_sources=True,
+    )
+    text = prepare_direct_request_text(
+        'observation', key=context.settings.agent_runtime_fingerprint_secret.encode()
+    )
+    result = build_company_memory_rag_answer_v2_graph().invoke(
+        {'prepared_text': text}, context=context
+    )
+    assert result['outcome'] == 'supported'
+    assert len(client.seen) == 1
+    assert result['evidence_projection'].source_ids == ('drive:source-1',)
+    assert result['evidence_projection'].source_snippets == ('Safe observation 한글',)
+    assert len(result['model_influence']) == 1
+    assert (
+        result['model_influence'][0].fresh_lookup_identity.public_source_id
+        == 'drive:source-1'
+    )
+
+
+@pytest.mark.parametrize('paid_embedding', (False, True))
+@pytest.mark.parametrize('drift_kind', ('c5', 'fence'))
+def test_actual_answer_transport_pre_send_evidence_drift_commits_canned_product(
+    tmp_path, monkeypatch, paid_embedding, drift_kind
+):
+    from backend.app.agent_runtime.rag_graph import (
+        build_company_memory_rag_answer_v2_graph,
+    )
+    from backend.app.agent_runtime.rag_provider_transport import (
+        RagProviderDispatchAuthority,
+    )
+    from backend.app.models import AgentRunCostComponent, RagLexicalServingProjection
+
+    context, client = _answer_context(tmp_path)
+    if paid_embedding:
+        context = _with_paid_embedding_answer(context, client)
+    original = RagProviderDispatchAuthority.prepare
+    prepared_calls = []
+
+    def drift_after_real_prepare(authority, **kwargs):
+        dispatch = original(authority, **kwargs)
+        if kwargs['grant'].component != 'answer_generation':
+            return dispatch
+        prepared_calls.append((kwargs['grant'], dispatch))
+        if drift_kind == 'c5':
+            row = context.services.db.query(RagLexicalServingProjection).one()
+            row.model_content_hmac = 'f' * 64
+            context.services.db.commit()
+        else:
+            monkeypatch.setattr(
+                authority._barrier._freshness,
+                '_load_current_identity',
+                lambda: 'f' * 64,
+            )
+        owner = context.services.cost_ledger._safe_pending_owner
+
+        @contextmanager
+        def pending_owner(*args, **kwargs):
+            assert not context.services.db.in_transaction(), (
+                'C.5 read locks must end before reacquiring safety/owner'
+            )
+            with owner(*args, **kwargs):
+                yield
+
+        monkeypatch.setattr(
+            context.services.cost_ledger, '_safe_pending_owner', pending_owner
+        )
+        return dispatch
+
+    monkeypatch.setattr(
+        RagProviderDispatchAuthority, 'prepare', drift_after_real_prepare
+    )
+    text = prepare_direct_request_text(
+        'observation', key=context.settings.agent_runtime_fingerprint_secret.encode()
+    )
+    result = build_company_memory_rag_answer_v2_graph().invoke(
+        {'prepared_text': text}, context=context
+    )
+    assert len(prepared_calls) == 1 and len(client.seen) == int(paid_embedding)
+    assert result['outcome'] == 'evidence_unavailable'
+    assert result['evidence_projection'].citations == ()
+    assert result['answer_blocks'] is None and result['model_influence'] == ()
+    assert result['charged_cost_usd'] == (Decimal('0.000001') if paid_embedding else 0)
+    parent = context.services.db.get(AgentRun, 161)
+    assert parent.status == 'complete' and parent.run_record_phase == 'final'
+    answer = (
+        context.services.db.query(AgentRunCostComponent)
+        .filter_by(agent_run_id=161, component='answer_generation')
+        .one()
+    )
+    assert answer.attempted is False and answer.dispatch_count == 0
+    assert answer.charged_cost_usd == 0
+    from backend.app.agent_runtime.rag_cost_ledger import RagCostLedgerError
+    from backend.app.agent_runtime.rag_provider_transport import (
+        RagProviderTransportError,
+    )
+
+    grant, dispatch = prepared_calls[0]
+    with pytest.raises(RagCostLedgerError):
+        context.services.cost_ledger.consume_committed_grant(grant)
+    with pytest.raises(RagProviderTransportError):
+        context.services.provider_transport.dispatch_and_finalize(
+            grant=grant, prepared=dispatch
+        )
+    with pytest.raises(RagCostLedgerError):
+        context.services.cost_ledger.commit_answer_evidence_changed_pending(
+            grant=grant,
+            corpus_generation=1,
+            vector_index_generation=1 if paid_embedding else None,
+        )
+    assert len(client.seen) == int(paid_embedding)
+
+
+@pytest.mark.parametrize('failure', ('key', 'provider_safety', 'invalid_identity'))
+def test_pre_send_authority_failure_is_not_canned_evidence_drift(
+    tmp_path, monkeypatch, failure
+):
+    from backend.app.agent_runtime.rag_graph import (
+        build_company_memory_rag_answer_v2_graph,
+    )
+    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+    from backend.app.agent_runtime.rag_provider_transport import (
+        RagProviderDispatchAuthority,
+        RagProviderTransportError,
+    )
+    from backend.app.models import AutoReviewRuntimeKeyState
+
+    context, client = _answer_context(tmp_path)
+    prepare = RagProviderDispatchAuthority.prepare
+
+    def after_prepare(authority, **kwargs):
+        dispatch = prepare(authority, **kwargs)
+        if failure == 'key':
+            context.services.db.query(AutoReviewRuntimeKeyState).one().ready = False
+            context.services.db.commit()
+        elif failure == 'invalid_identity':
+            monkeypatch.setattr(
+                authority._barrier._freshness,
+                '_load_current_identity',
+                lambda: 'invalid',
+            )
+        else:
+
+            def refuse(*args, **kwargs):
+                raise RagProviderSafetyError('provider authority unavailable')
+
+            monkeypatch.setattr(authority._safety, 'dispatch_barrier', refuse)
+        return dispatch
+
+    monkeypatch.setattr(RagProviderDispatchAuthority, 'prepare', after_prepare)
+    text = prepare_direct_request_text(
+        'observation', key=context.settings.agent_runtime_fingerprint_secret.encode()
+    )
+    with pytest.raises(RagProviderTransportError):
+        build_company_memory_rag_answer_v2_graph().invoke(
+            {'prepared_text': text}, context=context
+        )
+    parent = context.services.db.get(AgentRun, 161)
+    assert parent.status == 'failed' and parent.run_record_phase == 'final'
+    assert parent.metadata_['outcome'] == 'provider_safety_unavailable'
+    assert client.seen == []
+
+
+@pytest.mark.parametrize('unknown', (False, True))
+def test_evidence_refusal_pending_commit_failure_has_no_product_or_resend(
+    tmp_path, monkeypatch, unknown
+):
+    from backend.app.agent_runtime.rag_cost_ledger import RagCostLedgerError
+    from backend.app.agent_runtime.rag_graph import (
+        build_company_memory_rag_answer_v2_graph,
+    )
+    from backend.app.agent_runtime.rag_provider_transport import (
+        RagProviderDispatchAuthority,
+    )
+    from backend.app.models import RagLexicalServingProjection
+
+    context, client = _answer_context(tmp_path)
+    prepare = RagProviderDispatchAuthority.prepare
+    seen = []
+
+    def after_prepare(authority, **kwargs):
+        dispatch = prepare(authority, **kwargs)
+        seen.append(kwargs['grant'])
+        context.services.db.query(
+            RagLexicalServingProjection
+        ).one().model_content_hmac = 'f' * 64
+        context.services.db.commit()
+        original_commit = context.services.db.commit
+
+        def fail_commit():
+            with pytest.raises(RagCostLedgerError):
+                context.services.cost_ledger.consume_committed_grant(seen[0])
+            if unknown:
+                original_commit()
+            raise RuntimeError('pending commit acknowledgement failed')
+
+        monkeypatch.setattr(context.services.db, 'commit', fail_commit)
+        return dispatch
+
+    monkeypatch.setattr(RagProviderDispatchAuthority, 'prepare', after_prepare)
+    text = prepare_direct_request_text(
+        'observation', key=context.settings.agent_runtime_fingerprint_secret.encode()
+    )
+    with pytest.raises(RuntimeError, match='pending commit acknowledgement failed'):
+        build_company_memory_rag_answer_v2_graph().invoke(
+            {'prepared_text': text}, context=context
+        )
+    assert client.seen == []
+    with pytest.raises(RagCostLedgerError):
+        context.services.cost_ledger.consume_committed_grant(seen[0])
+
+
+def _with_paid_embedding_answer(context, client):
+    from backend.app.agent_runtime.provider_usage import StrictEmbeddingUsageParser
+    from backend.app.agents.rag_orchestrator_agent.v2_embedding import (
+        StrictQueryEmbeddingAdapter,
+    )
+
+    services = context.services
+    settings = context.settings.model_copy(
+        update={'rag_retrieval_backend': 'pgvector', 'rag_use_pgvector_search': True}
+    )
+    keyword = services.retrievers.resolve('keyword')
+
+    def vector(request):
+        return replace(
+            keyword.invoke(replace(request, query_embedding_result=None)),
+            configured_backend='pgvector',
+            effective_backend='pgvector',
+            query_embedding_receipt=request.query_embedding_result.receipt,
+        )
+
+    retriever = RunnableLambda(vector)
+    registry = RagRetrieverRegistry()
+    registry.register('pgvector', retriever)
+    original_send = client.send
+
+    def send(*args, **kwargs):
+        response = client.response
+        if not client.seen:
+            client.response = {
+                'object': 'list',
+                'model': 'text-embedding-3-small',
+                'data': [
+                    {
+                        'object': 'embedding',
+                        'index': 0,
+                        'embedding': [0.25, *([0.0] * 1535)],
+                    }
+                ],
+                'usage': {'prompt_tokens': 1, 'total_tokens': 1},
+            }
+        try:
+            return original_send(*args, **kwargs)
+        finally:
+            client.response = response
+
+    client.send = send
+    return replace(
+        context,
+        settings=settings,
+        services=replace(
+            services,
+            retrievers=registry,
+            load_generations=lambda: (1, 1),
+            query_embedding_adapter=StrictQueryEmbeddingAdapter(
+                usage_parser=StrictEmbeddingUsageParser(),
+                cost_policy=services.cost_policy,
+                transport=object(),
+                settings=settings,
+            ),
+            index_readiness=SimpleNamespace(
+                inspect=lambda **kwargs: (
+                    services.provider_transport._load_current_readiness()
+                )
+            ),
+            finalizer_factory=lambda pending, prepared: RagFinalizationService(
+                transaction_boundary=_AnswerFinalizationPort(
+                    services.cost_ledger,
+                    pending,
+                    retriever,
+                    settings,
+                    component='query_embedding',
+                ),
+                settings=settings,
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize('failure', ('missing_adapter', 'constructor'))
+def test_embedding_setup_failure_is_typed_and_never_generation_failure(
+    tmp_path, failure
+):
+    from backend.app.agent_runtime.rag_application import RagApplicationError
+    from backend.app.agent_runtime.rag_graph import (
+        build_company_memory_rag_answer_v2_graph,
+    )
+
+    context, client = _paid_context(tmp_path)
+
+    def fail_factory():
+        raise RuntimeError('embedding SDK construction failed')
+
+    services = replace(
+        context.services,
+        provider_transport=None,
+        provider_transport_factory=fail_factory,
+    )
+    if failure == 'missing_adapter':
+        services = replace(services, query_embedding_adapter=None)
+    context = replace(context, services=services)
+    graph = build_company_memory_rag_answer_v2_graph()
+    text = prepare_direct_request_text(
+        'observation', key=context.settings.agent_runtime_fingerprint_secret.encode()
+    )
+    if failure == 'missing_adapter':
+        with pytest.raises(RagApplicationError) as error:
+            graph.invoke({'prepared_text': text}, context=context)
+        assert error.value.code == 'retriever_not_configured'
+        assert services.db.get(AgentRun, 151) is None
+    else:
+        result = graph.invoke({'prepared_text': text}, context=context)
+        assert result['outcome'] == 'retriever_unavailable'
+        parent = services.db.get(AgentRun, 151)
+        assert parent.status == 'failed' and parent.run_record_phase == 'final'
+        assert result['charged_cost_usd'] == 0
+    assert client.seen == []

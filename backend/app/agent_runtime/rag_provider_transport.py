@@ -17,6 +17,7 @@ from backend.app.agent_runtime.fingerprints import (
     keyed_fingerprint,
 )
 from backend.app.agent_runtime.provider_send_fence import (
+    EvidenceIdentityChangedBeforeSendError,
     ProviderSendFenceError,
     RagEvidenceSendBarrier,
 )
@@ -25,7 +26,11 @@ from backend.app.agent_runtime.provider_usage import (
     StrictEmbeddingUsageParser,
 )
 from backend.app.agent_runtime.rag_advisory_locks import begin_rag_lock_order
-from backend.app.agent_runtime.rag_cost_ledger import RagCostLedger, RagCostLedgerError
+from backend.app.agent_runtime.rag_cost_ledger import (
+    RagCostLedger,
+    RagCostLedgerError,
+    RagServingEvidenceChangedError,
+)
 from backend.app.agent_runtime.rag_embedding_delivery import (
     embedding_dispatch_receipt_hmac,
 )
@@ -88,6 +93,10 @@ _PROVIDER_CLIENT_SEAL = object()
 
 class RagProviderTransportError(RuntimeError):
     """Body-blind provider transport refusal."""
+
+
+class RagAnswerEvidenceChangedBeforeSendError(RagProviderTransportError):
+    """Exact answer grant retired before send; graph must finalize safe projection."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -998,9 +1007,16 @@ class RagProviderDispatchAuthority:
                     )
         except (ProviderSendFenceError, RagCostLedgerError, RagProviderSafetyError) as exc:
             if getattr(grant, 'consumed', None) is False:
+                if grant.component == 'answer_generation' and isinstance(
+                    exc, (EvidenceIdentityChangedBeforeSendError, RagServingEvidenceChangedError)
+                ):
+                    self._store._defer_answer_evidence_refusal(grant)
+                    raise RagAnswerEvidenceChangedBeforeSendError(
+                        'answer evidence changed before provider send'
+                    ) from None
                 refusal_outcome = (
                     'evidence_unavailable'
-                    if isinstance(exc, ProviderSendFenceError)
+                    if isinstance(exc, EvidenceIdentityChangedBeforeSendError)
                     else 'provider_safety_unavailable'
                 )
                 try:

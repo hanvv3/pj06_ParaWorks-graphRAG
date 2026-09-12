@@ -91,6 +91,10 @@ class RagCostLedgerError(RuntimeError):
     """A fail-closed durable cost authority refusal."""
 
 
+class RagServingEvidenceChangedError(RagCostLedgerError):
+    """Authenticated answer evidence no longer matches current serving rows."""
+
+
 @dataclass(frozen=True, slots=True)
 class PendingProjectionPaidComponentAuthority:
     component: str
@@ -305,6 +309,7 @@ class RagCostLedger:
         self._runtime_health = runtime_health
         self._projection_mutex = threading.RLock()
         self._active_grants: dict[tuple[int, str], object] = {}
+        self._evidence_refused_grants: dict[int, CommittedRagDispatchGrant] = {}
         self._admission_snapshots: dict[
             tuple[int, str], AuthorizedProviderPolicySnapshot
         ] = {}
@@ -1111,6 +1116,12 @@ class RagCostLedger:
                 value[1][1].serving_identity_hmac,
             ),
         ):
+            if (
+                observation.ordinal != ordinal
+                or observation.slot_id != slot.slot_id
+                or observation.support_mode != slot.support_mode
+            ):
+                raise RagCostLedgerError('C.5 prepared evidence is unavailable')
             row = self._session.scalar(
                 select(RagLexicalServingProjection)
                 .where(
@@ -1120,11 +1131,16 @@ class RagCostLedger:
                 .with_for_update(read=True)
                 .execution_options(populate_existing=True)
             )
+            if row is not None and (
+                row.fingerprint_key_version != key_state.fingerprint_key_version
+                or not hmac.compare_digest(
+                    row.fingerprint_key_material_verifier,
+                    key_state.fingerprint_key_material_verifier,
+                )
+            ):
+                raise RagCostLedgerError('C.5 serving authority changed before send')
             if (
                 row is None
-                or observation.ordinal != ordinal
-                or observation.slot_id != slot.slot_id
-                or observation.support_mode != slot.support_mode
                 or row.corpus_generation_id != 1
                 or row.corpus_generation != corpus.corpus_generation
                 or row.serving_document_id
@@ -1138,14 +1154,8 @@ class RagCostLedger:
                 or row.model_content_hmac != observation.model_content_hmac
                 or row.canonical_citation_projection_hmac
                 != observation.canonical_citation_projection_hmac
-                or row.fingerprint_key_version
-                != key_state.fingerprint_key_version
-                or not hmac.compare_digest(
-                    row.fingerprint_key_material_verifier,
-                    key_state.fingerprint_key_material_verifier,
-                )
             ):
-                raise RagCostLedgerError(
+                raise RagServingEvidenceChangedError(
                     'C.5 serving evidence changed before send'
                 )
 
@@ -1520,9 +1530,38 @@ class RagCostLedger:
             self._pending_projection_identities.pop(run_id, None)
             return self._finalize_failed_run(parent, rows, outcome=outcome, completed_at=None, admission_only=False)
 
+    def _defer_answer_evidence_refusal(self, grant: CommittedRagDispatchGrant) -> None:
+        """Retire transport's exact unconsumed answer grant; never allow resend."""
+        key = (grant.agent_run_id, grant.component)
+        if (grant.component != 'answer_generation' or grant.consumed is not False
+            or self._active_grants.get(key) is not grant):
+            raise RagCostLedgerError('evidence refusal grant is unavailable')
+        self._evidence_refused_grants[grant.agent_run_id] = grant
+        self._active_grants.pop(key)
+
+    @_runtime_health_effect
+    def commit_answer_evidence_changed_pending(
+        self, *, grant: CommittedRagDispatchGrant, corpus_generation: int,
+        vector_index_generation: int | None,
+    ) -> RagProjectionPending:
+        with self._answer_binding_lock:
+            if self._evidence_refused_grants.get(grant.agent_run_id) is not grant:
+                raise RagCostLedgerError('evidence refusal proof is unavailable')
+            # Release pre-send C.5 read locks before starting ordinary lock order.
+            if self._session.new or self._session.dirty or self._session.deleted:
+                raise RagCostLedgerError('evidence refusal has uncommitted writes')
+            self._session.rollback()
+            return self._commit_safe_pending(
+                run_id=grant.agent_run_id, corpus_generation=corpus_generation,
+                vector_index_generation=vector_index_generation,
+                embedding_only=(grant.agent_run_id, 'query_embedding') in self._terminal_bindings,
+                refused_grant=grant,
+            )
+
     def _commit_safe_pending(
         self, *, run_id: int, corpus_generation: int,
         vector_index_generation: int | None, embedding_only: bool,
+        refused_grant: CommittedRagDispatchGrant | None = None,
     ) -> RagProjectionPending:
         from backend.app.agent_runtime.rag_finalization import RagProjectionPending
 
@@ -1539,6 +1578,19 @@ class RagCostLedger:
         with self._answer_binding_lock, self._safe_pending_owner(run_id, embedding_only=embedding_only):
             parent, rows = self._locked_run(run_id)
             query, answer = rows
+            if refused_grant is not None and (
+                self._evidence_refused_grants.get(run_id) is not refused_grant
+                or refused_grant.consumed is not False
+                or answer.dispatch_state != 'dispatching'
+                or answer.attempted is not True or answer.dispatch_count != 1
+                or answer.charged_cost_usd != refused_grant.reserved_cost_usd
+                or answer.reserved_cost_usd != refused_grant.reserved_cost_usd
+                or answer.charge_basis != 'reserved'
+                or answer.process_instance_hmac != self._process_hmac
+                or answer.dispatch_fence_hmac != refused_grant.dispatch_fence_hmac
+                or (run_id, 'answer_generation') in self._active_grants
+            ):
+                raise RagCostLedgerError('evidence refusal proof is unavailable')
             if (
                 parent.status != 'running' or parent.run_record_phase != 'admission'
                 or parent.projection_owner_fence_hmac is not None
@@ -1549,6 +1601,7 @@ class RagCostLedger:
                     or row.charged_cost_usd != _ZERO
                     or row.dispatch_fence_hmac is not None
                     for row in ((answer,) if embedding_only else rows)
+                    if refused_grant is None or row.component != 'answer_generation'
                 )
             ):
                 raise RagCostLedgerError('safe pending transition is unavailable')
@@ -1565,6 +1618,13 @@ class RagCostLedger:
                 self._require_terminal_cost_row(run_id, query)
             for row in ((answer,) if embedding_only else rows):
                 self._make_terminal_zero(row)
+            if refused_grant is not None:
+                # No answer bytes were sent. Safe phase 2 has no model influence.
+                parent.metadata_ = {
+                    **parent.metadata_, 'rendered_input_hmac': None,
+                    'answer_model_config_snapshot_hmac': None,
+                    'prepared_model_influence_observation_hmac': None,
+                }
             parent.run_record_phase = 'cost_finalized_pending_projection'
             parent.total_charged_cost_usd = sum((Decimal(row.charged_cost_usd) for row in rows), _ZERO)
             parent.estimated_cost_usd = float(sum((Decimal(row.reserved_cost_usd) for row in rows), _ZERO))
@@ -1589,6 +1649,9 @@ class RagCostLedger:
             self._answer_reservations.pop(run_id, None)
             self._admission_budgets.pop((run_id, 'answer_generation'), None)
             self._commit()
+            if refused_grant is not None:
+                self._evidence_refused_grants.pop(run_id)
+                self._grant_bindings.pop((run_id, 'answer_generation'), None)
             self._pending_projection_identities[run_id] = (
                 pending.projection_owner_fence_hmac,
                 pending.security_scope_fingerprint,

@@ -145,6 +145,117 @@ def test_default_runtime_sqlite_owns_single_atomic_graph_scope(
     engine.dispose()
 
 
+def test_default_sqlite_filtered_slot_persists_only_selected_safe_source(tmp_path):
+    from backend.app.agent_runtime.rag_v2_composition import build_rag_v2_runtime
+    from backend.app.rag.lexical_projection import refresh_rag_lexical_projections
+    from backend.tests.test_rag_source_observations import _seed_source_chunk
+
+    path = (tmp_path / 'mixed.db').absolute()
+    engine = _engine(path)
+    Base.metadata.create_all(engine)
+    settings = _settings().model_copy(
+        update={
+            'database_url': f'sqlite:///{path.as_posix()}',
+            'openai_api_key': None,
+            'rag_retrieval_backend': 'keyword',
+            'rag_use_pgvector_search': False,
+            'langgraph_rag_v2_mode': 'enforce',
+            'langgraph_rag_v2_stage': 'assistant',
+        }
+    )
+    query = 'mixedneedle'
+    with Session(engine) as db:
+        _seed_sqlite_raw_projection(db)
+        _seed_source_chunk(
+            db, text='mixedneedle Authorization: Bearer test-secret-token-1234567890'
+        )
+        _seed_source_chunk(
+            db, source_type='drive', text='mixedneedle Safe observation 한글'
+        )
+        refresh_rag_lexical_projections(db, settings=settings, corpus_generation=1)
+        conversation = AssistantConversation(user_id='user-1', title='RAG')
+        db.add(conversation)
+        db.flush()
+        message = AssistantMessage(
+            conversation_id=conversation.id,
+            role='user',
+            content=query,
+            citations=[],
+            source_ids=[],
+            source_links=[],
+            source_snippets=[],
+            metadata_={},
+        )
+        db.add(message)
+        db.commit()
+        target = AssistantProjectionTarget(conversation.id, message.id, 'user-1')
+    bundle = build_rag_v2_runtime(
+        settings=settings, session_factory=sessionmaker(bind=engine)
+    )
+    actor = DemoUser(
+        id='user-1',
+        email='test@example.test',
+        name='Tester',
+        role='member',
+        title='Test',
+        department='Test',
+        permission_levels={'public', 'internal'},
+    )
+    result = bundle.facade.invoke_graph(
+        actor=actor,
+        surface='assistant',
+        assistant_target=target,
+        prepared_text=prepare_assistant_request_text(
+            query, (), key=settings.agent_runtime_fingerprint_secret.encode()
+        ),
+    )
+    assert result['outcome'] == 'supported'
+    assert result['evidence_projection'].source_ids == ('drive:source-1',)
+    assert (
+        result['model_influence'][0].fresh_lookup_identity.public_source_id
+        == 'drive:source-1'
+    )
+    with Session(engine) as db:
+        saved = db.scalar(
+            select(AssistantMessage).where(AssistantMessage.role == 'assistant')
+        )
+        assert saved.source_ids == ['drive:source-1']
+        assert saved.citations[0]['source_id'] == 'drive:source-1'
+        assert (
+            saved.citations[0]['source_snippet'] == 'mixedneedle Safe observation 한글'
+        )
+        assert saved.citations[0]['permission_level'] == 'internal'
+    engine.dispose()
+
+
+def test_default_pgvector_missing_key_refuses_before_cost_authority_assembly(
+    monkeypatch,
+):
+    from backend.app.agent_runtime import rag_provider_transport as transport
+    from backend.app.agent_runtime.rag_application import RagApplicationError
+    from backend.app.agent_runtime.rag_v2_composition import _postgres_request_services
+
+    def forbidden(**kwargs):
+        pytest.fail('missing retrieval configuration must precede paid DB assembly')
+
+    monkeypatch.setattr(transport, '_assemble_rag_request_cost_authority', forbidden)
+    settings = _settings().model_copy(
+        update={
+            'rag_retrieval_backend': 'pgvector',
+            'rag_use_pgvector_search': True,
+            'openai_api_key': None,
+        }
+    )
+    with (
+        pytest.raises(RagApplicationError) as error,
+        _postgres_request_services(
+            db=object(), settings=settings, session_factory=forbidden
+        ),
+    ):
+        pytest.fail('missing key must not expose request services')
+    assert error.value.code == 'retriever_not_configured'
+
+
 @pytest.mark.parametrize('failure', ('node', 'commit', 'retriever'))
 def test_default_sqlite_graph_failure_rolls_back_without_dto_or_pending_parent(
     tmp_path, monkeypatch, failure

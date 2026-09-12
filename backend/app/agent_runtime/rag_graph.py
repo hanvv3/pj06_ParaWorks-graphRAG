@@ -172,6 +172,10 @@ def preflight_retrieval_paid_cost_ceiling(
         return {'run_id': run_id, 'generations': generations}
     prepared_embedding = None
     if backend == 'pgvector':
+        if services.query_embedding_adapter is None or services.index_readiness is None:
+            from backend.app.agent_runtime.rag_application import RagApplicationError
+
+            raise RagApplicationError('retriever_not_configured')
         prepared_embedding = services.query_embedding_adapter.prepare(
             _request(state),
             services.index_readiness.inspect(db=services.db),
@@ -225,7 +229,7 @@ def prepare_and_call_query_embedding(
     try:
         transport = _transport(services)
     except Exception:
-        return _terminalize_failure(state, runtime.context, 'model_unavailable')
+        return _terminalize_failure(state, runtime.context, 'retriever_unavailable')
     grant = services.cost_ledger.claim_component(
         run_id=state['run_id'], component='query_embedding', prepared=prepared.budget
     )
@@ -530,7 +534,9 @@ def paid_embedding_only_safe_outcome_finalizer(
 def _safe_outcome(state, context, *, embedding_only):
     corpus, index = state['generations']
     ledger = context.services.cost_ledger
-    if context.services.sqlite_scope is not None:
+    if state.get('pending') is not None:
+        pending = state['pending']
+    elif context.services.sqlite_scope is not None:
         pending = context.services.sqlite_scope.mark_projection_pending(state['run_id'])
     else:
         commit = (
@@ -655,7 +661,24 @@ def generate_structured_answer_blocks(
         run_id=state['run_id'], component='answer_generation', prepared=prepared.budget
     )
     dispatch = transport.prepare(grant=grant, prepared=prepared)
-    delivery = transport.dispatch_and_finalize(grant=grant, prepared=dispatch)
+    from backend.app.agent_runtime.rag_provider_transport import (
+        RagAnswerEvidenceChangedBeforeSendError,
+    )
+
+    try:
+        delivery = transport.dispatch_and_finalize(grant=grant, prepared=dispatch)
+    except RagAnswerEvidenceChangedBeforeSendError:
+        corpus, index = state['generations']
+        pending = services.cost_ledger.commit_answer_evidence_changed_pending(
+            grant=grant,
+            corpus_generation=corpus,
+            vector_index_generation=index,
+        )
+        return _safe_outcome(
+            {**state, 'pending': pending, 'safe_outcome': 'evidence_unavailable'},
+            runtime.context,
+            embedding_only=state.get('query_embedding_result') is not None,
+        )
     if delivery.output is None:
         from backend.app.agent_runtime.rag_application import ingress_budget_refusal
 

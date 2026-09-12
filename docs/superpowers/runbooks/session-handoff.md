@@ -2,6 +2,31 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task14 review round 1 fixes
+
+- Review of integration candidate `a5fe4df` was NOT CLEAN. Scoped fixes preserve
+  the authenticated prepared model-slot mapping in both finalizers; fresh
+  canonical lookup still verifies identity/content/citation fingerprints. Mixed
+  unsafe Gmail/safe Drive tests cover paid finalization and durable SQLite
+  Assistant citations, including Korean snippets and permissions.
+- Real post-transport-prepare C.5/fence evidence drift now retires the exact
+  unsent answer grant, releases C.5 read locks, and consumes request-local refusal
+  proof through the existing safe-pending transaction and fresh canned
+  evidence_unavailable finalizer. Paid embedding cost and its authenticated
+  dispatch receipt remain unchanged; answer is zero. Invalid identity/key/provider
+  safety errors remain fail-closed. Failed/unknown commit yields no DTO/resend.
+- Missing embedding key/adapter is typed retriever_not_configured before
+  assembly/admission; lazy embedding constructor failure terminalizes the
+  admission as retriever_unavailable, not generation-only model_unavailable.
+- No schema, budget, retries, public routes, promotion or later-task scope
+  changes. Exact verification and fix commit are recorded in the Task14 report;
+  this is a scoped rereview candidate, not CLEAN. Real PG remains unverified.
+- Fix-round affected gate: `254 passed, 1 PostgreSQL URL skip` in 217.14s,
+  no warnings. Ruff on nine code/test targets, seven production compile targets,
+  diff whitespace and added-line credential-pattern scan passed. The known UV
+  default-interpreter probe failure required the unchanged explicit working
+  interpreter fallback; no dependency, network or dotenv access.
+
 ## 2026-09-12 D Core Task14 graph integration candidate
 
 - Actual 26-node LangGraph is compiled once without checkpoints and registered

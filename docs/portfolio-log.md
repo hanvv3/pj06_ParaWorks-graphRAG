@@ -1,5 +1,20 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Task14 evidence-boundary review fixes
+
+- Independent review found three integration gaps: filtered model slots could
+  cite a different source, real pre-send evidence drift failed instead of
+  returning a safe product, and missing embedding setup produced untyped or
+  generation-specific errors. Scoped fixes preserve model-selected canonical
+  identity, exact paid embedding cost and zero unsent-answer cost.
+- Mixed unsafe/safe source tests reload the actual SQLite Assistant citations;
+  real fake-provider graph tests cover post-prepare drift, replay rejection,
+  failed/unknown pending commit and distinct key/provider failures. No live API,
+  DB/public schema or budget-policy changes. Candidate awaits scoped rereview,
+  not release approval; real PostgreSQL remains an unexecuted release gate.
+- Fresh affected verification: `254 passed, 1 PostgreSQL URL skip` in 217.14s,
+  no warnings; static/compile/diff checks passed. No paid providers were called.
+
 ## 2026-09-12 D Core request-owned answer graph candidate
 
 - The actual LangGraph now composes permission-aware Runnable retrieval,

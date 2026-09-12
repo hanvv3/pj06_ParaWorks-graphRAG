@@ -26,6 +26,10 @@ class ProviderSendFenceError(RuntimeError):
     """Bounded send-fence refusal; never contains a request or response body."""
 
 
+class EvidenceIdentityChangedBeforeSendError(ProviderSendFenceError):
+    """Two valid authoritative identities differ before any provider send."""
+
+
 class FencedProviderSendPermit(Protocol):
     """Read-only shape of a store-owned, process-local send permit."""
 
@@ -107,10 +111,11 @@ class RagEvidenceFreshnessAuthority:
         self._load_current_identity = load_current_identity
 
     def require_current(self, expected_identity_hmac: str) -> None:
-        if not identities_match(
-            self._load_current_identity(), expected_identity_hmac
-        ):
-            raise ProviderSendFenceError('evidence identity changed before send')
+        current = self.snapshot_identity()
+        if not identities_match(expected_identity_hmac, expected_identity_hmac):
+            raise ProviderSendFenceError('prepared evidence identity is unavailable')
+        if not identities_match(current, expected_identity_hmac):
+            raise EvidenceIdentityChangedBeforeSendError('evidence identity changed before send')
 
     def snapshot_identity(self) -> str:
         value = self._load_current_identity()
