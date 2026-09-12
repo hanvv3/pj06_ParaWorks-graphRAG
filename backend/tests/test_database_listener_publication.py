@@ -332,3 +332,122 @@ def test_failed_outer_publication_does_not_remove_foreign_installation(monkeypat
                     event.remove(*listener)
         for application in applications:
             application.dispose()
+
+
+@pytest.fixture
+def clean_listener_retirement_interrupted(monkeypatch):
+    application = create_engine('sqlite:///:memory:')
+    application.dialect.name = 'postgresql'
+    original_condition = initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION
+    original_init = initialization.TrustedPostgresEngineBootstrap.__init__
+    original_remove = event.remove
+    primary = PublicationInterrupted('bootstrap completed before failure')
+    removal_calls = []
+    injected = False
+
+    class RetirementCondition:
+        def __enter__(self):
+            nonlocal injected
+            if not injected and any(
+                owner._state == 'CLEAN'
+                for owner in initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS.values()
+            ):
+                injected = True
+                raise PublicationInterrupted('clean retirement lock interrupted')
+            return original_condition.__enter__()
+
+        def __exit__(self, *args):
+            return original_condition.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(original_condition, name)
+
+    def completed_then_raise(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        raise primary
+
+    def remove(*listener):
+        removal_calls.append(listener)
+        original_remove(*listener)
+
+    monkeypatch.setattr(initialization, 'create_engine', lambda *_a, **_k: application)
+    monkeypatch.setattr(
+        initialization.TrustedPostgresEngineBootstrap, '__init__', completed_then_raise
+    )
+    monkeypatch.setattr(
+        initialization,
+        '_FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION',
+        RetirementCondition(),
+    )
+    monkeypatch.setattr(event, 'remove', remove)
+    try:
+        with pytest.raises(PublicationInterrupted) as captured:
+            initialization.initialize_database_runtime(
+                'postgresql+psycopg://test@localhost/test'
+            )
+        assert captured.value is primary
+        assert injected
+        retained = tuple(initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS.values())
+        assert len(retained) == 1
+        owner = retained[0]
+        assert owner._state == 'CLEAN'
+        assert len(removal_calls) == 3
+        assert all(not event.contains(*listener) for listener in removal_calls)
+        yield owner, removal_calls
+    finally:
+        monkeypatch.setattr(
+            initialization,
+            '_FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION',
+            original_condition,
+        )
+        for owner in tuple(initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS.values()):
+            owner._state = 'QUARANTINED'
+        initialization._drain_failed_checkout_listener_cleanups()
+        application.dispose()
+
+
+def test_clean_listener_retirement_retries_exact_unlink_without_repeating_removal(
+    clean_listener_retirement_interrupted,
+):
+    owner, removal_calls = clean_listener_retirement_interrupted
+    initialization._drain_failed_checkout_listener_cleanups(frozenset({id(owner)}))
+    assert initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS == {}
+    assert len(removal_calls) == 3
+
+
+def test_registration_deadline_covers_successful_cleanup_retry(
+    monkeypatch,
+    clean_listener_retirement_interrupted,
+):
+    owner, removal_calls = clean_listener_retirement_interrupted
+    cls = initialization._CheckoutListenerConstructionResponsibility
+    contender = cls(
+        owner=object(),
+        runtime_health=owner.runtime_health,
+        _seal=initialization._POSTGRES_LISTENER_CONSTRUCTION_SEAL,
+    )
+    original_drain = cls.drain_quarantine
+    elapsed = 0
+    attempts = 0
+
+    def drain_then_deadline(self):
+        nonlocal elapsed, attempts
+        attempts += 1
+        if attempts > 2:
+            pytest.fail('registration repeatedly drained without checking its deadline')
+        result = original_drain(self)
+        elapsed = 1_000_000_001
+        return result
+
+    monkeypatch.setattr(initialization, 'monotonic_ns', lambda: elapsed)
+    monkeypatch.setattr(cls, 'drain_quarantine', drain_then_deadline)
+    try:
+        with pytest.raises(initialization.PostgresRuntimeHealthUnavailableError):
+            contender.register()
+        assert attempts == 1
+        assert contender._state == 'NEW'
+        assert initialization._FAILED_CHECKOUT_LISTENER_CLEANUPS == {}
+        assert len(removal_calls) == 3
+    finally:
+        monkeypatch.setattr(cls, 'drain_quarantine', original_drain)
+        contender.construction_failed()

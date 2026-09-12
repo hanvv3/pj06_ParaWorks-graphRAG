@@ -6027,3 +6027,16 @@ Cost/security note:
   handler. Finite callback failures and protected pre-return cancellation are
   covered; arbitrary repeated bytecode interruption is not claimed. This is
   a candidate awaiting independent review; Task 14 remains blocked.
+
+## 2026-09-12 Task 13 candidate correction: retire physically clean ownership
+
+- Review identified a distinction between completed listener removal and
+  completed quarantine retirement: one failed retirement lock could leave a
+  CLEAN record that admission drained indefinitely. Exact map retirement is
+  now retryable independently of physical removal, and the admission deadline
+  covers every retry.
+- Two new regressions failed before the fix. Acceptance is `11 passed`;
+  affected verification is `395 passed, 10 skipped`, with the same three
+  existing rollback warnings. Static/import/security checks passed. This
+  remains a candidate for independent rereview; Task 14 and real PostgreSQL
+  release verification remain pending.

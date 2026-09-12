@@ -4408,3 +4408,22 @@ tests passed with 53 tests; ruff passed.
 - Candidate only: independent review is still required, and Task 14 remains
   blocked. `PARAWORKS_TEST_POSTGRES_URL` is absent; no real PostgreSQL gate,
   provider/network/Docker/paid call, `.env` access, push, or merge was performed.
+
+## 2026-09-12 Task 13 candidate fix round 1: CLEAN retirement remains retryable
+
+- Independent review of `8ae4232` accepted runtime publication ownership but
+  found a retained CLEAN tombstone could make registration loop forever after
+  one failed retirement-condition acquisition. Two new tests reproduced it
+  (`2 failed`) using a real completed bootstrap, exact listener removal, and
+  an injected monotonic deadline after real drain work.
+- `drain_quarantine` now retries exact map unlink even when physical cleanup
+  is already CLEAN, without repeating listener removal. Registration checks
+  its deadline on every iteration, including successful-drain retries.
+- Acceptance file: `11 passed`. Same seven-file affected Task 13 gate:
+  `395 passed, 10 skipped`, plus the three existing rollback warnings at
+  binding-test line 2130. Ruff, compile/import, credential scan, Alembic head,
+  and diff checks passed. Scoped basetemp:
+  `.tmp/task13-resume-20260912-round1`.
+- The finite failure model is unchanged. This correction requires independent
+  rereview; Task 14 remains blocked. PostgreSQL URL is absent, so no real PG
+  release gate is claimed. No dotenv/provider/network/Docker/paid/push/merge.

@@ -1316,6 +1316,11 @@ class _CheckoutListenerConstructionResponsibility:
         while True:
             existing: _CheckoutListenerConstructionResponsibility | None
             with _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION:
+                remaining = (deadline - monotonic_ns()) / 1_000_000_000
+                if remaining <= 0:
+                    raise PostgresRuntimeHealthUnavailableError(
+                        'PostgreSQL listener construction is unavailable'
+                    )
                 if self._state != 'NEW':
                     raise TypeError('PostgreSQL listener construction changed')
                 existing = next(
@@ -1327,11 +1332,6 @@ class _CheckoutListenerConstructionResponsibility:
                     _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
                     return
                 if existing._state in {'INSTALLING', 'INSTALLED', 'CLAIMING'}:
-                    remaining = (deadline - monotonic_ns()) / 1_000_000_000
-                    if remaining <= 0:
-                        raise PostgresRuntimeHealthUnavailableError(
-                            'PostgreSQL listener construction is unavailable'
-                        )
                     _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.wait(
                         timeout=min(0.1, remaining)
                     )
@@ -1434,18 +1434,19 @@ class _CheckoutListenerConstructionResponsibility:
 
     def drain_quarantine(self) -> bool:
         with self._lock:
-            if self._state == 'CLEAN':
-                return True
-            if self._state != 'QUARANTINED':
+            if self._state not in {'QUARANTINED', 'CLEAN'}:
                 return False
-            registry = self._registry
-            unresolved = bool(
-                registry is not None
-                and registry._retry_failed_installation_cleanup()
-            )
-            if unresolved:
-                return False
-            self._state = 'CLEAN'
+            if self._state == 'QUARANTINED':
+                registry = self._registry
+                unresolved = bool(
+                    registry is not None
+                    and registry._retry_failed_installation_cleanup()
+                )
+                if unresolved:
+                    return False
+                self._state = 'CLEAN'
+        # Physical cleanup and map retirement are separate steps. A CLEAN
+        # owner still retries exact unlink if the previous lock/pop failed.
         with _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION:
             if _FAILED_CHECKOUT_LISTENER_CLEANUPS.get(id(self)) is self:
                 _FAILED_CHECKOUT_LISTENER_CLEANUPS.pop(id(self), None)
