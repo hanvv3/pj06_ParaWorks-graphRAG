@@ -1,6 +1,4 @@
 import json
-from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Annotated
 
 import pytest
@@ -527,56 +525,8 @@ def _add_v2_canned_message(
     conversation: AssistantConversation,
     content: str,
 ) -> AssistantMessage:
-    result_hmac = 'd' * 64
-    parent = AgentRun(
-        agent_name='rag_orchestrator_agent',
-        prompt_version='rag-answer:v2',
-        status='complete',
-        source_window='rag-v2:product:enforce:assistant:keyword',
-        cache_key='rag-v2-final:' + 'e' * 64,
-        model_name='deterministic',
-        input_tokens=0,
-        output_tokens=0,
-        total_tokens=0,
-        estimated_cost_usd=0.0,
-        permission_level='internal',
-        run_contract_version='rag-run:v2',
-        run_record_phase='final',
-        total_charged_cost_usd=Decimal('0.000000'),
-        completed_at=datetime.now(UTC),
-        metadata_={'outcome': 'no_match', 'rag_result_hmac': result_hmac},
-    )
-    db.add(parent)
-    db.flush()
-    message = AssistantMessage(
-        conversation_id=conversation.id,
-        role='assistant',
-        content=content,
-        citations=[],
-        source_ids=[],
-        source_links=[],
-        source_snippets=[],
-        hidden_match_count=0,
-        agent_run_id=parent.id,
-        evidence_contract_version='none-v1',
-        serving_dependency_count=0,
-        content_write_mode='rag_v2_exact',
-        content_hmac_schema_version='assistant-message-content-hmac:v1',
-        assistant_message_content_hmac='a' * 64,
-        content_hmac_key_version='runtime-key-v1',
-        content_hmac_key_material_verifier='b' * 64,
-        content_origin='rag_canned',
-        content_origin_hmac='c' * 64,
-        rag_result_hmac=result_hmac,
-        linked_agent_run_id=parent.id,
-        metadata_={
-            'agent_name': 'rag_orchestrator_agent',
-            'prompt_version': 'rag-answer:v2',
-        },
-    )
-    db.add(message)
-    db.commit()
-    return message
+    from backend.tests.assistant_evidence_helpers import write_canned
+    return write_canned(db, conversation, content)
 
 
 def _add_stale_v2_message(
@@ -727,6 +677,8 @@ def test_hidden_only_canned_v2_requires_guard_and_preserves_original_projection(
     message = _add_v2_canned_message(db_session, conversation, 'HIDDEN_V2_SENTINEL')
     message.hidden_match_count = 1
     message.permission_notice = 'Some sources may be hidden by permissions.'
+    parent = db_session.get(AgentRun, message.agent_run_id)
+    parent.metadata_ = {**parent.metadata_, 'hidden_match_count': 1, 'outcome': 'hidden_only'}
     db_session.commit()
 
     refused_messages = client.get(

@@ -41,6 +41,38 @@ from backend.tests.test_auto_review_source_reconciliation import (
 )
 
 
+@pytest.mark.parametrize('mode,stage', [('disabled', 'none'), ('enforce', 'search')])
+def test_noncutover_legacy_unbound_post_get_keeps_exact_v1_without_v2_eligibility(client, db_session, mode, stage):
+    from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
+    from backend.app.api.v1 import assistant as assistant_api
+    from backend.app.core.config import Settings, get_settings
+    from backend.app.models import AutoReviewRuntimeKeyState
+    from backend.app.rag.trusted_evidence import TrustedServingEnvelopeResolver
+    settings = get_settings()
+    db_session.add(AutoReviewRuntimeKeyState(component='auto_review_trust_promotion', ready=True, generation=1,
+        fingerprint_key_version=settings.agent_runtime_fingerprint_key_version,
+        fingerprint_key_material_verifier=fingerprint_key_material_verifier(settings.agent_runtime_fingerprint_secret)))
+    target = DecisionRecord(title='LegacyNeedle', decision_summary='LegacyNeedle confirmed decision',
+        source_links=['https://example.test/legacy-needle'], source_snippets=['LegacyNeedle original snippet'],
+        permission_level='internal', confidence_score=1, review_status='approved')
+    db_session.add(target)
+    db_session.commit()
+    client.app.dependency_overrides[assistant_api.get_settings] = lambda: Settings(
+        langgraph_rag_v2_mode=mode, langgraph_rag_v2_stage=stage, paraworks_demo_mode=True)
+    conversation = create_conversation(db_session, USERS['viewer'])
+    response = client.post(f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        json={'content': 'LegacyNeedle'}, headers={'X-Demo-User': 'viewer'})
+    assert response.status_code == 200
+    posted = response.json()['assistant_message']
+    fetched = client.get(f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        headers={'X-Demo-User': 'viewer'})
+    assert fetched.status_code == 200
+    assert fetched.json()['messages'][-1] == posted
+    assert posted['source_snippets'] == ['LegacyNeedle original snippet']
+    assert posted['permission_level'] == 'internal'
+    assert TrustedServingEnvelopeResolver(db=db_session, settings=get_settings()).resolve_for_index('decision_record', target.id) is None
+
+
 def test_conversations_are_scoped_to_user(db_session: Session) -> None:
     viewer = USERS['viewer']
     employee = USERS['hanvv-employee']

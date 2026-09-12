@@ -115,6 +115,22 @@ def test_assistant_evidence_contract_columns_are_legacy_nullable() -> None:
     assert 'ck_assistant_messages_serving_dependency_count' in checks
 
 
+def test_historical_null_content_marker_roundtrips_without_inferred_v2_authority(db_session):
+    from backend.app.assistant.service import serialize_message
+    from backend.app.core.demo_auth import USERS
+    conversation = AssistantConversation(user_id=USERS['viewer'].id)
+    message = AssistantMessage(conversation=conversation, role='assistant', content='Historical operational answer',
+        evidence_contract_version='none-v1', serving_dependency_count=0,
+        metadata_={'agent_name': 'rag_orchestrator_agent', 'prompt_version': 'rag-answer:v1'})
+    db_session.add(conversation)
+    db_session.commit()
+    projected = serialize_message(message, db=db_session, user=USERS['viewer'])
+    assert projected['content'] == 'Historical operational answer'
+    assert message.content_write_mode is None
+    assert message.assistant_message_content_hmac is None
+    assert message.dependency_set_hmac_schema_version is None
+
+
 def test_assistant_evidence_dependencies_bind_exact_parent_and_effect() -> None:
     parent_constraints = {
         constraint.name

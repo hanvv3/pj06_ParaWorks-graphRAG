@@ -2,6 +2,36 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task17 evidence reader candidate; review before Task18
+
+- Candidate implements `AssistantEvidenceReader` / immutable message view and
+  routes serialization and all existing liveness/context/summary consumers
+  through it. Current C.5 key readiness/identity is mandatory for keyed reads.
+  It verifies exact content and linked final AgentRun/result identity, every
+  child and set signature, canonical source/provenance/permission, all model
+  influence, selected citation score/term order and arrays. Failures redact the
+  whole message. Hidden-only `none-v1` canned messages remain live when valid.
+- Historical null-marker children stay on the existing V1 revalidation path;
+  retained V2 child markers cannot be downgraded to historical authority.
+  Signed `legacy_v1_only` / `legacy_unbound` reads use current V1 knowledge and
+  never construct a D serving envelope or grant V2 eligibility. Controller's
+  narrow interpretation: the legacy snapshot HMAC's named version-fingerprint
+  input is the freshly verified V1 `serving_content_hash`; the child's two D
+  identity/version columns remain NULL. Independently review this interpretation.
+- `evidence_persistence.py` is unchanged. Its ordinary initial flush currently
+  violates current content-integrity CHECKs before it computes final fields.
+  Reader tests reuse the SQLite smoke reserved-message-ID/before_flush bridge,
+  leaving real DB CHECKs and writer-computed final HMACs active. Task18 must
+  resolve this and implement the missing keyed legacy production writer; do not
+  claim ordinary writer cutover or full legacy keyed POST integration yet.
+- Verification: focused 133 passed; affected group 279 passed, 1 opt-in real-PG
+  skipped; final Assistant/privacy group 170 passed. Ruff/compile/diff checks
+  passed. Capability assertions remain intact; only its artificial signature
+  fixture changed to the real writer through a standalone test helper.
+- Candidate awaits independent review; not CLEAN. Full commands, RED evidence,
+  changed files and limitations are in the local Task17 report. No live calls,
+  push, merge, rollout activation, real-PG proof, Slack/CDC/Redis/D.1/E work.
+
 ## 2026-09-12 D Core Task16 CLEAN; resume at Task17 implementation
 
 - Task16 cumulative independent review is CLEAN at `a9da2eb` (candidate

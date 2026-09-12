@@ -311,53 +311,10 @@ def serialize_message(
     db: Session | None = None,
     user: DemoUser | None = None,
 ) -> dict:
-    response = {
-        'id': message.id,
-        'conversation_id': message.conversation_id,
-        'role': message.role,
-        'content': message.content,
-        'citations': message.citations,
-        'source_ids': message.source_ids,
-        'source_links': message.source_links,
-        'source_snippets': message.source_snippets,
-        'permission_level': message.permission_level,
-        'hidden_match_count': message.hidden_match_count,
-        'permission_notice': message.permission_notice,
-        'agent_run_id': message.agent_run_id,
-        'metadata': message.metadata_,
-        'created_at': message.created_at.isoformat(),
-    }
-    evidence_shaped = bool(
-        message.citations
-        or message.source_ids
-        or message.source_links
-        or message.source_snippets
-        or message.hidden_match_count
-        or (message.metadata_ or {}).get('evidence_derived') is True
-    )
-    unavailable = (evidence_shaped and (db is None or user is None)) or (
-        db is not None
-        and user is not None
-        and not assistant_message_projection_is_live(db, user=user, message=message)
-    )
-    if unavailable:
-        response.update(
-            {
-                'content': '이 답변의 근거를 더 이상 확인할 수 없습니다. 다시 생성해 주세요.',
-                'citations': [],
-                'source_ids': [],
-                'source_links': [],
-                'source_snippets': [],
-                'permission_level': None,
-                'hidden_match_count': 0,
-                'permission_notice': 'evidence_unavailable',
-                'metadata': {
-                    'status': 'evidence_unavailable',
-                    'regeneration_required': True,
-                },
-            }
-        )
-    return response
+    from backend.app.assistant.evidence_reader import AssistantEvidenceReader
+    return AssistantEvidenceReader().project_message(
+        db=db, actor=user, message=message
+    ).to_response()
 
 
 def eligible_context_messages(
@@ -433,7 +390,6 @@ def _message_evidence_is_live(
         or message.source_ids
         or message.source_links
         or message.source_snippets
-        or message.hidden_match_count
         or (message.metadata_ or {}).get('evidence_derived') is True
     )
     dependencies = tuple(
@@ -455,7 +411,9 @@ def _message_evidence_is_live(
         return False
     eligibility = TrustedServingEligibilityService(db)
     return all(
-        dependency.permission_level in user.permission_levels
+        dependency.dependency_serving_scope is None
+        and dependency.dependency_role is None
+        and dependency.permission_level in user.permission_levels
         and _dependency_is_live(db, eligibility, message, dependency)
         for dependency in dependencies
     )
@@ -472,13 +430,9 @@ def assistant_message_projection_is_live(
     db: Session, *, user: DemoUser, message: AssistantMessage
 ) -> bool:
     """Return whether the current serializer may expose stored message bytes."""
-    if message.content_write_mode != 'rag_v2_exact':
-        return _message_evidence_is_live(db, user=user, message=message)
-    if not _assistant_message_has_valid_v2_structure(db, message=message):
-        return False
-    if message.content_origin == 'rag_canned':
-        return True
-    return _message_evidence_is_live(db, user=user, message=message)
+    from backend.app.assistant.evidence_reader import AssistantEvidenceReader
+    view = AssistantEvidenceReader().project_message(db=db, actor=user, message=message)
+    return view.metadata.get('regeneration_required') is not True
 
 
 def _assistant_message_has_valid_v2_structure(

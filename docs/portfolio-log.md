@@ -1,5 +1,25 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Task17 evidence reader candidate
+
+- Assistant serialization, summary/context selection and render-capability
+  liveness now share an evidence reader. It verifies exact content, linked final
+  result, current fingerprint key, every selected/unselected influence child,
+  whole-set HMAC, current source/version/approval/permission and citation bytes.
+  Any mismatch redacts the entire answer; valid hidden-only canned messages
+  retain their original bytes and permission notice.
+- Historical reads retain V1 behavior. Signed legacy-only snapshots revalidate
+  current V1 knowledge without gaining V2 eligibility. Public RAG metadata omits
+  question, backend/graph/fallback/IDs and raw diagnostics, retaining safe agent
+  identity and the existing failure classification triple.
+- Candidate verification: focused 133 passed; affected resolver/writer/API/
+  finalization group 279 passed, 1 opt-in real-PostgreSQL test skipped; final
+  Assistant/privacy group 170 passed. Ruff, compile and diff checks passed.
+- Candidate awaits independent review; not CLEAN. Task13's ordinary writer
+  first-flush CHECK issue and missing keyed legacy production writer remain
+  Task18 cutover obligations. Tests reuse the existing SQLite reserved-ID bridge.
+  No live providers, rollout activation, push/merge or PostgreSQL proof.
+
 ## 2026-09-12 D Core Assistant capability boundary reviewed
 
 - Task16 is independently CLEAN at `a9da2eb`. Assistant clients must declare
