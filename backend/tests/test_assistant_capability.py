@@ -1,8 +1,10 @@
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Annotated
 
 import pytest
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -111,6 +113,130 @@ def test_authentication_precedes_body_and_capability_validation(
     assert response.status_code == 401
     assert response.json() == {'detail': 'Authentication required.'}
     assert db_session.query(AssistantConversation).count() == 0
+    _assert_no_store(response)
+
+
+@pytest.mark.parametrize(
+    'path',
+    (
+        '/api/v1/assistant/conversations',
+        '/api/v1/assistant/conversations/999999/messages',
+    ),
+)
+def test_unauthenticated_malformed_json_is_401_before_body_or_owner_lookup(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    _enforce_assistant(client)
+    monkeypatch.setattr(
+        demo_auth,
+        'get_settings',
+        lambda: Settings(paraworks_demo_mode=False),
+    )
+
+    response = client.post(
+        path,
+        content=b'{',
+        headers={'Content-Type': 'application/json'},
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {'detail': 'Authentication required.'}
+    assert db_session.query(AssistantConversation).count() == 0
+    assert db_session.query(AssistantMessage).count() == 0
+    assert db_session.query(AgentRun).count() == 0
+    _assert_no_store(response)
+
+
+@pytest.mark.parametrize(
+    'path',
+    (
+        '/api/v1/assistant/conversations',
+        '/api/v1/assistant/conversations/999999/messages',
+    ),
+)
+def test_authenticated_malformed_json_is_422_with_capability_headers(
+    client: TestClient,
+    db_session: Session,
+    path: str,
+) -> None:
+    _enforce_assistant(client)
+
+    response = client.post(
+        path,
+        content=b'{',
+        headers={'Content-Type': 'application/json', 'X-Demo-User': 'viewer'},
+    )
+
+    assert response.status_code == 422
+    assert isinstance(response.json()['detail'], list)
+    assert db_session.query(AssistantConversation).count() == 0
+    assert db_session.query(AssistantMessage).count() == 0
+    assert db_session.query(AgentRun).count() == 0
+    _assert_no_store(response)
+
+
+def test_pre_body_auth_reuses_override_with_one_db_session_and_auth_call(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {'db': 0, 'db_closed': 0, 'user': 0, 'settings': 0}
+    settings = Settings(
+        paraworks_demo_mode=True,
+        langgraph_rag_v2_mode='enforce',
+        langgraph_rag_v2_stage='assistant',
+    )
+    capability_setting_ids: list[int] = []
+
+    def override_db():
+        calls['db'] += 1
+        try:
+            yield db_session
+        finally:
+            calls['db_closed'] += 1
+
+    def override_user(
+        db: Annotated[Session, Depends(assistant_api.get_db)],
+    ):
+        calls['user'] += 1
+        assert db is db_session
+        return demo_auth.USERS['viewer']
+
+    def override_settings() -> Settings:
+        calls['settings'] += 1
+        return settings
+
+    def require_capability(value: Settings) -> bool:
+        capability_setting_ids.append(id(value))
+        return True
+
+    client.app.dependency_overrides[assistant_api.get_db] = override_db
+    client.app.dependency_overrides[assistant_api.get_demo_user] = override_user
+    client.app.dependency_overrides[assistant_api.get_settings] = override_settings
+    monkeypatch.setattr(
+        assistant_api,
+        'assistant_post_requires_render_capability',
+        require_capability,
+    )
+
+    response = client.post(
+        '/api/v1/assistant/conversations',
+        json={'title': 'dependency identity'},
+        headers=CAPABILITY_HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert calls['db'] == 1
+    assert calls['db_closed'] == 1
+    assert calls['user'] == 1
+    assert calls['settings'] >= 1
+    assert capability_setting_ids == [id(settings), id(settings)]
+    conversation = db_session.query(AssistantConversation).one()
+    assert conversation.user_id == demo_auth.USERS['viewer'].id
+    _assert_no_store(response)
 
 
 def test_malformed_first_turn_body_precedes_capability_guard(
@@ -141,6 +267,92 @@ def test_strict_unicode_validation_precedes_capability_guard(
     assert response.status_code == 422
     assert db_session.query(AssistantConversation).count() == 0
     _assert_no_store(response)
+
+
+@pytest.mark.parametrize(
+    ('path', 'field'),
+    (
+        ('/api/v1/assistant/conversations', 'title'),
+        ('/api/v1/assistant/conversations/999999/messages', 'content'),
+    ),
+)
+def test_escaped_surrogate_is_safe_422_before_writes_owner_or_provider(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    field: str,
+) -> None:
+    provider_calls = 0
+
+    def provider_must_not_run(**_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError('provider ran for invalid Unicode')
+
+    monkeypatch.setattr(
+        assistant_api, 'answer_question_with_rag', provider_must_not_run
+    )
+    _enforce_assistant(client)
+    response = client.post(
+        path,
+        content=json.dumps({field: '\ud800'}),
+        headers={
+            'Content-Type': 'application/json',
+            **CAPABILITY_HEADERS,
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json()['detail']
+    assert isinstance(detail, list)
+    assert detail[0]['loc'] == ['body', field]
+    assert detail[0]['input'] == '\ud800'
+    assert db_session.query(AssistantConversation).count() == 0
+    assert db_session.query(AssistantMessage).count() == 0
+    assert db_session.query(AgentRun).count() == 0
+    assert provider_calls == 0
+    _assert_no_store(response)
+
+
+def test_capability_dependent_unexpected_500_has_headers_and_unchanged_body(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enforce_assistant(client)
+    monkeypatch.setattr(
+        assistant_api,
+        'create_conversation',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('synthetic')),
+    )
+    client._transport.raise_server_exceptions = False
+
+    response = client.post(
+        '/api/v1/assistant/conversations',
+        json={'title': 'persistence exception'},
+        headers=CAPABILITY_HEADERS,
+    )
+
+    assert response.status_code == 500
+    assert response.text == 'Internal Server Error'
+    assert db_session.query(AssistantConversation).count() == 0
+    _assert_no_store(response)
+
+
+def test_email_send_error_remains_outside_render_capability_headers(
+    client: TestClient,
+) -> None:
+    _enforce_assistant(client)
+
+    response = client.post(
+        '/api/v1/assistant/messages/999999/email/send',
+        headers=CAPABILITY_HEADERS,
+    )
+
+    assert response.status_code == 404
+    assert 'cache-control' not in response.headers
+    assert 'vary' not in response.headers
 
 
 def test_owner_hidden_message_post_precedes_capability_guard(
@@ -212,7 +424,10 @@ def test_capability_dependent_message_post_success_keeps_legacy_writer_contract(
         headers=CAPABILITY_HEADERS,
     )
     assert response.status_code == 200
-    assert response.json()['assistant_message']['metadata']['action_type'] == 'contact_lookup'
+    assert (
+        response.json()['assistant_message']['metadata']['action_type']
+        == 'contact_lookup'
+    )
     assert db_session.query(AssistantMessage).count() == 2
     _assert_no_store(response)
 
@@ -258,7 +473,9 @@ def test_scanner_unavailable_existing_turn_preserves_rows_and_skips_provider(
         provider_calls += 1
         raise AssertionError('provider path ran before scanner readiness')
 
-    monkeypatch.setattr(assistant_api, 'answer_question_with_rag', provider_must_not_run)
+    monkeypatch.setattr(
+        assistant_api, 'answer_question_with_rag', provider_must_not_run
+    )
     monkeypatch.setattr(
         assistant_api,
         '_scan_value',
@@ -434,6 +651,78 @@ def test_message_get_does_not_require_capability_for_stale_redacted_v2(
     assert 'vary' not in response.headers
 
 
+def test_missing_parent_v2_is_redacted_before_message_guard_and_summary(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conversation = AssistantConversation(
+        user_id='employee-mina', title='missing parent'
+    )
+    db_session.add(conversation)
+    db_session.commit()
+    message = _add_v2_canned_message(db_session, conversation, 'ORPHANED_V2_SENTINEL')
+    linked_agent_run_id = message.linked_agent_run_id
+    original_get = db_session.get
+
+    def get_without_parent(entity, ident, *args, **kwargs):
+        if entity is AgentRun and ident == linked_agent_run_id:
+            return None
+        return original_get(entity, ident, *args, **kwargs)
+
+    monkeypatch.setattr(db_session, 'get', get_without_parent)
+
+    messages_response = client.get(
+        f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        headers={'X-Demo-User': 'viewer'},
+    )
+    conversations_response = client.get(
+        '/api/v1/assistant/conversations',
+        headers={'X-Demo-User': 'viewer'},
+    )
+
+    assert messages_response.status_code == 200
+    assert b'ORPHANED_V2_SENTINEL' not in messages_response.content
+    assert messages_response.json()['messages'][0]['permission_notice'] == (
+        'evidence_unavailable'
+    )
+    assert 'cache-control' not in messages_response.headers
+    assert conversations_response.status_code == 200
+    assert b'ORPHANED_V2_SENTINEL' not in conversations_response.content
+    assert 'cache-control' not in conversations_response.headers
+
+
+def test_already_redacted_hidden_v2_does_not_trigger_guard_or_summary(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    conversation = AssistantConversation(user_id='employee-mina', title='hidden v2')
+    db_session.add(conversation)
+    db_session.commit()
+    message = _add_v2_canned_message(db_session, conversation, 'HIDDEN_V2_SENTINEL')
+    message.hidden_match_count = 1
+    db_session.commit()
+
+    messages_response = client.get(
+        f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        headers={'X-Demo-User': 'viewer'},
+    )
+    conversations_response = client.get(
+        '/api/v1/assistant/conversations',
+        headers={'X-Demo-User': 'viewer'},
+    )
+
+    assert messages_response.status_code == 200
+    assert b'HIDDEN_V2_SENTINEL' not in messages_response.content
+    assert messages_response.json()['messages'][0]['permission_notice'] == (
+        'evidence_unavailable'
+    )
+    assert 'cache-control' not in messages_response.headers
+    assert conversations_response.status_code == 200
+    assert b'HIDDEN_V2_SENTINEL' not in conversations_response.content
+    assert 'cache-control' not in conversations_response.headers
+
+
 def test_message_get_ignores_live_v2_row_in_unrelated_conversation(
     client: TestClient,
     db_session: Session,
@@ -477,7 +766,9 @@ def test_conversation_list_ignores_live_v2_that_does_not_contribute_summary(
     client: TestClient,
     db_session: Session,
 ) -> None:
-    conversation = AssistantConversation(user_id='employee-mina', title='summary window')
+    conversation = AssistantConversation(
+        user_id='employee-mina', title='summary window'
+    )
     db_session.add(conversation)
     db_session.commit()
     _add_v2_canned_message(db_session, conversation, 'OLD_V2_SENTINEL')

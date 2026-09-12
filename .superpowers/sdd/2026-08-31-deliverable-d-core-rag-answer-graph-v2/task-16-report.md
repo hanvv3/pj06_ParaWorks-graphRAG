@@ -178,3 +178,66 @@ The scoped local commit uses the required message
 `feat: enforce assistant rag render capability`; its SHA is reported by the
 implementer after Git creates the commit because a commit cannot contain its
 own final SHA.
+
+## Independent review fix round 1
+
+The first independent review of `24f470e` was not clean. Four Important
+findings were reproduced with real in-memory Assistant HTTP routes before
+production changes: capability-dependent authentication, malformed-body, and
+unexpected 500 responses lacked the required headers; escaped surrogates
+crashed error rendering; GET classification disagreed with the serializer;
+and malformed JSON ran before authentication.
+
+The valid behavioral RED command was:
+
+```powershell
+$env:PARAWORKS_DEMO_MODE='true'; $env:DATABASE_URL='sqlite:///:memory:'; $env:PARAWORKS_DEMO_DATABASE_URL='sqlite:///:memory:'; .venv-task4-r3-review/Scripts/python.exe -c "from backend.app.core.config import Settings; Settings.model_config['env_file']=None; import pytest; raise SystemExit(pytest.main(['backend/tests/test_assistant_capability.py','-q','-p','no:cacheprovider','--basetemp=.tmp/task16-fix-red-20260912b']))"
+```
+
+It produced `10 failed, 22 passed in 6.12s`. Every failure was an expected
+contract assertion; the earlier fixture attempt that violated a database
+constraint was corrected and is not counted as RED evidence.
+
+The scoped fix resolves the same FastAPI dependency graph before body parsing
+only for the two capability-sensitive Assistant POST routes. The marker runs
+before authentication, while the endpoint reuses the exact dependency-
+overridden DB session, authenticated user, and settings object. A lifecycle
+integration test proves one DB acquisition, one authentication call, the same
+session/user at persistence, the same settings at both capability decisions,
+and generator cleanup after the response. Email-send remains outside this
+boundary.
+
+The route boundary now uses ASCII-safe JSON serialization for the unchanged
+FastAPI validation detail array, attaches exact cache headers to every
+capability-dependent success/error including unexpected 500, and retains the
+existing status/body. The minimal V2 structural-parent check moved beside the
+existing service liveness decision so guard, serializer, context, and summary
+all make one projection decision. Missing/invalid parents redact without V2
+bytes; hidden already-redacted canned rows no longer require a capability.
+Task17 full cryptographic evidence revalidation remains deferred.
+
+First focused GREEN was `9 passed, 23 deselected in 1.90s`; the complete
+capability suite then passed `32 passed in 5.23s`. Assistant/API/auth regression
+was `99 passed in 14.60s`. The final proportional affected gate, including
+Task16 contracts, complete Assistant API/service/models/evidence writer,
+authentication, direct RAG delivery, V1 response contracts, and V2 input, was:
+
+```text
+207 passed in 70.37s
+```
+
+Static, compilation, diff, and credential hygiene results are recorded below
+after their final fresh run:
+
+```text
+Ruff (4 changed Python files): All checks passed!
+compileall (3 changed production files): exit 0
+git diff --check: exit 0 (line-ending notices only)
+credential-pattern scan (all 7 changed files): 0 matches
+```
+
+This is a review-fix candidate, not a CLEAN claim. The route boundary uses
+FastAPI's dependency solver as a deliberately narrow integration point;
+behavioral coverage freezes override reuse, object identity, one DB/auth
+lifecycle, cleanup, precedence, and public responses without pinning a private
+library version or source text.

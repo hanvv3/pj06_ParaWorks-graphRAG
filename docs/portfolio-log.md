@@ -2,6 +2,17 @@
 
 ## 2026-09-12 D Core Assistant delivery/capability candidate
 
+- Independent review round 1 found and fixed four route-boundary gaps. The two
+  capability-sensitive Assistant POSTs now authenticate before malformed JSON
+  using one dependency-overridden DB/user lifecycle, and all their configured
+  success/error outcomes carry exact no-store/Vary headers. Validation details
+  remain FastAPI-compatible and safely serialize escaped surrogates; email-send
+  is unchanged.
+- GET guards and serializers now share one minimal projection-liveness
+  decision, so structurally invalid parents redact without leaking V2 bytes
+  while already-redacted hidden rows do not cause a needless 409. Final
+  proportional review-fix gate: 207 passed with local SQLite/fakes. The result
+  remains a candidate awaiting rereview, not a CLEAN claim.
 - Task16 adds a frozen, construction-validated `AssistantDeliveryResult`
   algebra and the permanent refusal-only Assistant render-capability guard.
   The header cannot activate a stage, authenticate a client, select legacy,

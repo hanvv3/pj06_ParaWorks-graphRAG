@@ -4,6 +4,17 @@ Updated: 2026-09-12
 
 ## 2026-09-12 D Core Task16 Assistant capability candidate
 
+- Review fix round 1 closes four verified Important gaps from `24f470e`:
+  configured Assistant POST auth/422/500 headers, surrogate-safe validation,
+  auth-before-malformed-JSON, and GET guard/serializer liveness agreement. The
+  pre-body boundary is limited to conversation create/message create and
+  reuses one dependency-overridden DB session/user/settings lifecycle; the
+  email-send route is unchanged.
+- Missing/invalid V2 parents and hidden already-redacted rows now contribute no
+  guarded bytes to messages or summaries. This is only Task16's stable
+  structural projection predicate; Task17 still owns full evidence/content
+  revalidation. Affected review-fix gate: 207 passed in 70.37s. Candidate
+  awaits the same independent reviewer and is not CLEAN.
 - Task16 candidate implements the exact Assistant delivery-state/status/body/
   id/outcome construction matrix and rejects all cross-combinations. It also
   adds the exact-one raw-ASGI render declaration guard and exact cache-isolation

@@ -1,13 +1,15 @@
+import json
 import unicodedata
 from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.dependencies.utils import get_dependant, solve_dependencies
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from sqlalchemy.orm import Session
+from starlette.responses import PlainTextResponse, Response
 
 from backend.app.agents.rag_orchestrator_agent import answer_question_with_rag
 from backend.app.agents.rag_orchestrator_agent.v2_input import (
@@ -88,24 +90,59 @@ _CAPABILITY_DEPENDENT_STATE = 'assistant_rag_render_capability_dependent'
 class _AssistantCapabilityHeadersRoute(APIRoute):
     def get_route_handler(self):
         original_handler = super().get_route_handler()
+        is_capability_post = self.endpoint.__name__ in {
+            'create_assistant_conversation',
+            'create_assistant_message',
+        }
+        pre_body_dependant = (
+            get_dependant(
+                path=self.path_format,
+                call=_prepare_assistant_post_context,
+            )
+            if is_capability_post
+            else None
+        )
 
         async def capability_headers_handler(request: Request):
             try:
+                if pre_body_dependant is not None:
+                    solved = await solve_dependencies(
+                        request=request,
+                        dependant=pre_body_dependant,
+                        body=None,
+                        dependency_overrides_provider=self.dependency_overrides_provider,
+                        async_exit_stack=request.scope['fastapi_inner_astack'],
+                        embed_body_fields=False,
+                    )
+                    if solved.errors:
+                        raise RequestValidationError(solved.errors)
+                    _prepare_assistant_post_context(**solved.values)
                 response = await original_handler(request)
             except RequestValidationError as exc:
-                if _is_capability_dependent(request):
-                    return JSONResponse(
-                        status_code=422,
-                        content=jsonable_encoder({'detail': exc.errors()}),
-                        headers=RAG_RENDER_CAPABILITY_RESPONSE_HEADERS,
-                    )
-                raise
+                return _ascii_safe_json_response(
+                    status_code=422,
+                    content={'detail': exc.errors()},
+                    capability_dependent=_is_capability_dependent(request),
+                )
             except HTTPException as exc:
                 if _is_capability_dependent(request):
-                    exc.headers = {
-                        **(exc.headers or {}),
-                        **RAG_RENDER_CAPABILITY_RESPONSE_HEADERS,
-                    }
+                    return _ascii_safe_json_response(
+                        status_code=exc.status_code,
+                        content={'detail': exc.detail},
+                        headers={
+                            **(exc.headers or {}),
+                            **RAG_RENDER_CAPABILITY_RESPONSE_HEADERS,
+                        },
+                        capability_dependent=True,
+                    )
+                raise
+            except Exception:
+                if _is_capability_dependent(request):
+                    return PlainTextResponse(
+                        'Internal Server Error',
+                        status_code=500,
+                        headers=RAG_RENDER_CAPABILITY_RESPONSE_HEADERS,
+                    )
                 raise
             if _is_capability_dependent(request):
                 for name, value in RAG_RENDER_CAPABILITY_RESPONSE_HEADERS.items():
@@ -123,7 +160,32 @@ router = APIRouter(
 DbSession = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[DemoUser, Depends(get_demo_user)]
 AppSettings = Annotated[Settings, Depends(get_settings)]
-ASSISTANT_FAILURE_CONTENT = '답변 생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.'
+ASSISTANT_FAILURE_CONTENT = (
+    '답변 생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.'
+)
+
+
+def _ascii_safe_json_response(
+    *,
+    status_code: int,
+    content: object,
+    capability_dependent: bool,
+    headers: dict[str, str] | None = None,
+) -> Response:
+    response_headers = dict(headers or {})
+    if capability_dependent:
+        response_headers.update(RAG_RENDER_CAPABILITY_RESPONSE_HEADERS)
+    return Response(
+        status_code=status_code,
+        media_type='application/json',
+        headers=response_headers,
+        content=json.dumps(
+            jsonable_encoder(content),
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(',', ':'),
+        ),
+    )
 
 
 def _mark_capability_dependent(request: Request) -> None:
@@ -138,6 +200,7 @@ def _mark_capability_dependent_post(
     request: Request,
     settings: AppSettings,
 ) -> None:
+    request.state.assistant_post_settings = settings
     if assistant_post_requires_render_capability(settings):
         _mark_capability_dependent(request)
 
@@ -146,6 +209,33 @@ CapabilityDependentPost = Annotated[
     None,
     Depends(_mark_capability_dependent_post),
 ]
+
+
+def _prepare_assistant_post_context(
+    request: Request,
+    _capability_context: CapabilityDependentPost,
+    db: DbSession,
+    user: CurrentUser,
+) -> None:
+    request.state.assistant_post_db = db
+    request.state.assistant_post_user = user
+
+
+def _prepared_assistant_post_db(request: Request) -> Session:
+    return request.state.assistant_post_db
+
+
+def _prepared_assistant_post_user(request: Request) -> DemoUser:
+    return request.state.assistant_post_user
+
+
+def _prepared_assistant_post_settings(request: Request) -> Settings:
+    return request.state.assistant_post_settings
+
+
+AssistantPostDbSession = Annotated[Session, Depends(_prepared_assistant_post_db)]
+AssistantPostCurrentUser = Annotated[DemoUser, Depends(_prepared_assistant_post_user)]
+AssistantPostSettings = Annotated[Settings, Depends(_prepared_assistant_post_settings)]
 
 
 def _require_post_capability(request: Request, settings: Settings) -> None:
@@ -174,7 +264,9 @@ def require_conversation(db: Session, user: DemoUser, conversation_id: int):
     try:
         return get_owned_conversation(db, user, conversation_id)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail='assistant conversation not found') from exc
+        raise HTTPException(
+            status_code=404, detail='assistant conversation not found'
+        ) from exc
 
 
 def append_failed_assistant_message(
@@ -242,12 +334,8 @@ def _answer_question_or_raise(
 
 
 def _render_rag_answer_for_email(answer) -> str:
-    source_lines = [
-        f'- {link}' for link in answer.source_links[:5]
-    ]
-    snippet_lines = [
-        f'- {snippet}' for snippet in answer.source_snippets[:5]
-    ]
+    source_lines = [f'- {link}' for link in answer.source_links[:5]]
+    snippet_lines = [f'- {snippet}' for snippet in answer.source_snippets[:5]]
     return '\n'.join(
         [
             'RAG answer:',
@@ -262,7 +350,9 @@ def _render_rag_answer_for_email(answer) -> str:
     )
 
 
-def _recipient_clarification_content(recipient_resolution, *, correction: bool = False) -> str:
+def _recipient_clarification_content(
+    recipient_resolution, *, correction: bool = False
+) -> str:
     if correction:
         return '수신자를 누구로 수정할까요? 이름이나 이메일 주소를 알려주세요.'
     if recipient_resolution.status == 'ambiguous' and recipient_resolution.candidates:
@@ -270,7 +360,10 @@ def _recipient_clarification_content(recipient_resolution, *, correction: bool =
             f'- {candidate.display_name}: {candidate.email}'
             for candidate in recipient_resolution.candidates[:5]
         ]
-        return '수신자를 하나로 확정하기 어렵습니다. 누구에게 보낼지 선택해 주세요.\n' + '\n'.join(lines)
+        return (
+            '수신자를 하나로 확정하기 어렵습니다. 누구에게 보낼지 선택해 주세요.\n'
+            + '\n'.join(lines)
+        )
     return '수신자를 확정할 수 없습니다. 받을 사람의 정확한 이름이나 이메일 주소를 알려주세요.'
 
 
@@ -287,7 +380,9 @@ def _append_recipient_clarification_message(
         db,
         user,
         conversation,
-        content=_recipient_clarification_content(recipient_resolution, correction=correction),
+        content=_recipient_clarification_content(
+            recipient_resolution, correction=correction
+        ),
         citations=[],
         source_ids=[],
         source_links=[],
@@ -301,7 +396,9 @@ def _append_recipient_clarification_message(
             'status': 'needs_input',
             'prompt_version': EMAIL_ACTION_PROMPT_VERSION,
             'agent_name': 'recipient_resolver',
-            'reason': 'recipient_correction_requested' if correction else 'recipient_not_resolved',
+            'reason': 'recipient_correction_requested'
+            if correction
+            else 'recipient_not_resolved',
             'recipient_status': getattr(recipient_resolution, 'status', 'not_found'),
             'source_context': source_context.metadata if source_context else None,
         },
@@ -318,7 +415,7 @@ def _append_source_email_draft_message(
     email_context: str,
     source_context,
     resolved_recipients: list[dict[str, object]],
-) :
+):
     source_rag_context = render_email_source_context(
         source_context,
         max_chars=settings.assistant_email_agent_max_input_chars,
@@ -371,7 +468,10 @@ def _append_source_email_draft_message(
             },
         )
 
-    if email_decision.action_type == 'needs_clarification' and email_decision.clarification_question:
+    if (
+        email_decision.action_type == 'needs_clarification'
+        and email_decision.clarification_question
+    ):
         return append_assistant_message(
             db,
             user,
@@ -408,9 +508,7 @@ def list_assistant_conversations(
 ) -> dict:
     conversations = list_conversations(db, user)
     if any(
-        conversation_summary_contains_live_v2(
-            db, user=user, conversation=conversation
-        )
+        conversation_summary_contains_live_v2(db, user=user, conversation=conversation)
         for conversation in conversations
     ):
         _mark_capability_dependent(raw_request)
@@ -427,10 +525,9 @@ def list_assistant_conversations(
 def create_assistant_conversation(
     request: AssistantConversationCreateRequest,
     raw_request: Request,
-    db: DbSession,
-    user: CurrentUser,
-    settings: AppSettings,
-    _capability_context: CapabilityDependentPost,
+    db: AssistantPostDbSession,
+    user: AssistantPostCurrentUser,
+    settings: AssistantPostSettings,
 ) -> dict:
     _require_post_capability(raw_request, settings)
     _require_assistant_ingress_scan(request.title or '새 대화')
@@ -444,11 +541,7 @@ def create_assistant_conversation(
             }
 
     conversation = create_conversation(db, user, title=request.title)
-    return {
-        'conversation': serialize_conversation(
-            conversation, db=db, user=user
-        )
-    }
+    return {'conversation': serialize_conversation(conversation, db=db, user=user)}
 
 
 @router.get(
@@ -463,18 +556,13 @@ def list_assistant_messages(
 ) -> dict:
     conversation = require_conversation(db, user, conversation_id)
     messages = list_messages(db, user, conversation.id)
-    if messages_projection_contains_live_v2(
-        db, user=user, messages=messages
-    ):
+    if messages_projection_contains_live_v2(db, user=user, messages=messages):
         _mark_capability_dependent(raw_request)
         require_rag_render_capability(raw_request.scope.get('headers', ()))
     return {
-        'conversation': serialize_conversation(
-            conversation, db=db, user=user
-        ),
+        'conversation': serialize_conversation(conversation, db=db, user=user),
         'messages': [
-            serialize_message(message, db=db, user=user)
-            for message in messages
+            serialize_message(message, db=db, user=user) for message in messages
         ],
     }
 
@@ -487,10 +575,9 @@ def create_assistant_message(
     conversation_id: int,
     request: AssistantMessageCreateRequest,
     raw_request: Request,
-    db: DbSession,
-    user: CurrentUser,
-    settings: AppSettings,
-    _capability_context: CapabilityDependentPost,
+    db: AssistantPostDbSession,
+    user: AssistantPostCurrentUser,
+    settings: AssistantPostSettings,
 ) -> dict:
     conversation = require_conversation(db, user, conversation_id)
     _require_post_capability(raw_request, settings)
@@ -522,15 +609,9 @@ def create_assistant_message(
             correction=True,
         )
         return {
-            'conversation': serialize_conversation(
-                conversation, db=db, user=user
-            ),
-            'user_message': serialize_message(
-                user_message, db=db, user=user
-            ),
-            'assistant_message': serialize_message(
-                assistant_message, db=db, user=user
-            ),
+            'conversation': serialize_conversation(conversation, db=db, user=user),
+            'user_message': serialize_message(user_message, db=db, user=user),
+            'assistant_message': serialize_message(assistant_message, db=db, user=user),
         }
 
     contact_lookup = detect_contact_lookup_request(
@@ -577,15 +658,9 @@ def create_assistant_message(
             },
         )
         return {
-            'conversation': serialize_conversation(
-                conversation, db=db, user=user
-            ),
-            'user_message': serialize_message(
-                user_message, db=db, user=user
-            ),
-            'assistant_message': serialize_message(
-                assistant_message, db=db, user=user
-            ),
+            'conversation': serialize_conversation(conversation, db=db, user=user),
+            'user_message': serialize_message(user_message, db=db, user=user),
+            'assistant_message': serialize_message(assistant_message, db=db, user=user),
         }
 
     generated_source_request = build_generated_email_source_request(
@@ -606,12 +681,8 @@ def create_assistant_message(
                 recipient_resolution=recipient_resolution,
             )
             return {
-                'conversation': serialize_conversation(
-                    conversation, db=db, user=user
-                ),
-                'user_message': serialize_message(
-                    user_message, db=db, user=user
-                ),
+                'conversation': serialize_conversation(conversation, db=db, user=user),
+                'user_message': serialize_message(user_message, db=db, user=user),
                 'assistant_message': serialize_message(
                     assistant_message, db=db, user=user
                 ),
@@ -651,12 +722,8 @@ def create_assistant_message(
         )
         if assistant_message is not None:
             return {
-                'conversation': serialize_conversation(
-                    conversation, db=db, user=user
-                ),
-                'user_message': serialize_message(
-                    user_message, db=db, user=user
-                ),
+                'conversation': serialize_conversation(conversation, db=db, user=user),
+                'user_message': serialize_message(user_message, db=db, user=user),
                 'assistant_message': serialize_message(
                     assistant_message, db=db, user=user
                 ),
@@ -685,12 +752,8 @@ def create_assistant_message(
                 source_context=source_context,
             )
             return {
-                'conversation': serialize_conversation(
-                    conversation, db=db, user=user
-                ),
-                'user_message': serialize_message(
-                    user_message, db=db, user=user
-                ),
+                'conversation': serialize_conversation(conversation, db=db, user=user),
+                'user_message': serialize_message(user_message, db=db, user=user),
                 'assistant_message': serialize_message(
                     assistant_message, db=db, user=user
                 ),
@@ -716,12 +779,8 @@ def create_assistant_message(
         )
         if assistant_message is not None:
             return {
-                'conversation': serialize_conversation(
-                    conversation, db=db, user=user
-                ),
-                'user_message': serialize_message(
-                    user_message, db=db, user=user
-                ),
+                'conversation': serialize_conversation(conversation, db=db, user=user),
+                'user_message': serialize_message(user_message, db=db, user=user),
                 'assistant_message': serialize_message(
                     assistant_message, db=db, user=user
                 ),
@@ -755,7 +814,8 @@ def create_assistant_message(
     vector_store = build_pgvector_search_store(db=db, settings=settings)
     confident_email_intent = (
         email_intent.email_intent
-        and email_intent.confidence_score >= settings.assistant_email_agent_min_confidence
+        and email_intent.confidence_score
+        >= settings.assistant_email_agent_min_confidence
     )
     if confident_email_intent:
         recipient_resolution = resolve_email_recipients(
@@ -792,7 +852,9 @@ def create_assistant_message(
             'email_draft_composer',
             f'start intent_type={email_intent.intent_type} requires_rag_result={email_intent.requires_rag_result}',
         )
-        email_decision: EmailActionDecision = build_email_draft_composer(settings).compose(
+        email_decision: EmailActionDecision = build_email_draft_composer(
+            settings
+        ).compose(
             conversation_context=email_context,
             latest_message=user_message.content,
             intent=email_intent,
@@ -834,18 +896,17 @@ def create_assistant_message(
                 evidence_derived=email_evidence_derived,
             )
             return {
-                'conversation': serialize_conversation(
-                    conversation, db=db, user=user
-                ),
-                'user_message': serialize_message(
-                    user_message, db=db, user=user
-                ),
+                'conversation': serialize_conversation(conversation, db=db, user=user),
+                'user_message': serialize_message(user_message, db=db, user=user),
                 'assistant_message': serialize_message(
                     assistant_message, db=db, user=user
                 ),
             }
 
-        if email_decision.action_type == 'needs_clarification' and email_decision.clarification_question:
+        if (
+            email_decision.action_type == 'needs_clarification'
+            and email_decision.clarification_question
+        ):
             assistant_message = append_assistant_message(
                 db,
                 user,
@@ -870,12 +931,8 @@ def create_assistant_message(
                 },
             )
             return {
-                'conversation': serialize_conversation(
-                    conversation, db=db, user=user
-                ),
-                'user_message': serialize_message(
-                    user_message, db=db, user=user
-                ),
+                'conversation': serialize_conversation(conversation, db=db, user=user),
+                'user_message': serialize_message(user_message, db=db, user=user),
                 'assistant_message': serialize_message(
                     assistant_message, db=db, user=user
                 ),
@@ -939,17 +996,15 @@ def create_assistant_message(
             detail='assistant answer generation failed',
         ) from exc
     return {
-        'conversation': serialize_conversation(
-            conversation, db=db, user=user
-        ),
+        'conversation': serialize_conversation(conversation, db=db, user=user),
         'user_message': serialize_message(user_message, db=db, user=user),
-        'assistant_message': serialize_message(
-            assistant_message, db=db, user=user
-        ),
+        'assistant_message': serialize_message(assistant_message, db=db, user=user),
     }
 
 
-@router.post('/messages/{message_id}/email/send', response_model=AssistantEmailSendResponse)
+@router.post(
+    '/messages/{message_id}/email/send', response_model=AssistantEmailSendResponse
+)
 def send_assistant_email_draft(
     message_id: int,
     db: DbSession,
@@ -959,23 +1014,31 @@ def send_assistant_email_draft(
     try:
         message = get_owned_message(db, user, message_id)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail='assistant message not found') from exc
+        raise HTTPException(
+            status_code=404, detail='assistant message not found'
+        ) from exc
 
     metadata = dict(message.metadata_ or {})
     draft = metadata.get('email_draft')
     if metadata.get('action_type') != 'email_draft' or not isinstance(draft, dict):
-        raise HTTPException(status_code=422, detail='assistant message is not an email draft')
+        raise HTTPException(
+            status_code=422, detail='assistant message is not an email draft'
+        )
     if metadata.get('status') == 'sent':
         return {
             'message': serialize_message(message, db=db, user=user),
             'status': 'sent',
         }
     if metadata.get('status') != 'pending_approval':
-        raise HTTPException(status_code=409, detail='email draft is not pending approval')
+        raise HTTPException(
+            status_code=409, detail='email draft is not pending approval'
+        )
     if metadata.get('evidence_derived') is True and not (
         assistant_message_evidence_is_live(db, user=user, message=message)
     ):
-        raise HTTPException(status_code=409, detail='email draft evidence is unavailable')
+        raise HTTPException(
+            status_code=409, detail='email draft evidence is unavailable'
+        )
 
     try:
         result = GmailDraftSender(settings=settings).send(

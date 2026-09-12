@@ -11,6 +11,7 @@ from backend.app.knowledge.trusted_serving_eligibility import (
     knowledge_model_for_type,
 )
 from backend.app.models import (
+    AgentRun,
     AssistantConversation,
     AssistantMessage,
     AssistantMessageEvidenceDependency,
@@ -32,7 +33,9 @@ MAX_CONTEXT_MESSAGE_CHARS = 500
 MAX_SUMMARY_LINES = 4
 
 
-def create_conversation(db: Session, user: DemoUser, *, title: str | None = None) -> AssistantConversation:
+def create_conversation(
+    db: Session, user: DemoUser, *, title: str | None = None
+) -> AssistantConversation:
     conversation = AssistantConversation(
         user_id=user.id,
         title=_conversation_title(title),
@@ -48,12 +51,16 @@ def list_conversations(db: Session, user: DemoUser) -> list[AssistantConversatio
         db.scalars(
             select(AssistantConversation)
             .where(AssistantConversation.user_id == user.id)
-            .order_by(AssistantConversation.updated_at.desc(), AssistantConversation.id.desc())
+            .order_by(
+                AssistantConversation.updated_at.desc(), AssistantConversation.id.desc()
+            )
         )
     )
 
 
-def find_reusable_empty_conversation(db: Session, user: DemoUser) -> AssistantConversation | None:
+def find_reusable_empty_conversation(
+    db: Session, user: DemoUser
+) -> AssistantConversation | None:
     return db.scalar(
         select(AssistantConversation)
         .where(
@@ -61,11 +68,15 @@ def find_reusable_empty_conversation(db: Session, user: DemoUser) -> AssistantCo
             AssistantConversation.title == DEFAULT_CONVERSATION_TITLE,
             ~AssistantConversation.messages.any(),
         )
-        .order_by(AssistantConversation.updated_at.desc(), AssistantConversation.id.desc())
+        .order_by(
+            AssistantConversation.updated_at.desc(), AssistantConversation.id.desc()
+        )
     )
 
 
-def get_owned_conversation(db: Session, user: DemoUser, conversation_id: int) -> AssistantConversation:
+def get_owned_conversation(
+    db: Session, user: DemoUser, conversation_id: int
+) -> AssistantConversation:
     conversation = db.scalar(
         select(AssistantConversation)
         .options(selectinload(AssistantConversation.messages))
@@ -79,7 +90,9 @@ def get_owned_conversation(db: Session, user: DemoUser, conversation_id: int) ->
     return conversation
 
 
-def list_messages(db: Session, user: DemoUser, conversation_id: int) -> list[AssistantMessage]:
+def list_messages(
+    db: Session, user: DemoUser, conversation_id: int
+) -> list[AssistantMessage]:
     conversation = get_owned_conversation(db, user, conversation_id)
     return list(conversation.messages)
 
@@ -195,9 +208,7 @@ def append_assistant_message(
         permission_notice=permission_notice,
         agent_run_id=agent_run_id,
         evidence_contract_version=(
-            'assistant-evidence:v1'
-            if serving_dependencies
-            else 'none-v1'
+            'assistant-evidence:v1' if serving_dependencies else 'none-v1'
         ),
         serving_dependency_count=len(serving_dependencies),
         metadata_=stored_metadata,
@@ -240,7 +251,7 @@ def build_contextual_question(
         summary_lines = _dedupe_lines(conversation.summary.splitlines())
         if summary_lines:
             seen_context.update(f'assistant:{line}' for line in summary_lines)
-            parts.append(f"대화 요약: {' '.join(summary_lines)}")
+            parts.append(f'대화 요약: {" ".join(summary_lines)}')
 
     # 전체 대화를 보내지 않고 최근 메시지만 사용해 토큰 사용량을 제한한다.
     context_messages = _exclude_current_user_message(messages, new_message)
@@ -272,18 +283,19 @@ def serialize_conversation(
 ) -> dict:
     summary = None
     if db is not None and user is not None:
-        live_messages = eligible_context_messages(
-            db, user, list(conversation.messages)
+        live_messages = eligible_context_messages(db, user, list(conversation.messages))
+        summary = (
+            '\n'.join(
+                _dedupe_lines(
+                    [
+                        message.content
+                        for message in live_messages
+                        if message.role == 'assistant'
+                    ]
+                )[-MAX_SUMMARY_LINES:]
+            )
+            or None
         )
-        summary = '\n'.join(
-            _dedupe_lines(
-                [
-                    message.content
-                    for message in live_messages
-                    if message.role == 'assistant'
-                ]
-            )[-MAX_SUMMARY_LINES:]
-        ) or None
     return {
         'id': conversation.id,
         'title': conversation.title,
@@ -323,12 +335,10 @@ def serialize_message(
         or message.hidden_match_count
         or (message.metadata_ or {}).get('evidence_derived') is True
     )
-    unavailable = (
-        evidence_shaped and (db is None or user is None)
-    ) or (
+    unavailable = (evidence_shaped and (db is None or user is None)) or (
         db is not None
         and user is not None
-        and not _message_evidence_is_live(db, user=user, message=message)
+        and not assistant_message_projection_is_live(db, user=user, message=message)
     )
     if unavailable:
         response.update(
@@ -359,7 +369,7 @@ def eligible_context_messages(
         message
         for message in messages
         if message.role != 'assistant'
-        or _message_evidence_is_live(db, user=user, message=message)
+        or assistant_message_projection_is_live(db, user=user, message=message)
     ]
 
 
@@ -373,21 +383,22 @@ def _persist_serving_dependencies(
         return
     runtime = db.scalar(
         select(AutoReviewRuntimeKeyState).where(
-            AutoReviewRuntimeKeyState.component
-            == 'auto_review_trust_promotion'
+            AutoReviewRuntimeKeyState.component == 'auto_review_trust_promotion'
         )
     )
     if runtime is None or not runtime.ready:
         raise ValueError('assistant serving dependency key runtime unavailable')
     for ordinal, snapshot in enumerate(dependencies):
-        values = vars(snapshot) if hasattr(snapshot, '__dict__') else {
-            name: getattr(snapshot, name)
-            for name in getattr(snapshot, '__slots__', ())
-        }
-        evidence_link_ids = tuple(values.pop('evidence_link_ids', ()))
-        identity = '|'.join(
-            f'{key}={values[key]!r}' for key in sorted(values)
+        values = (
+            vars(snapshot)
+            if hasattr(snapshot, '__dict__')
+            else {
+                name: getattr(snapshot, name)
+                for name in getattr(snapshot, '__slots__', ())
+            }
         )
+        evidence_link_ids = tuple(values.pop('evidence_link_ids', ()))
+        identity = '|'.join(f'{key}={values[key]!r}' for key in sorted(values))
         dependency = AssistantMessageEvidenceDependency(
             assistant_message_id=message.id,
             candidate_ordinal=ordinal,
@@ -403,10 +414,10 @@ def _persist_serving_dependencies(
         if dependency.approval_link_id is not None:
             refs = [
                 AssistantMessageKnowledgeEvidenceRef(
-                        dependency_id=dependency.id,
-                        assistant_message_id=message.id,
-                        approval_link_id=dependency.approval_link_id,
-                        trusted_knowledge_evidence_link_id=evidence_link_id,
+                    dependency_id=dependency.id,
+                    assistant_message_id=message.id,
+                    approval_link_id=dependency.approval_link_id,
+                    trusted_knowledge_evidence_link_id=evidence_link_id,
                 )
                 for evidence_link_id in evidence_link_ids
             ]
@@ -429,8 +440,7 @@ def _message_evidence_is_live(
         db.scalars(
             select(AssistantMessageEvidenceDependency)
             .where(
-                AssistantMessageEvidenceDependency.assistant_message_id
-                == message.id
+                AssistantMessageEvidenceDependency.assistant_message_id == message.id
             )
             .order_by(AssistantMessageEvidenceDependency.candidate_ordinal)
         ).all()
@@ -455,7 +465,71 @@ def assistant_message_evidence_is_live(
     db: Session, *, user: DemoUser, message: AssistantMessage
 ) -> bool:
     """Public fail-closed gate for operations that reuse stored answer bytes."""
-    return _message_evidence_is_live(db, user=user, message=message)
+    return assistant_message_projection_is_live(db, user=user, message=message)
+
+
+def assistant_message_projection_is_live(
+    db: Session, *, user: DemoUser, message: AssistantMessage
+) -> bool:
+    """Return whether the current serializer may expose stored message bytes."""
+    if message.content_write_mode != 'rag_v2_exact':
+        return _message_evidence_is_live(db, user=user, message=message)
+    return bool(
+        _assistant_message_has_valid_v2_structure(db, message=message)
+        and _message_evidence_is_live(db, user=user, message=message)
+    )
+
+
+def _assistant_message_has_valid_v2_structure(
+    db: Session, *, message: AssistantMessage
+) -> bool:
+    if (
+        message.role != 'assistant'
+        or type(message.linked_agent_run_id) is not int
+        or message.linked_agent_run_id <= 0
+        or message.agent_run_id != message.linked_agent_run_id
+        or message.content_hmac_schema_version != 'assistant-message-content-hmac:v1'
+        or not _is_lower_hmac(message.assistant_message_content_hmac)
+        or not _is_lower_hmac(message.content_hmac_key_material_verifier)
+        or not _is_lower_hmac(message.content_origin_hmac)
+        or not _is_lower_hmac(message.rag_result_hmac)
+    ):
+        return False
+    parent = db.get(AgentRun, message.linked_agent_run_id)
+    if (
+        parent is None
+        or parent.run_contract_version != 'rag-run:v2'
+        or parent.run_record_phase != 'final'
+        or parent.status not in {'complete', 'failed'}
+        or parent.completed_at is None
+        or parent.agent_name != 'rag_orchestrator_agent'
+        or parent.prompt_version != 'rag-answer:v2'
+        or (parent.metadata_ or {}).get('rag_result_hmac') != message.rag_result_hmac
+    ):
+        return False
+    if message.content_origin == 'rag_canned':
+        return bool(
+            message.evidence_contract_version == 'none-v1'
+            and message.serving_dependency_count == 0
+            and not message.citations
+            and not message.source_ids
+            and not message.source_links
+            and not message.source_snippets
+            and (message.metadata_ or {}).get('evidence_derived') is not True
+            and message.dependency_set_hmac_schema_version is None
+            and message.dependency_set_hmac is None
+            and message.parent_selected_evidence_projection_hmac is None
+            and message.model_influence_set_hmac is None
+        )
+    return message.content_origin == 'rag_assembled'
+
+
+def _is_lower_hmac(value: object) -> bool:
+    return bool(
+        type(value) is str
+        and len(value) == 64
+        and all(character in '0123456789abcdef' for character in value)
+    )
 
 
 def _dependency_is_live(
@@ -475,9 +549,7 @@ def _dependency_is_live(
         source = db.get(Source, dependency.source_id)
         parser_run = db.get(DocumentParserRun, dependency.parser_run_id)
         document = (
-            db.get(Document, parser_run.document_id)
-            if parser_run is not None
-            else None
+            db.get(Document, parser_run.document_id) if parser_run is not None else None
         )
         identity_is_current = bool(
             chunk is not None
@@ -488,13 +560,10 @@ def _dependency_is_live(
             and chunk.parser_run_id == dependency.parser_run_id
             and document.current_document_version_id
             == dependency.current_document_version_id
-            and source.server_content_signature
-            == dependency.server_content_signature
-            and parser_run.parser_policy_version
-            == dependency.parser_policy_version
+            and source.server_content_signature == dependency.server_content_signature
+            and parser_run.parser_policy_version == dependency.parser_policy_version
             and parser_run.parser_version == dependency.parser_version
-            and parser_run.chunk_policy_version
-            == dependency.chunk_policy_version
+            and parser_run.chunk_policy_version == dependency.chunk_policy_version
         )
         return bool(
             identity_is_current
@@ -559,10 +628,8 @@ def _dependency_is_live(
             select(
                 AssistantMessageKnowledgeEvidenceRef.trusted_knowledge_evidence_link_id
             ).where(
-                AssistantMessageKnowledgeEvidenceRef.dependency_id
-                == dependency.id,
-                AssistantMessageKnowledgeEvidenceRef.assistant_message_id
-                == message.id,
+                AssistantMessageKnowledgeEvidenceRef.dependency_id == dependency.id,
+                AssistantMessageKnowledgeEvidenceRef.assistant_message_id == message.id,
             )
         ).all()
     )
@@ -631,14 +698,14 @@ def _serving_content_hash(
     source_snippet: str,
     permission_level: str,
 ) -> str:
-    value = '\n'.join(
-        (source_id, text, source_url, source_snippet, permission_level)
-    )
+    value = '\n'.join((source_id, text, source_url, source_snippet, permission_level))
     return sha256(value.encode('utf-8')).hexdigest()
 
 
 def _conversation_title(value: str | None) -> str:
-    normalized = (value or DEFAULT_CONVERSATION_TITLE).strip() or DEFAULT_CONVERSATION_TITLE
+    normalized = (
+        value or DEFAULT_CONVERSATION_TITLE
+    ).strip() or DEFAULT_CONVERSATION_TITLE
     return normalized[:80]
 
 
@@ -651,7 +718,9 @@ def summarize_conversation_title(value: str) -> str:
     return f'{normalized[: MAX_CONVERSATION_TITLE_LENGTH - 1].rstrip()}…'
 
 
-def _ensure_owned_conversation(user: DemoUser, conversation: AssistantConversation) -> None:
+def _ensure_owned_conversation(
+    user: DemoUser, conversation: AssistantConversation
+) -> None:
     if conversation.user_id != user.id:
         raise ValueError('assistant conversation not found')
 
@@ -663,7 +732,10 @@ def _exclude_current_user_message(
     if not messages:
         return messages
     latest_message = messages[-1]
-    if latest_message.role == 'user' and latest_message.content.strip() == new_message.strip():
+    if (
+        latest_message.role == 'user'
+        and latest_message.content.strip() == new_message.strip()
+    ):
         return messages[:-1]
     return messages
 
