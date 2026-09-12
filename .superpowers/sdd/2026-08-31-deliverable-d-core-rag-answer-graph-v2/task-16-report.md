@@ -249,3 +249,57 @@ FastAPI's dependency solver as a deliberately narrow integration point;
 behavioral coverage freezes override reuse, object identity, one DB/auth
 lifecycle, cleanup, precedence, and public responses without pinning a private
 library version or source text.
+
+## Independent review fix round 2
+
+Scoped rereview of `c92bff9` found one new Important failure boundary. The
+unexpected-exception catch inside `APIRoute.get_route_handler()` converted the
+exception before FastAPI's request dependency `AsyncExitStack` unwound. A real
+yielding `get_db` override therefore observed normal exit rather than the
+original `RuntimeError`, and `TestClient(raise_server_exceptions=True)` could
+not surface the original failure for normal server error reporting.
+
+The RED node was:
+
+```text
+backend/tests/test_assistant_capability.py::test_unexpected_failure_reaches_dependency_unwind_before_sanitized_500
+```
+
+Run with the standard explicit environment/interpreter wrapper,
+`-p no:cacheprovider`, and fresh `.tmp/task16-round2-red`, its two transport
+cases produced `2 failed in 1.11s`. The false case recorded exact events
+`open, normal_exit, closed`; the true case failed `DID NOT RAISE RuntimeError`.
+
+The fix removes unexpected conversion from the request handler. A narrow
+`APIRoute.handle()` boundary now intercepts response-start headers outside the
+inner request/function dependency stacks. On capability-dependent unexpected
+failure it sends one sanitized plain-text 500 with exact no-store/Vary headers,
+then re-raises the original exception. Starlette's outer server-error boundary
+therefore observes the original without sending a duplicate response: a
+production-like false transport returns the sanitized response, while a true
+transport surfaces the original. The yielding DB dependency now records exact
+`open, exception_seen, closed` once in both cases.
+
+Expected HTTP and validation exceptions are no longer consumed inside the
+request handler; FastAPI unwinds dependencies and renders them normally. The
+response-start interceptor supplies capability headers. Escaped-surrogate
+validation still uses the existing ASCII-safe detail-array fallback after the
+dependency stack unwinds. Email-send remains unmarked and unchanged.
+
+Focused GREEN was `2 passed in 0.51s`; the full capability suite was
+`34 passed in 5.53s`. Final proportional affected verification after cleanup:
+
+```text
+208 passed in 68.77s
+```
+
+Final round-2 hygiene:
+
+```text
+Ruff (2 changed Python files): All checks passed!
+compileall (1 changed production file): exit 0
+git diff --check: exit 0 (line-ending notices only)
+credential-pattern scan (all 5 changed files): 0 matches
+```
+
+This is a round-2 review-fix candidate, not a CLEAN claim.

@@ -315,29 +315,54 @@ def test_escaped_surrogate_is_safe_422_before_writes_owner_or_provider(
     _assert_no_store(response)
 
 
-def test_capability_dependent_unexpected_500_has_headers_and_unchanged_body(
+@pytest.mark.parametrize('raise_server_exceptions', (False, True))
+def test_unexpected_failure_reaches_dependency_unwind_before_sanitized_500(
     client: TestClient,
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
+    raise_server_exceptions: bool,
 ) -> None:
+    events: list[str] = []
+
+    def override_db():
+        events.append('open')
+        try:
+            yield db_session
+        except RuntimeError:
+            events.append('exception_seen')
+            raise
+        else:
+            events.append('normal_exit')
+        finally:
+            events.append('closed')
+
+    client.app.dependency_overrides[assistant_api.get_db] = override_db
     _enforce_assistant(client)
     monkeypatch.setattr(
         assistant_api,
         'create_conversation',
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('synthetic')),
     )
-    client._transport.raise_server_exceptions = False
+    client._transport.raise_server_exceptions = raise_server_exceptions
 
-    response = client.post(
-        '/api/v1/assistant/conversations',
-        json={'title': 'persistence exception'},
-        headers=CAPABILITY_HEADERS,
-    )
+    def request():
+        return client.post(
+            '/api/v1/assistant/conversations',
+            json={'title': 'persistence exception'},
+            headers=CAPABILITY_HEADERS,
+        )
 
-    assert response.status_code == 500
-    assert response.text == 'Internal Server Error'
+    if raise_server_exceptions:
+        with pytest.raises(RuntimeError, match='synthetic'):
+            request()
+    else:
+        response = request()
+        assert response.status_code == 500
+        assert response.text == 'Internal Server Error'
+        _assert_no_store(response)
+
+    assert events == ['open', 'exception_seen', 'closed']
     assert db_session.query(AssistantConversation).count() == 0
-    _assert_no_store(response)
 
 
 def test_email_send_error_remains_outside_render_capability_headers(

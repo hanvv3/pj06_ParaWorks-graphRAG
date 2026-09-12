@@ -4,6 +4,13 @@ Updated: 2026-09-12
 
 ## 2026-09-12 D Core Task16 Assistant capability candidate
 
+- Review fix round 2 closes the exception-unwinding gap in `c92bff9`.
+  Capability-dependent unexpected failures now cross the yielding DB/session
+  dependency as the original exception before an outer route boundary sends
+  one sanitized 500 and re-raises for server reporting. False TestClient
+  transport gets exact body/headers; true transport gets the original;
+  lifecycle is `open, exception_seen, closed` once. Final affected gate:
+  208 passed in 68.77s. Candidate awaits rereview and is not CLEAN.
 - Review fix round 1 closes four verified Important gaps from `24f470e`:
   configured Assistant POST auth/422/500 headers, surrogate-safe validation,
   auth-before-malformed-JSON, and GET guard/serializer liveness agreement. The

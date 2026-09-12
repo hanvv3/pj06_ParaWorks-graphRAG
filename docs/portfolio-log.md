@@ -2,6 +2,12 @@
 
 ## 2026-09-12 D Core Assistant delivery/capability candidate
 
+- Review fix round 2 moves unexpected-error delivery outside FastAPI's inner
+  dependency stacks. Yielding DB/session dependencies now see the original
+  exception and close once; production-like clients still receive one generic
+  500 with exact capability cache headers, while server error reporting retains
+  the original failure. Expected HTTP/validation unwinding and email-send are
+  unchanged. Final affected gate: 208 passed; candidate awaits rereview.
 - Independent review round 1 found and fixed four route-boundary gaps. The two
   capability-sensitive Assistant POSTs now authenticate before malformed JSON
   using one dependency-overridden DB/user lifecycle, and all their configured

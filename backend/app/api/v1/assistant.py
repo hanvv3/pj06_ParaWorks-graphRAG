@@ -9,6 +9,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from sqlalchemy.orm import Session
+from starlette.datastructures import MutableHeaders
 from starlette.responses import PlainTextResponse, Response
 
 from backend.app.agents.rag_orchestrator_agent import answer_question_with_rag
@@ -104,52 +105,56 @@ class _AssistantCapabilityHeadersRoute(APIRoute):
         )
 
         async def capability_headers_handler(request: Request):
-            try:
-                if pre_body_dependant is not None:
-                    solved = await solve_dependencies(
-                        request=request,
-                        dependant=pre_body_dependant,
-                        body=None,
-                        dependency_overrides_provider=self.dependency_overrides_provider,
-                        async_exit_stack=request.scope['fastapi_inner_astack'],
-                        embed_body_fields=False,
-                    )
-                    if solved.errors:
-                        raise RequestValidationError(solved.errors)
-                    _prepare_assistant_post_context(**solved.values)
-                response = await original_handler(request)
-            except RequestValidationError as exc:
-                return _ascii_safe_json_response(
-                    status_code=422,
-                    content={'detail': exc.errors()},
-                    capability_dependent=_is_capability_dependent(request),
+            if pre_body_dependant is not None:
+                solved = await solve_dependencies(
+                    request=request,
+                    dependant=pre_body_dependant,
+                    body=None,
+                    dependency_overrides_provider=self.dependency_overrides_provider,
+                    async_exit_stack=request.scope['fastapi_inner_astack'],
+                    embed_body_fields=False,
                 )
-            except HTTPException as exc:
-                if _is_capability_dependent(request):
-                    return _ascii_safe_json_response(
-                        status_code=exc.status_code,
-                        content={'detail': exc.detail},
-                        headers={
-                            **(exc.headers or {}),
-                            **RAG_RENDER_CAPABILITY_RESPONSE_HEADERS,
-                        },
-                        capability_dependent=True,
-                    )
-                raise
-            except Exception:
-                if _is_capability_dependent(request):
-                    return PlainTextResponse(
-                        'Internal Server Error',
-                        status_code=500,
-                        headers=RAG_RENDER_CAPABILITY_RESPONSE_HEADERS,
-                    )
-                raise
-            if _is_capability_dependent(request):
-                for name, value in RAG_RENDER_CAPABILITY_RESPONSE_HEADERS.items():
-                    response.headers[name] = value
-            return response
+                if solved.errors:
+                    raise RequestValidationError(solved.errors)
+                _prepare_assistant_post_context(**solved.values)
+            return await original_handler(request)
 
         return capability_headers_handler
+
+    async def handle(self, scope, receive, send) -> None:
+        response_started = False
+
+        async def send_with_capability_headers(message) -> None:
+            nonlocal response_started
+            if message['type'] == 'http.response.start':
+                if _scope_is_capability_dependent(scope):
+                    headers = MutableHeaders(scope=message)
+                    for name, value in RAG_RENDER_CAPABILITY_RESPONSE_HEADERS.items():
+                        headers[name] = value
+                response_started = True
+            await send(message)
+
+        try:
+            await super().handle(scope, receive, send_with_capability_headers)
+        except Exception as exc:
+            validation_error = _surrogate_validation_error(exc)
+            if validation_error is not None and not response_started:
+                response = _ascii_safe_json_response(
+                    status_code=422,
+                    content={'detail': validation_error.errors()},
+                    capability_dependent=_scope_is_capability_dependent(scope),
+                )
+                await response(scope, receive, send_with_capability_headers)
+                return
+            if not _scope_is_capability_dependent(scope) or response_started:
+                raise
+            response = PlainTextResponse(
+                'Internal Server Error',
+                status_code=500,
+                headers=RAG_RENDER_CAPABILITY_RESPONSE_HEADERS,
+            )
+            await response(scope, receive, send_with_capability_headers)
+            raise
 
 
 router = APIRouter(
@@ -170,9 +175,8 @@ def _ascii_safe_json_response(
     status_code: int,
     content: object,
     capability_dependent: bool,
-    headers: dict[str, str] | None = None,
 ) -> Response:
-    response_headers = dict(headers or {})
+    response_headers: dict[str, str] = {}
     if capability_dependent:
         response_headers.update(RAG_RENDER_CAPABILITY_RESPONSE_HEADERS)
     return Response(
@@ -194,6 +198,32 @@ def _mark_capability_dependent(request: Request) -> None:
 
 def _is_capability_dependent(request: Request) -> bool:
     return getattr(request.state, _CAPABILITY_DEPENDENT_STATE, False) is True
+
+
+def _scope_is_capability_dependent(scope: dict) -> bool:
+    state = scope.get('state')
+    return bool(
+        isinstance(state, dict)
+        and state.get(_CAPABILITY_DEPENDENT_STATE) is True
+    )
+
+
+def _surrogate_validation_error(
+    exc: Exception,
+) -> RequestValidationError | None:
+    if not isinstance(exc, UnicodeEncodeError):
+        return None
+    pending: list[BaseException | None] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, RequestValidationError):
+            return current
+        pending.extend((current.__cause__, current.__context__))
+    return None
 
 
 def _mark_capability_dependent_post(
