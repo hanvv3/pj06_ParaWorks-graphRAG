@@ -5,14 +5,16 @@ serving eligibility. Historical evidence never enters the V2 resolver by inferen
 """
 
 import math
+import re
 import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from hmac import compare_digest
 from types import MappingProxyType
 from typing import get_args
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -113,6 +115,14 @@ class AssistantMessageView:
     agent_run_id: int | None
     metadata: Mapping[str, object]
     created_at: str
+    evidence_available: bool
+    content_write_mode: str | None
+    actor_id: str | None
+
+    @property
+    def metadata_(self) -> dict:
+        """A detached copy for legacy email consumers, never mutable verified state."""
+        return _thaw(self.metadata)
 
     def to_response(self) -> dict:
         return {
@@ -124,13 +134,30 @@ class AssistantMessageView:
                 if name == 'citations'
                 else list(value)
                 if name in {'source_ids', 'source_links', 'source_snippets'}
-                else dict(value)
+                else _thaw(value)
                 if name == 'metadata'
                 else value
             )
             for name in self.__slots__
+            if name not in {'evidence_available', 'content_write_mode', 'actor_id'}
             for value in (getattr(self, name),)
         }
+
+
+def _freeze(value):
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value):
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
 
 
 def public_metadata(message: AssistantMessage) -> dict:
@@ -144,7 +171,17 @@ def public_metadata(message: AssistantMessage) -> dict:
         )
     ):
         return {
-            key: value for key, value in metadata.items() if key in _PUBLIC_RAG_METADATA
+            key: value
+            for key, value in metadata.items()
+            if key in _PUBLIC_RAG_METADATA
+            and (
+                (key == 'regeneration_required' and type(value) is bool)
+                or (
+                    key != 'regeneration_required'
+                    and type(value) is str
+                    and re.fullmatch(r'[A-Za-z0-9_:.-]{1,80}', value) is not None
+                )
+            )
         }
 
     # Non-RAG email/contact UI metadata is part of V1. Remove diagnostic fields
@@ -168,65 +205,171 @@ class AssistantEvidenceReader:
         self._settings = settings
 
     def project_message(
-        self, *, db: Session | None, actor: DemoUser | None, message: AssistantMessage
+        self,
+        *,
+        db: Session | None,
+        actor: DemoUser | None,
+        message: AssistantMessage | AssistantMessageView,
     ) -> AssistantMessageView:
-        live = False
+        if isinstance(message, AssistantMessageView):
+            if message.actor_id == (actor.id if actor else None):
+                return message
+            return self._unavailable(message.id, message.conversation_id)
+
+        # Identity/state access cannot trigger an expired attribute refresh. Keep
+        # this fallback independent of the row surviving the fresh read below.
+        state = inspect(message)
+        message_id = state.identity[0] if state.identity else state.dict.get('id', 0)
+        conversation_id = state.dict.get('conversation_id', 0)
+        envelope = dict(state.dict)
         try:
             if db is not None:
-                # Repeated GET/context reads must not trust cached ORM evidence.
-                # Preserve caller-owned pending edits, including corruption tests.
-                for row in list(db.identity_map.values()):
-                    if not isinstance(
-                        row, AssistantConversation
-                    ) and not db.is_modified(row, include_collections=True):
-                        db.expire(row)
-            live = self._is_live(db=db, actor=actor, message=message)
-            citation_reader = (
-                RagCitationResponse.model_validate
-                if message.content_write_mode == 'rag_v2_exact'
-                else lambda item: RagCitationResponse.model_construct(
-                    **{
-                        key: tuple(value) if key == 'matched_terms' else value
-                        for key, value in item.items()
-                    }
-                )
-            )
-            citations = (
-                tuple(citation_reader(item) for item in message.citations)
-                if live
-                else ()
-            )
+                # Reject pending signature/provenance edits without flushing them.
+                # Current source authority is read independently, never from the
+                # caller identity map (even when an unrelated field is dirty).
+                if (
+                    message in db.dirty
+                    and db.is_modified(message, include_collections=True)
+                    or message in db.deleted
+                ):
+                    return self._unavailable(
+                        message_id, conversation_id, envelope=envelope
+                    )
+                # Join the existing connection without transaction ownership.
+                # Closing this read session neither commits nor rolls back the
+                # caller transaction, and its fresh identity map cannot expire
+                # caller rows or conceal committed revocation behind dirty state.
+                with (
+                    db.no_autoflush,
+                    Session(
+                        bind=db.connection(),
+                        autoflush=False,
+                        join_transaction_mode='rollback_only',
+                    ) as reader_db,
+                ):
+                    fresh = reader_db.get(AssistantMessage, message_id)
+                    if fresh is None:
+                        return self._unavailable(
+                            message_id, conversation_id, envelope=envelope
+                        )
+                    if self._has_pending_integrity_changes(db, fresh):
+                        return self._unavailable(
+                            fresh.id,
+                            fresh.conversation_id,
+                            envelope=inspect(fresh).dict,
+                        )
+                    return self._project_loaded(reader_db, actor, fresh)
+            return self._project_loaded(db, actor, message)
         except (SQLAlchemyError, TypeError, ValueError, KeyError, AttributeError):
-            live = False
-            citations = ()
+            return self._unavailable(message_id, conversation_id, envelope=envelope)
+
+    @staticmethod
+    def _has_pending_integrity_changes(caller_db, message):
+        if message.role == 'user':
+            return False  # Ordinary input has no Assistant integrity dependencies.
+        for row in set(caller_db.dirty) | set(caller_db.deleted):
+            state = inspect(row)
+            if isinstance(row, AgentRun):
+                relevant = bool(
+                    state.identity and state.identity[0] == message.agent_run_id
+                )
+            elif isinstance(
+                row,
+                (
+                    AssistantMessageEvidenceDependency,
+                    AssistantMessageKnowledgeEvidenceRef,
+                ),
+            ):
+                relevant = (
+                    state.dict.get('assistant_message_id', message.id) == message.id
+                    or state.committed_state.get('assistant_message_id') == message.id
+                )
+            elif isinstance(row, AutoReviewRuntimeKeyState):
+                relevant = message.content_write_mode is not None
+            else:
+                relevant = False
+            if relevant and (
+                row in caller_db.deleted
+                or caller_db.is_modified(row, include_collections=True)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _unavailable(message_id, conversation_id, *, envelope=None):
+        envelope = envelope or {}
+        created_at = envelope.get('created_at')
+        role = envelope.get('role')
+        return AssistantMessageView(
+            id=message_id,
+            conversation_id=conversation_id,
+            role=role
+            if type(role) is str and role in {'user', 'assistant'}
+            else 'assistant',
+            content=UNAVAILABLE_CONTENT,
+            citations=(),
+            source_ids=(),
+            source_links=(),
+            source_snippets=(),
+            permission_level=None,
+            hidden_match_count=0,
+            permission_notice='evidence_unavailable',
+            agent_run_id=envelope.get('agent_run_id')
+            if type(envelope.get('agent_run_id')) is int
+            else None,
+            metadata=_freeze(
+                {'status': 'evidence_unavailable', 'regeneration_required': True}
+            ),
+            created_at=created_at.isoformat()
+            if isinstance(created_at, datetime)
+            else '1970-01-01T00:00:00',
+            evidence_available=False,
+            content_write_mode=None,
+            actor_id=None,
+        )
+
+    def _project_loaded(self, db, actor, message):
+        if not self._is_live(db=db, actor=actor, message=message):
+            return self._unavailable(
+                message.id, message.conversation_id, envelope=inspect(message).dict
+            )
+        citation_reader = (
+            RagCitationResponse.model_validate
+            if message.content_write_mode == 'rag_v2_exact'
+            else lambda item: RagCitationResponse.model_construct(
+                **{
+                    key: tuple(value) if key == 'matched_terms' else value
+                    for key, value in item.items()
+                }
+            )
+        )
         return AssistantMessageView(
             id=message.id,
             conversation_id=message.conversation_id,
             role=message.role,
-            content=message.content if live else UNAVAILABLE_CONTENT,
-            citations=citations,
-            source_ids=tuple(message.source_ids) if live else (),
-            source_links=tuple(message.source_links) if live else (),
-            source_snippets=tuple(message.source_snippets) if live else (),
-            permission_level=message.permission_level if live else None,
-            hidden_match_count=message.hidden_match_count if live else 0,
-            permission_notice=message.permission_notice
-            if live
-            else 'evidence_unavailable',
+            content=message.content,
+            citations=tuple(citation_reader(item) for item in message.citations),
+            source_ids=tuple(message.source_ids),
+            source_links=tuple(message.source_links),
+            source_snippets=tuple(message.source_snippets),
+            permission_level=message.permission_level,
+            hidden_match_count=message.hidden_match_count,
+            permission_notice=message.permission_notice,
             agent_run_id=message.agent_run_id,
-            metadata=MappingProxyType(
-                public_metadata(message)
-                if live
-                else {
-                    'status': 'evidence_unavailable',
-                    'regeneration_required': True,
-                }
-            ),
+            metadata=_freeze(public_metadata(message)),
             created_at=message.created_at.isoformat(),
+            evidence_available=True,
+            content_write_mode=message.content_write_mode,
+            actor_id=actor.id if actor else None,
         )
 
     def _is_live(self, *, db, actor, message):
         from backend.app.assistant.service import _message_evidence_is_live
+
+        if message.role not in {'user', 'assistant'}:
+            return False
+        if message.role == 'user' and message.content_write_mode is not None:
+            return False
 
         if db is not None and actor is not None:
             owner = db.scalar(
@@ -256,6 +399,18 @@ class AssistantEvidenceReader:
                 )
             ):
                 return False
+            if message.role == 'user':
+                # User-authored input is not an evidence-derived Assistant answer.
+                # Do not run serving eligibility on it, but reject evidence marks.
+                return not bool(
+                    message.citations
+                    or message.source_ids
+                    or message.source_links
+                    or message.source_snippets
+                    or message.serving_dependency_count
+                    or message.evidence_contract_version not in {None, 'none-v1'}
+                    or (message.metadata_ or {}).get('evidence_derived')
+                )
             if db is None or actor is None:
                 return not bool(
                     message.citations

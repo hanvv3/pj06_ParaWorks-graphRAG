@@ -2,6 +2,27 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task17 F1–F5 fix candidate; rereview required
+
+- `eligible_context_messages` now returns immutable `AssistantMessageView`
+  snapshots, never ORM messages. Keep these snapshots through contextual-question,
+  summary, email and capability contributor selection. The compatibility
+  `metadata_` property returns a detached deep copy for existing email consumers.
+  Reader snapshots are actor-bound and intended for the current read operation.
+- Reader authority loads through a fresh Session identity map joined to the
+  caller connection with autoflush disabled and rollback-only join mode. It does
+  not expire, flush, commit or roll back caller state. Related pending integrity
+  mutations fail closed; user input does not require an unrelated AgentRun's
+  evidence. Committed source revocation wins even with dirty caller source fields.
+- F1 role bypass, F2 refresh-after-validation, F3 dirty identity-map revocation,
+  F4 deleted/expired row errors and F5 nested allowlisted metadata leaks have
+  tracked regressions plus retained independent probes. Final focused gate:
+  196 passed; affected gate: 243 passed, 1 opt-in PostgreSQL skip; review probes:
+  5 passed (legacy notice exploratory non-finding deselected).
+- Still a candidate, NOT CLEAN; independent rereview must precede Task18.
+  Writer file/route cutover remain unchanged. Existing SQLite reserved-ID bridge
+  and future keyed-legacy writer debts below remain explicit.
+
 ## 2026-09-12 D Core Task17 evidence reader candidate; review before Task18
 
 - Candidate implements `AssistantEvidenceReader` / immutable message view and

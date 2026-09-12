@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from hashlib import sha256
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -25,6 +26,9 @@ from backend.app.models import (
     TrustedKnowledgeApprovalLink,
     TrustedKnowledgeEvidenceLink,
 )
+
+if TYPE_CHECKING:
+    from backend.app.assistant.evidence_reader import AssistantMessageView
 
 RECENT_CONTEXT_MESSAGE_LIMIT = 6
 DEFAULT_CONVERSATION_TITLE = '새 대화'
@@ -312,21 +316,27 @@ def serialize_message(
     user: DemoUser | None = None,
 ) -> dict:
     from backend.app.assistant.evidence_reader import AssistantEvidenceReader
-    return AssistantEvidenceReader().project_message(
-        db=db, actor=user, message=message
-    ).to_response()
+
+    return (
+        AssistantEvidenceReader()
+        .project_message(db=db, actor=user, message=message)
+        .to_response()
+    )
 
 
 def eligible_context_messages(
     db: Session,
     user: DemoUser,
     messages: list[AssistantMessage],
-) -> list[AssistantMessage]:
+) -> list['AssistantMessageView']:
+    from backend.app.assistant.evidence_reader import AssistantEvidenceReader
+
+    reader = AssistantEvidenceReader()
     return [
-        message
+        view
         for message in messages
-        if message.role != 'assistant'
-        or assistant_message_projection_is_live(db, user=user, message=message)
+        for view in (reader.project_message(db=db, actor=user, message=message),)
+        if view.evidence_available
     ]
 
 
@@ -431,8 +441,9 @@ def assistant_message_projection_is_live(
 ) -> bool:
     """Return whether the current serializer may expose stored message bytes."""
     from backend.app.assistant.evidence_reader import AssistantEvidenceReader
+
     view = AssistantEvidenceReader().project_message(db=db, actor=user, message=message)
-    return view.metadata.get('regeneration_required') is not True
+    return view.evidence_available
 
 
 def _assistant_message_has_valid_v2_structure(
@@ -486,10 +497,7 @@ def _canned_hidden_projection_is_valid(message: AssistantMessage) -> bool:
     if type(hidden_count) is not int or not 0 <= hidden_count <= 20:
         return False
     if hidden_count > 0:
-        return (
-            message.permission_notice
-            == 'Some sources may be hidden by permissions.'
-        )
+        return message.permission_notice == 'Some sources may be hidden by permissions.'
     return message.permission_notice in {None, 'evidence_unavailable'}
 
 

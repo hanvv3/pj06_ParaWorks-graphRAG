@@ -1,5 +1,20 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Task17 review-fix candidate
+
+- Addressed independent findings F1–F5: context, summary, email and capability
+  consumers now retain immutable verified message snapshots. Role mutations
+  cannot bypass evidence checks; ordinary user input needs no evidence authority.
+- Current authority uses an isolated read identity map on the caller connection,
+  without autoflush, caller expiration or transaction ownership. Dirty caller
+  source fields cannot conceal committed revocation. Missing/expired rows and
+  read failures redact safely; RAG metadata accepts only bounded scalar values.
+- Fresh verification: 196 focused/Assistant API/email/capability tests passed;
+  243 affected tests passed with one opt-in PostgreSQL test skipped; five retained
+  independent review probes passed. Ruff, compile and diff checks passed.
+- Fix candidate only, not CLEAN; independent rereview required. Task18 ordinary
+  writer first-flush and keyed-legacy writer obligations remain unchanged.
+
 ## 2026-09-12 D Core Task17 evidence reader candidate
 
 - Assistant serialization, summary/context selection and render-capability

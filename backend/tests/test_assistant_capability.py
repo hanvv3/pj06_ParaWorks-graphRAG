@@ -526,6 +526,7 @@ def _add_v2_canned_message(
     content: str,
 ) -> AssistantMessage:
     from backend.tests.assistant_evidence_helpers import write_canned
+
     return write_canned(db, conversation, content)
 
 
@@ -629,7 +630,6 @@ def test_message_get_does_not_require_capability_for_stale_redacted_v2(
 def test_missing_parent_v2_is_redacted_before_message_guard_and_summary(
     client: TestClient,
     db_session: Session,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conversation = AssistantConversation(
         user_id='employee-mina', title='missing parent'
@@ -638,14 +638,12 @@ def test_missing_parent_v2_is_redacted_before_message_guard_and_summary(
     db_session.commit()
     message = _add_v2_canned_message(db_session, conversation, 'ORPHANED_V2_SENTINEL')
     linked_agent_run_id = message.linked_agent_run_id
-    original_get = db_session.get
-
-    def get_without_parent(entity, ident, *args, **kwargs):
-        if entity is AgentRun and ident == linked_agent_run_id:
-            return None
-        return original_get(entity, ident, *args, **kwargs)
-
-    monkeypatch.setattr(db_session, 'get', get_without_parent)
+    # Corrupt the actual SQLite authority, not one Session's identity-map method.
+    # The reader uses a separate identity map by design.
+    db_session.execute(
+        AgentRun.__table__.delete().where(AgentRun.id == linked_agent_run_id)
+    )
+    db_session.commit()
 
     messages_response = client.get(
         f'/api/v1/assistant/conversations/{conversation.id}/messages',
@@ -678,7 +676,11 @@ def test_hidden_only_canned_v2_requires_guard_and_preserves_original_projection(
     message.hidden_match_count = 1
     message.permission_notice = 'Some sources may be hidden by permissions.'
     parent = db_session.get(AgentRun, message.agent_run_id)
-    parent.metadata_ = {**parent.metadata_, 'hidden_match_count': 1, 'outcome': 'hidden_only'}
+    parent.metadata_ = {
+        **parent.metadata_,
+        'hidden_match_count': 1,
+        'outcome': 'hidden_only',
+    }
     db_session.commit()
 
     refused_messages = client.get(

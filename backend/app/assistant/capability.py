@@ -13,7 +13,6 @@ from backend.app.agent_runtime.rag_v2_contracts import (
 from backend.app.assistant.service import (
     MAX_SUMMARY_LINES,
     _compact_context_text,
-    assistant_message_projection_is_live,
     eligible_context_messages,
 )
 from backend.app.core.config import Settings
@@ -61,10 +60,10 @@ def assistant_message_is_live_v2(
     user: DemoUser,
     message: AssistantMessage,
 ) -> bool:
-    return bool(
-        message.content_write_mode == 'rag_v2_exact'
-        and assistant_message_projection_is_live(db, user=user, message=message)
-    )
+    from backend.app.assistant.evidence_reader import AssistantEvidenceReader
+
+    view = AssistantEvidenceReader().project_message(db=db, actor=user, message=message)
+    return bool(view.content_write_mode == 'rag_v2_exact' and view.evidence_available)
 
 
 def messages_projection_contains_live_v2(

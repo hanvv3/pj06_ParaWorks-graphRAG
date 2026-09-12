@@ -3,7 +3,8 @@
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.orm import Session
 
 from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
 from backend.app.agent_runtime.fingerprints import keyed_fingerprint
@@ -15,6 +16,7 @@ from backend.app.assistant.evidence_persistence import (
 )
 from backend.app.assistant.service import (
     assistant_message_projection_is_live,
+    build_contextual_question,
     create_conversation,
     eligible_context_messages,
     serialize_conversation,
@@ -49,6 +51,215 @@ from backend.tests.test_rag_v2_keyword_retriever import (
 )
 
 UNAVAILABLE = '이 답변의 근거를 더 이상 확인할 수 없습니다. 다시 생성해 주세요.'
+
+
+def test_unrelated_dirty_parent_does_not_require_evidence_for_user_input(written):
+    db, conversation, _, parent, *_ = written
+    user_message = AssistantMessage(
+        conversation_id=conversation.id, role='user', content='user input'
+    )
+    db.add(user_message)
+    db.commit()
+    parent.model_name = 'pending unrelated edit'
+    views = eligible_context_messages(db, USERS['viewer'], [user_message])
+    assert [view.content for view in views] == ['user input']
+    assert parent.model_name == 'pending unrelated edit' and parent in db.dirty
+
+
+def test_database_read_failure_has_safe_projection_for_expired_row(
+    written, monkeypatch
+):
+    from sqlalchemy.exc import SQLAlchemyError
+
+    db, _, message, *_ = written
+    message_id = message.id
+    db.expire(message)
+    original = Session.get
+
+    def fail_message_read(self, entity, ident, *args, **kwargs):
+        if entity is AssistantMessage and ident == message_id:
+            raise SQLAlchemyError('PRIVATE DATABASE FAILURE')
+        return original(self, entity, ident, *args, **kwargs)
+
+    monkeypatch.setattr(Session, 'get', fail_message_read)
+    result = serialize_message(message, db=db, user=USERS['viewer'])
+    assert result['id'] == message_id and result['content'] == UNAVAILABLE
+    assert 'PRIVATE DATABASE FAILURE' not in str(result)
+
+
+@pytest.mark.parametrize('role', ('user', 'system', 'tool', 'ASSISTANT'))
+def test_role_mutation_cannot_bypass_context_evidence_validation(written, role):
+    db, conversation, message, *_ = written
+    message.role = role
+    db.commit()
+    assert (
+        serialize_message(message, db=db, user=USERS['viewer'])['content']
+        == UNAVAILABLE
+    )
+    assert eligible_context_messages(db, USERS['viewer'], [message]) == []
+    assert (
+        serialize_conversation(conversation, db=db, user=USERS['viewer'])['summary']
+        is None
+    )
+
+
+@pytest.mark.parametrize('consumer', ('context', 'summary', 'email'))
+def test_consumers_use_verified_snapshot_after_interleaved_row_change(
+    written,
+    monkeypatch,
+    consumer,
+):
+    from backend.app.assistant.email_draft_context import find_latest_sendable_artifact
+    from backend.app.assistant.evidence_reader import AssistantEvidenceReader
+
+    db, conversation, first, *_ = written
+    second = write_canned(db, conversation, 'safe second')
+    first_id, second_id = first.id, second.id
+    verified_content = first.content
+    original = AssistantEvidenceReader.project_message
+
+    def interleave(self, **kwargs):
+        if kwargs['message'].id == second_id:
+            with Session(db.get_bind()) as other:
+                other.execute(
+                    update(AssistantMessage)
+                    .where(
+                        AssistantMessage.id == first_id,
+                    )
+                    .values(content='UNVERIFIED_INJECTION')
+                )
+                other.commit()
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(AssistantEvidenceReader, 'project_message', interleave)
+    if consumer == 'context':
+        result = build_contextual_question(
+            conversation=conversation,
+            messages=[first, second],
+            new_message='next',
+            db=db,
+            user=USERS['viewer'],
+        )
+    elif consumer == 'summary':
+        result = serialize_conversation(conversation, db=db, user=USERS['viewer'])[
+            'summary'
+        ]
+    else:
+        snapshots = eligible_context_messages(db, USERS['viewer'], [first, second])
+        result = find_latest_sendable_artifact(snapshots[:1])['content']
+    assert 'UNVERIFIED_INJECTION' not in result
+    assert verified_content.strip() in result
+
+
+@pytest.mark.parametrize('expire', (False, True))
+def test_deleted_message_returns_safe_projection_without_refreshing_descriptors(
+    written, expire
+):
+    db, _, message, *_ = written
+    message_id = message.id
+    if expire:
+        db.expire(message)
+    with Session(db.get_bind()) as other:
+        other.execute(
+            AssistantMessage.__table__.delete().where(AssistantMessage.id == message_id)
+        )
+        other.commit()
+    result = serialize_message(message, db=db, user=USERS['viewer'])
+    assert result['id'] == message_id
+    assert result['content'] == UNAVAILABLE
+    assert eligible_context_messages(db, USERS['viewer'], [message]) == []
+
+
+@pytest.mark.parametrize(
+    'value', ({'question': 'PRIVATE RAW QUESTION'}, ['PRIVATE RAW QUESTION'])
+)
+@pytest.mark.parametrize(
+    'key', ('status', 'failure_reason', 'failure_class', 'agent_name', 'prompt_version')
+)
+def test_allowlisted_metadata_keys_reject_structured_private_values(
+    written, key, value
+):
+    db, _, message, *_ = written
+    message.metadata_ = {
+        'agent_name': 'rag_orchestrator_agent',
+        'prompt_version': 'rag-answer:v2',
+        key: value,
+    }
+    db.commit()
+    assert 'PRIVATE RAW QUESTION' not in str(
+        serialize_message(message, db=db, user=USERS['viewer'])
+    )
+
+
+def test_dirty_source_does_not_mask_committed_revocation_or_get_flushed(written):
+    from backend.app.models import Source
+
+    db, _, message, _, _, source, *_ = written
+    assert (
+        serialize_message(message, db=db, user=USERS['viewer'])['content']
+        != UNAVAILABLE
+    )
+    source_id, original_author = source.id, source.author
+    source.author = 'pending caller update'
+    with Session(db.get_bind()) as other:
+        other.execute(
+            update(Source)
+            .where(Source.id == source_id)
+            .values(permission_level='restricted')
+        )
+        other.commit()
+    assert (
+        serialize_message(message, db=db, user=USERS['viewer'])['content']
+        == UNAVAILABLE
+    )
+    assert source.author == 'pending caller update' and source in db.dirty
+    with db.no_autoflush:
+        assert (
+            db.scalar(select(Source.author).where(Source.id == source_id))
+            == original_author
+        )
+
+
+def test_context_snapshots_keep_user_and_nested_email_metadata_without_mutable_aliases(
+    db_session,
+):
+    from dataclasses import FrozenInstanceError
+
+    from backend.app.assistant.email_draft_context import (
+        find_latest_pending_email_draft,
+    )
+
+    db = db_session
+    conversation = create_conversation(db, USERS['viewer'])
+    user_message = AssistantMessage(
+        conversation_id=conversation.id, role='user', content='legitimate question'
+    )
+    email = AssistantMessage(
+        conversation_id=conversation.id,
+        role='assistant',
+        content='draft',
+        metadata_={
+            'action_type': 'email_draft',
+            'status': 'pending_approval',
+            'email_draft': {
+                'to': ['person@example.test'],
+                'subject': 'subject',
+                'body': 'verified body',
+            },
+        },
+    )
+    db.add_all([user_message, email])
+    db.commit()
+    views = eligible_context_messages(db, USERS['viewer'], [user_message, email])
+    assert [view.role for view in views] == ['user', 'assistant']
+    with pytest.raises(FrozenInstanceError):
+        views[0].content = 'injection'
+    with pytest.raises(TypeError):
+        views[1].metadata['email_draft']['body'] = 'injection'
+    detached = views[1].metadata_
+    detached['email_draft']['body'] = 'injection'
+    assert find_latest_pending_email_draft(views).body == 'verified body'
+    assert views[1].to_response()['metadata']['email_draft']['body'] == 'verified body'
 
 
 def test_missing_current_key_runtime_never_authenticates_retained_v2_bytes(written):
@@ -106,7 +317,9 @@ def written(db_session, monkeypatch):
         db=db, settings=settings
     ).resolve_for_index('decision_record', decision.id)
     slots = (
-        EvidenceSlot('E1', raw.evidence.support_mode, raw.evidence, 0.75, ('raw',)),
+        EvidenceSlot(
+            'E1', raw.evidence.support_mode, raw.evidence, 0.75, ('raw', 'ordered')
+        ),
         EvidenceSlot(
             'E2', trusted.evidence.support_mode, trusted.evidence, 0.5, ('trusted',)
         ),
@@ -292,6 +505,9 @@ def test_unselected_influence_tamper_also_redacts_whole_answer(written, field, v
         'score',
         'source_array',
         'parent_result',
+        'matched_term_order',
+        'selected_child_deleted',
+        'source_version',
     ),
 )
 def test_current_evidence_or_public_projection_drift_cannot_reuse_stored_answer(
@@ -316,6 +532,26 @@ def test_current_evidence_or_public_projection_drift_cannot_reuse_stored_answer(
         message.citations = [citation]
     elif change == 'source_array':
         message.source_links = ['https://example.test/altered']
+    elif change == 'matched_term_order':
+        citation = dict(message.citations[0])
+        assert len(citation['matched_terms']) == 2
+        citation['matched_terms'] = list(reversed(citation['matched_terms']))
+        message.citations = [citation]
+    elif change == 'selected_child_deleted':
+        db.delete(
+            db.scalar(
+                select(AssistantMessageEvidenceDependency).where(
+                    AssistantMessageEvidenceDependency.assistant_message_id
+                    == message.id,
+                    AssistantMessageEvidenceDependency.candidate_ordinal == 0,
+                )
+            )
+        )
+    elif change == 'source_version':
+        from backend.app.models import Document, DocumentVersion
+
+        version = db.get(DocumentVersion, chunk.version_id)
+        db.get(Document, version.document_id).current_document_version_id = None
     else:
         parent.metadata_ = {**parent.metadata_, 'rag_result_hmac': 'f' * 64}
     db.commit()
@@ -337,6 +573,7 @@ def test_public_metadata_drops_private_question_trace_and_exception(written):
         'parent_agent_run_id': 999,
         'exception': 'PRIVATE ERROR',
     }
+    db.commit()
     result = serialize_message(message, db=db, user=USERS['viewer'])
     assert result['metadata'] == {
         'agent_name': 'rag_orchestrator_agent',
