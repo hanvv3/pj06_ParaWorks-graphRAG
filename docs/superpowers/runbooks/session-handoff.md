@@ -2,6 +2,19 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task14 CLEAN; Task15 next
+
+- Independent integration review and both scoped fix reviews are complete.
+  Candidate `298b80d` resolves the remaining audit-retention finding; Task14
+  is CLEAN. Controller independently reran seven pre-send drift/audit cases:
+  `7 passed, 40 deselected` in 24.94s. Affected implementer gate remains
+  `179 passed, 1 PostgreSQL URL skip`; no real PostgreSQL proof is claimed.
+- Continue approved implementation with Task15: exact V1 DTOs and direct
+  `/ask` and `/search` facade delivery. This is implementation, not planning.
+  Preserve legacy/non-cutover behavior and expose no graph/audit identities.
+- Task16/18/21 and later D Core gates remain outstanding. No paid/live calls,
+  push, merge, D.1 cache, Slack, CDC or Redis work was performed.
+
 ## 2026-09-12 D Core Task14 audit-retention fix round 2
 
 - Scoped review accepted round-1 citation/configuration fixes and safe runtime

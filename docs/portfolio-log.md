@@ -1,5 +1,16 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core answer graph review complete
+
+- Task14 integration and scoped corrections are independently CLEAN at
+  `298b80d`: evidence-selected citations, safe pre-send drift handling and
+  hash-only audit retention preserve permissions and exact provider charges.
+- Controller regression: seven pre-send drift/audit cases passed in 24.94s.
+  Affected gate: 179 passed, one missing PostgreSQL URL skip; real database
+  locking/concurrency and remaining D Core delivery/release gates are not proven.
+- Next approved implementation: Task15 direct API facade with exact V1 response
+  contracts. No public API cutover or full D Core completion is claimed yet.
+
 ## 2026-09-12 D Core pre-send audit-retention correction
 
 - Scoped review identified that an unsent prepared answer still needs its
