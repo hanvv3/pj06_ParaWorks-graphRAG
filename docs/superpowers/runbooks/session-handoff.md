@@ -2,7 +2,7 @@
 
 Updated: 2026-09-12
 
-## 2026-09-12 D Core Task17 F1–F5 fix candidate; rereview required
+## 2026-09-12 D Core Task17 CLEAN; resume at Task18 sole-writer cutover
 
 - `eligible_context_messages` now returns immutable `AssistantMessageView`
   snapshots, never ORM messages. Keep these snapshots through contextual-question,
@@ -19,9 +19,14 @@ Updated: 2026-09-12
   tracked regressions plus retained independent probes. Final focused gate:
   196 passed; affected gate: 243 passed, 1 opt-in PostgreSQL skip; review probes:
   5 passed (legacy notice exploratory non-finding deselected).
-- Still a candidate, NOT CLEAN; independent rereview must precede Task18.
-  Writer file/route cutover remain unchanged. Existing SQLite reserved-ID bridge
-  and future keyed-legacy writer debts below remain explicit.
+- Independent rereview is CLEAN at `acee98f`: the reviewer reran 202 focused
+  Assistant/API/email/recipient/capability tests, the five original finding
+  probes, and three transaction/owner/query-count probes. There are no open or
+  new findings. One two-dependency answer performs 43 linear fresh queries, two
+  perform 86, and same-operation immutable view reuse performs zero more.
+- Resume at Task18 actual implementation. Writer file/route cutover remain
+  unchanged so far. The SQLite reserved-ID bridge, ordinary first-flush failure,
+  and missing keyed-legacy production writer are explicit Task18 obligations.
 
 ## 2026-09-12 D Core Task17 evidence reader candidate; review before Task18
 

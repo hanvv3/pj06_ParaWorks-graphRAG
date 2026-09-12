@@ -1,6 +1,6 @@
 # ParaWorks Portfolio Log
 
-## 2026-09-12 D Core Task17 review-fix candidate
+## 2026-09-12 D Core Task17 evidence reader independently CLEAN
 
 - Addressed independent findings F1–F5: context, summary, email and capability
   consumers now retain immutable verified message snapshots. Role mutations
@@ -12,8 +12,13 @@
 - Fresh verification: 196 focused/Assistant API/email/capability tests passed;
   243 affected tests passed with one opt-in PostgreSQL test skipped; five retained
   independent review probes passed. Ruff, compile and diff checks passed.
-- Fix candidate only, not CLEAN; independent rereview required. Task18 ordinary
-  writer first-flush and keyed-legacy writer obligations remain unchanged.
+- Independent rereview at `acee98f` is CLEAN. The reviewer reran 202 focused
+  Assistant/API/email/recipient/capability tests, all five retained finding
+  probes, and three extra transaction/owner/query-count probes with no open or
+  new finding. The reader performs 43 fresh queries for one two-dependency
+  answer and 86 for two, while reuse of the same immutable view adds zero.
+- Task18 ordinary writer first-flush and keyed-legacy writer obligations remain
+  unchanged. No production PostgreSQL or release claim is made here.
 
 ## 2026-09-12 D Core Task17 evidence reader candidate
 
