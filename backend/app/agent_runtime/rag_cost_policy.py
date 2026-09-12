@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import ROUND_CEILING, Decimal, localcontext
 from threading import RLock
 from typing import Final, NamedTuple
@@ -95,6 +96,28 @@ class RagBudgetExceededError(RagCostPolicyError):
 class RagPolicyUnavailableError(RagCostPolicyError):
     def __init__(self, code: str) -> None:
         super().__init__(code, 'RAG provider policy is unavailable')
+
+
+@dataclass(frozen=True, slots=True)
+class RagAnswerCeilingReservation:
+    """Conservative admission ceiling, never a rendered prompt/dispatch budget."""
+
+    component: str
+    estimated_input_tokens: int
+    maximum_output_tokens: int
+    reserved_cost_usd: Decimal
+    cost_policy_snapshot_hmac: str
+
+
+@dataclass(frozen=True, slots=True)
+class RagUnusedComponentReservation:
+    """Zero-cost route-inapplicable component; contains no prepared prompt."""
+
+    component: RagPaidComponent
+    cost_policy_snapshot_hmac: str
+    estimated_input_tokens: int = 0
+    maximum_output_tokens: int = 0
+    reserved_cost_usd: Decimal = Decimal('0.000000')
 
 
 def build_answer_output_schema_hmac(
@@ -694,6 +717,33 @@ def _create_rag_cost_policy_type(
                 )
             )
             require_same_state(self, state, code)
+            return result
+
+        def reserve_unused_component(self, component: RagPaidComponent) -> RagUnusedComponentReservation:
+            return RagUnusedComponentReservation(
+                component=_exact_component(component),
+                cost_policy_snapshot_hmac=self.authorized_policy_snapshot_hmac(component),
+            )
+
+        def reserve_answer_generation(self) -> RagAnswerCeilingReservation:
+            state = get_state(self, 'model_unavailable')
+            authority = state.authority
+            reserved = _rounded_cost(
+                input_tokens=authority.max_answer_input_tokens,
+                output_tokens=authority.max_answer_output_tokens,
+                input_price=authority.answer_input_usd_per_1m,
+                output_price=authority.answer_output_usd_per_1m,
+                authority=authority,
+            )
+            _require_component_ceiling(reserved, ceiling=authority.component_ceiling_usd)
+            result = RagAnswerCeilingReservation(
+                component='answer_generation',
+                estimated_input_tokens=authority.max_answer_input_tokens,
+                maximum_output_tokens=authority.max_answer_output_tokens,
+                reserved_cost_usd=reserved,
+                cost_policy_snapshot_hmac=state.answer_policy_hmac,
+            )
+            require_same_state(self, state, 'model_unavailable')
             return result
 
         def validate_prepared_budget(

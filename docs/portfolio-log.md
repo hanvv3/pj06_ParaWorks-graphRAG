@@ -1,5 +1,17 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core staged-cost integration candidate
+
+- Added conservative answer reservation followed by one-time concrete prompt
+  budget binding, plus true zero reserves for keyword search. Added provider-free
+  and embedding-only cost-pending transitions for the existing fresh finalizer.
+- Regression cases cover stale costs, duplicate/concurrent binding, foreign
+  request ownership, commit failures and blocked provider families. The candidate
+  keeps prices and dispatch limits unchanged and awaits independent review;
+  complete graph/facade integration remains unfinished.
+- Fresh affected verification: `194 passed, 1 PostgreSQL URL skip`, including
+  20 new staged/pending cases; static and import checks passed.
+
 ## 2026-09-12 D Core Task 14 prerequisite candidate
 
 - Added exhaustive cumulative rollout routing and a single-dispatch provider

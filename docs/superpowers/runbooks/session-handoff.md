@@ -4453,3 +4453,23 @@ tests passed with 53 tests; ruff passed.
 - See `.superpowers/sdd/2026-08-31-deliverable-d-core-rag-answer-graph-v2/task-14-report.md`.
   Existing interpreter fallback remains needed; UV intermittently fails querying
   default `.venv`. No dotenv, network or provider calls.
+
+## 2026-09-12 Task 14 staged-cost prerequisite candidate
+
+- Controller accepted rollout/provider-delivery commit `ca8d82b` CLEAN. Next
+  candidate adds distinct non-prompt answer-ceiling and unused-zero reservations,
+  one-time concrete answer-budget binding, and typed provider-free/embedding-only
+  cost-pending entry. No database schema or frozen price/ceiling changes.
+- Provider-free pending skips provider family/latch authority. Paid pending
+  rechecks safety and exact terminal query cost. Request-local ownership prevents
+  another ledger from adopting a run; duplicate binding/pending and failed ACK
+  return no new dispatch authority. Details and final test evidence are in the
+  local Task 14 report.
+- Next separate integration correction: finalizer currently conflates DB
+  dispatch fence with prepared embedding attempt fence and authorized cost-policy
+  HMAC with embedding config-policy HMAC. Preserve distinct domains and verify
+  real ledger -> fake transport -> finalizer before graph composition.
+- Graph/facade remain incomplete; this is a prerequisite review checkpoint.
+- Final six-file affected gate: `194 passed, 1 skipped`, including 20 new
+  staged/pending cases. Ruff, compile/import and diff checks passed. The skip is
+  the existing PostgreSQL URL gate; real PostgreSQL concurrency remains unrun.

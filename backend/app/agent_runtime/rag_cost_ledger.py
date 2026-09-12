@@ -4,12 +4,12 @@ import hmac
 import secrets
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import wraps
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
@@ -20,10 +20,16 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     RagLockOrderCoordinator,
     RegisteredAdvisoryLock,
     acquire_advisory_lock,
+    begin_rag_lock_order,
     rag_projection_owner_lock_id,
     release_advisory_lock,
 )
-from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
+from backend.app.agent_runtime.rag_cost_policy import (
+    RagAnswerCeilingReservation,
+    RagBudgetExceededError,
+    RagCostPolicy,
+    RagUnusedComponentReservation,
+)
 from backend.app.agent_runtime.rag_postgres_binding import (
     RagPostgresAdvisoryTransport,
 )
@@ -72,6 +78,11 @@ from backend.app.rag.retrieval import (
 _ZERO = Decimal('0.000000')
 _COMPONENT_ORDER = ('query_embedding', 'answer_generation')
 _LEDGER_ASSEMBLY_SEAL = object()
+
+if TYPE_CHECKING:
+    from backend.app.agent_runtime.rag_finalization import RagProjectionPending
+
+RagAdmissionBudget = PreparedPaidCallBudget | RagAnswerCeilingReservation | RagUnusedComponentReservation
 
 
 class RagCostLedgerError(RuntimeError):
@@ -298,9 +309,13 @@ class RagCostLedger:
         self._admission_budgets: dict[
             tuple[int, str], PreparedPaidCallBudget
         ] = {}
+        self._answer_reservations: dict[int, RagAnswerCeilingReservation] = {}
+        self._answer_binding_lock = threading.RLock()
         self._grant_bindings: dict[
             tuple[int, str], RagProviderSafetyBinding
         ] = {}
+        self._terminal_bindings: dict[tuple[int, str], RagProviderSafetyBinding] = {}
+        self._terminal_cost_rows: dict[tuple[int, str], tuple[tuple[str, object], ...]] = {}
         self._process_hmac = process_instance_identity(
             {
                 'designated_environment_id_bytes': exact_utf8_bytes(
@@ -394,7 +409,7 @@ class RagCostLedger:
     @staticmethod
     def _admission_runtime_component(
         snapshot: AuthorizedProviderPolicySnapshot,
-        budget: PreparedPaidCallBudget,
+        budget: RagAdmissionBudget,
     ) -> dict[str, object]:
         return {
             'actual_input_tokens': None,
@@ -511,8 +526,8 @@ class RagCostLedger:
         admission_cache_identity_hmac: str | None,
         source_window: str,
         components: tuple[
-            tuple[AuthorizedProviderPolicySnapshot, PreparedPaidCallBudget],
-            tuple[AuthorizedProviderPolicySnapshot, PreparedPaidCallBudget],
+            tuple[AuthorizedProviderPolicySnapshot, RagAdmissionBudget],
+            tuple[AuthorizedProviderPolicySnapshot, RagAdmissionBudget],
         ],
     ) -> RagRunAdmission:
         expected_source_window = admission_source_window(
@@ -563,7 +578,7 @@ class RagCostLedger:
             snapshot, budget = pair
             if (
                 type(snapshot) is not AuthorizedProviderPolicySnapshot
-                or type(budget) is not PreparedPaidCallBudget
+                or type(budget) not in {PreparedPaidCallBudget, RagAnswerCeilingReservation, RagUnusedComponentReservation}
                 or snapshot.component != expected
                 or budget.component != expected
                 or not hmac.compare_digest(
@@ -572,10 +587,27 @@ class RagCostLedger:
                 )
             ):
                 raise ValueError('RAG admission components are misaligned')
+            if type(budget) is RagAnswerCeilingReservation:
+                if expected != 'answer_generation' or mode != 'enforce' or surface == 'search':
+                    raise ValueError('answer ceiling is unused by this route')
+                if budget != self._cost_policy.reserve_answer_generation():
+                    raise ValueError('answer ceiling authority is invalid')
+            if type(budget) is RagUnusedComponentReservation:
+                unused = (
+                    configured_backend == 'keyword' if expected == 'query_embedding'
+                    else mode != 'enforce' or surface == 'search'
+                )
+                if not unused or budget != self._cost_policy.reserve_unused_component(expected):
+                    raise ValueError('unused component reservation is invalid')
             normalized.append((snapshot, budget))
         total_reserved = sum(
             (budget.reserved_cost_usd for _, budget in normalized), _ZERO
         )
+        if any(type(budget) is RagAnswerCeilingReservation for _, budget in normalized):
+            if type(normalized[0][1]) is PreparedPaidCallBudget:
+                self._cost_policy.validate_prepared_budget(normalized[0][1])
+            if total_reserved > Decimal('0.012000'):
+                raise RagBudgetExceededError
         computed_admission_hmac = admission_identity(
             {
                 'answer_provider_policy_snapshot_hmac': (
@@ -677,7 +709,10 @@ class RagCostLedger:
         self._commit()
         for snapshot, saved_budget in normalized:
             self._admission_snapshots[(agent_run_id, snapshot.component)] = snapshot
-            self._admission_budgets[(agent_run_id, snapshot.component)] = saved_budget
+            if type(saved_budget) is RagAnswerCeilingReservation:
+                self._answer_reservations[agent_run_id] = saved_budget
+            elif type(saved_budget) is PreparedPaidCallBudget:
+                self._admission_budgets[(agent_run_id, snapshot.component)] = saved_budget
         return RagRunAdmission(
             agent_run_id=agent_run_id,
             surface=surface,  # type: ignore[arg-type]
@@ -709,6 +744,62 @@ class RagCostLedger:
         )
 
     @_runtime_health_effect
+    def bind_answer_budget(
+        self, *, run_id: int, prepared: PreparedPaidCallBudget,
+    ) -> None:
+        """Narrow an undispatched ceiling once; failed commit never grants dispatch."""
+        self._cost_policy.validate_prepared_budget(prepared)
+        with self._answer_binding_lock:
+            reservation = self._answer_reservations.get(run_id)
+            if (
+                reservation is None
+                or prepared.component != 'answer_generation'
+                or prepared.estimated_input_tokens > reservation.estimated_input_tokens
+                or prepared.maximum_output_tokens > reservation.maximum_output_tokens
+                or prepared.reserved_cost_usd > reservation.reserved_cost_usd
+                or prepared.cost_policy_snapshot_hmac != reservation.cost_policy_snapshot_hmac
+            ):
+                raise RagCostLedgerError('answer ceiling binding is unavailable')
+            parent, rows = self._locked_run(run_id)
+            query, answer = rows
+            if (
+                parent.status != 'running'
+                or parent.run_record_phase != 'admission'
+                or self._component_is_unused(parent, 'answer_generation')
+                or answer.dispatch_state != 'not_attempted'
+                or answer.attempted is not False
+                or answer.dispatch_count != 0
+                or answer.charged_cost_usd != _ZERO
+                or answer.reserved_input_tokens != reservation.estimated_input_tokens
+                or answer.reserved_output_tokens != reservation.maximum_output_tokens
+                or answer.reserved_cost_usd != reservation.reserved_cost_usd
+                or answer.authorized_policy_snapshot_hmac != reservation.cost_policy_snapshot_hmac
+                or parent.metadata_.get('configured_backend') == 'pgvector'
+                and (query.dispatch_state != 'terminal' or query.terminal_outcome != 'component_succeeded')
+            ):
+                raise RagCostLedgerError('durable answer reservation changed')
+            if parent.metadata_.get('configured_backend') == 'pgvector':
+                self._require_terminal_cost_row(run_id, query)
+            # Retire before fallible commit/ACK. Recovery may close the run, but
+            # neither an uncertain commit nor a second caller may rebind it.
+            del self._answer_reservations[run_id]
+            answer.reserved_input_tokens = prepared.estimated_input_tokens
+            answer.reserved_output_tokens = prepared.maximum_output_tokens
+            answer.reserved_cost_usd = prepared.reserved_cost_usd
+            parent.estimated_cost_usd = float(sum((Decimal(row.reserved_cost_usd) for row in rows), _ZERO))
+            parent.metadata_ = {
+                **parent.metadata_,
+                'runtime_cost_snapshot_hmac': self._runtime_cost_identity(
+                    agent_run_id=run_id,
+                    components=[self._row_runtime_component(row) for row in rows],
+                    parent_outcome=None, parent_run_record_phase='admission',
+                    parent_status='running', snapshot_stage='pre_projection',
+                ),
+            }
+            self._commit()
+            self._admission_budgets[(run_id, 'answer_generation')] = prepared
+
+    @_runtime_health_effect
     def claim_component(
         self,
         *,
@@ -719,6 +810,8 @@ class RagCostLedger:
         if component not in _COMPONENT_ORDER or type(prepared) is not PreparedPaidCallBudget:
             raise ValueError('component claim is invalid')
         self._cost_policy.validate_prepared_budget(prepared)
+        if type(self._admission_budgets.get((run_id, component))) is not PreparedPaidCallBudget:
+            raise RagCostLedgerError('concrete component budget is unavailable')
         parent = self._session.get(AgentRun, run_id, with_for_update=True)
         rows = tuple(self._session.scalars(
             select(AgentRunCostComponent)
@@ -1243,9 +1336,139 @@ class RagCostLedger:
                 ),
             }
         self._commit()
+        if outcome.classification == 'validated_success':
+            self._terminal_bindings[key] = binding
+            self._terminal_cost_rows[key] = tuple(sorted(self._row_runtime_component(row).items()))
         self._active_grants.pop(key, None)
         self._grant_bindings.pop(key, None)
         return self._component_final(parent, row)
+
+    @_runtime_health_effect
+    def commit_provider_free_pending(
+        self,
+        *,
+        run_id: int,
+        corpus_generation: int,
+        vector_index_generation: int | None,
+    ) -> RagProjectionPending:
+        return self._commit_safe_pending(
+            run_id=run_id, corpus_generation=corpus_generation,
+            vector_index_generation=vector_index_generation, embedding_only=False,
+        )
+
+    @_runtime_health_effect
+    def commit_embedding_only_pending(
+        self,
+        *,
+        run_id: int,
+        corpus_generation: int,
+        vector_index_generation: int,
+    ) -> RagProjectionPending:
+        return self._commit_safe_pending(
+            run_id=run_id, corpus_generation=corpus_generation,
+            vector_index_generation=vector_index_generation, embedding_only=True,
+        )
+
+    @contextmanager
+    def _safe_pending_owner(self, run_id: int, *, embedding_only: bool):
+        order = begin_rag_lock_order('ordinary')
+        sidecar = order.acquire('provider_stable_sidecar')
+        safety = order.acquire('provider_safety_rows')
+        with ExitStack() as stack:
+            if embedding_only:
+                binding = self._terminal_bindings.get((run_id, 'query_embedding'))
+                if binding is None:
+                    raise RagCostLedgerError('terminal embedding authority is unavailable')
+                connection = stack.enter_context(self._provider_connection_factory())
+                stack.enter_context(self._provider_safety.finalization_barrier(
+                    connection, ((binding.policy_snapshot, binding),),
+                    order=order, sidecar_capability=sidecar, safety_capability=safety,
+                ))
+            # Zero dispatch skips provider singleton/family/latch entirely.
+            stack.enter_context(self.projection_owner_barrier(
+                run_id, order=order,
+                order_capability=order.acquire('projection_owner'),
+            ))
+            for stage in ('evidence_shared_barrier', 'c5_key_corpus', 'agent_run_cost', 'optional_assistant'):
+                order.acquire(stage)
+            order.finish()
+            yield
+
+    def _commit_safe_pending(
+        self, *, run_id: int, corpus_generation: int,
+        vector_index_generation: int | None, embedding_only: bool,
+    ) -> RagProjectionPending:
+        from backend.app.agent_runtime.rag_finalization import RagProjectionPending
+
+        if (
+            type(run_id) is not int or run_id <= 0
+            or type(corpus_generation) is not int or corpus_generation < 0
+            or vector_index_generation is not None
+            and (type(vector_index_generation) is not int or vector_index_generation < 0)
+            or embedding_only and vector_index_generation is None
+        ):
+            raise ValueError('pending projection generation is invalid')
+        if any((run_id, component) not in self._admission_snapshots for component in _COMPONENT_ORDER):
+            raise RagCostLedgerError('request-owned admission is unavailable')
+        with self._answer_binding_lock, self._safe_pending_owner(run_id, embedding_only=embedding_only):
+            parent, rows = self._locked_run(run_id)
+            query, answer = rows
+            if (
+                parent.status != 'running' or parent.run_record_phase != 'admission'
+                or parent.projection_owner_fence_hmac is not None
+                or parent.completed_at is not None
+                or any(
+                    row.dispatch_state != 'not_attempted'
+                    or row.attempted is not False or row.dispatch_count != 0
+                    or row.charged_cost_usd != _ZERO
+                    or row.dispatch_fence_hmac is not None
+                    for row in ((answer,) if embedding_only else rows)
+                )
+            ):
+                raise RagCostLedgerError('safe pending transition is unavailable')
+            if embedding_only and (
+                parent.metadata_.get('configured_backend') != 'pgvector'
+                or query.dispatch_state != 'terminal'
+                or query.terminal_outcome != 'component_succeeded'
+                or query.attempted is not True or query.dispatch_count != 1
+                or query.charge_basis != 'actual' or query.overrun is not False
+                or query.process_instance_hmac != self._process_hmac
+            ):
+                raise RagCostLedgerError('terminal embedding cost is unavailable')
+            if embedding_only:
+                self._require_terminal_cost_row(run_id, query)
+            for row in ((answer,) if embedding_only else rows):
+                self._make_terminal_zero(row)
+            parent.run_record_phase = 'cost_finalized_pending_projection'
+            parent.total_charged_cost_usd = sum((Decimal(row.charged_cost_usd) for row in rows), _ZERO)
+            parent.estimated_cost_usd = float(sum((Decimal(row.reserved_cost_usd) for row in rows), _ZERO))
+            parent.projection_owner_fence_hmac = self._projection_owner_fence(
+                agent_run_id=run_id, process_instance_hmac=self._process_hmac,
+            )
+            snapshot_hmac = self._runtime_cost_identity(
+                agent_run_id=run_id,
+                components=[self._row_runtime_component(row) for row in rows],
+                parent_outcome=None, parent_run_record_phase='cost_finalized_pending_projection',
+                parent_status='running', snapshot_stage='pre_projection',
+            )
+            parent.metadata_ = {**parent.metadata_, 'runtime_cost_snapshot_hmac': snapshot_hmac}
+            pending = RagProjectionPending(
+                parent_agent_run_id=run_id,
+                projection_owner_fence_hmac=parent.projection_owner_fence_hmac,
+                security_scope_fingerprint=parent.metadata_['security_scope_fingerprint'],
+                prepared_corpus_generation=corpus_generation,
+                prepared_vector_index_generation=vector_index_generation,
+                terminal_cost_snapshot_hmac=snapshot_hmac,
+            )
+            self._answer_reservations.pop(run_id, None)
+            self._admission_budgets.pop((run_id, 'answer_generation'), None)
+            self._commit()
+        return pending
+
+    def _require_terminal_cost_row(self, run_id: int, row: AgentRunCostComponent) -> None:
+        expected = self._terminal_cost_rows.get((run_id, row.component))
+        if expected is None or tuple(sorted(self._row_runtime_component(row).items())) != expected:
+            raise RagCostLedgerError('terminal component cost changed')
 
     @staticmethod
     def _component_is_unused(parent: AgentRun, component: str) -> bool:
