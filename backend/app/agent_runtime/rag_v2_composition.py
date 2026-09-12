@@ -19,6 +19,7 @@ from backend.app.agent_runtime.rag_v2_contracts import (
     COMPANY_MEMORY_RAG_GRAPH_VERSION,
     COMPANY_MEMORY_RAG_STATE_SCHEMA_VERSION,
     COMPANY_MEMORY_RAG_WORKFLOW,
+    resolved_rag_backend,
 )
 from backend.app.agent_runtime.rag_v2_registry import (
     RagGraphRegistration,
@@ -114,7 +115,7 @@ def _default_shadow_runner(*, session_factory, settings):
 
     from backend.app.rag.shadow import run_keyword_shadow, run_pgvector_shadow
 
-    if settings.rag_retrieval_backend == 'pgvector':
+    if resolved_rag_backend(settings) == 'pgvector':
         return partial(
             run_pgvector_shadow,
             request_factory=default_rag_request_factory,
@@ -294,7 +295,8 @@ def _postgres_request_services(*, db, settings, session_factory):
     )
     from backend.app.rag.trusted_evidence import ServingEvidenceResolver
 
-    if settings.rag_retrieval_backend == 'pgvector' and not settings.openai_api_key:
+    backend = resolved_rag_backend(settings)
+    if backend == 'pgvector' and not settings.openai_api_key:
         raise RagApplicationError('retriever_not_configured')
     assembly = transport._assemble_rag_request_cost_authority(
         settings=settings, session=db
@@ -306,7 +308,7 @@ def _postgres_request_services(*, db, settings, session_factory):
         store=SqlAlchemyKeywordSearchStore(db=db, settings=settings), settings=settings
     )
     retrievers.register('keyword', keyword)
-    if settings.rag_retrieval_backend == 'pgvector':
+    if backend == 'pgvector':
         store = build_rag_v2_pgvector_search_store(db=db, settings=settings)
         if store is None:
             raise RagApplicationError('retriever_not_configured')
@@ -377,7 +379,7 @@ def _postgres_request_services(*, db, settings, session_factory):
         return (
             row.corpus_generation,
             row.vector_index_generation
-            if settings.rag_retrieval_backend == 'pgvector'
+            if backend == 'pgvector'
             else None,
         )
 

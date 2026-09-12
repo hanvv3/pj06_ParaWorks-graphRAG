@@ -18,6 +18,7 @@ from backend.app.agent_runtime.rag_application import (
     AssistantIngressError,
     RagApplicationFacade,
 )
+from backend.app.agent_runtime.rag_v2_contracts import resolved_rag_backend
 from backend.app.agents.rag_orchestrator_agent.v2_input import (
     RagInputSafetyError,
     RagInputScannerUnavailableError,
@@ -942,12 +943,12 @@ def create_assistant_message(
     )
     pgvector_shared_shadow = bool(
         assistant_rag_owner == 'shadow'
-        and settings.rag_retrieval_backend == 'pgvector'
+        and resolved_rag_backend(settings) == 'pgvector'
         and not assistant_context_shadow
     )
     assistant_keyword_shadow = bool(
         assistant_rag_owner == 'shadow'
-        and settings.rag_retrieval_backend == 'keyword'
+        and resolved_rag_backend(settings) == 'keyword'
         and not assistant_context_shadow
     )
     vector_store = (

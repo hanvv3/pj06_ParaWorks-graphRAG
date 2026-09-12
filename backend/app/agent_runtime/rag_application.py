@@ -20,6 +20,7 @@ from backend.app.agent_runtime.rag_v2_contracts import (
     COMPANY_MEMORY_RAG_GRAPH_VERSION,
     COMPANY_MEMORY_RAG_WORKFLOW,
     RagSurface,
+    resolved_rag_backend,
     resolved_rag_mode,
     resolved_rag_stage,
 )
@@ -444,7 +445,7 @@ class RagApplicationFacade:
         """Compare Assistant user-only context through provider-free retrieval."""
         if (
             self.execution_owner('assistant') != 'shadow'
-            or self._settings.rag_retrieval_backend != 'keyword'
+            or resolved_rag_backend(self._settings) != 'keyword'
             or prepared_text.query_context_version != 'assistant-context:v1'
         ):
             raise RagApplicationError('runtime_version_unavailable')
@@ -481,7 +482,7 @@ class RagApplicationFacade:
     ):
         if (
             self.execution_owner('assistant') != 'shadow'
-            or self._settings.rag_retrieval_backend != 'pgvector'
+            or resolved_rag_backend(self._settings) != 'pgvector'
             or prepared_text.query_context_version != 'assistant-context:v1'
         ):
             raise RagApplicationError('runtime_version_unavailable')
@@ -520,7 +521,7 @@ class RagApplicationFacade:
             return direct_rag_error(exc.code)
         owner = self.execution_owner(surface)
         if owner != 'v2':
-            if owner == 'shadow' and self._settings.rag_retrieval_backend == 'pgvector':
+            if owner == 'shadow' and resolved_rag_backend(self._settings) == 'pgvector':
                 from backend.app.rag.shadow import RagShadowProviderOverrideError
 
                 try:

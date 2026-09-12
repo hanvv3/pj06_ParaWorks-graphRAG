@@ -57,6 +57,7 @@ def test_default_rag_graph_and_facade_registered_without_paid_construction(
             assert 'keyword_retrieval' in graph.nodes
             assert graph.checkpointer is None
             assert isinstance(app.state.rag_application_facade, RagApplicationFacade)
+            assert app.state.rag_shadow_recovered_count == 0
             with pytest.raises(ValueError, match='sealed'):
                 app.state.rag_graph_registry.register(_build_test_rag_graph_registration())
             manifest = app.state.agent_manifest_registry.get('rag_orchestrator_agent')

@@ -17,6 +17,7 @@ from backend.app.agent_runtime.rag_v2_contracts import (
     RagEffectiveBackend,
     RagRetrievalBackend,
     RagSurface,
+    resolved_rag_backend,
 )
 from backend.app.agent_runtime.rag_v2_identity import (
     SecurityScope,
@@ -277,6 +278,86 @@ class ShadowComparison:
         """Return only aggregates and domain-separated HMACs."""
         return asdict(self)
 
+    def verify(self, *, settings: Settings) -> None:
+        if (
+            self.surface not in {'ask', 'search', 'assistant'}
+            or self.configured_backend not in {'keyword', 'pgvector'}
+            or self.effective_backend not in {'deterministic_lexical', 'pgvector'}
+            or self.outcome not in {'shadow_match', 'shadow_mismatch'}
+            or (self.configured_backend == 'pgvector')
+            != (self.effective_backend == 'pgvector')
+        ):
+            raise ValueError('shadow comparison is invalid')
+        for value in (
+            self.security_scope_fingerprint,
+            self.legacy_observation_hmac,
+            self.v2_top_candidate_window_hmac,
+            self.common_cohort_hmac,
+            self.intended_delta_set_hmac,
+            self.comparison_hmac,
+        ):
+            _require_hmac(value)
+        _require_hmac(self.legacy_public_run_correlation_hmac, nullable=True)
+        count_names = (
+            'legacy_candidate_count',
+            'v2_candidate_count',
+            'common_cohort_count',
+            'common_cohort_exact_match_count',
+            'legacy_hidden_match_count',
+            'v2_hidden_match_count',
+            'v2_source_observation_delta_count',
+            'trust_tier_reorder_delta_count',
+            'raw_public_identity_repair_delta_count',
+            'bounded_hidden_delta_count',
+            'assistant_context_security_delta_count',
+            'trusted_comparison_projection_unavailable_count',
+            'unclassified_shadow_mismatch_count',
+            'latency_ms',
+        )
+        for name in count_names:
+            _require_nonnegative(getattr(self, name))
+        if (
+            self.common_cohort_exact_match_count > self.common_cohort_count
+            or self.common_cohort_count > self.legacy_candidate_count
+            or self.common_cohort_count > self.v2_candidate_count
+            or self.assistant_context_security_delta_count not in {0, 1}
+        ):
+            raise ValueError('shadow comparison aggregate is invalid')
+        delta_counts = {
+            'v2_source_observation_delta': self.v2_source_observation_delta_count,
+            'trust_tier_reorder_delta': self.trust_tier_reorder_delta_count,
+            'raw_public_identity_repair_delta': self.raw_public_identity_repair_delta_count,
+            'bounded_hidden_delta': self.bounded_hidden_delta_count,
+            'assistant_context_security_delta': self.assistant_context_security_delta_count,
+        }
+        expected_delta_hmac = _fingerprint(
+            delta_counts,
+            settings=settings,
+            schema='rag-shadow-intended-deltas:v1',
+        )
+        expected_outcome = (
+            'shadow_match'
+            if self.unclassified_shadow_mismatch_count == 0
+            and self.trusted_comparison_projection_unavailable_count == 0
+            else 'shadow_mismatch'
+        )
+        payload = self.audit_metadata()
+        supplied_hmac = payload.pop('comparison_hmac')
+        expected_comparison_hmac = _fingerprint(
+            payload,
+            settings=settings,
+            schema='rag-shadow-comparison:v1',
+        )
+        if (
+            self.outcome != expected_outcome
+            or not hmac.compare_digest(
+                self.intended_delta_set_hmac,
+                expected_delta_hmac,
+            )
+            or not hmac.compare_digest(supplied_hmac, expected_comparison_hmac)
+        ):
+            raise ValueError('shadow comparison identity changed')
+
 
 class ShadowComparator:
     def __init__(self, settings: Settings):
@@ -330,9 +411,16 @@ class ShadowComparator:
                 unclassified += 1
             elif projection_equal:
                 common_exact += 1
-            elif before.support_class == 'raw_candidate':
+            elif _is_exact_pgvector_raw_identity_repair(
+                legacy=legacy,
+                before=before,
+                after=after,
+                settings=self._settings,
+            ):
                 raw_repairs += 1
                 common_exact += 1
+            elif before.support_class == 'raw_candidate':
+                unclassified += 1
             else:
                 trusted_unavailable += 1
 
@@ -476,6 +564,7 @@ class ShadowAuditWriter:
     def append(self, db: Session, comparison: ShadowComparison) -> AuditLog:
         if type(comparison) is not ShadowComparison:
             raise ValueError('shadow comparison is required')
+        comparison.verify(settings=self.settings)
         row = AuditLog(
             actor_id='system-rag-shadow',
             actor_email='system@paraworks.local',
@@ -544,6 +633,20 @@ def _legacy_window_hmac(
                 'effective_permission': row.effective_permission,
                 'relevance_score': row.relevance_score,
                 'matched_terms_hmac': _term_set_hmac(row.matched_terms, settings=settings),
+                'request_local_identity_hmac': _fingerprint(
+                    {
+                        'legacy_serving_document_id_bytes': exact_utf8_bytes(
+                            row.legacy_serving_document_id
+                        ),
+                        'legacy_public_source_id_bytes': (
+                            None
+                            if row.legacy_public_source_id is None
+                            else exact_utf8_bytes(row.legacy_public_source_id)
+                        ),
+                    },
+                    settings=settings,
+                    schema='rag-shadow-request-local-legacy-identity:v1',
+                ),
                 'public_projection_hmac': row.public_projection_hmac,
                 'candidate_identity_hmac': row.candidate_identity_hmac,
             }
@@ -551,6 +654,41 @@ def _legacy_window_hmac(
         ],
         settings=settings,
         schema='rag-shadow-legacy-candidate-window:v1',
+    )
+
+
+def _is_exact_pgvector_raw_identity_repair(
+    *, legacy, before, after, settings: Settings
+) -> bool:
+    serving_id = before.legacy_serving_document_id
+    prefix, separator, raw_identifier = serving_id.partition(':')
+    if (
+        legacy.configured_backend != 'pgvector'
+        or legacy.effective_backend != 'pgvector'
+        or before.support_class != 'raw_candidate'
+        or after.evidence.serving_kind != 'raw_chunk'
+        or prefix != 'chunk'
+        or not separator
+        or not raw_identifier.isascii()
+        or not raw_identifier.isdecimal()
+        or int(raw_identifier) <= 0
+        or str(int(raw_identifier)) != raw_identifier
+        or before.legacy_public_source_id != serving_id
+        or after.evidence.serving_document_id != serving_id
+        or after.evidence.public_source_id == serving_id
+        or after.evidence.version_envelope.serving_document_id != serving_id
+        or after.evidence.version_envelope.public_source_id
+        != after.evidence.public_source_id
+    ):
+        return False
+    expected_projection = _fingerprint(
+        {'legacy_public_source_id_bytes': exact_utf8_bytes(serving_id)},
+        settings=settings,
+        schema='rag-shadow-legacy-public-identity:v1',
+    )
+    return (
+        type(before.public_projection_hmac) is str
+        and hmac.compare_digest(before.public_projection_hmac, expected_projection)
     )
 
 
@@ -604,7 +742,7 @@ def run_keyword_shadow(
     legacy_delivery,
 ) -> ShadowComparison | None:
     """Run a real provider-free lexical comparison after V1 is committed."""
-    if settings.rag_retrieval_backend != 'keyword':
+    if resolved_rag_backend(settings) != 'keyword':
         raise ValueError('keyword shadow runner requires keyword configuration')
     if surface not in {'ask', 'search', 'assistant'}:
         raise ValueError('keyword shadow surface is invalid')
@@ -710,7 +848,7 @@ def run_pgvector_shadow(
     legacy_observation_factory=None,
 ):
     """Own one shared pgvector embedding and never invoke answer generation."""
-    if settings.rag_retrieval_backend != 'pgvector':
+    if resolved_rag_backend(settings) != 'pgvector':
         raise ValueError('pgvector shadow runner requires pgvector configuration')
     if surface not in {'ask', 'search', 'assistant'}:
         raise ValueError('pgvector shadow surface is invalid')
@@ -806,7 +944,10 @@ def run_pgvector_shadow(
                 if getattr(services, 'provider_transport', None) is not None
                 else services.provider_transport_factory()
             )
-            dispatch = transport.prepare(grant=grant, prepared=prepared_embedding)
+            dispatch = transport.prepare_shadow_legacy(
+                grant=grant,
+                prepared=prepared_embedding,
+            )
             delivery = transport.dispatch_and_finalize(grant=grant, prepared=dispatch)
         except Exception as exc:
             from backend.app.agent_runtime.rag_cost_ledger import (
@@ -833,7 +974,15 @@ def run_pgvector_shadow(
             legacy_query_text=prepared_text.retrieval_query_text,
             v2_query_text=prepared_text.retrieval_query_text,
         )
-        public_delivery = legacy_invoke(shared)
+        try:
+            public_delivery = legacy_invoke(shared)
+        except Exception:
+            with suppress(Exception):
+                services.cost_ledger.finalize_inter_component_failure(
+                    run_id=run_id,
+                    outcome='unexpected_internal_error',
+                )
+            raise
         try:
             _finish_pgvector_shadow(
                 services=services,
@@ -883,48 +1032,55 @@ def _finish_pgvector_shadow(
             settings=settings,
         )
         return
-    legacy = (
-        legacy_observation_factory(
-            services=services,
-            actor=actor,
-            surface=surface,
-            prepared_text=prepared_text,
-            shared=shared,
-            scope=scope,
-            scope_hmac=scope_hmac,
-            public_delivery=public_delivery,
+    def comparison_factory():
+        legacy = (
+            legacy_observation_factory(
+                services=services,
+                actor=actor,
+                surface=surface,
+                prepared_text=prepared_text,
+                shared=shared,
+                scope=scope,
+                scope_hmac=scope_hmac,
+                public_delivery=public_delivery,
+            )
+            if legacy_observation_factory is not None
+            else _observe_pgvector_legacy(
+                services=services,
+                settings=settings,
+                actor=actor,
+                surface=surface,
+                prepared_text=prepared_text,
+                shared=shared,
+                scope_hmac=scope_hmac,
+                public_delivery=public_delivery,
+            )
         )
-        if legacy_observation_factory is not None
-        else _observe_pgvector_legacy(
-            services=services,
-            settings=settings,
-            actor=actor,
-            surface=surface,
-            prepared_text=prepared_text,
-            shared=shared,
-            scope_hmac=scope_hmac,
-            public_delivery=public_delivery,
-        )
-    )
-    from backend.app.rag.pgvector_retriever import PgVectorEvidenceRetriever
+        from backend.app.rag.pgvector_retriever import PgVectorEvidenceRetriever
 
-    retriever = services.retrievers.resolve('pgvector')
-    if isinstance(retriever, PgVectorEvidenceRetriever):
-        retriever = retriever.with_graph_fallback()
-    v2 = retriever.invoke(
-        replace(request, query_embedding_result=shared),
-        config={'callbacks': [], 'metadata': {}},
-    )
-    comparison = ShadowComparator(settings).compare(
-        legacy=legacy,
-        v2=v2,
-        scope=scope,
-    )
+        retriever = services.retrievers.resolve('pgvector')
+        if isinstance(retriever, PgVectorEvidenceRetriever):
+            retriever = retriever.with_graph_fallback()
+        v2 = retriever.invoke(
+            replace(request, query_embedding_result=shared),
+            config={'callbacks': [], 'metadata': {}},
+        )
+        return ShadowComparator(settings).compare(
+            legacy=legacy,
+            v2=v2,
+            scope=scope,
+        )
+
     services.cost_ledger.finalize_shadow_run(
         run_id=run_id,
-        outcome=comparison.outcome,
-        comparison=comparison,
+        outcome=None,
+        comparison=None,
         settings=settings,
+        comparison_factory=comparison_factory,
+        prepared_embedding=shared.prepared,
+        load_current_readiness=lambda: services.index_readiness.inspect(
+            db=services.db
+        ),
     )
 
 
@@ -944,7 +1100,7 @@ def run_assistant_context_security_delta(
     with session_factory() as db:
         scope = ServerRagSecurityScopeResolver(settings).resolve(db=db, actor=actor)
         scope_hmac = security_scope_fingerprint(scope, settings=settings)
-        backend = settings.rag_retrieval_backend
+        backend = resolved_rag_backend(settings)
         legacy = LegacyRetrievalObservation.build(
             surface='assistant',
             configured_backend=backend,

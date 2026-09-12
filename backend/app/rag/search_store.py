@@ -9,6 +9,7 @@ from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
+from backend.app.agent_runtime.rag_v2_contracts import resolved_rag_backend
 from backend.app.agent_runtime.rag_v2_identity import SecurityScope
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
@@ -58,7 +59,7 @@ def build_pgvector_search_store(
     settings: Settings,
     shared_query_embedding: QueryEmbeddingCallResult | None = None,
 ):
-    if not settings.rag_use_pgvector_search:
+    if resolved_rag_backend(settings) != 'pgvector':
         return None
     if db.bind is None or db.bind.dialect.name != 'postgresql':
         return None

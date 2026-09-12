@@ -755,6 +755,150 @@ def test_shadow_pgvector_final_is_complete_exact_two_and_audit_is_aggregate_only
     assert "'internal_run_id'" not in serialized
 
 
+def test_shadow_comparison_rejects_generation_drift_inside_finalization_fence(
+    tmp_path: Path,
+):
+    """Mixed-generation comparison cannot write an audit or complete the parent."""
+    from backend.app.models import (
+        AuditLog,
+        AutoReviewRuntimeKeyState,
+        RagServingCorpusGeneration,
+    )
+    from backend.app.rag.index_readiness import RagServingIndexReadiness
+    from backend.app.rag.shadow import ShadowComparator
+    from backend.tests.test_rag_shadow import (
+        SETTINGS,
+        _evidence,
+        _legacy,
+        _rebuild_legacy,
+        _result,
+        _scope,
+    )
+    from backend.tests.test_rag_v2_provider_transport import _prepared_query
+
+    ledger = _ledger(tmp_path)
+    ledger._session.add_all([
+        AutoReviewRuntimeKeyState(
+            component='auto_review_trust_promotion',
+            fingerprint_key_version='test-v1',
+            fingerprint_key_material_verifier='b' * 64,
+            generation=1,
+            ready=True,
+        ),
+        RagServingCorpusGeneration(
+            id=1,
+            corpus_generation=1,
+            vector_index_generation=1,
+            embedding_model='text-embedding-3-small',
+            embedding_dimensions=1536,
+            index_policy_version='rag-v2-serving-index:v1',
+            pgvector_cosine_policy_version='pgvector-cosine-indexable:v1',
+            fingerprint_key_version='test-v1',
+            fingerprint_key_material_verifier='b' * 64,
+        ),
+    ])
+    ledger._session.commit()
+    comparison = ShadowComparator(SETTINGS).compare(
+        legacy=_rebuild_legacy(
+            _legacy(_evidence(1)),
+            configured_backend='pgvector',
+            effective_backend='pgvector',
+        ),
+        v2=replace(
+            _result(_evidence(1)),
+            configured_backend='pgvector',
+            effective_backend='pgvector',
+        ),
+        scope=_scope(),
+    )
+    ledger.create_admission(
+        agent_run_id=133,
+        surface='search',
+        mode='shadow',
+        cutover_stage='search',
+        configured_backend='pgvector',
+        query_context_version='direct-query:v1',
+        current_text_hmac='1' * 64,
+        retrieval_query_hmac='2' * 64,
+        security_scope_fingerprint=comparison.security_scope_fingerprint,
+        admission_cache_identity_hmac=None,
+        source_window='rag-v2:admission:shadow:search:pgvector',
+        components=(
+            (
+                _snapshot('query_embedding', _TEST_COST_POLICY),
+                _budget('query_embedding', '0.000010'),
+            ),
+            (
+                _snapshot('answer_generation', _TEST_COST_POLICY),
+                _budget('answer_generation', '0.002000'),
+            ),
+        ),
+    )
+    grant = ledger.claim_component(
+        run_id=133,
+        component='query_embedding',
+        prepared=_budget('query_embedding', '0.000010'),
+    )
+    ledger.consume_committed_grant(grant)
+    ledger.finalize_component(
+        grant=grant,
+        observation=StrictProviderOutcome(
+            component='query_embedding',
+            classification='validated_success',
+            terminal_outcome='component_succeeded',
+            provider_dispatch_started=True,
+            provider_response_received=True,
+            strict_usage=StrictProviderUsage(20, 0, 20),
+            actual_cost_usd=Decimal('0.000001'),
+            safety_action='unchanged',
+        ),
+    )
+    readiness_hmac = ['4' * 64]
+
+    def readiness():
+        return RagServingIndexReadiness(
+            ready=True,
+            corpus_generation=(1 if readiness_hmac[0] == '4' * 64 else 2),
+            vector_index_generation=(1 if readiness_hmac[0] == '4' * 64 else 2),
+            expected_document_count=0,
+            live_vector_count=0,
+            tombstone_count=0,
+            mismatch_count_capped_at_20=0,
+            embedding_model='text-embedding-3-small',
+            embedding_dimensions=1536,
+            index_policy_version='rag-v2-serving-index:v1',
+            readiness_snapshot_hmac=readiness_hmac[0],
+        )
+
+    def comparison_factory():
+        ledger._session.get(RagServingCorpusGeneration, 1).corpus_generation = 2
+        ledger._session.get(RagServingCorpusGeneration, 1).vector_index_generation = 2
+        readiness_hmac[0] = '5' * 64
+        return comparison
+
+    with pytest.raises(RagCostLedgerError, match='generation|readiness|snapshot'):
+        ledger.finalize_shadow_run(
+            run_id=133,
+            outcome=None,
+            comparison=None,
+            settings=SETTINGS,
+            comparison_factory=comparison_factory,
+            prepared_embedding=_prepared_query(
+                _budget('query_embedding', '0.000010')
+            ),
+            load_current_readiness=readiness,
+        )
+
+    ledger._session.rollback()
+    ledger._session.expire_all()
+    parent = ledger._session.get(AgentRun, 133)
+    assert parent.status == 'running'
+    assert parent.run_record_phase == 'cost_finalized_pending_projection'
+    assert ledger._session.scalar(
+        select(AuditLog).where(AuditLog.action == 'rag_shadow_compared')
+    ) is None
+
+
 def test_shadow_not_ready_crash_gap_recovers_fail_closed_without_redispatch(
     tmp_path: Path,
 ):
@@ -828,6 +972,71 @@ def test_shadow_not_ready_crash_gap_recovers_fail_closed_without_redispatch(
     assert terminal.component_finals[1].dispatch_count == 0
     with pytest.raises(RagCostLedgerError):
         ledger.consume_committed_grant(grant)
+
+
+def test_shadow_restart_scanner_recovers_pending_paid_owner_once_without_state(
+    tmp_path: Path,
+):
+    """Lifecycle recovery is DB-owned, preserves actual cost, and never redispatches."""
+    ledger = _ledger(tmp_path)
+    ledger.create_admission(
+        agent_run_id=132,
+        surface='search',
+        mode='shadow',
+        cutover_stage='search',
+        configured_backend='pgvector',
+        query_context_version='direct-query:v1',
+        current_text_hmac='1' * 64,
+        retrieval_query_hmac='2' * 64,
+        security_scope_fingerprint='3' * 64,
+        admission_cache_identity_hmac=None,
+        source_window='rag-v2:admission:shadow:search:pgvector',
+        components=(
+            (
+                _snapshot('query_embedding', _TEST_COST_POLICY),
+                _budget('query_embedding', '0.000010'),
+            ),
+            (
+                _snapshot('answer_generation', _TEST_COST_POLICY),
+                _budget('answer_generation', '0.002000'),
+            ),
+        ),
+    )
+    grant = ledger.claim_component(
+        run_id=132,
+        component='query_embedding',
+        prepared=_budget('query_embedding', '0.000010'),
+    )
+    ledger.consume_committed_grant(grant)
+    ledger.finalize_component(
+        grant=grant,
+        observation=StrictProviderOutcome(
+            component='query_embedding',
+            classification='validated_success',
+            terminal_outcome='component_succeeded',
+            provider_dispatch_started=True,
+            provider_response_received=True,
+            strict_usage=StrictProviderUsage(20, 0, 20),
+            actual_cost_usd=Decimal('0.000001'),
+            safety_action='unchanged',
+        ),
+    )
+    ledger._pending_projection_identities.clear()
+    ledger._terminal_bindings.clear()
+    ledger._active_grants.clear()
+    ledger._grant_bindings.clear()
+
+    recovered = ledger.recover_incomplete_shadow_runs(limit=100)
+
+    assert len(recovered) == 1
+    assert recovered[0].agent_run_id == 132
+    assert recovered[0].outcome == 'persistence_failed'
+    assert recovered[0].total_charged_cost_usd == Decimal('0.000001')
+    assert recovered[0].component_finals[0].attempted is True
+    assert recovered[0].component_finals[0].dispatch_count == 1
+    assert recovered[0].component_finals[0].charge_basis == 'actual'
+    assert recovered[0].component_finals[1].attempted is False
+    assert ledger.recover_incomplete_shadow_runs(limit=100) == ()
 
 
 def test_pre_send_refusal_closes_selected_and_sibling_terminal_zero(

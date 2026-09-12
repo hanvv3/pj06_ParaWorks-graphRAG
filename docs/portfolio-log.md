@@ -6711,3 +6711,30 @@ Cost/security note:
 - The next approved-plan item is **Task 21 in Phase E of the D Core plan**:
   staged rollout and retrieval-only shadow. It is an **actual implementation
   task**, not planning, and it is not Deliverable E Neo4j GraphRAG.
+
+## 2026-09-13 Deliverable D Core Task 21 review-fix candidate
+
+- Task 21 implements deployment-static staged rollout and retrieval-only shadow
+  for Ask, Search, and Assistant. Keyword shadow remains provider/cost free;
+  pgvector shares one authenticated immutable query embedding with legacy only
+  for byte-identical input, records its real internal cost, and never generates
+  an answer. Public V1 DTOs and delivery ownership remain unchanged.
+- Independent review of the first candidate found seven hardening gaps. The
+  fix round now authenticates the production not-ready shadow permit, resolves
+  canonical/legacy backend settings through one precedence rule, limits public
+  identity repair to the exact pgvector `chunk:{id}` leak, rejects forged audit
+  comparisons, and fail-closes paid embedding owners across legacy failure and
+  restart without redispatch.
+- Comparison and aggregate/HMAC-only audit persistence now execute under one
+  provider-safety and corpus-generation database fence. A generation change
+  rolls back the audit and leaves the parent pending for recovery. Retained
+  provider blockers are covered across every mode, stage, and surface; the
+  actual shadow refusal path additionally runs on all three surfaces and keeps
+  exact standalone legacy delivery.
+- All automated paths use deterministic/fake transports; no live provider or
+  network call is made. A real PostgreSQL row-lock concurrency probe exists but
+  remains an explicit environment-gated release check when
+  `PARAWORKS_TEST_POSTGRES_URL` is not configured. This candidate remains
+  **DONE_WITH_CONCERNS** pending independent rereview; no rollout activation,
+  push, merge, deploy, Task 22+, Slack, CDC, Redis/D.1, or Deliverable E work is
+  included.

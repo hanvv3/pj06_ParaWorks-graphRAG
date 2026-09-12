@@ -187,7 +187,8 @@ def test_comparator_exact_common_cohort_matches_without_raw_identity_persistence
 )
 def test_comparator_classifies_only_allowed_non_assistant_deltas(mutation, expected_field):
     """Catches treating an intended D delta as an unclassified parity failure."""
-    from backend.app.rag.shadow import ShadowComparator
+    from backend.app.agent_runtime.rag_v2_identity import exact_utf8_bytes
+    from backend.app.rag.shadow import ShadowComparator, _fingerprint
 
     trusted, raw = _evidence(1, kind='trusted_knowledge'), _evidence(2)
     legacy = _legacy(trusted, raw)
@@ -202,8 +203,30 @@ def test_comparator_classifies_only_allowed_non_assistant_deltas(mutation, expec
         legacy = _rebuild_legacy(legacy, candidate_window=rows)
     elif mutation == 'raw_projection_repair':
         rows = list(legacy.candidate_window)
-        rows[1] = replace(rows[1], public_projection_hmac='f' * 64)
-        legacy = _rebuild_legacy(legacy, candidate_window=tuple(rows))
+        rows[1] = replace(
+            rows[1],
+            legacy_public_source_id=rows[1].legacy_serving_document_id,
+            public_projection_hmac=_fingerprint(
+                {
+                    'legacy_public_source_id_bytes': (
+                        exact_utf8_bytes(rows[1].legacy_serving_document_id)
+                    )
+                },
+                settings=SETTINGS,
+                schema='rag-shadow-legacy-public-identity:v1',
+            ),
+        )
+        legacy = _rebuild_legacy(
+            legacy,
+            configured_backend='pgvector',
+            effective_backend='pgvector',
+            candidate_window=tuple(rows),
+        )
+        v2 = replace(
+            v2,
+            configured_backend='pgvector',
+            effective_backend='pgvector',
+        )
     elif mutation == 'bounded_hidden':
         legacy = _legacy(trusted, raw, hidden=27)
         v2 = _result(trusted, raw, hidden=20, capped=True)
@@ -211,6 +234,30 @@ def test_comparator_classifies_only_allowed_non_assistant_deltas(mutation, expec
     comparison = ShadowComparator(SETTINGS).compare(legacy=legacy, v2=v2, scope=_scope())
     assert getattr(comparison, expected_field) == 1
     assert comparison.unclassified_shadow_mismatch_count == 0
+
+
+def test_raw_projection_delta_rejects_keyword_and_unrelated_public_identity():
+    """Only the exact pgvector ``chunk:{id}`` public leak is allowlisted."""
+    from backend.app.rag.shadow import ShadowComparator
+
+    raw = _evidence(1)
+    legacy = _legacy(raw)
+    candidate = replace(
+        legacy.candidate_window[0],
+        legacy_public_source_id='unrelated-public-id',
+        public_projection_hmac='f' * 64,
+    )
+    changed = _rebuild_legacy(legacy, candidate_window=(candidate,))
+
+    comparison = ShadowComparator(SETTINGS).compare(
+        legacy=changed,
+        v2=_result(raw),
+        scope=_scope(),
+    )
+
+    assert comparison.raw_public_identity_repair_delta_count == 0
+    assert comparison.unclassified_shadow_mismatch_count == 1
+    assert comparison.outcome == 'shadow_mismatch'
 
 
 @pytest.mark.parametrize('mutation', ('permission', 'relevance', 'within_tier_rank', 'trusted_projection'))
@@ -301,6 +348,35 @@ def test_shadow_audit_persists_only_aggregates_and_domain_hmacs(db_session):
     for key, value in row.metadata_.items():
         if key.endswith('_hmac') and value is not None:
             assert isinstance(value, str) and len(value) == 64
+
+
+def test_shadow_audit_rejects_forged_raw_fields_and_stale_comparison_identity(
+    db_session,
+):
+    """Persistence independently verifies HMAC types and comparison authenticity."""
+    from backend.app.rag.shadow import (
+        ShadowAuditWriter,
+        ShadowComparator,
+        ShadowComparison,
+    )
+
+    valid = ShadowComparator(SETTINGS).compare(
+        legacy=_legacy(_evidence(1)),
+        v2=_result(_evidence(1)),
+        scope=_scope(),
+    )
+    forged_raw = ShadowComparison(
+        **{
+            **{field: getattr(valid, field) for field in valid.__dataclass_fields__},
+            'security_scope_fingerprint': 'raw query/source/id injection',
+        }
+    )
+    with pytest.raises(ValueError, match='HMAC|comparison'):
+        ShadowAuditWriter(SETTINGS).append(db_session, forged_raw)
+
+    stale_identity = replace(valid, unclassified_shadow_mismatch_count=1)
+    with pytest.raises(ValueError, match='comparison'):
+        ShadowAuditWriter(SETTINGS).append(db_session, stale_identity)
 
 
 def test_tampered_legacy_observation_is_rejected_before_comparison():
@@ -511,6 +587,7 @@ def test_pgvector_shadow_dispatches_one_embedding_zero_generation_and_finalizes(
     )
     shared = _embedding_result(query='identical bytes')
     calls = []
+    finalization_fence = [False]
 
     class Ledger:
         def create_admission(self, **kwargs):
@@ -521,13 +598,21 @@ def test_pgvector_shadow_dispatches_one_embedding_zero_generation_and_finalizes(
             return object()
 
         def finalize_shadow_run(self, **kwargs):
+            factory = kwargs.pop('comparison_factory', None)
+            if factory is not None:
+                finalization_fence[0] = True
+                try:
+                    kwargs['comparison'] = factory()
+                    kwargs['outcome'] = kwargs['comparison'].outcome
+                finally:
+                    finalization_fence[0] = False
             calls.append(('final', kwargs))
 
         def finalize_inter_component_failure(self, **kwargs):
             calls.append(('final', {**kwargs, 'comparison': None}))
 
     class Transport:
-        def prepare(self, **kwargs):
+        def prepare_shadow_legacy(self, **kwargs):
             calls.append(('transport_prepare', kwargs))
             return object()
 
@@ -537,6 +622,7 @@ def test_pgvector_shadow_dispatches_one_embedding_zero_generation_and_finalizes(
 
     class Retriever:
         def invoke(self, request, config):
+            assert finalization_fence[0], 'V2 read escaped the generation fence'
             calls.append(('v2_retrieval', request.query_embedding_result, config))
             return replace(
                 _result(_evidence(1)),
@@ -580,6 +666,7 @@ def test_pgvector_shadow_dispatches_one_embedding_zero_generation_and_finalizes(
     legacy_calls = []
 
     def legacy_observation(**_kwargs):
+        assert finalization_fence[0], 'legacy read escaped the generation fence'
         if observer_fails:
             raise RuntimeError('aggregate projection unavailable')
         return _rebuild_legacy(
@@ -612,25 +699,28 @@ def test_pgvector_shadow_dispatches_one_embedding_zero_generation_and_finalizes(
     assert len(admission['components']) == 2
 
 
+@pytest.mark.parametrize('surface', ('ask', 'search', 'assistant'))
 def test_retained_provider_blocker_skips_d_admission_and_serves_standalone_legacy(
-    db_session,
+    db_session, tmp_path, surface,
 ):
     """Catches a retained D blocker replacing or suppressing the legacy product."""
+    from decimal import Decimal
     from types import SimpleNamespace
 
     from sqlalchemy import select
 
-    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
     from backend.app.agents.rag_orchestrator_agent.v2_input import (
         prepare_direct_request_text,
     )
     from backend.app.core.demo_auth import DemoUser
     from backend.app.models import AuditLog
     from backend.app.rag.shadow import run_pgvector_shadow
+    from backend.tests.test_rag_v2_costs import _snapshot
 
     settings = SETTINGS.model_copy(update={
         'langgraph_rag_v2_mode': 'shadow',
-        'langgraph_rag_v2_stage': 'search',
+        'langgraph_rag_v2_stage': 'assistant',
         'rag_retrieval_backend': 'pgvector',
     })
     prepared = prepare_direct_request_text(
@@ -638,19 +728,37 @@ def test_retained_provider_blocker_skips_d_admission_and_serves_standalone_legac
         key=settings.agent_runtime_fingerprint_secret.encode(),
     )
     safety_calls = []
-
-    class Safety:
-        def require_ready(self, connection, component, snapshot):
-            safety_calls.append((connection, component, snapshot))
-            raise RagProviderSafetyError('provider family is blocked')
+    safety = RagProviderSafetyService(
+        latch_path=tmp_path / f'shadow-{surface}-retained.json',
+        identity_secret=b'shadow-retained-boundary-test-key',
+        designated_environment_id='test',
+    )
+    snapshots = (_snapshot('query_embedding'), _snapshot('answer_generation'))
+    with db_session.get_bind().connect() as connection:
+        safety.bootstrap(
+            connection,
+            snapshots,
+            reviewed_transition_reference_hmac='9' * 64,
+        )
+        safety.block_remediation(
+            connection,
+            'query_embedding',
+            category='provider_safety_unavailable',
+            agent_run_id=21,
+            input_tokens=20,
+            output_tokens=0,
+            cost_usd=Decimal('0.000010'),
+        )
 
     class Ledger:
-        provider_safety_authority = Safety()
+        provider_safety_authority = safety
 
         def require_component_safety_ready(self, snapshot):
-            self.provider_safety_authority.require_ready(
-                object(), 'query_embedding', snapshot
-            )
+            safety_calls.append(snapshot)
+            with db_session.get_bind().connect() as connection:
+                self.provider_safety_authority.require_ready(
+                    connection, 'query_embedding', snapshot
+                )
 
         def create_admission(self, **_kwargs):
             raise AssertionError('blocked shadow must not create a D admission')
@@ -666,10 +774,7 @@ def test_retained_provider_blocker_skips_d_admission_and_serves_standalone_legac
                 budget=object()
             )
         ),
-        policy_snapshots=(
-            SimpleNamespace(component='query_embedding'),
-            SimpleNamespace(component='answer_generation'),
-        ),
+        policy_snapshots=snapshots,
         cost_ledger=Ledger(),
         allocate_run_id=lambda: pytest.fail('blocked shadow cannot allocate a run'),
     )
@@ -691,7 +796,7 @@ def test_retained_provider_blocker_skips_d_admission_and_serves_standalone_legac
         session_factory=lambda: None,
         settings=settings,
         actor=actor,
-        surface='search',
+        surface=surface,
         prepared_text=prepared,
         legacy_invoke=lambda carrier: legacy_calls.append(carrier) or public,
     )
@@ -745,3 +850,131 @@ def test_assistant_prior_context_delta_writes_only_sanitized_aggregate(db_sessio
     assert raw_context not in serialized
     assert "'public_agent_run_id'" not in serialized
     assert "'internal_run_id'" not in serialized
+
+
+def test_pgvector_legacy_failure_closes_paid_internal_owner_before_reraising():
+    """A public legacy failure must not strand the paid shadow parent pending."""
+    from types import SimpleNamespace
+
+    from backend.app.agents.rag_orchestrator_agent.v2_input import (
+        prepare_direct_request_text,
+    )
+    from backend.app.core.demo_auth import DemoUser
+    from backend.app.rag.shadow import run_pgvector_shadow
+    from backend.tests.test_rag_v2_pgvector_retriever import _embedding_result
+
+    settings = SETTINGS.model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'search',
+        'rag_retrieval_backend': 'pgvector',
+    })
+    prepared_text = prepare_direct_request_text(
+        'identical bytes', key=settings.agent_runtime_fingerprint_secret.encode()
+    )
+    shared = _embedding_result(query='identical bytes')
+    finalizations = []
+
+    class Ledger:
+        def create_admission(self, **_kwargs):
+            pass
+
+        def claim_component(self, **_kwargs):
+            return object()
+
+        def finalize_inter_component_failure(self, **kwargs):
+            finalizations.append(kwargs)
+
+    class Transport:
+        def prepare_shadow_legacy(self, **_kwargs):
+            return object()
+
+        def dispatch_and_finalize(self, **_kwargs):
+            return SimpleNamespace(output=shared)
+
+    services = SimpleNamespace(
+        db=object(),
+        security_scope_resolver=SimpleNamespace(resolve=lambda **_kwargs: _scope()),
+        index_readiness=SimpleNamespace(
+            inspect=lambda **_kwargs: SimpleNamespace(
+                ready=True, corpus_generation=7, vector_index_generation=11,
+            )
+        ),
+        query_embedding_adapter=SimpleNamespace(
+            prepare_shadow_legacy=lambda request, readiness: shared.prepared
+        ),
+        policy_snapshots=(
+            SimpleNamespace(component='query_embedding'),
+            SimpleNamespace(component='answer_generation'),
+        ),
+        cost_policy=SimpleNamespace(
+            reserve_unused_component=lambda component: SimpleNamespace(
+                component=component
+            )
+        ),
+        allocate_run_id=lambda: 91,
+        cost_ledger=Ledger(),
+        provider_transport_factory=lambda: Transport(),
+    )
+
+    @contextmanager
+    def request_factory(**_kwargs):
+        yield services
+
+    actor = DemoUser(
+        id='shadow-user', email='shadow@example.test', role='admin',
+        permission_levels={'public'}, name='Shadow', title='Tester',
+        department='Platform',
+    )
+    with pytest.raises(RuntimeError, match='legacy failed'):
+        run_pgvector_shadow(
+            request_factory=request_factory,
+            session_factory=lambda: None,
+            settings=settings,
+            actor=actor,
+            surface='search',
+            prepared_text=prepared_text,
+            legacy_invoke=lambda _carrier: (_ for _ in ()).throw(
+                RuntimeError('legacy failed')
+            ),
+        )
+
+    assert finalizations == [
+        {'run_id': 91, 'outcome': 'unexpected_internal_error'}
+    ]
+
+
+def test_canonical_pgvector_backend_does_not_require_legacy_boolean_alias(
+    monkeypatch,
+):
+    """The canonical resolver is the only legacy-store routing authority."""
+    from types import SimpleNamespace
+
+    import backend.app.rag.search_store as module
+
+    settings = Settings(
+        _env_file=None,
+        rag_retrieval_backend='pgvector',
+        rag_use_pgvector_search=False,
+        openai_api_key='test-only-key',
+    )
+    monkeypatch.setattr(module, 'PgVectorStore', lambda **_kwargs: object())
+    monkeypatch.setattr(module, 'OpenAIEmbeddingModel', lambda **_kwargs: object())
+    db = SimpleNamespace(bind=SimpleNamespace(dialect=SimpleNamespace(name='postgresql')))
+
+    assert module.build_pgvector_search_store(db=db, settings=settings) is not None
+
+
+def test_legacy_pgvector_alias_selects_pgvector_shadow_runner():
+    """An unset canonical field still honors the approved migration alias."""
+    from functools import partial
+
+    from backend.app.agent_runtime.rag_v2_composition import _default_shadow_runner
+
+    settings = Settings(_env_file=None, rag_use_pgvector_search=True)
+    runner = _default_shadow_runner(
+        session_factory=lambda: None,
+        settings=settings,
+    )
+
+    assert isinstance(runner, partial)
+    assert runner.func.__name__ == 'run_pgvector_shadow'

@@ -5280,3 +5280,36 @@ tests passed with 53 tests; ruff passed.
   and retrieval-only shadow. This is the next **actual implementation** step;
   it is not a planning task and must not be confused with Deliverable E Neo4j
   GraphRAG.
+
+## 2026-09-13 Task 21 review fix round 1 handoff
+
+- Worktree/branch: `.worktrees/review-hitl-v2-design` on
+  `codex/rag-orchestrator-agent`. Original Task 21 base is
+  `b832e58920c4dbdd89fd8f201de2b43a969c316f`; first candidate is
+  `51c8f60121fea89df3af677324366c9a46726cf7`. Review fix F1-F7 is contained in
+  the current local candidate and awaits independent cumulative rereview.
+- F1/F2: production `RagProviderDispatchAuthority` owns a narrowly
+  authenticated not-ready shadow permit and revalidates it at dispatch; all
+  composition/facade/legacy-store decisions use `resolved_rag_backend()` so a
+  canonical false pgvector flag cannot be overridden by the legacy alias.
+- F3/F4: comparator repair is limited to exact canonical pgvector
+  `chunk:{positive-int}` leakage and otherwise reports an unclassified
+  mismatch. `ShadowComparison.verify()` revalidates types, counts, outcome,
+  intended-delta HMAC, and comparison HMAC at the audit persistence boundary;
+  raw query/source/id injection is rejected.
+- F5/F6: a paid embedding followed by legacy failure terminalizes its internal
+  owner with the actual cost, and restart recovery scans only owner-fenced
+  pending shadow rows without provider redispatch. Ready comparison and
+  aggregate audit run inside the same provider-safety/corpus-generation lock
+  transaction, with post-callback generation revalidation and rollback on
+  drift.
+- F7: the real retained latch is exercised for both blocker categories across
+  3 modes x 4 stages x 3 surfaces. Disabled/non-cutover paths preserve legacy;
+  active shadow is advancement-red and legacy-safe; active enforce refuses D.
+  The actual blocked shadow runner is separately exercised for Ask, Search,
+  and Assistant.
+- Verification must be rerun from the final commit before claiming CLEAN. The
+  PostgreSQL lock-race test in `backend/tests/test_rag_v2_costs_postgres.py`
+  requires `PARAWORKS_TEST_POSTGRES_URL`; absence is a documented release gate,
+  not a pass. Do not run live providers/network, activate rollout, or start
+  Task 22 until independent rereview is CLEAN.

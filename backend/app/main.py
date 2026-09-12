@@ -125,6 +125,11 @@ def create_app(
                 settings=settings,
             )
             key_bootstrap_result = key_bootstrap_service.ensure_initialized()
+            rag_shadow_recovered_count = _recover_rag_shadow_batch(
+                workflow_session_factory,
+                settings=settings,
+                limit=100,
+            )
             rag_runtime = build_rag_v2_runtime(
                 settings=settings,
                 session_factory=workflow_session_factory,
@@ -202,6 +207,7 @@ def create_app(
             app.state.rag_graph_registry = rag_runtime.graph_registry
             app.state.agent_manifest_registry = rag_runtime.manifest_registry
             app.state.rag_application_facade = rag_runtime.facade
+            app.state.rag_shadow_recovered_count = rag_shadow_recovered_count
             app.state.review_agent_catalog = catalog
             app.state.review_agent_registry = agent_registry
             app.state.review_model_readiness = model_readiness
@@ -303,6 +309,36 @@ def _recover_auto_review_calls_batch(
             validation_remaining=1,
             failure_count=1,
         )
+
+
+def _recover_rag_shadow_batch(
+    session_factory: WorkflowSessionFactory,
+    *,
+    settings: Settings,
+    limit: int,
+) -> int | None:
+    """Recover only durable paid shadow projection owners; never call providers."""
+    from backend.app.agent_runtime.rag_cost_ledger import RagCostLedgerError
+    from backend.app.agent_runtime.rag_provider_transport import (
+        RagProviderTransportError,
+        _assemble_rag_request_cost_authority,
+    )
+
+    try:
+        with session_factory() as db:
+            if db.get_bind().dialect.name != 'postgresql':
+                return 0
+            assembly = _assemble_rag_request_cost_authority(
+                settings=settings,
+                session=db,
+            )
+            recovered = assembly.store.recover_incomplete_shadow_runs(limit=limit)
+            return len(recovered)
+    except (SQLAlchemyError, RagCostLedgerError, RagProviderTransportError):
+        # Pending rows remain fail-closed and provider-ineligible. ``None`` is
+        # retained in app state so an unavailable recovery is never reported as
+        # a successful zero-row scan.
+        return None
 
 
 app = create_app()

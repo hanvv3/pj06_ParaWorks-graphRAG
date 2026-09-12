@@ -146,7 +146,9 @@ def _transport_ledger(
     return ledger
 
 
-def _prepared_query(query_budget) -> PreparedQueryEmbedding:
+def _prepared_query(
+    query_budget, *, readiness_snapshot_hmac: str = '4' * 64
+) -> PreparedQueryEmbedding:
     query_utf8 = '민감한 근거'.encode()
     query_hmac = build_query_embedding_retrieval_query_hmac_from_utf8(
         query_utf8,
@@ -161,7 +163,7 @@ def _prepared_query(query_budget) -> PreparedQueryEmbedding:
         transient_query_utf8=query_utf8,
         corpus_generation=1,
         vector_index_generation=1,
-        readiness_snapshot_hmac='4' * 64,
+        readiness_snapshot_hmac=readiness_snapshot_hmac,
         model_config_snapshot_hmac=model_hmac,
         provider_policy_snapshot_hmac=provider_hmac,
         estimated_input_tokens=query_budget.estimated_input_tokens,
@@ -170,7 +172,7 @@ def _prepared_query(query_budget) -> PreparedQueryEmbedding:
             retrieval_query_hmac=query_hmac,
             corpus_generation=1,
             vector_index_generation=1,
-            readiness_snapshot_hmac='4' * 64,
+            readiness_snapshot_hmac=readiness_snapshot_hmac,
             model_config_snapshot_hmac=model_hmac,
             provider_policy_snapshot_hmac=provider_hmac,
             budget=query_budget,
@@ -180,7 +182,14 @@ def _prepared_query(query_budget) -> PreparedQueryEmbedding:
     )
 
 
-def _admit_transport(ledger, run_id: int, *, surface='ask', scope_hmac='3' * 64):
+def _admit_transport(
+    ledger,
+    run_id: int,
+    *,
+    surface='ask',
+    scope_hmac='3' * 64,
+    mode='enforce',
+):
     from backend.app.agents.rag_orchestrator_agent.v2_input import (
         prepare_direct_request_text,
     )
@@ -199,7 +208,7 @@ def _admit_transport(ledger, run_id: int, *, surface='ask', scope_hmac='3' * 64)
     ledger.create_admission(
         agent_run_id=run_id,
         surface=surface,
-        mode='enforce',
+        mode=mode,
         cutover_stage=surface,
         configured_backend='pgvector',
         query_context_version='direct-query:v1',
@@ -207,7 +216,7 @@ def _admit_transport(ledger, run_id: int, *, surface='ask', scope_hmac='3' * 64)
         retrieval_query_hmac=text.retrieval_query_hmac,
         security_scope_fingerprint=scope_hmac,
         admission_cache_identity_hmac=None,
-        source_window=f'rag-v2:admission:enforce:{surface}:pgvector',
+        source_window=f'rag-v2:admission:{mode}:{surface}:pgvector',
         components=(
             (_snapshot('query_embedding', _TEST_COST_POLICY), query_budget),
             (
@@ -374,6 +383,100 @@ def test_server_builds_canonical_request_and_consumes_store_owned_grant_once(
     assert '민감한 근거' not in caplog.text
     with pytest.raises(RagProviderTransportError):
         authority.dispatch(grant=grant, prepared=prepared)
+
+
+def test_real_authority_allows_not_ready_embedding_only_for_shadow_legacy(
+    tmp_path: Path,
+):
+    """The narrow carrier permit cannot weaken ordinary enforce readiness."""
+    seen = []
+    client = _Client(seen)
+    ledger = _transport_ledger(tmp_path, client)
+    budget = _admit_transport(ledger, 301, surface='search', mode='shadow')
+    not_ready = RagServingIndexReadiness(
+        ready=False,
+        corpus_generation=1,
+        vector_index_generation=1,
+        expected_document_count=1,
+        live_vector_count=0,
+        tombstone_count=0,
+        mismatch_count_capped_at_20=1,
+        embedding_model='text-embedding-3-small',
+        embedding_dimensions=1536,
+        index_policy_version='rag-v2-serving-index:v1',
+        readiness_snapshot_hmac='5' * 64,
+    )
+    client.response = {
+        'object': 'list',
+        'model': 'text-embedding-3-small',
+        'data': [{
+            'object': 'embedding',
+            'index': 0,
+            'embedding': [1.0, *([0.0] * 1535)],
+        }],
+        'usage': {
+            'prompt_tokens': budget.estimated_input_tokens,
+            'total_tokens': budget.estimated_input_tokens,
+        },
+    }
+    grant = ledger.claim_component(
+        run_id=301,
+        component='query_embedding',
+        prepared=budget,
+    )
+    authority = _authority(ledger, readiness=not_ready)
+    prepared = authority.prepare_shadow_legacy(
+        grant=grant,
+        prepared=_prepared_query(
+            budget,
+            readiness_snapshot_hmac=not_ready.readiness_snapshot_hmac,
+        ),
+    )
+    delivery = authority.dispatch_and_finalize(grant=grant, prepared=prepared)
+
+    assert delivery.output is not None
+    assert delivery.component_final.terminal_outcome == 'component_succeeded'
+    assert len(seen) == 1
+
+    enforce_path = tmp_path / 'enforce'
+    enforce_path.mkdir()
+    enforce_ledger = _transport_ledger(enforce_path, _Client([]))
+    enforce_budget = _admit_transport(enforce_ledger, 302, surface='search')
+    enforce_grant = enforce_ledger.claim_component(
+        run_id=302,
+        component='query_embedding',
+        prepared=enforce_budget,
+    )
+    enforce = _authority(enforce_ledger, readiness=not_ready)
+    with pytest.raises(RagProviderTransportError):
+        enforce.prepare_shadow_legacy(
+            grant=enforce_grant,
+            prepared=_prepared_query(
+                enforce_budget,
+                readiness_snapshot_hmac=not_ready.readiness_snapshot_hmac,
+            ),
+        )
+
+    ordinary_path = tmp_path / 'ordinary'
+    ordinary_path.mkdir()
+    ordinary_ledger = _transport_ledger(ordinary_path, _Client([]))
+    ordinary_budget = _admit_transport(
+        ordinary_ledger, 303, surface='search'
+    )
+    ordinary_grant = ordinary_ledger.claim_component(
+        run_id=303,
+        component='query_embedding',
+        prepared=ordinary_budget,
+    )
+    ordinary = _authority(ordinary_ledger, readiness=not_ready)
+    with pytest.raises(RagProviderTransportError):
+        ordinary.prepare(
+            grant=ordinary_grant,
+            prepared=_prepared_query(
+                ordinary_budget,
+                readiness_snapshot_hmac=not_ready.readiness_snapshot_hmac,
+            ),
+        )
 
 
 def test_forged_prepared_or_grant_and_evidence_drift_are_zero_call(tmp_path: Path):

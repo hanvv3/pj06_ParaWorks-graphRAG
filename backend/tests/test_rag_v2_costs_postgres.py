@@ -64,7 +64,12 @@ from backend.app.db.initialization import (
     TrustedPostgresEngineBootstrap,
     initialize_database_runtime,
 )
-from backend.app.models import AgentRun, AgentRunCostComponent
+from backend.app.models import (
+    AgentRun,
+    AgentRunCostComponent,
+    AuditLog,
+    RagServingCorpusGeneration,
+)
 from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import StrictProviderUsage
 from backend.app.rag.serving_locks import (
@@ -216,6 +221,166 @@ def test_postgres_failed_component_closes_exact_sibling_and_parent(
     )
     assert final.parent_status == 'failed'
     assert final.parent_total_charged_cost_usd == Decimal('0.000010')
+
+
+def test_postgres_shadow_comparison_and_audit_hold_one_corpus_generation(
+    postgres_cost_authority: PostgresAuthorityFixture,
+):
+    """A generation writer waits until both comparison reads and audit commit."""
+    from dataclasses import replace
+
+    from backend.app.rag.shadow import ShadowComparator
+    from backend.tests.test_rag_shadow import (
+        SETTINGS,
+        _evidence,
+        _legacy,
+        _rebuild_legacy,
+        _result,
+        _scope,
+    )
+
+    engine, service, bootstrap = postgres_cost_authority
+    run_id = (uuid4().int % (2**31 - 1)) + 1
+    with engine.begin() as connection:
+        register_advisory_identity_db(
+            connection,
+            rag_projection_owner_lock_id(run_id),
+            identity_namespace='dynamic',
+        )
+    with engine.connect() as connection:
+        owner_capability = load_registered_advisory_capability(
+            connection,
+            rag_projection_owner_lock_id(run_id),
+            identity_namespace='dynamic',
+        )
+    ledger = _assemble_rag_cost_ledger(
+        Session(engine),
+        identity_secret=b'postgres-shadow-fence-test-key',
+        cost_policy=_TEST_COST_POLICY,
+        provider_safety=service,
+        provider_connection_factory=engine.connect,
+        designated_environment_id='test',
+        designated_host_id='pytest-shadow-fence',
+        projection_lock_capability_factory=lambda _run_id: owner_capability,
+        runtime_health=bootstrap._runtime_effect_authority(engine),
+    )
+    comparison = ShadowComparator(SETTINGS).compare(
+        legacy=_rebuild_legacy(
+            _legacy(_evidence(1)),
+            configured_backend='pgvector',
+            effective_backend='pgvector',
+        ),
+        v2=replace(
+            _result(_evidence(1)),
+            configured_backend='pgvector',
+            effective_backend='pgvector',
+        ),
+        scope=_scope(),
+    )
+    budget = _admit_transport(
+        ledger,
+        run_id,
+        surface='search',
+        scope_hmac=comparison.security_scope_fingerprint,
+        mode='shadow',
+    )
+    grant = ledger.claim_component(
+        run_id=run_id,
+        component='query_embedding',
+        prepared=budget,
+    )
+    ledger.consume_committed_grant(grant)
+    ledger.finalize_component(
+        grant=grant,
+        observation=StrictProviderOutcome(
+            component='query_embedding',
+            classification='validated_success',
+            terminal_outcome='component_succeeded',
+            provider_dispatch_started=True,
+            provider_response_received=True,
+            strict_usage=StrictProviderUsage(20, 0, 20),
+            actual_cost_usd=Decimal('0.000001'),
+            safety_action='unchanged',
+        ),
+    )
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    writer_errors: list[BaseException] = []
+    observed_generations: list[int] = []
+
+    def mutate_generation():
+        try:
+            with Session(engine) as db, db.begin():
+                writer_started.set()
+                row = db.scalar(
+                    select(RagServingCorpusGeneration)
+                    .where(RagServingCorpusGeneration.id == 1)
+                    .with_for_update()
+                )
+                assert row is not None
+                row.corpus_generation = 2
+                row.vector_index_generation = 2
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            writer_errors.append(exc)
+        finally:
+            writer_finished.set()
+
+    worker: threading.Thread | None = None
+
+    def comparison_factory():
+        nonlocal worker
+        first = ledger._session.get(RagServingCorpusGeneration, 1)
+        assert first is not None
+        observed_generations.append(first.corpus_generation)
+        worker = threading.Thread(target=mutate_generation, daemon=True)
+        worker.start()
+        assert writer_started.wait(5)
+        time.sleep(0.2)
+        assert writer_finished.is_set() is False
+        ledger._session.expire(first)
+        second = ledger._session.get(RagServingCorpusGeneration, 1)
+        assert second is not None
+        observed_generations.append(second.corpus_generation)
+        return comparison
+
+    readiness = RagServingIndexReadiness(
+        ready=True,
+        corpus_generation=1,
+        vector_index_generation=1,
+        expected_document_count=0,
+        live_vector_count=0,
+        tombstone_count=0,
+        mismatch_count_capped_at_20=0,
+        embedding_model='text-embedding-3-small',
+        embedding_dimensions=1536,
+        index_policy_version='rag-v2-serving-index:v1',
+        readiness_snapshot_hmac='4' * 64,
+    )
+    terminal = ledger.finalize_shadow_run(
+        run_id=run_id,
+        outcome=None,
+        comparison=None,
+        settings=SETTINGS,
+        comparison_factory=comparison_factory,
+        prepared_embedding=_prepared_query(budget),
+        load_current_readiness=lambda: readiness,
+    )
+    assert worker is not None
+    worker.join(5)
+
+    assert writer_errors == []
+    assert writer_finished.is_set() is True
+    assert observed_generations == [1, 1]
+    assert terminal.status == 'complete'
+    with Session(engine) as db:
+        assert db.scalar(
+            select(RagServingCorpusGeneration.corpus_generation).where(
+                RagServingCorpusGeneration.id == 1
+            )
+        ) == 2
+        assert db.scalar(
+            select(AuditLog).where(AuditLog.action == 'rag_shadow_compared')
+        ) is not None
 
 
 def test_postgres_reviewed_intercomponent_recovery_accepts_terminal_zero_sibling(

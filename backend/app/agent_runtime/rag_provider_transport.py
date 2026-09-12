@@ -314,6 +314,7 @@ class _PreparedState:
     binding: RagProviderSafetyBinding
     evidence_identity_hmac: str
     query_identity_hmac: str
+    shadow_legacy_not_ready_permit: bool
     domain_prepared: PreparedQueryEmbedding | PreparedAnswerInvocation = field(
         repr=False
     )
@@ -647,7 +648,40 @@ class RagProviderDispatchAuthority:
                 return self._prepare_under_health(
                     grant=grant,
                     prepared=prepared,
+                    shadow_legacy_not_ready_permit=False,
                 )
+        except PostgresRuntimeHealthUnavailableError:
+            self._cancel_unconsumed_claim(
+                grant,
+                outcome='provider_safety_unavailable',
+            )
+            raise RagProviderTransportError(
+                'provider runtime health refused preparation'
+            ) from None
+
+    def prepare_shadow_legacy(
+        self,
+        *,
+        grant: CommittedRagDispatchGrant,
+        prepared: PreparedQueryEmbedding,
+    ) -> _PreparedProviderDispatch:
+        """Prepare the exact shadow-owned legacy embedding carrier."""
+        try:
+            with self._runtime_health._effect('rag_provider_prepare'):
+                self._store.require_shadow_legacy_embedding_grant(grant)
+                return self._prepare_under_health(
+                    grant=grant,
+                    prepared=prepared,
+                    shadow_legacy_not_ready_permit=True,
+                )
+        except RagCostLedgerError:
+            self._cancel_unconsumed_claim(
+                grant,
+                outcome='provider_safety_unavailable',
+            )
+            raise RagProviderTransportError(
+                'shadow legacy provider authority is unavailable'
+            ) from None
         except PostgresRuntimeHealthUnavailableError:
             self._cancel_unconsumed_claim(
                 grant,
@@ -662,6 +696,7 @@ class RagProviderDispatchAuthority:
         *,
         grant: CommittedRagDispatchGrant,
         prepared: object,
+        shadow_legacy_not_ready_permit: bool,
     ) -> _PreparedProviderDispatch:
         domain_prepared = prepared
         if type(prepared) not in {PreparedQueryEmbedding, PreparedAnswerInvocation}:
@@ -675,7 +710,10 @@ class RagProviderDispatchAuthority:
                 readiness = validate_rag_serving_index_readiness(
                     self._load_current_readiness()
                 )
-                if readiness[0] is not True:
+                if (
+                    readiness[0] is not True
+                    and shadow_legacy_not_ready_permit is not True
+                ):
                     raise ValueError
                 prepared = validate_prepared_query_embedding(
                     prepared,
@@ -769,6 +807,7 @@ class RagProviderDispatchAuthority:
             binding=binding,
             query_identity_hmac=query_identity_hmac,
             evidence_identity_hmac=evidence_identity_hmac,
+            shadow_legacy_not_ready_permit=shadow_legacy_not_ready_permit,
         )
         dispatch = _PreparedProviderDispatch(
             request_identity_hmac=identity,
@@ -783,6 +822,7 @@ class RagProviderDispatchAuthority:
             binding=binding,
             evidence_identity_hmac=evidence_identity_hmac,
             query_identity_hmac=query_identity_hmac,
+            shadow_legacy_not_ready_permit=shadow_legacy_not_ready_permit,
             domain_prepared=domain_prepared,
         )
         return dispatch
@@ -943,6 +983,9 @@ class RagProviderDispatchAuthority:
                     binding=state.binding,
                     query_identity_hmac=state.query_identity_hmac,
                     evidence_identity_hmac=state.evidence_identity_hmac,
+                    shadow_legacy_not_ready_permit=(
+                        state.shadow_legacy_not_ready_permit
+                    ),
                 ),
             )
         ):
@@ -957,11 +1000,16 @@ class RagProviderDispatchAuthority:
         safety_capability = order.acquire('provider_safety_rows')
         try:
             def send() -> _ClassifiedDelivery:
+                if state.shadow_legacy_not_ready_permit:
+                    self._store.require_shadow_legacy_embedding_grant(grant)
                 self._store.revalidate_c5_before_send(
                     state.domain_prepared,
                     order=order,
                     order_capability=c5_capability,
                     load_current_readiness=self._load_current_readiness,
+                    allow_not_ready_shadow=(
+                        state.shadow_legacy_not_ready_permit
+                    ),
                 )
                 cost_capability = order.acquire('agent_run_cost')
                 self._store.consume_transport_grant(
@@ -1334,6 +1382,7 @@ class RagProviderDispatchAuthority:
         binding: RagProviderSafetyBinding,
         query_identity_hmac: str,
         evidence_identity_hmac: str,
+        shadow_legacy_not_ready_permit: bool,
     ) -> str:
         return rag_identity_hmac(
             {
@@ -1353,6 +1402,9 @@ class RagProviderDispatchAuthority:
                 ).hexdigest(),
                 'request_bytes_sha256': hashlib.sha256(request_bytes).hexdigest(),
                 'service_tier': request.service_tier,
+                'shadow_legacy_not_ready_permit': (
+                    shadow_legacy_not_ready_permit
+                ),
             },
             secret=self._secret,
             schema_version='rag-provider-dispatch-request:v1',
