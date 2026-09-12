@@ -6009,3 +6009,21 @@ Cost/security note:
   initialization/binding `312 passed`, affected broad `1002 passed, 16
   skipped, 2128 deselected`, with static/security/migration checks green. Real
   PostgreSQL remains unrun because its URL is absent.
+
+## 2026-09-12 Deliverable D Core Task 13 runtime ownership candidate
+
+- Fixed the remaining constructor ownership gap by creating the runtime shell
+  before installing listeners and publishing bootstrap ownership before claim
+  retirement. Cleanup preserves exact quarantine ownership before acquiring
+  fallible locks, retains the primary exception, and bounds waiting on another
+  unfinished construction to one second.
+- Added nine deterministic provider-free regressions, including a failed
+  runtime construction concurrent with another healthy listener installation.
+  Final adjacent Task 13 checks: `393 passed, 10 skipped`, with three existing
+  SQLAlchemy rollback warnings. Static, import, migration-head, and secret
+  checks passed. Real PostgreSQL remains unrun because its test URL is absent.
+- Documented the actual cancellation contract after an exploratory trace test
+  showed that CPython's return event lies outside the function's exception
+  handler. Finite callback failures and protected pre-return cancellation are
+  covered; arbitrary repeated bytecode interruption is not claimed. This is
+  a candidate awaiting independent review; Task 14 remains blocked.

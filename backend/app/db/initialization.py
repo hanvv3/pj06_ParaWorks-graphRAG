@@ -1312,6 +1312,7 @@ class _CheckoutListenerConstructionResponsibility:
 
     def register(self) -> None:
         """Bound process quarantine to one exact construction before effects."""
+        deadline = monotonic_ns() + 1_000_000_000
         while True:
             existing: _CheckoutListenerConstructionResponsibility | None
             with _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION:
@@ -1326,7 +1327,14 @@ class _CheckoutListenerConstructionResponsibility:
                     _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
                     return
                 if existing._state in {'INSTALLING', 'INSTALLED', 'CLAIMING'}:
-                    _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.wait(timeout=0.1)
+                    remaining = (deadline - monotonic_ns()) / 1_000_000_000
+                    if remaining <= 0:
+                        raise PostgresRuntimeHealthUnavailableError(
+                            'PostgreSQL listener construction is unavailable'
+                        )
+                    _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.wait(
+                        timeout=min(0.1, remaining)
+                    )
                     continue
             if existing.drain_quarantine():
                 continue
@@ -1358,17 +1366,23 @@ class _CheckoutListenerConstructionResponsibility:
             with self._lock:
                 if (
                     self._state != 'INSTALLED'
-                    or self._owner is not bootstrap
+                    or (
+                        self._owner is not bootstrap
+                        and type(self._owner) is not DatabaseRuntime
+                    )
                     or self._registry is None
                 ):
                     raise TypeError('PostgreSQL listener construction changed')
                 bootstrap._listener_handoff_checkpoint('after_registry_install')
                 bootstrap._checkout_registry = self._registry
+                if type(self._owner) is DatabaseRuntime:
+                    self._owner.rag_postgres_bootstrap = bootstrap
                 bootstrap._listener_handoff_checkpoint('after_bootstrap_store')
                 self._state = 'CLAIMING'
             self._complete_claim()
         except BaseException:
-            self.construction_failed()
+            with suppress(BaseException):
+                self.construction_failed()
             raise
 
     def claim_standalone(self, owner: object) -> None:
@@ -1380,10 +1394,19 @@ class _CheckoutListenerConstructionResponsibility:
             self._retire_checkpoint('standalone_retire')
             self._complete_claim()
         except BaseException:
-            self.construction_failed()
+            with suppress(BaseException):
+                self.construction_failed()
             raise
 
     def construction_failed(self) -> None:
+        # Publish the exact tombstone before fallible locks/cleanup. These plain
+        # slot/dict writes invoke no callbacks; do not move them behind a lock
+        # whose acquisition can itself be interrupted. This retains an owner
+        # even after claim retirement, without overwriting a foreign record.
+        if self._state in {'NEW', 'CLEAN'}:
+            return
+        self._state = 'QUARANTINED'
+        _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
         should_drain = False
         try:
             with _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION:
@@ -1448,12 +1471,8 @@ class _CheckoutListenerConstructionResponsibility:
                 with self._lock:
                     self._state = 'CLAIMED'
             except BaseException:
-                with self._lock:
-                    self._state = 'QUARANTINED'
-                if not _FAILED_CHECKOUT_LISTENER_CLEANUPS:
-                    _FAILED_CHECKOUT_LISTENER_CLEANUPS[id(self)] = self
                 with suppress(BaseException):
-                    _FAILED_CHECKOUT_LISTENER_CLEANUPS_CONDITION.notify_all()
+                    self.construction_failed()
                 raise
 
     def _retire_checkpoint(self, _stage: str) -> None:
@@ -1619,7 +1638,8 @@ class _TrustedApplicationCheckoutRegistry:
             with self._condition:
                 self._state = 'closing'
                 self._condition.notify_all()
-            responsibility.construction_failed()
+            with suppress(BaseException):
+                responsibility.construction_failed()
             raise
         else:
             responsibility.mark_installed()
@@ -1856,6 +1876,9 @@ class TrustedPostgresEngineBootstrap:
         policy_capability_id: str,
         runtime_health: TrustedPostgresRuntimeHealth,
         _seal: object,
+        _construction_responsibility: (
+            _CheckoutListenerConstructionResponsibility | None
+        ) = None,
     ) -> None:
         if (
             _seal is not _POSTGRES_BOOTSTRAP_SEAL
@@ -1873,14 +1896,17 @@ class TrustedPostgresEngineBootstrap:
         self._runtime_health = runtime_health
         self._seal = _seal
         self._state_lock = RLock()
-        responsibility = _CheckoutListenerConstructionResponsibility(
-            owner=self,
-            runtime_health=runtime_health,
-            _seal=_POSTGRES_LISTENER_CONSTRUCTION_SEAL,
-        )
+        responsibility = _construction_responsibility
+        if responsibility is None:
+            responsibility = _CheckoutListenerConstructionResponsibility(
+                owner=self,
+                runtime_health=runtime_health,
+                _seal=_POSTGRES_LISTENER_CONSTRUCTION_SEAL,
+            )
         self._listener_construction = responsibility
         try:
-            responsibility.register()
+            if _construction_responsibility is None:
+                responsibility.register()
             _TrustedApplicationCheckoutRegistry(
                 application_engine,
                 runtime_health=runtime_health,
@@ -1888,10 +1914,9 @@ class TrustedPostgresEngineBootstrap:
             )
             responsibility.claim_into_bootstrap(self)
         except BaseException:
-            responsibility.construction_failed()
+            with suppress(BaseException):
+                responsibility.construction_failed()
             raise
-        finally:
-            self._listener_construction = None
 
     def _listener_handoff_checkpoint(self, _stage: str) -> None:
         """Test seam around the lower-layer listener ownership handoff."""
@@ -2159,35 +2184,48 @@ def initialize_database_runtime(
         raise session_factory_failure
 
     assert session_factory is not None
-    postgres_bootstrap: TrustedPostgresEngineBootstrap | None = None
-    if parsed_url.get_backend_name() == 'postgresql':
-        policy_capability_id = secrets.token_hex(32)
-        runtime_health = TrustedPostgresRuntimeHealth(
-            _seal=_POSTGRES_RUNTIME_HEALTH_SEAL
+    responsibility: _CheckoutListenerConstructionResponsibility | None = None
+    try:
+        # Store the public owner before any listener side effect. Bootstrap
+        # publishes into this shell before retiring its construction claim, so
+        # a constructor-return/assignment interruption cannot orphan listeners.
+        runtime = DatabaseRuntime(
+            engine=engine,
+            session_factory=session_factory,
         )
+        if parsed_url.get_backend_name() == 'postgresql':
+            policy_capability_id = secrets.token_hex(32)
+            runtime_health = TrustedPostgresRuntimeHealth(
+                _seal=_POSTGRES_RUNTIME_HEALTH_SEAL
+            )
+            responsibility = _CheckoutListenerConstructionResponsibility(
+                owner=runtime,
+                runtime_health=runtime_health,
+                _seal=_POSTGRES_LISTENER_CONSTRUCTION_SEAL,
+            )
+            responsibility.register()
 
-        def dedicated_factory() -> Engine:
-            dedicated_options = _engine_options_for_create(engine_options)
-            dedicated_options['poolclass'] = NullPool
-            return create_engine(database_url, **dedicated_options)
+            def dedicated_factory() -> Engine:
+                dedicated_options = _engine_options_for_create(engine_options)
+                dedicated_options['poolclass'] = NullPool
+                return create_engine(database_url, **dedicated_options)
 
-        try:
-            postgres_bootstrap = TrustedPostgresEngineBootstrap(
+            TrustedPostgresEngineBootstrap(
                 application_engine=engine,
                 dedicated_factory=dedicated_factory,
                 policy_capability_id=policy_capability_id,
                 runtime_health=runtime_health,
                 _seal=_POSTGRES_BOOTSTRAP_SEAL,
+                _construction_responsibility=responsibility,
             )
-        except BaseException:
+        return runtime
+    except BaseException:
+        if responsibility is not None:
             with suppress(BaseException):
-                engine.dispose()
-            raise
-    return DatabaseRuntime(
-        engine=engine,
-        session_factory=session_factory,
-        rag_postgres_bootstrap=postgres_bootstrap,
-    )
+                responsibility.construction_failed()
+        with suppress(BaseException):
+            engine.dispose()
+        raise
 
 
 def _engine_options_for_create(

@@ -4377,3 +4377,34 @@ tests passed with 53 tests; ruff passed.
   as 149 real-PostgreSQL requirements, 6 PostgreSQL-only Task 13 assembly tests
   invalid under forced SQLite, and 10 existing Slack/OAuth/config-sensitive
   expectations. It is diagnostic context, not production-PostgreSQL evidence.
+
+## 2026-09-12 Deliverable D Core Task 13 twenty-second remediation candidate
+
+- Resumed checkpoint `928f4c2` on `codex/rag-orchestrator-agent` in
+  `.worktrees/review-hitl-v2-design`. Production changes are confined to
+  `backend/app/db/initialization.py`; acceptance tests are in
+  `backend/tests/test_database_listener_publication.py`.
+- Runtime shell and its exact listener responsibility are stored before
+  listener effects. Bootstrap publishes into the shell before claim retirement;
+  outer assembly failures preserve their original BaseException and perform
+  one engine disposal. Cleanup publishes an exact quarantine tombstone before
+  fallible locks. Transitional construction waits fail typed after one second.
+- Nine new acceptance cases cover constructor-completes-then-raises, protected
+  pre-return cancellation, cleanup entry/global-lock/self-lock interruption,
+  claim-map-pop rollback failure, stalled admission, and exact concurrent
+  foreign-listener isolation. Final focused/affected evidence is `393 passed,
+  10 skipped`, plus three existing SQLAlchemy rollback warnings at binding-test
+  line 2130. Ruff, compile/import, secret-pattern scan, Alembic single head
+  `a4d5e6f7b8c9`, and diff check passed. Use the functioning
+  `.venv-task4-r3-review/Scripts/python.exe`, disable Settings dotenv before
+  test collection, and choose a fresh `.tmp/` basetemp to avoid the old shared
+  temporary-directory ACL error.
+- Failure model is explicit: finite operation/callback exceptions and the
+  protected pre-return boundary; not arbitrary repeated bytecode interruptions,
+  a forever-hung dependency, process death, or caller ownership after return.
+  CPython's actual `RETURN_VALUE` is outside its exception handler table.
+  Details, exploratory failure, RED results, and exact verification command
+  are in the Task 13 report's twenty-second remediation section.
+- Candidate only: independent review is still required, and Task 14 remains
+  blocked. `PARAWORKS_TEST_POSTGRES_URL` is absent; no real PostgreSQL gate,
+  provider/network/Docker/paid call, `.env` access, push, or merge was performed.
