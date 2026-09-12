@@ -6495,3 +6495,26 @@ Cost/security note:
   rollout or release claim. Tests use mocked browser routes; no backend,
   provider, network, paid-model, Task 18 release-gate, or Task 20 UX behavior
   changed.
+
+## 2026-09-13 Deliverable D Core Task 19 fix round 1 candidate
+
+- Independent review found the first shared error decoder accepted non-exact or
+  unbounded envelopes, omitted the existing Auto-Review remediation code, and
+  had weak DTO/test coverage. Reviewer reproductions were moved into tracked
+  tests and observed RED before product edits.
+- Error bodies now have a 2,048-code-unit ceiling before JSON parsing. Arrays,
+  extra root/detail keys, inherited/accessor properties, malformed JSON, raw
+  text, oversize bodies, and unknown codes all degrade to `code=null` plus safe
+  Korean copy while retaining HTTP status.
+- The shared decoder minimally preserves the backend's
+  `remediation_required` code for the current Auto-Review consumer, which
+  revalidates it through its own exact set. Unknown/raw/non-exact failures stay
+  generic, while the bounded exact legacy parser remains compatible.
+- DTO compile gates now require exact mutual types, required keys, and explicit
+  `any` rejection. Browser capture exercises all five Assistant endpoints,
+  including message-list GET and email-send POST, with exact-one capability and
+  preserved auth/CSRF/content-type headers.
+- Final local evidence: TypeScript and lint exit 0, focused Task 19/Auto-Review
+  `11 passed`, and combined Task 19, Assistant memory, Review Workflow,
+  Auto-Review transport/UI `59 passed`. This remains a rereview candidate; no
+  Task 20, backend, live provider, network, paid model, push, merge, or deploy.

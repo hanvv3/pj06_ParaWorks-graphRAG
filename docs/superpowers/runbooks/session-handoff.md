@@ -5075,3 +5075,39 @@ tests passed with 53 tests; ruff passed.
 - Candidate status is `DONE_WITH_CONCERNS` pending independent Task 19 review.
   Do not start Task 20 from a self-review. No push, merge, deploy, Task 18
   release gate, backend, Slack, CDC, Redis/D.1, or paid-model work is included.
+
+## 2026-09-13 Deliverable D Core Task 19 fix round 1 candidate
+
+- Independent review at `2c967a42` was `NOT CLEAN` with F1–F4: unbounded and
+  non-exact shared error envelopes, lost Auto-Review remediation classification,
+  weak compile predicates, and two unexercised Assistant wrapper branches.
+- Tracked RED before production edits: Task 19 + Auto-Review Playwright was
+  `3 failed, 5 passed`; the substantive failures were extra-root
+  `budget_exceeded` acceptance and real-apiPost `remediation_required` loss.
+  The third failure exposed test sequencing for the new five-route capture.
+  Compile RED was five unused `@ts-expect-error` directives for deliberately
+  wrong types, followed by the missing pure decoder export plus the same five.
+- `frontend/src/lib/api/client.ts` reads failure bodies as text, rejects more
+  than 2,048 UTF-16 code units before `JSON.parse`, then requires non-array
+  objects with exact own data keys `detail` and `code`. Accessor/proxy/inherited,
+  extra-key, malformed, raw, oversize, and unknown inputs return null; status
+  and fixed Korean message remain.
+- Backend Auto-Review conflicts were inspected: `audit_required`,
+  `quality_audit_required`, `remediation_required`, `revoke_reason_conflict`,
+  `unsupported_transition`, fallback `invalid_auto_review_action`, plus audit
+  `audit_conflict`/`audit_unavailable`. The only current frontend discriminator
+  is remediation, so the shared and local exact sets minimally preserve only
+  `remediation_required`; other codes remain generic rather than becoming new
+  UI behavior.
+- `rag-v2-types.fixture.ts` now combines required-key proof, mutual exact type
+  equality, an explicit any detector, and five negative compile fixtures.
+  Assistant capture now proves the full five routes, case-insensitive exact-one
+  capability header, demo user, POST CSRF/content type, and negative shell APIs.
+- Fresh candidate evidence: full non-incremental TypeScript exit 0; lint exit 0
+  with no warnings; focused Task 19 + Auto-Review `11 passed`; combined Task 19,
+  Assistant memory, full Review Workflow integrations/UI, and Auto-Review
+  transport/UI `59 passed` in 37.8s, process exit 0. Existing unrelated proxy
+  `ECONNREFUSED` log noise remains in old Review specs.
+- Status is `DONE_WITH_CONCERNS` pending independent rereview. Task 20 remains
+  blocked. No Playwright config, backend, Task 18 release gate, Slack, CDC,
+  Redis/D.1, provider, network, paid model, push, merge, or deploy change.

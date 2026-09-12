@@ -135,9 +135,11 @@ const REVIEW_WORKFLOW_API_ERROR_CODES = {
   invalid_state_transition: true,
 } as const;
 
-type PublicApiErrorCode = keyof typeof SAFE_API_ERROR_MESSAGES;
-type ReviewWorkflowApiErrorCode = keyof typeof REVIEW_WORKFLOW_API_ERROR_CODES;
-type KnownApiErrorCode = PublicApiErrorCode | ReviewWorkflowApiErrorCode;
+// This consumer currently distinguishes only the durable remediation boundary.
+// Other Auto-Review conflict codes intentionally remain generic UI failures.
+const AUTO_REVIEW_API_ERROR_CODES = {
+  remediation_required: true,
+} as const;
 
 function hasOwnKey<T extends object>(value: T, key: PropertyKey): key is keyof T {
   return Object.prototype.hasOwnProperty.call(value, key);
@@ -155,23 +157,49 @@ export class ApiError extends Error {
 }
 
 const UNKNOWN_API_ERROR_MESSAGE = "요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.";
+const MAX_API_ERROR_BODY_LENGTH = 2_048;
 
-function publicErrorCode(payload: unknown): KnownApiErrorCode | null {
-  if (typeof payload !== "object" || payload === null || !("detail" in payload)) return null;
-  const detail = payload.detail;
-  if (typeof detail !== "object" || detail === null || !("code" in detail)) return null;
-  const code = detail.code;
-  if (typeof code !== "string") return null;
-  if (hasOwnKey(SAFE_API_ERROR_MESSAGES, code) || hasOwnKey(REVIEW_WORKFLOW_API_ERROR_CODES, code)) {
-    return code;
+export function decodeApiErrorEnvelope(payload: unknown): string | null {
+  try {
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+    const rootKeys = Reflect.ownKeys(payload);
+    if (rootKeys.length !== 1 || rootKeys[0] !== "detail") return null;
+    const detailDescriptor = Object.getOwnPropertyDescriptor(payload, "detail");
+    if (detailDescriptor === undefined || !hasOwnKey(detailDescriptor, "value")) return null;
+    const detail = detailDescriptor.value;
+    if (typeof detail !== "object" || detail === null || Array.isArray(detail)) return null;
+    const detailKeys = Reflect.ownKeys(detail);
+    if (detailKeys.length !== 1 || detailKeys[0] !== "code") return null;
+    const codeDescriptor = Object.getOwnPropertyDescriptor(detail, "code");
+    if (codeDescriptor === undefined || !hasOwnKey(codeDescriptor, "value")) return null;
+    const code = codeDescriptor.value;
+    if (typeof code !== "string") return null;
+    if (
+      hasOwnKey(SAFE_API_ERROR_MESSAGES, code)
+      || hasOwnKey(REVIEW_WORKFLOW_API_ERROR_CODES, code)
+      || hasOwnKey(AUTO_REVIEW_API_ERROR_CODES, code)
+    ) {
+      return code;
+    }
+  } catch {
+    // Reject proxy/accessor-shaped values without reading or retaining them.
   }
   return null;
 }
 
+function decodeApiErrorBody(rawBody: string): string | null {
+  if (rawBody.length === 0 || rawBody.length > MAX_API_ERROR_BODY_LENGTH) return null;
+  try {
+    return decodeApiErrorEnvelope(JSON.parse(rawBody) as unknown);
+  } catch {
+    return null;
+  }
+}
+
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const payload = await response.json().catch(() => undefined) as unknown;
-    const code = publicErrorCode(payload);
+    const rawBody = await response.text().catch(() => "");
+    const code = decodeApiErrorBody(rawBody);
     throw new ApiError(
       response.status,
       code,
