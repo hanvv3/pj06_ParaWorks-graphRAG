@@ -118,6 +118,105 @@ def test_shadow_observer_has_no_disabled_noncutover_or_enforce_background_work(
     assert len(observed) == calls
 
 
+def test_pgvector_shadow_runner_owns_single_shared_embedding_before_legacy(
+    tmp_path, monkeypatch,
+):
+    """Catches legacy dispatching first or the internal run leaking into public delivery."""
+    from backend.app.agent_runtime.rag_application import DirectRagDeliveryResult
+    from backend.app.agent_runtime.rag_v2_composition import (
+        RagRuntimeDependencies,
+        build_rag_v2_runtime,
+    )
+    from backend.app.schemas.rag import SearchV1Projection
+
+    context = _context(tmp_path)
+    settings = context.settings.model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'search',
+        'rag_retrieval_backend': 'pgvector',
+    })
+    legacy = DirectRagDeliveryResult(
+        200, 'success', 'search_projected', SearchV1Projection(
+            retrieval_backend='pgvector',
+            cost_policy={'embedding_query_call': True, 'paid_llm_call': False,
+                         'requires_pgvector_flag': True},
+            hidden_match_count=0, permission_notice=None, results=[],
+        ), None,
+    )
+    shared = object()
+    calls = []
+
+    def shadow_runner(**kwargs):
+        calls.append(kwargs)
+        return kwargs['legacy_invoke'](shared)
+
+    bundle = build_rag_v2_runtime(
+        settings=settings,
+        session_factory=lambda: None,
+        dependencies=RagRuntimeDependencies(
+            request_factory=lambda **kwargs: None,
+            shadow_runner=shadow_runner,
+        ),
+    )
+
+    def legacy_invoke(_facade, **kwargs):
+        assert kwargs['query_embedding_result'] is shared
+        return legacy
+
+    monkeypatch.setattr(type(bundle.facade), '_invoke_legacy', legacy_invoke)
+
+    delivered = bundle.facade.invoke_search(actor=context.actor, caller_text='same')
+
+    assert delivered is legacy
+    assert len(calls) == 1
+    assert 'legacy_delivery' not in calls[0]
+    assert callable(calls[0]['legacy_invoke'])
+
+
+def test_pgvector_shadow_embedding_safety_failure_overrides_legacy_with_typed_503(
+    tmp_path, monkeypatch,
+):
+    """Catches invalid paid output reaching legacy or being hidden by parity mode."""
+    from backend.app.agent_runtime.rag_v2_composition import (
+        RagRuntimeDependencies,
+        build_rag_v2_runtime,
+    )
+    from backend.app.rag.shadow import RagShadowProviderOverrideError
+
+    context = _context(tmp_path)
+    settings = context.settings.model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'search',
+        'rag_retrieval_backend': 'pgvector',
+    })
+
+    def shadow_runner(**_kwargs):
+        raise RagShadowProviderOverrideError(
+            'provider_usage_overrun', component='query_embedding'
+        )
+
+    bundle = build_rag_v2_runtime(
+        settings=settings,
+        session_factory=lambda: None,
+        dependencies=RagRuntimeDependencies(
+            request_factory=lambda **kwargs: None,
+            shadow_runner=shadow_runner,
+        ),
+    )
+    monkeypatch.setattr(
+        type(bundle.facade),
+        '_invoke_legacy',
+        lambda *args, **kwargs: pytest.fail('invalid carrier must not reach legacy'),
+    )
+
+    delivered = bundle.facade.invoke_search(actor=context.actor, caller_text='same')
+
+    assert delivered.public_status == 503
+    assert delivered.application_outcome == 'provider_usage_overrun'
+    assert delivered.error is not None
+    assert delivered.error.code == 'provider_usage_overrun'
+
+
 @pytest.mark.parametrize('mode', ('disabled', 'shadow', 'enforce'))
 @pytest.mark.parametrize('stage', ('none', 'ask', 'search', 'assistant'))
 @pytest.mark.parametrize('surface', ('ask', 'search', 'assistant'))

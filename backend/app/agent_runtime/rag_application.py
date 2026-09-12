@@ -342,6 +342,7 @@ class RagApplicationFacade:
             or prepared_ingress.conversation_id not in {None, conversation_id}
             or prepared_ingress.capability_version != 'rag-v2-plain-text-citations:v1'):
             return _assistant_unknown()
+
         target = AssistantProjectionTarget(conversation_id, user_message_id, actor.id)
         try:
             expected = self._prepare_assistant_ingress(actor=actor,
@@ -413,6 +414,84 @@ class RagApplicationFacade:
                         target=target, prepared_text=prepared_ingress.prepared_text, outcome=outcome)
             return _assistant_unknown()
 
+    def observe_assistant_context_shadow(
+        self,
+        *,
+        actor: DemoUser,
+        contextual_query: str,
+        public_agent_run_id: int | None,
+    ):
+        """Persist only the deliberate prior-assistant no-share aggregate."""
+        if self.execution_owner('assistant') != 'shadow':
+            return None
+        from backend.app.rag.shadow import run_assistant_context_security_delta
+
+        return run_assistant_context_security_delta(
+            session_factory=self._session_factory,
+            settings=self._settings,
+            actor=actor,
+            contextual_query=contextual_query,
+            public_agent_run_id=public_agent_run_id,
+        )
+
+    def observe_assistant_keyword_shadow(
+        self,
+        *,
+        actor: DemoUser,
+        prepared_text: PreparedRagRequestText,
+        legacy_delivery,
+    ):
+        """Compare Assistant user-only context through provider-free retrieval."""
+        if (
+            self.execution_owner('assistant') != 'shadow'
+            or self._settings.rag_retrieval_backend != 'keyword'
+            or prepared_text.query_context_version != 'assistant-context:v1'
+        ):
+            raise RagApplicationError('runtime_version_unavailable')
+        return self._shadow_runner(
+            actor=actor,
+            surface='assistant',
+            prepared_text=prepared_text,
+            legacy_delivery=legacy_delivery,
+        )
+
+    def prepare_assistant_shadow_ingress(
+        self,
+        *,
+        actor: DemoUser,
+        conversation_id: int,
+        user_message_id: int,
+        caller_text: str,
+    ) -> PreparedRagRequestText:
+        if self.execution_owner('assistant') != 'shadow':
+            raise RagApplicationError('runtime_version_unavailable')
+        return self._prepare_assistant_ingress(
+            actor=actor,
+            conversation_id=conversation_id,
+            caller_text=caller_text,
+            current_message_id=user_message_id,
+        ).prepared_text
+
+    def invoke_assistant_pgvector_shadow_legacy(
+        self,
+        *,
+        actor: DemoUser,
+        prepared_text: PreparedRagRequestText,
+        legacy_invoke,
+    ):
+        if (
+            self.execution_owner('assistant') != 'shadow'
+            or self._settings.rag_retrieval_backend != 'pgvector'
+            or prepared_text.query_context_version != 'assistant-context:v1'
+        ):
+            raise RagApplicationError('runtime_version_unavailable')
+        return self._shadow_runner(
+            actor=actor,
+            surface='assistant',
+            prepared_text=prepared_text,
+            legacy_invoke=legacy_invoke,
+        )
+
     def invoke_ask(
         self, *, actor: DemoUser, caller_text: str
     ) -> DirectRagDeliveryResult[AskV1Projection]:
@@ -441,6 +520,28 @@ class RagApplicationFacade:
             return direct_rag_error(exc.code)
         owner = self.execution_owner(surface)
         if owner != 'v2':
+            if owner == 'shadow' and self._settings.rag_retrieval_backend == 'pgvector':
+                from backend.app.rag.shadow import RagShadowProviderOverrideError
+
+                try:
+                    delivered = self._shadow_runner(
+                        actor=actor,
+                        surface=surface,
+                        prepared_text=prepared,
+                        legacy_invoke=lambda shared: self._invoke_legacy(
+                            actor=actor,
+                            caller_text=caller_text,
+                            surface=surface,
+                            query_embedding_result=shared,
+                        ),
+                    )
+                    if type(delivered) is DirectRagDeliveryResult:
+                        return delivered
+                    return direct_rag_error('unexpected_internal_error')
+                except RagShadowProviderOverrideError as exc:
+                    return direct_rag_error(exc.outcome, component=exc.component)
+                except Exception:
+                    return direct_rag_error('unexpected_internal_error')
             legacy = self._invoke_legacy(
                 actor=actor, caller_text=caller_text, surface=surface
             )
@@ -500,12 +601,27 @@ class RagApplicationFacade:
         except Exception:
             return direct_rag_error('unexpected_internal_error')
 
-    def _invoke_legacy(self, *, actor, caller_text, surface):
+    def _invoke_legacy(
+        self,
+        *,
+        actor,
+        caller_text,
+        surface,
+        query_embedding_result=None,
+    ):
         from backend.app.agents.rag_orchestrator_agent import service
         from backend.app.permissions.service import can_access_permission
 
         with self._session_factory() as db:
-            vector_store = _legacy_pgvector_search_store(db=db, settings=self._settings)
+            vector_store = _legacy_pgvector_search_store(
+                db=db,
+                settings=self._settings,
+                **(
+                    {'shared_query_embedding': query_embedding_result}
+                    if query_embedding_result is not None
+                    else {}
+                ),
+            )
             if surface == 'ask':
                 answer = service.answer_question_with_rag(
                     db=db,
@@ -696,10 +812,14 @@ class RagApplicationFacade:
         return result
 
 
-def _legacy_pgvector_search_store(*, db, settings):
+def _legacy_pgvector_search_store(*, db, settings, shared_query_embedding=None):
     from backend.app.rag.search_store import build_pgvector_search_store
 
-    return build_pgvector_search_store(db=db, settings=settings)
+    return build_pgvector_search_store(
+        db=db,
+        settings=settings,
+        shared_query_embedding=shared_query_embedding,
+    )
 
 
 def _assistant_committed(record):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 
 import pytest
@@ -256,6 +257,28 @@ def test_assistant_context_delta_is_sanitized_without_a_v2_result():
     assert comparison.unclassified_shadow_mismatch_count == 0
 
 
+def test_assistant_without_prior_assistant_compares_identical_user_only_query():
+    """Catches all Assistant traffic being misclassified as the context delta."""
+    from backend.app.rag.shadow import ShadowComparator
+
+    evidence = _evidence(1)
+    legacy = _rebuild_legacy(
+        _legacy(evidence),
+        surface='assistant',
+        query_context_version='assistant-context:v1',
+    )
+
+    comparison = ShadowComparator(SETTINGS).compare(
+        legacy=legacy,
+        v2=_result(evidence),
+        scope=_scope(),
+    )
+
+    assert comparison.outcome == 'shadow_match'
+    assert comparison.assistant_context_security_delta_count == 0
+    assert comparison.common_cohort_exact_match_count == 1
+
+
 def test_shadow_audit_persists_only_aggregates_and_domain_hmacs(db_session):
     """Catches raw query/evidence/public/internal identifiers entering shadow audit."""
     from backend.app.models import AuditLog
@@ -347,3 +370,378 @@ def test_default_keyword_shadow_runs_real_retriever_and_writes_one_audit(
     )))
     assert len(audits) == 1
     assert audits[0].metadata_['comparison_hmac'] == result.comparison_hmac
+
+
+def test_keyword_shadow_runs_assistant_user_only_context_as_third_surface(
+    db_session,
+):
+    """Catches silently skipping Assistant keyword shadow without assistant history."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.app.agents.rag_orchestrator_agent.v2_input import (
+        AssistantContextMessage,
+        prepare_assistant_request_text,
+    )
+    from backend.app.core.demo_auth import DemoUser
+    from backend.app.models import AuditLog
+    from backend.app.rag.shadow import run_keyword_shadow
+    from backend.tests.test_rag_v2_keyword_retriever import (
+        _seed_sqlite_raw_projection,
+        _settings,
+    )
+
+    _seed_sqlite_raw_projection(db_session)
+    settings = _settings().model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'assistant',
+        'rag_retrieval_backend': 'keyword',
+    })
+    actor = DemoUser(
+        id='shadow-user', email='shadow@example.test', role='admin',
+        permission_levels={'public', 'internal', 'restricted'},
+        name='Shadow User', title='Tester', department='Platform',
+    )
+    prepared = prepare_assistant_request_text(
+        'Exact raw observation',
+        (
+            AssistantContextMessage(
+                message_id=1,
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                role='user',
+                content='Earlier user-only context',
+            ),
+        ),
+        key=settings.agent_runtime_fingerprint_secret.encode(),
+    )
+    delivery = SimpleNamespace(agent_run_id=42)
+
+    result = run_keyword_shadow(
+        session_factory=sessionmaker(
+            bind=db_session.get_bind(), expire_on_commit=False
+        ),
+        settings=settings,
+        actor=actor,
+        surface='assistant',
+        prepared_text=prepared,
+        legacy_delivery=delivery,
+    )
+
+    assert result is not None
+    assert result.outcome == 'shadow_match'
+    assert result.surface == 'assistant'
+    db_session.expire_all()
+    audit = db_session.scalar(select(AuditLog).where(
+        AuditLog.action == 'rag_shadow_compared'
+    ))
+    assert audit is not None
+    assert audit.metadata_['surface'] == 'assistant'
+
+
+def test_legacy_pgvector_adapter_reuses_exact_shared_immutable_carrier():
+    """Catches a second legacy embedding call or a copied/mutated shared vector."""
+    from types import SimpleNamespace
+
+    from backend.app.rag.search_store import PgVectorSearchAdapter
+    from backend.tests.test_rag_v2_pgvector_retriever import _embedding_result
+
+    shared = _embedding_result(query='identical bytes')
+
+    class Store:
+        def __init__(self):
+            self.vectors = []
+
+        def search_with_embedding(self, *, query_embedding, user, limit):
+            self.vectors.append(query_embedding)
+            return SimpleNamespace(matches=(), hidden_match_count=0)
+
+    class RefuseSecondEmbedding:
+        def embed(self, _query):
+            raise AssertionError('legacy must not dispatch a second embedding')
+
+    store = Store()
+    adapter = PgVectorSearchAdapter(
+        store=store,
+        embedding_model=RefuseSecondEmbedding(),
+        shared_query_embedding=shared,
+    )
+    actor = SimpleNamespace(id='actor')
+
+    adapter.search(query='identical bytes', user=actor)
+    adapter.search(query='identical bytes', user=actor)
+
+    assert store.vectors == [shared.vector.coordinates, shared.vector.coordinates]
+    assert store.vectors[0] is shared.vector.coordinates
+    with pytest.raises(ValueError, match='query bytes'):
+        adapter.search(query='different bytes', user=actor)
+    assert len(store.vectors) == 2
+
+
+@pytest.mark.parametrize(
+    ('ready', 'expected_outcome', 'expected_comparisons', 'observer_fails'),
+    (
+        (True, 'shadow_match', 1, False),
+        (False, 'serving_index_not_ready', 0, False),
+        (True, 'unexpected_internal_error', 0, True),
+    ),
+)
+def test_pgvector_shadow_dispatches_one_embedding_zero_generation_and_finalizes(
+    ready, expected_outcome, expected_comparisons, observer_fails,
+):
+    """Catches dual embedding/generation or generic pending on not-ready shadow."""
+    from types import SimpleNamespace
+
+    from backend.app.agents.rag_orchestrator_agent.v2_input import (
+        prepare_direct_request_text,
+    )
+    from backend.app.core.demo_auth import DemoUser
+    from backend.app.rag.shadow import run_pgvector_shadow
+    from backend.tests.test_rag_v2_pgvector_retriever import _embedding_result
+
+    settings = SETTINGS.model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'search',
+        'rag_retrieval_backend': 'pgvector',
+    })
+    prepared_text = prepare_direct_request_text(
+        'identical bytes', key=settings.agent_runtime_fingerprint_secret.encode()
+    )
+    shared = _embedding_result(query='identical bytes')
+    calls = []
+
+    class Ledger:
+        def create_admission(self, **kwargs):
+            calls.append(('admission', kwargs))
+
+        def claim_component(self, **kwargs):
+            calls.append(('claim', kwargs))
+            return object()
+
+        def finalize_shadow_run(self, **kwargs):
+            calls.append(('final', kwargs))
+
+        def finalize_inter_component_failure(self, **kwargs):
+            calls.append(('final', {**kwargs, 'comparison': None}))
+
+    class Transport:
+        def prepare(self, **kwargs):
+            calls.append(('transport_prepare', kwargs))
+            return object()
+
+        def dispatch_and_finalize(self, **kwargs):
+            calls.append(('dispatch', kwargs))
+            return SimpleNamespace(output=shared)
+
+    class Retriever:
+        def invoke(self, request, config):
+            calls.append(('v2_retrieval', request.query_embedding_result, config))
+            return replace(
+                _result(_evidence(1)),
+                configured_backend='pgvector',
+                effective_backend='pgvector',
+            )
+
+    services = SimpleNamespace(
+        db=object(),
+        security_scope_resolver=SimpleNamespace(resolve=lambda **_kwargs: _scope()),
+        index_readiness=SimpleNamespace(inspect=lambda **_kwargs: SimpleNamespace(
+            ready=ready, corpus_generation=7, vector_index_generation=11,
+        )),
+        query_embedding_adapter=SimpleNamespace(
+            prepare_shadow_legacy=lambda request, readiness: shared.prepared
+        ),
+        policy_snapshots=(
+            SimpleNamespace(component='query_embedding'),
+            SimpleNamespace(component='answer_generation'),
+        ),
+        cost_policy=SimpleNamespace(
+            reserve_unused_component=lambda component: SimpleNamespace(component=component)
+        ),
+        allocate_run_id=lambda: 91,
+        cost_ledger=Ledger(),
+        provider_transport_factory=lambda: Transport(),
+        retrievers=SimpleNamespace(resolve=lambda backend: Retriever()),
+    )
+
+    @contextmanager
+    def request_factory(**kwargs):
+        calls.append(('request', kwargs))
+        yield services
+
+    actor = DemoUser(
+        id='shadow-user', email='shadow@example.test', role='admin',
+        permission_levels={'public', 'internal'}, name='Shadow', title='Tester',
+        department='Platform',
+    )
+    public = object()
+    legacy_calls = []
+
+    def legacy_observation(**_kwargs):
+        if observer_fails:
+            raise RuntimeError('aggregate projection unavailable')
+        return _rebuild_legacy(
+            _legacy(_evidence(1)),
+            configured_backend='pgvector',
+            effective_backend='pgvector',
+        )
+
+    delivered = run_pgvector_shadow(
+        request_factory=request_factory,
+        session_factory=lambda: None,
+        settings=settings,
+        actor=actor,
+        surface='search',
+        prepared_text=prepared_text,
+        legacy_invoke=lambda carrier: legacy_calls.append(carrier) or public,
+        legacy_observation_factory=legacy_observation,
+    )
+
+    assert delivered is public
+    assert legacy_calls == [shared]
+    assert [call[0] for call in calls].count('dispatch') == 1
+    assert [call[0] for call in calls].count('v2_retrieval') == expected_comparisons
+    final = next(call[1] for call in calls if call[0] == 'final')
+    assert final['outcome'] == expected_outcome
+    assert (final['comparison'] is not None) is bool(expected_comparisons)
+    admission = next(call[1] for call in calls if call[0] == 'admission')
+    assert admission['mode'] == 'shadow'
+    assert admission['configured_backend'] == 'pgvector'
+    assert len(admission['components']) == 2
+
+
+def test_retained_provider_blocker_skips_d_admission_and_serves_standalone_legacy(
+    db_session,
+):
+    """Catches a retained D blocker replacing or suppressing the legacy product."""
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+    from backend.app.agents.rag_orchestrator_agent.v2_input import (
+        prepare_direct_request_text,
+    )
+    from backend.app.core.demo_auth import DemoUser
+    from backend.app.models import AuditLog
+    from backend.app.rag.shadow import run_pgvector_shadow
+
+    settings = SETTINGS.model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'search',
+        'rag_retrieval_backend': 'pgvector',
+    })
+    prepared = prepare_direct_request_text(
+        'blocked but legacy-safe',
+        key=settings.agent_runtime_fingerprint_secret.encode(),
+    )
+    safety_calls = []
+
+    class Safety:
+        def require_ready(self, connection, component, snapshot):
+            safety_calls.append((connection, component, snapshot))
+            raise RagProviderSafetyError('provider family is blocked')
+
+    class Ledger:
+        provider_safety_authority = Safety()
+
+        def require_component_safety_ready(self, snapshot):
+            self.provider_safety_authority.require_ready(
+                object(), 'query_embedding', snapshot
+            )
+
+        def create_admission(self, **_kwargs):
+            raise AssertionError('blocked shadow must not create a D admission')
+
+    services = SimpleNamespace(
+        db=db_session,
+        security_scope_resolver=SimpleNamespace(resolve=lambda **_kwargs: _scope()),
+        index_readiness=SimpleNamespace(inspect=lambda **_kwargs: SimpleNamespace(
+            ready=True, corpus_generation=7, vector_index_generation=11,
+        )),
+        query_embedding_adapter=SimpleNamespace(
+            prepare_shadow_legacy=lambda request, readiness: SimpleNamespace(
+                budget=object()
+            )
+        ),
+        policy_snapshots=(
+            SimpleNamespace(component='query_embedding'),
+            SimpleNamespace(component='answer_generation'),
+        ),
+        cost_ledger=Ledger(),
+        allocate_run_id=lambda: pytest.fail('blocked shadow cannot allocate a run'),
+    )
+
+    @contextmanager
+    def request_factory(**_kwargs):
+        yield services
+
+    actor = DemoUser(
+        id='shadow-user', email='shadow@example.test', role='admin',
+        permission_levels={'public', 'internal'}, name='Shadow', title='Tester',
+        department='Platform',
+    )
+    public = object()
+    legacy_calls = []
+
+    delivered = run_pgvector_shadow(
+        request_factory=request_factory,
+        session_factory=lambda: None,
+        settings=settings,
+        actor=actor,
+        surface='search',
+        prepared_text=prepared,
+        legacy_invoke=lambda carrier: legacy_calls.append(carrier) or public,
+    )
+
+    assert delivered is public
+    assert legacy_calls == [None]
+    assert len(safety_calls) == 1
+    audit = db_session.scalar(select(AuditLog).where(
+        AuditLog.action == 'rag_shadow_provider_safety_unavailable'
+    ))
+    assert audit is not None
+    assert audit.status == 'blocked'
+    assert prepared.retrieval_query_text not in repr(audit.metadata_)
+    assert 'shadow-user' not in repr(audit.metadata_)
+
+
+def test_assistant_prior_context_delta_writes_only_sanitized_aggregate(db_session):
+    """Catches prior-assistant bytes, V2 comparison, or internal cost being invented."""
+    from sqlalchemy import select
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.app.core.demo_auth import DemoUser
+    from backend.app.models import AgentRun, AuditLog
+    from backend.app.rag.shadow import run_assistant_context_security_delta
+
+    actor = DemoUser(
+        id='shadow-user', email='shadow@example.test', role='admin',
+        permission_levels={'public', 'internal'}, name='Shadow', title='Tester',
+        department='Platform',
+    )
+    raw_context = 'assistant: 이전 비공개 응답\nuser: 다음 질문'
+    result = run_assistant_context_security_delta(
+        session_factory=sessionmaker(bind=db_session.get_bind(), expire_on_commit=False),
+        settings=SETTINGS.model_copy(update={'rag_retrieval_backend': 'pgvector'}),
+        actor=actor,
+        contextual_query=raw_context,
+        public_agent_run_id=734,
+    )
+
+    db_session.expire_all()
+    audits = tuple(db_session.scalars(select(AuditLog).where(
+        AuditLog.action == 'rag_shadow_compared'
+    )))
+    assert result.assistant_context_security_delta_count == 1
+    assert result.v2_candidate_count == 0
+    assert len(audits) == 1
+    assert db_session.scalar(select(AgentRun).where(
+        AgentRun.run_contract_version == 'rag-run:v2'
+    )) is None
+    serialized = repr(audits[0].metadata_)
+    assert raw_context not in serialized
+    assert "'public_agent_run_id'" not in serialized
+    assert "'internal_run_id'" not in serialized

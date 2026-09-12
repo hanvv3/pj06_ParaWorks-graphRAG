@@ -245,7 +245,7 @@ class PgVectorStore:
     def search_with_embedding(
         self,
         *,
-        query_embedding: list[float],
+        query_embedding: Sequence[float],
         user: DemoUser,
         limit: int = 5,
     ) -> VectorSearchResult:

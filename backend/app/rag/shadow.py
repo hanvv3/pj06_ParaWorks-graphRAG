@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hmac
 import math
-from dataclasses import asdict, dataclass
+from contextlib import suppress
+from dataclasses import asdict, dataclass, replace
 from time import perf_counter_ns
 from typing import Literal
 
@@ -294,10 +295,15 @@ class ShadowComparator:
         if not hmac.compare_digest(legacy.security_scope_fingerprint, expected_scope):
             raise ValueError('shadow security scope changed')
         _validate_result(v2)
+        expected_context = (
+            'assistant-context:v1'
+            if legacy.surface == 'assistant'
+            else 'direct-query:v1'
+        )
         if (
             legacy.configured_backend != v2.configured_backend
             or legacy.effective_backend != v2.effective_backend
-            or legacy.query_context_version != 'direct-query:v1'
+            or legacy.query_context_version != expected_context
         ):
             raise ValueError('shadow retrieval authority changed')
 
@@ -485,6 +491,40 @@ class ShadowAuditWriter:
         return row
 
 
+@dataclass(frozen=True, slots=True)
+class ShadowSafetyBlockerAuditWriter:
+    settings: Settings
+
+    def append(self, db: Session, *, surface: RagSurface) -> AuditLog:
+        payload = {
+            'surface': surface,
+            'configured_backend': 'pgvector',
+            'outcome': 'provider_safety_unavailable',
+            'v2_admission_count': 0,
+            'v2_comparison_count': 0,
+            'shared_embedding_count': 0,
+            'advancement_allowed': False,
+        }
+        blocker_hmac = _fingerprint(
+            payload,
+            settings=self.settings,
+            schema='rag-shadow-provider-safety-blocker:v1',
+        )
+        row = AuditLog(
+            actor_id='system-rag-shadow',
+            actor_email='system@paraworks.local',
+            actor_role='system',
+            action='rag_shadow_provider_safety_unavailable',
+            target_type='rag_shadow_safety_blocker',
+            target_id=blocker_hmac,
+            status='blocked',
+            metadata_={**payload, 'blocker_hmac': blocker_hmac},
+        )
+        db.add(row)
+        db.flush()
+        return row
+
+
 def _validate_ordinals(rows: tuple[LegacyRetrievalCandidateObservation, ...]) -> None:
     if tuple(row.ordinal for row in rows) != tuple(range(len(rows))):
         raise ValueError('legacy candidate ordinals are invalid')
@@ -566,8 +606,8 @@ def run_keyword_shadow(
     """Run a real provider-free lexical comparison after V1 is committed."""
     if settings.rag_retrieval_backend != 'keyword':
         raise ValueError('keyword shadow runner requires keyword configuration')
-    if surface not in {'ask', 'search'}:
-        return None
+    if surface not in {'ask', 'search', 'assistant'}:
+        raise ValueError('keyword shadow surface is invalid')
     from backend.app.agent_runtime.rag_v2_identity import (
         ServerRagSecurityScopeResolver,
     )
@@ -600,7 +640,7 @@ def run_keyword_shadow(
             )
             for ordinal, candidate in enumerate(candidates)
         )
-        projection = getattr(legacy_delivery, 'projection', None)
+        projection = getattr(legacy_delivery, 'projection', legacy_delivery)
         public_run_id = getattr(projection, 'agent_run_id', None)
         correlation = (
             _fingerprint(
@@ -615,7 +655,7 @@ def run_keyword_shadow(
             surface=surface,
             configured_backend='keyword',
             effective_backend='deterministic_lexical',
-            query_context_version='direct-query:v1',
+            query_context_version=prepared_text.query_context_version,
             retrieval_query_hmac=prepared_text.retrieval_query_hmac,
             security_scope_fingerprint=scope_hmac,
             candidate_window=rows,
@@ -647,6 +687,370 @@ def run_keyword_shadow(
         ShadowAuditWriter(settings).append(db, comparison)
         db.commit()
         return comparison
+
+
+class RagShadowProviderOverrideError(RuntimeError):
+    """A paid shared-embedding failure that must replace legacy parity delivery."""
+
+    def __init__(self, outcome: str, *, component: str = 'query_embedding') -> None:
+        self.outcome = outcome
+        self.component = component
+        super().__init__(outcome)
+
+
+def run_pgvector_shadow(
+    *,
+    request_factory,
+    session_factory,
+    settings: Settings,
+    actor,
+    surface: RagSurface,
+    prepared_text,
+    legacy_invoke,
+    legacy_observation_factory=None,
+):
+    """Own one shared pgvector embedding and never invoke answer generation."""
+    if settings.rag_retrieval_backend != 'pgvector':
+        raise ValueError('pgvector shadow runner requires pgvector configuration')
+    if surface not in {'ask', 'search', 'assistant'}:
+        raise ValueError('pgvector shadow surface is invalid')
+    from backend.app.agents.rag_orchestrator_agent.v2_embedding import (
+        share_query_embedding_result,
+    )
+    from backend.app.rag.retrieval import RetrievalRequest
+
+    with request_factory(
+        session_factory=session_factory,
+        settings=settings,
+        actor=actor,
+        surface=surface,
+        assistant_target=None,
+    ) as services:
+        scope = services.security_scope_resolver.resolve(db=services.db, actor=actor)
+        scope_hmac = security_scope_fingerprint(scope, settings=settings)
+        request = RetrievalRequest(
+            retrieval_query_text=prepared_text.retrieval_query_text,
+            security_scope=scope,
+            security_scope_fingerprint=scope_hmac,
+            query_embedding_result=None,
+            candidate_scan_limit=50,
+            visible_limit=5 if surface == 'search' else 8,
+            relevance_policy_version='rag-retrieval-policy:v2.0',
+        )
+        query_snapshot = next(
+            snapshot
+            for snapshot in services.policy_snapshots
+            if snapshot.component == 'query_embedding'
+        )
+        from backend.app.agent_runtime.rag_provider_safety import (
+            RagProviderSafetyError,
+            RagProviderSafetyInspectionError,
+        )
+
+        try:
+            preflight_safety = getattr(
+                services.cost_ledger,
+                'require_component_safety_ready',
+                None,
+            )
+            if preflight_safety is not None:
+                preflight_safety(query_snapshot)
+        except RagProviderSafetyInspectionError:
+            raise RagShadowProviderOverrideError(
+                'provider_safety_unavailable'
+            ) from None
+        except RagProviderSafetyError:
+            with suppress(Exception):
+                ShadowSafetyBlockerAuditWriter(settings).append(
+                    services.db,
+                    surface=surface,
+                )
+                services.db.commit()
+            return legacy_invoke(None)
+        readiness = services.index_readiness.inspect(db=services.db)
+        prepared_embedding = services.query_embedding_adapter.prepare_shadow_legacy(
+            request, readiness
+        )
+        components = tuple(
+            (
+                snapshot,
+                prepared_embedding.budget
+                if snapshot.component == 'query_embedding'
+                else services.cost_policy.reserve_unused_component(snapshot.component),
+            )
+            for snapshot in services.policy_snapshots
+        )
+        run_id = services.allocate_run_id()
+        services.cost_ledger.create_admission(
+            agent_run_id=run_id,
+            surface=surface,
+            mode='shadow',
+            cutover_stage=settings.langgraph_rag_v2_stage,
+            configured_backend='pgvector',
+            query_context_version=prepared_text.query_context_version,
+            current_text_hmac=prepared_text.current_text_hmac,
+            retrieval_query_hmac=prepared_text.retrieval_query_hmac,
+            security_scope_fingerprint=scope_hmac,
+            admission_cache_identity_hmac=None,
+            source_window=f'rag-v2:admission:shadow:{surface}:pgvector',
+            components=components,
+        )
+        try:
+            grant = services.cost_ledger.claim_component(
+                run_id=run_id,
+                component='query_embedding',
+                prepared=prepared_embedding.budget,
+            )
+            transport = (
+                services.provider_transport
+                if getattr(services, 'provider_transport', None) is not None
+                else services.provider_transport_factory()
+            )
+            dispatch = transport.prepare(grant=grant, prepared=prepared_embedding)
+            delivery = transport.dispatch_and_finalize(grant=grant, prepared=dispatch)
+        except Exception as exc:
+            from backend.app.agent_runtime.rag_cost_ledger import (
+                RagPreclaimSafetyRefusalError,
+            )
+
+            terminal = getattr(exc, 'terminal', None)
+            outcome = (
+                'provider_safety_unavailable'
+                if isinstance(exc, RagPreclaimSafetyRefusalError)
+                else getattr(exc, 'outcome', None)
+                or getattr(terminal, 'outcome', None)
+                or 'retriever_unavailable'
+            )
+            raise RagShadowProviderOverrideError(outcome) from None
+        if delivery.output is None:
+            final = delivery.component_final
+            raise RagShadowProviderOverrideError(
+                final.terminal_outcome or 'retriever_unavailable',
+                component=final.component,
+            )
+        shared = share_query_embedding_result(
+            delivery.output,
+            legacy_query_text=prepared_text.retrieval_query_text,
+            v2_query_text=prepared_text.retrieval_query_text,
+        )
+        public_delivery = legacy_invoke(shared)
+        try:
+            _finish_pgvector_shadow(
+                services=services,
+                settings=settings,
+                actor=actor,
+                surface=surface,
+                prepared_text=prepared_text,
+                shared=shared,
+                scope=scope,
+                scope_hmac=scope_hmac,
+                public_delivery=public_delivery,
+                request=request,
+                readiness=readiness,
+                run_id=run_id,
+                legacy_observation_factory=legacy_observation_factory,
+            )
+        except Exception:
+            with suppress(Exception):
+                services.cost_ledger.finalize_inter_component_failure(
+                    run_id=run_id,
+                    outcome='unexpected_internal_error',
+                )
+        return public_delivery
+
+
+def _finish_pgvector_shadow(
+    *,
+    services,
+    settings,
+    actor,
+    surface,
+    prepared_text,
+    shared,
+    scope,
+    scope_hmac,
+    public_delivery,
+    request,
+    readiness,
+    run_id,
+    legacy_observation_factory,
+):
+    if readiness.ready is not True:
+        services.cost_ledger.finalize_shadow_run(
+            run_id=run_id,
+            outcome='serving_index_not_ready',
+            comparison=None,
+            settings=settings,
+        )
+        return
+    legacy = (
+        legacy_observation_factory(
+            services=services,
+            actor=actor,
+            surface=surface,
+            prepared_text=prepared_text,
+            shared=shared,
+            scope=scope,
+            scope_hmac=scope_hmac,
+            public_delivery=public_delivery,
+        )
+        if legacy_observation_factory is not None
+        else _observe_pgvector_legacy(
+            services=services,
+            settings=settings,
+            actor=actor,
+            surface=surface,
+            prepared_text=prepared_text,
+            shared=shared,
+            scope_hmac=scope_hmac,
+            public_delivery=public_delivery,
+        )
+    )
+    from backend.app.rag.pgvector_retriever import PgVectorEvidenceRetriever
+
+    retriever = services.retrievers.resolve('pgvector')
+    if isinstance(retriever, PgVectorEvidenceRetriever):
+        retriever = retriever.with_graph_fallback()
+    v2 = retriever.invoke(
+        replace(request, query_embedding_result=shared),
+        config={'callbacks': [], 'metadata': {}},
+    )
+    comparison = ShadowComparator(settings).compare(
+        legacy=legacy,
+        v2=v2,
+        scope=scope,
+    )
+    services.cost_ledger.finalize_shadow_run(
+        run_id=run_id,
+        outcome=comparison.outcome,
+        comparison=comparison,
+        settings=settings,
+    )
+
+
+def run_assistant_context_security_delta(
+    *,
+    session_factory,
+    settings: Settings,
+    actor,
+    contextual_query: str,
+    public_agent_run_id: int | None,
+) -> ShadowComparison:
+    """Record the deliberate no-share branch without retaining context or ids."""
+    from backend.app.agent_runtime.rag_v2_identity import (
+        ServerRagSecurityScopeResolver,
+    )
+
+    with session_factory() as db:
+        scope = ServerRagSecurityScopeResolver(settings).resolve(db=db, actor=actor)
+        scope_hmac = security_scope_fingerprint(scope, settings=settings)
+        backend = settings.rag_retrieval_backend
+        legacy = LegacyRetrievalObservation.build(
+            surface='assistant',
+            configured_backend=backend,
+            effective_backend=(
+                'pgvector' if backend == 'pgvector' else 'deterministic_lexical'
+            ),
+            query_context_version='assistant-context:v1',
+            retrieval_query_hmac=_fingerprint(
+                {'contextual_query_bytes': exact_utf8_bytes(contextual_query)},
+                settings=settings,
+                schema='rag-shadow-assistant-context-query:v1',
+            ),
+            security_scope_fingerprint=scope_hmac,
+            candidate_window=(),
+            hidden_match_count=0,
+            hidden_count_capped=False,
+            query_embedding_attempt_fence_hmac=None,
+            public_agent_run_correlation_hmac=(
+                _fingerprint(
+                    {'legacy_public_run_id': public_agent_run_id},
+                    settings=settings,
+                    schema='rag-shadow-legacy-public-run-correlation:v1',
+                )
+                if type(public_agent_run_id) is int and public_agent_run_id > 0
+                else None
+            ),
+            latency_ms=0,
+            settings=settings,
+        )
+        comparison = ShadowComparator(settings).assistant_context_security_delta(
+            legacy=legacy,
+            scope=scope,
+        )
+        ShadowAuditWriter(settings).append(db, comparison)
+        db.commit()
+        return comparison
+
+
+def _observe_pgvector_legacy(
+    *,
+    services,
+    settings: Settings,
+    actor,
+    surface,
+    prepared_text,
+    shared,
+    scope_hmac,
+    public_delivery,
+):
+    from backend.app.agents.rag_orchestrator_agent import service
+    from backend.app.permissions.service import can_access_permission
+    from backend.app.rag.search_store import build_pgvector_search_store
+
+    store = build_pgvector_search_store(
+        db=services.db,
+        settings=settings,
+        shared_query_embedding=shared,
+    )
+    if store is None:
+        raise ValueError('legacy pgvector store is unavailable')
+    found = store.search(
+        query=prepared_text.retrieval_query_text,
+        user=actor,
+        limit=5 if surface == 'search' else 8,
+    )
+    candidates = service.filter_live_serving_candidates(
+        db=services.db,
+        candidates=service.candidates_from_vector_matches(found.matches),
+    )
+    rows = tuple(
+        _observe_legacy_candidate(
+            db=services.db,
+            settings=settings,
+            actor=actor,
+            candidate=candidate,
+            ordinal=ordinal,
+            can_access_permission=can_access_permission,
+        )
+        for ordinal, candidate in enumerate(candidates)
+    )
+    projection = getattr(public_delivery, 'projection', None)
+    public_run_id = getattr(projection, 'agent_run_id', None)
+    correlation = (
+        _fingerprint(
+            {'legacy_public_run_id': public_run_id},
+            settings=settings,
+            schema='rag-shadow-legacy-public-run-correlation:v1',
+        )
+        if type(public_run_id) is int and public_run_id > 0
+        else None
+    )
+    return LegacyRetrievalObservation.build(
+        surface=surface,
+        configured_backend='pgvector',
+        effective_backend='pgvector',
+        query_context_version=prepared_text.query_context_version,
+        retrieval_query_hmac=prepared_text.retrieval_query_hmac,
+        security_scope_fingerprint=scope_hmac,
+        candidate_window=rows,
+        hidden_match_count=found.hidden_match_count,
+        hidden_count_capped=False,
+        query_embedding_attempt_fence_hmac=shared.prepared.attempt_fence_hmac,
+        public_agent_run_correlation_hmac=correlation,
+        latency_ms=shared.receipt.latency_ms,
+        settings=settings,
+    )
 
 
 def _observe_legacy_candidate(

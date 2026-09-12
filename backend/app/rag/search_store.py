@@ -32,6 +32,7 @@ from backend.app.rag.pgvector_store import (
 from backend.app.rag.retrieval import (
     QUERY_EMBEDDING_DIMENSIONS,
     ClassifiedRetrievalCandidate,
+    QueryEmbeddingCallResult,
     RetrievalRequest,
 )
 from backend.app.rag.serving_contracts import (
@@ -51,7 +52,12 @@ from backend.app.rag.trusted_evidence import (
 )
 
 
-def build_pgvector_search_store(*, db: Session, settings: Settings):
+def build_pgvector_search_store(
+    *,
+    db: Session,
+    settings: Settings,
+    shared_query_embedding: QueryEmbeddingCallResult | None = None,
+):
     if not settings.rag_use_pgvector_search:
         return None
     if db.bind is None or db.bind.dialect.name != 'postgresql':
@@ -62,15 +68,23 @@ def build_pgvector_search_store(*, db: Session, settings: Settings):
         session=db,
         config=PgVectorConfig(embedding_dimensions=settings.openai_embedding_dimensions),
     )
-    embedding_model = OpenAIEmbeddingModel(
-        config=OpenAIEmbeddingConfig(
-            api_key=settings.openai_api_key,
-            model=settings.openai_embedding_model,
-            dimensions=settings.openai_embedding_dimensions,
-            timeout_seconds=settings.openai_embedding_timeout_seconds,
+    embedding_model = (
+        None
+        if shared_query_embedding is not None
+        else OpenAIEmbeddingModel(
+            config=OpenAIEmbeddingConfig(
+                api_key=settings.openai_api_key,
+                model=settings.openai_embedding_model,
+                dimensions=settings.openai_embedding_dimensions,
+                timeout_seconds=settings.openai_embedding_timeout_seconds,
+            )
         )
     )
-    return PgVectorSearchAdapter(store=store, embedding_model=embedding_model)
+    return PgVectorSearchAdapter(
+        store=store,
+        embedding_model=embedding_model,
+        shared_query_embedding=shared_query_embedding,
+    )
 
 
 def build_rag_v2_pgvector_search_store(
@@ -219,14 +233,40 @@ def _resolve_canonical_projection(
 
 
 class PgVectorSearchAdapter:
-    def __init__(self, *, store: PgVectorStore, embedding_model: OpenAIEmbeddingModel) -> None:
+    def __init__(
+        self,
+        *,
+        store: PgVectorStore,
+        embedding_model: OpenAIEmbeddingModel | None,
+        shared_query_embedding: QueryEmbeddingCallResult | None = None,
+    ) -> None:
+        if embedding_model is None and shared_query_embedding is None:
+            raise ValueError('pgvector embedding authority is required')
         self.store = store
         self.embedding_model = embedding_model
+        self.shared_query_embedding = shared_query_embedding
         self._query_embeddings: dict[str, list[float]] = {}
 
     def search(self, *, query: str, user: DemoUser, limit: int = 5):
+        if self.shared_query_embedding is not None:
+            from backend.app.agents.rag_orchestrator_agent.v2_embedding import (
+                share_query_embedding_result,
+            )
+
+            shared = share_query_embedding_result(
+                self.shared_query_embedding,
+                legacy_query_text=query,
+                v2_query_text=query,
+            )
+            return self.store.search_with_embedding(
+                query_embedding=shared.vector.coordinates,
+                user=user,
+                limit=limit,
+            )
         query_embedding = self._query_embeddings.get(query)
         if query_embedding is None:
+            if self.embedding_model is None:
+                raise ValueError('pgvector embedding authority is unavailable')
             query_embedding = self.embedding_model.embed(query)
             self._query_embeddings[query] = query_embedding
         return self.store.search_with_embedding(

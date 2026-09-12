@@ -1,5 +1,31 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-13 D Core Task21 staged retrieval-shadow candidate
+
+- Added deployment-static rollout execution across Ask, Search, and Assistant.
+  Keyword shadow is provider/cost/generation-free; pgvector shadow shares one
+  exact immutable query embedding with the unchanged legacy path and never runs
+  V2 answer generation.
+- Added a pure aggregate comparator with exactly five allowed delta classes.
+  Persisted shadow evidence is limited to counts, latency/cost values, and
+  domain-separated HMACs; raw queries, evidence bytes, public/internal run IDs,
+  and candidate tuples are not stored.
+- Assistant history containing a prior assistant response remains on one
+  standalone legacy path and records only the sanitized context-security delta.
+  User-only Assistant context now participates in both keyword and pgvector
+  retrieval comparison without changing public response bytes.
+- A retained provider-safety blocker now prevents D admission/shared embedding,
+  writes an aggregate advancement-blocked audit, and permits exactly the legacy
+  product path. Rollback does not clear the underlying latch. A crash after a
+  successful embedding-cost commit is owner-fenced, recoverable only as final
+  `persistence_failed`, retains actual cost, and cannot redispatch.
+- Provider-free evidence is `558 passed` plus Ruff clean. All exact 60 golden
+  cases execute the real LangChain keyword/pgvector Runnable boundaries with
+  deterministic fake transports and zero external provider/network calls.
+  The candidate remains **DONE_WITH_CONCERNS pending independent review**. No
+  rollout activation, live provider, network, push, merge, deploy, Slack, CDC,
+  Redis/D.1, or Deliverable E work occurred.
+
 ## 2026-09-12 D Core Task18 CLEAN
 
 - Independent review found two uncommon schema spellings that d7 accepted but

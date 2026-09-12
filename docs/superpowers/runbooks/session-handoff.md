@@ -1,6 +1,36 @@
 # ParaWorks Harness Session Handoff
 
-Updated: 2026-09-12
+Updated: 2026-09-13
+
+## 2026-09-13 Task21 staged retrieval-shadow candidate
+
+- Task21 actual implementation is complete as a review candidate, not CLEAN.
+  It adds exhaustive deployment-static mode/stage/surface policy, provider-free
+  keyword shadow, one-shared-embedding pgvector shadow, and Assistant-specific
+  user-only versus prior-assistant context handling. V2 generation is never
+  called in shadow, and public legacy delivery remains the product result.
+- Pgvector shadow owns one internal exact-two ledger: the query child records
+  exact actual/reserved cost and the generation child is terminal zero. Ready
+  retrieval writes one aggregate comparison; not-ready writes no comparison and
+  closes final as `serving_index_not_ready`. A simulated crash in the phase-1
+  pending gap requires the exact owner/cost fence, closes `persistence_failed`,
+  preserves actual embedding cost, and cannot redispatch.
+- A pre-existing query-embedding safety blocker is checked before D admission.
+  It writes only an aggregate/HMAC advancement-blocked audit and calls the
+  standalone legacy path once. Assistant context containing a prior assistant
+  message likewise creates no shared carrier, V2 comparison, or D cost owner.
+- Verification: focused/affected backend matrix `558 passed in 117.96s`; Ruff
+  reports `All checks passed!`; the exact 60-case provider-free gate executes
+  real keyword/pgvector LangChain Runnables with fake in-process ports and zero
+  external provider/network calls.
+- Expanded files were necessary for real wiring: cost ledger/finalization,
+  composition, strict embedding preparation, legacy pgvector store adapter,
+  Assistant route, and their regression tests. Public DTOs and permission,
+  trust, budget, and Review Queue contracts are unchanged.
+- Status is **DONE_WITH_CONCERNS pending independent review**. Rollout defaults
+  remain disabled. No paid/live call, network, push, merge, deploy, Slack, CDC,
+  Redis/D.1, or Deliverable E work. Next action is independent Task21 review;
+  Task22 must not start before the controller accepts that review.
 
 ## 2026-09-12 Task18 CLEAN; continue with Task19
 

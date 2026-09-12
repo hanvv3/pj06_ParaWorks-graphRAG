@@ -112,10 +112,15 @@ def build_rag_v2_runtime(
 def _default_shadow_runner(*, session_factory, settings):
     from functools import partial
 
-    from backend.app.rag.shadow import run_keyword_shadow
+    from backend.app.rag.shadow import run_keyword_shadow, run_pgvector_shadow
 
-    if settings.rag_retrieval_backend != 'keyword':
-        return lambda **_kwargs: None
+    if settings.rag_retrieval_backend == 'pgvector':
+        return partial(
+            run_pgvector_shadow,
+            request_factory=default_rag_request_factory,
+            session_factory=session_factory,
+            settings=settings,
+        )
     return partial(
         run_keyword_shadow,
         session_factory=session_factory,

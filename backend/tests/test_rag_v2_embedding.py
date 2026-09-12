@@ -11,6 +11,7 @@ from backend.app.agent_runtime.rag_v2_identity import (
 )
 from backend.app.agents.rag_orchestrator_agent.v2_embedding import (
     QueryEmbeddingDispatchError,
+    QueryEmbeddingReadinessError,
     StrictQueryEmbeddingAdapter,
     share_query_embedding_result,
 )
@@ -519,3 +520,21 @@ def test_shadow_reuses_exact_same_immutable_carrier_only_for_identical_query_byt
             legacy_query_text='한글 Exact',
             v2_query_text='한글 exact',
         )
+
+
+def test_not_ready_shadow_can_prepare_legacy_only_carrier_without_weakening_enforce():
+    """Catches serving-index readiness being bypassed outside the shadow bridge."""
+    adapter, _, _, transport = _adapter()
+    not_ready = _readiness(ready=False)
+
+    with pytest.raises(QueryEmbeddingReadinessError):
+        adapter.prepare(_request(query='legacy only'), not_ready)
+
+    prepared = adapter.prepare_shadow_legacy(
+        _request(query='legacy only'), not_ready
+    )
+
+    assert prepared.transient_query_utf8 == b'legacy only'
+    assert prepared.corpus_generation == not_ready.corpus_generation
+    assert prepared.vector_index_generation == not_ready.vector_index_generation
+    assert transport.calls == 0

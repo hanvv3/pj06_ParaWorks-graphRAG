@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -644,6 +645,189 @@ def test_shadow_pgvector_success_closes_unused_answer_component_terminal_zero(
     assert children[1].attempted is False
     assert children[1].charged_cost_usd == Decimal('0.000000')
     assert final.projection_owner_fence_hmac is not None
+
+
+@pytest.mark.parametrize('ready', (True, False))
+def test_shadow_pgvector_final_is_complete_exact_two_and_audit_is_aggregate_only(
+    tmp_path: Path, ready: bool,
+):
+    """Catches shadow cost stranded pending or raw/internal ids entering its audit."""
+    from backend.app.models import AuditLog
+    from backend.app.rag.shadow import ShadowComparator
+    from backend.tests.test_rag_shadow import (
+        SETTINGS,
+        _evidence,
+        _legacy,
+        _rebuild_legacy,
+        _result,
+        _scope,
+    )
+
+    ledger = _ledger(tmp_path)
+    comparison = (
+        ShadowComparator(SETTINGS).compare(
+            legacy=_rebuild_legacy(
+                _legacy(_evidence(1)),
+                configured_backend='pgvector',
+                effective_backend='pgvector',
+            ),
+            v2=replace(
+                _result(_evidence(1)),
+                configured_backend='pgvector',
+                effective_backend='pgvector',
+            ),
+            scope=_scope(),
+        )
+        if ready
+        else None
+    )
+    scope_hmac = (
+        comparison.security_scope_fingerprint if comparison is not None else '3' * 64
+    )
+    ledger.create_admission(
+        agent_run_id=128,
+        surface='search',
+        mode='shadow',
+        cutover_stage='search',
+        configured_backend='pgvector',
+        query_context_version='direct-query:v1',
+        current_text_hmac='1' * 64,
+        retrieval_query_hmac='2' * 64,
+        security_scope_fingerprint=scope_hmac,
+        admission_cache_identity_hmac=None,
+        source_window='rag-v2:admission:shadow:search:pgvector',
+        components=(
+            (_snapshot('query_embedding', _TEST_COST_POLICY), _budget('query_embedding', '0.000010')),
+            (_snapshot('answer_generation', _TEST_COST_POLICY), _budget('answer_generation', '0.002000')),
+        ),
+    )
+    grant = ledger.claim_component(
+        run_id=128,
+        component='query_embedding',
+        prepared=_budget('query_embedding', '0.000010'),
+    )
+    ledger.consume_committed_grant(grant)
+    ledger.finalize_component(
+        grant=grant,
+        observation=StrictProviderOutcome(
+            component='query_embedding',
+            classification='validated_success',
+            terminal_outcome='component_succeeded',
+            provider_dispatch_started=True,
+            provider_response_received=True,
+            strict_usage=StrictProviderUsage(20, 0, 20),
+            actual_cost_usd=Decimal('0.000001'),
+            safety_action='unchanged',
+        ),
+    )
+
+    outcome = 'shadow_match' if ready else 'serving_index_not_ready'
+    terminal = ledger.finalize_shadow_run(
+        run_id=128,
+        outcome=outcome,
+        comparison=comparison,
+        settings=SETTINGS,
+    )
+
+    parent = ledger._session.get(AgentRun, 128)
+    children = tuple(ledger._session.scalars(
+        select(AgentRunCostComponent)
+        .where(AgentRunCostComponent.agent_run_id == 128)
+        .order_by(AgentRunCostComponent.component_ordinal)
+    ))
+    assert terminal.status == 'complete'
+    assert parent.status == 'complete'
+    assert parent.run_record_phase == 'final'
+    assert parent.source_window == 'rag-v2:shadow:search:pgvector'
+    assert parent.cache_key.startswith('rag-v2-final-shadow:')
+    assert parent.metadata_['outcome'] == outcome
+    assert children[0].attempted is True
+    assert children[0].charged_cost_usd == Decimal('0.000001')
+    assert children[1].attempted is False
+    assert children[1].charged_cost_usd == Decimal('0.000000')
+    audits = tuple(ledger._session.scalars(select(AuditLog).where(
+        AuditLog.action == 'rag_shadow_compared'
+    )))
+    assert len(audits) == int(ready)
+    serialized = repr(parent.metadata_) + repr([row.metadata_ for row in audits])
+    assert 'chunk:1' not in serialized
+    assert 'source-1' not in serialized
+    assert "'internal_run_id'" not in serialized
+
+
+def test_shadow_not_ready_crash_gap_recovers_fail_closed_without_redispatch(
+    tmp_path: Path,
+):
+    """Proves a crash after embedding cost commit cannot retry or lose actual cost."""
+    ledger = _ledger(tmp_path)
+    ledger.create_admission(
+        agent_run_id=129,
+        surface='search',
+        mode='shadow',
+        cutover_stage='search',
+        configured_backend='pgvector',
+        query_context_version='direct-query:v1',
+        current_text_hmac='1' * 64,
+        retrieval_query_hmac='2' * 64,
+        security_scope_fingerprint='3' * 64,
+        admission_cache_identity_hmac=None,
+        source_window='rag-v2:admission:shadow:search:pgvector',
+        components=(
+            (
+                _snapshot('query_embedding', _TEST_COST_POLICY),
+                _budget('query_embedding', '0.000010'),
+            ),
+            (
+                _snapshot('answer_generation', _TEST_COST_POLICY),
+                _budget('answer_generation', '0.002000'),
+            ),
+        ),
+    )
+    grant = ledger.claim_component(
+        run_id=129,
+        component='query_embedding',
+        prepared=_budget('query_embedding', '0.000010'),
+    )
+    ledger.consume_committed_grant(grant)
+    embedding = ledger.finalize_component(
+        grant=grant,
+        observation=StrictProviderOutcome(
+            component='query_embedding',
+            classification='validated_success',
+            terminal_outcome='component_succeeded',
+            provider_dispatch_started=True,
+            provider_response_received=True,
+            strict_usage=StrictProviderUsage(20, 0, 20),
+            actual_cost_usd=Decimal('0.000001'),
+            safety_action='unchanged',
+        ),
+    )
+
+    assert embedding.parent_run_record_phase == 'cost_finalized_pending_projection'
+    snapshot = ledger.pending_projection_recovery_snapshot(129)
+    with pytest.raises(RagCostLedgerError, match='owner fence'):
+        ledger.recover_incomplete_run(
+            run_id=129,
+            projection_owner_fence_hmac='0' * 64,
+            expected_runtime_cost_snapshot_hmac=snapshot.runtime_cost_snapshot_hmac,
+        )
+
+    terminal = ledger.recover_incomplete_run(
+        run_id=129,
+        projection_owner_fence_hmac=snapshot.projection_owner_fence_hmac,
+        expected_runtime_cost_snapshot_hmac=snapshot.runtime_cost_snapshot_hmac,
+    )
+
+    assert terminal.outcome == 'persistence_failed'
+    assert terminal.run_record_phase == 'final'
+    assert terminal.total_charged_cost_usd == Decimal('0.000001')
+    assert terminal.component_finals[0].attempted is True
+    assert terminal.component_finals[0].dispatch_count == 1
+    assert terminal.component_finals[0].charge_basis == 'actual'
+    assert terminal.component_finals[1].attempted is False
+    assert terminal.component_finals[1].dispatch_count == 0
+    with pytest.raises(RagCostLedgerError):
+        ledger.consume_committed_grant(grant)
 
 
 def test_pre_send_refusal_closes_selected_and_sibling_terminal_zero(

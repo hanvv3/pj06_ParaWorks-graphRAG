@@ -97,6 +97,23 @@ class StrictQueryEmbeddingAdapter:
         request: RetrievalRequest,
         readiness: RagServingIndexReadiness,
     ) -> PreparedQueryEmbedding:
+        return self._prepare(request, readiness, require_ready=True)
+
+    def prepare_shadow_legacy(
+        self,
+        request: RetrievalRequest,
+        readiness: RagServingIndexReadiness,
+    ) -> PreparedQueryEmbedding:
+        """Prepare the one paid carrier legacy may use when V2 index is not ready."""
+        return self._prepare(request, readiness, require_ready=False)
+
+    def _prepare(
+        self,
+        request: RetrievalRequest,
+        readiness: RagServingIndexReadiness,
+        *,
+        require_ready: bool,
+    ) -> PreparedQueryEmbedding:
         verify_serialized_security_scope_fingerprint(
             request.security_scope,
             serialized_fingerprint=request.security_scope_fingerprint,
@@ -108,7 +125,7 @@ class StrictQueryEmbeddingAdapter:
             raise ValueError(
                 'serving index is not ready; serving index readiness is invalid'
             ) from None
-        if readiness_snapshot[0] is not True:
+        if require_ready and readiness_snapshot[0] is not True:
             raise QueryEmbeddingReadinessError('serving index is not ready for query embedding')
         query_utf8 = request.retrieval_query_text.encode('utf-8', errors='strict')
         model_snapshot_hmac = build_query_embedding_model_config_snapshot_hmac(

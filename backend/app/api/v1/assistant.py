@@ -1,5 +1,6 @@
 import json
 import unicodedata
+from contextlib import suppress
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Annotated
@@ -666,7 +667,8 @@ def create_assistant_message(
     _require_assistant_ingress_scan(request.content)
     facade = raw_request.app.state.rag_application_facade
     prepared_ingress = None
-    v2_rag_owner = facade.execution_owner('assistant') == 'v2'
+    assistant_rag_owner = facade.execution_owner('assistant')
+    v2_rag_owner = assistant_rag_owner == 'v2'
     # Non-RAG planning sees only eligible immutable prior snapshots and current
     # input. Defer the V2 user INSERT until an action actually writes a product,
     # or until provider/RAG ingress has passed. A tentative email decision cannot
@@ -698,6 +700,10 @@ def create_assistant_message(
     messages = list_messages(db, user, conversation.id)
     messages = eligible_context_messages(db, user, messages)
     prior_messages = messages if v2_rag_owner else messages[:-1]
+    assistant_context_shadow = bool(
+        assistant_rag_owner == 'shadow'
+        and any(message.role == 'assistant' for message in prior_messages)
+    )
     tool_logger = AssistantToolLogger()
     email_context = render_email_action_context(
         messages=prior_messages,
@@ -934,8 +940,21 @@ def create_assistant_message(
         db=db,
         user=user,
     )
-    vector_store = (build_pgvector_search_store(db=db, settings=settings)
-                    if not v2_rag_owner else None)
+    pgvector_shared_shadow = bool(
+        assistant_rag_owner == 'shadow'
+        and settings.rag_retrieval_backend == 'pgvector'
+        and not assistant_context_shadow
+    )
+    assistant_keyword_shadow = bool(
+        assistant_rag_owner == 'shadow'
+        and settings.rag_retrieval_backend == 'keyword'
+        and not assistant_context_shadow
+    )
+    vector_store = (
+        build_pgvector_search_store(db=db, settings=settings)
+        if not v2_rag_owner and not pgvector_shared_shadow
+        else None
+    )
     confident_email_intent = (
         email_intent.email_intent
         and email_intent.confidence_score
@@ -1088,16 +1107,53 @@ def create_assistant_message(
             'assistant_message': serialize_message(assistant_message, db=db, user=user),
         }
 
+    shadow_prepared = None
     try:
-        answer = answer_question_with_rag(
-            db=db,
-            user=user,
-            question=contextual_question,
-            settings=settings,
-            vector_store=vector_store,
-            tool_logger=tool_logger,
-            commit_agent_run=False,
-        )
+        if pgvector_shared_shadow:
+            shadow_prepared = facade.prepare_assistant_shadow_ingress(
+                actor=user,
+                conversation_id=conversation_id,
+                user_message_id=user_message.id,
+                caller_text=user_message.content,
+            )
+            if shadow_prepared.retrieval_query_text != contextual_question:
+                raise ValueError('assistant shadow query bytes changed')
+            answer = facade.invoke_assistant_pgvector_shadow_legacy(
+                actor=user,
+                prepared_text=shadow_prepared,
+                legacy_invoke=lambda shared: answer_question_with_rag(
+                    db=db,
+                    user=user,
+                    question=contextual_question,
+                    settings=settings,
+                    vector_store=build_pgvector_search_store(
+                        db=db,
+                        settings=settings,
+                        shared_query_embedding=shared,
+                    ),
+                    tool_logger=tool_logger,
+                    commit_agent_run=False,
+                ),
+            )
+        else:
+            if assistant_keyword_shadow:
+                shadow_prepared = facade.prepare_assistant_shadow_ingress(
+                    actor=user,
+                    conversation_id=conversation_id,
+                    user_message_id=user_message.id,
+                    caller_text=user_message.content,
+                )
+                if shadow_prepared.retrieval_query_text != contextual_question:
+                    raise ValueError('assistant shadow query bytes changed')
+            answer = answer_question_with_rag(
+                db=db,
+                user=user,
+                question=contextual_question,
+                settings=settings,
+                vector_store=vector_store,
+                tool_logger=tool_logger,
+                commit_agent_run=False,
+            )
     except Exception as exc:
         append_failed_assistant_message(
             db,
@@ -1110,6 +1166,21 @@ def create_assistant_message(
             status_code=502,
             detail='assistant answer generation failed',
         ) from exc
+
+    if assistant_context_shadow:
+        with suppress(Exception):
+            facade.observe_assistant_context_shadow(
+                actor=user,
+                contextual_query=contextual_question,
+                public_agent_run_id=answer.agent_run_id,
+            )
+    elif assistant_keyword_shadow:
+        with suppress(Exception):
+            facade.observe_assistant_keyword_shadow(
+                actor=user,
+                prepared_text=shadow_prepared,
+                legacy_delivery=answer,
+            )
 
     try:
         assistant_message = append_assistant_message(

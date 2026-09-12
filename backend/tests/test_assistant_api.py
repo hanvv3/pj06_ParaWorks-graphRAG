@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -441,6 +442,247 @@ def test_assistant_non_email_intent_goes_to_rag(
     assert assistant_message['content'] == 'RAG answer'
     assert assistant_message['metadata']['agent_name'] == 'rag_orchestrator_agent'
     assert assistant_message['metadata'].get('action_type') != 'email_draft'
+
+
+def test_shadow_assistant_with_prior_assistant_records_context_delta_only(
+    client: TestClient, db_session: Session, monkeypatch,
+) -> None:
+    from backend.app.agent_runtime.rag_application import RagApplicationFacade
+
+    facade = client.app.state.rag_application_facade
+    settings = facade._settings.model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'assistant',
+        'rag_retrieval_backend': 'keyword',
+    })
+    client.app.state.rag_application_facade = replace(facade, _settings=settings)
+    client.app.dependency_overrides[assistant_api.get_settings] = lambda: settings
+    conversation = create_conversation(db_session, USERS['viewer'], title='shadow context')
+    append_assistant_message(
+        db_session, USERS['viewer'], conversation,
+        content='이전 비서 답변', citations=[], source_ids=[], source_links=[],
+        source_snippets=[], permission_level=None, hidden_match_count=0,
+        permission_notice=None, agent_run_id=None, metadata={},
+    )
+    observed = []
+    monkeypatch.setattr(
+        RagApplicationFacade,
+        'observe_assistant_context_shadow',
+        lambda self, **kwargs: observed.append(kwargs),
+    )
+    _patch_email_flow(
+        monkeypatch,
+        intent_decision=_email_intent(email_intent=False, confidence_score=1.0),
+    )
+    monkeypatch.setattr(
+        assistant_api,
+        'answer_question_with_rag',
+        lambda **kwargs: SimpleNamespace(
+            answer='legacy answer', citations=[], source_ids=[], source_links=[],
+            source_snippets=[], permission_level='internal', hidden_match_count=0,
+            permission_notice=None, agent_run_id=654,
+            agent_name='rag_orchestrator_agent', prompt_version='rag-answer:v1',
+            question=kwargs['question'],
+        ),
+    )
+
+    response = client.post(
+        f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        json={'content': '다음 질문'}, headers={'X-Demo-User': 'viewer'},
+    )
+
+    assert response.status_code == 200
+    assert response.json()['assistant_message']['content'] == 'legacy answer'
+    assert len(observed) == 1
+    assert observed[0]['public_agent_run_id'] == 654
+    assert '이전 비서 답변' in observed[0]['contextual_query']
+
+
+def test_shadow_pgvector_prior_assistant_uses_one_standalone_legacy_path(
+    client: TestClient, db_session: Session, monkeypatch,
+) -> None:
+    """Catches prior-assistant context entering shared embedding or a D run."""
+    from backend.app.agent_runtime.rag_application import RagApplicationFacade
+
+    facade = client.app.state.rag_application_facade
+    settings = facade._settings.model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'assistant',
+        'rag_retrieval_backend': 'pgvector',
+    })
+    client.app.state.rag_application_facade = replace(
+        facade,
+        _settings=settings,
+        _shadow_runner=lambda **_kwargs: pytest.fail(
+            'prior-assistant context cannot enter shared D shadow'
+        ),
+    )
+    client.app.dependency_overrides[assistant_api.get_settings] = lambda: settings
+    conversation = create_conversation(
+        db_session, USERS['viewer'], title='pgvector prior assistant'
+    )
+    append_assistant_message(
+        db_session, USERS['viewer'], conversation,
+        content='이전 비서 답변', citations=[], source_ids=[], source_links=[],
+        source_snippets=[], permission_level=None, hidden_match_count=0,
+        permission_notice=None, agent_run_id=None, metadata={},
+    )
+    stores = []
+
+    def build_store(**kwargs):
+        stores.append(kwargs)
+        assert 'shared_query_embedding' not in kwargs
+        return object()
+
+    monkeypatch.setattr(assistant_api, 'build_pgvector_search_store', build_store)
+    observed = []
+    monkeypatch.setattr(
+        RagApplicationFacade,
+        'observe_assistant_context_shadow',
+        lambda self, **kwargs: observed.append(kwargs),
+    )
+    _patch_email_flow(
+        monkeypatch,
+        intent_decision=_email_intent(email_intent=False, confidence_score=1.0),
+    )
+    answer_calls = []
+
+    def answer(**kwargs):
+        answer_calls.append(kwargs)
+        return SimpleNamespace(
+            answer='standalone legacy answer', citations=[], source_ids=[],
+            source_links=[], source_snippets=[], permission_level='internal',
+            hidden_match_count=0, permission_notice=None, agent_run_id=657,
+            agent_name='rag_orchestrator_agent', prompt_version='rag-answer:v1',
+            question=kwargs['question'],
+        )
+
+    monkeypatch.setattr(assistant_api, 'answer_question_with_rag', answer)
+
+    response = client.post(
+        f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        json={'content': '다음 질문'}, headers={'X-Demo-User': 'viewer'},
+    )
+
+    assert response.status_code == 200
+    assert response.json()['assistant_message']['content'] == 'standalone legacy answer'
+    assert len(stores) == 1
+    assert len(answer_calls) == 1
+    assert len(observed) == 1
+
+
+def test_shadow_assistant_without_prior_assistant_uses_shared_pgvector_carrier(
+    client: TestClient, monkeypatch,
+) -> None:
+    facade = client.app.state.rag_application_facade
+    shared = object()
+    shadow_calls = []
+
+    def shadow_runner(**kwargs):
+        shadow_calls.append(kwargs)
+        return kwargs['legacy_invoke'](shared)
+
+    settings = facade._settings.model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'assistant',
+        'rag_retrieval_backend': 'pgvector',
+    })
+    client.app.state.rag_application_facade = replace(
+        facade, _settings=settings, _shadow_runner=shadow_runner
+    )
+    client.app.dependency_overrides[assistant_api.get_settings] = lambda: settings
+    _patch_email_flow(
+        monkeypatch,
+        intent_decision=_email_intent(email_intent=False, confidence_score=1.0),
+    )
+    stores = []
+
+    def build_store(**kwargs):
+        stores.append(kwargs)
+        assert kwargs['shared_query_embedding'] is shared
+        return object()
+
+    monkeypatch.setattr(assistant_api, 'build_pgvector_search_store', build_store)
+
+    def answer(**kwargs):
+        assert kwargs['vector_store'] is not None
+        return SimpleNamespace(
+            answer='shared legacy answer', citations=[], source_ids=[], source_links=[],
+            source_snippets=[], permission_level='internal', hidden_match_count=0,
+            permission_notice=None, agent_run_id=655,
+            agent_name='rag_orchestrator_agent', prompt_version='rag-answer:v1',
+            question=kwargs['question'],
+        )
+
+    monkeypatch.setattr(assistant_api, 'answer_question_with_rag', answer)
+    create_response = client.post(
+        '/api/v1/assistant/conversations',
+        json={'title': 'shared shadow'}, headers={'X-Demo-User': 'viewer'},
+    )
+    conversation_id = create_response.json()['conversation']['id']
+
+    response = client.post(
+        f'/api/v1/assistant/conversations/{conversation_id}/messages',
+        json={'content': '첫 질문'}, headers={'X-Demo-User': 'viewer'},
+    )
+
+    assert response.status_code == 200
+    assert response.json()['assistant_message']['content'] == 'shared legacy answer'
+    assert len(shadow_calls) == 1
+    assert shadow_calls[0]['surface'] == 'assistant'
+    assert len(stores) == 1
+
+
+def test_shadow_assistant_without_prior_assistant_runs_keyword_comparison(
+    client: TestClient, monkeypatch,
+) -> None:
+    from backend.app.agent_runtime.rag_application import RagApplicationFacade
+
+    facade = client.app.state.rag_application_facade
+    settings = facade._settings.model_copy(update={
+        'langgraph_rag_v2_mode': 'shadow',
+        'langgraph_rag_v2_stage': 'assistant',
+        'rag_retrieval_backend': 'keyword',
+    })
+    client.app.state.rag_application_facade = replace(facade, _settings=settings)
+    client.app.dependency_overrides[assistant_api.get_settings] = lambda: settings
+    observed = []
+    monkeypatch.setattr(
+        RagApplicationFacade,
+        'observe_assistant_keyword_shadow',
+        lambda self, **kwargs: observed.append(kwargs),
+    )
+    _patch_email_flow(
+        monkeypatch,
+        intent_decision=_email_intent(email_intent=False, confidence_score=1.0),
+    )
+    monkeypatch.setattr(
+        assistant_api,
+        'answer_question_with_rag',
+        lambda **kwargs: SimpleNamespace(
+            answer='legacy keyword answer', citations=[], source_ids=[],
+            source_links=[], source_snippets=[], permission_level='internal',
+            hidden_match_count=0, permission_notice=None, agent_run_id=656,
+            agent_name='rag_orchestrator_agent', prompt_version='rag-answer:v1',
+            question=kwargs['question'],
+        ),
+    )
+    create_response = client.post(
+        '/api/v1/assistant/conversations',
+        json={'title': 'keyword shadow'}, headers={'X-Demo-User': 'viewer'},
+    )
+    conversation_id = create_response.json()['conversation']['id']
+
+    response = client.post(
+        f'/api/v1/assistant/conversations/{conversation_id}/messages',
+        json={'content': '첫 질문'}, headers={'X-Demo-User': 'viewer'},
+    )
+
+    assert response.status_code == 200
+    assert response.json()['assistant_message']['content'] == 'legacy keyword answer'
+    assert len(observed) == 1
+    assert observed[0]['legacy_delivery'].agent_run_id == 656
+    assert observed[0]['prepared_text'].query_context_version == 'assistant-context:v1'
 
 
 def test_assistant_email_agent_uses_conversation_context_without_rag(

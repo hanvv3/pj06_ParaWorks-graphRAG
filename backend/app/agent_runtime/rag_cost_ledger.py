@@ -55,6 +55,7 @@ from backend.app.agent_runtime.rag_safety_identity import (
     dead_process_attestation_identity,
     dispatch_fence_identity,
     final_error_identity,
+    final_shadow_identity,
     process_instance_identity,
     projection_owner_identity,
     require_lower_hmac,
@@ -383,6 +384,24 @@ class RagCostLedger:
     def process_instance_hmac(self) -> str:
         """Return the non-secret process identity used by reviewed recovery."""
         return self._process_hmac
+
+    def require_component_safety_ready(
+        self,
+        snapshot: AuthorizedProviderPolicySnapshot,
+    ) -> None:
+        """Read the retained safety latch before shadow creates an admission."""
+        if type(snapshot) is not AuthorizedProviderPolicySnapshot:
+            raise ValueError('provider safety snapshot is invalid')
+        self._cost_policy.require_authorized_policy_snapshot(
+            snapshot.component,
+            snapshot.authorized_policy_snapshot_hmac,
+        )
+        with self._provider_connection_factory() as connection:
+            self._provider_safety.require_ready(
+                connection,
+                snapshot.component,
+                snapshot,
+            )
 
     def _expected_dead_process_attestation_hmac(
         self,
@@ -1487,6 +1506,145 @@ class RagCostLedger:
         return self._commit_safe_pending(
             run_id=run_id, corpus_generation=corpus_generation,
             vector_index_generation=vector_index_generation, embedding_only=True,
+        )
+
+    @_runtime_health_effect
+    def finalize_shadow_run(
+        self,
+        *,
+        run_id: int,
+        outcome: str,
+        comparison,
+        settings,
+    ) -> RagRunTerminal:
+        """Atomically close paid retrieval-only shadow cost and aggregate audit."""
+        from backend.app.rag.shadow import (
+            ShadowAuditWriter,
+            ShadowComparison,
+        )
+
+        comparison_outcome = outcome in {'shadow_match', 'shadow_mismatch'}
+        if (
+            type(run_id) is not int
+            or run_id <= 0
+            or outcome not in {
+                'shadow_match',
+                'shadow_mismatch',
+                'serving_index_not_ready',
+            }
+            or comparison_outcome
+            and (
+                type(comparison) is not ShadowComparison
+                or comparison.outcome != outcome
+                or comparison.configured_backend != 'pgvector'
+            )
+            or not comparison_outcome
+            and comparison is not None
+        ):
+            raise ValueError('shadow finalization is invalid')
+        with self._answer_binding_lock, self._safe_pending_owner(
+            run_id,
+            embedding_only=True,
+        ):
+            parent, rows = self._locked_run(run_id)
+            query, answer = rows
+            expected = self._pending_projection_identities.get(run_id)
+            actual = (
+                parent.projection_owner_fence_hmac,
+                parent.metadata_.get('security_scope_fingerprint'),
+                parent.metadata_.get('runtime_cost_snapshot_hmac'),
+            )
+            if (
+                expected is None
+                or actual != expected
+                or parent.status != 'running'
+                or parent.run_record_phase != 'cost_finalized_pending_projection'
+                or parent.completed_at is not None
+                or parent.metadata_.get('mode') != 'shadow'
+                or parent.metadata_.get('configured_backend') != 'pgvector'
+                or query.dispatch_state != 'terminal'
+                or query.terminal_outcome != 'component_succeeded'
+                or query.attempted is not True
+                or query.dispatch_count != 1
+                or answer.dispatch_state != 'terminal'
+                or answer.attempted is not False
+                or answer.dispatch_count != 0
+                or Decimal(answer.charged_cost_usd) != _ZERO
+                or comparison is not None
+                and not hmac.compare_digest(
+                    comparison.security_scope_fingerprint,
+                    parent.metadata_['security_scope_fingerprint'],
+                )
+            ):
+                raise RagCostLedgerError('shadow pending projection changed')
+            self._require_terminal_cost_row(run_id, query)
+            parts = parent.source_window.split(':')
+            if len(parts) != 5 or parts[:3] != ['rag-v2', 'admission', 'shadow']:
+                raise RagCostLedgerError('shadow admission source window is invalid')
+            surface, backend = parts[3], parts[4]
+            admission_hmac = parent.cache_key.removeprefix('rag-v2-admission:')
+            require_lower_hmac(admission_hmac)
+            terminal_runtime_hmac = self._runtime_cost_identity(
+                agent_run_id=parent.id,
+                components=[self._row_runtime_component(row) for row in rows],
+                parent_outcome=outcome,
+                parent_run_record_phase='final',
+                parent_status='complete',
+                snapshot_stage='terminal',
+            )
+            terminal_hmac = final_shadow_identity(
+                {
+                    'admission_cache_identity_hmac': admission_hmac,
+                    'outcome': outcome,
+                    'runtime_cost_snapshot_hmac': terminal_runtime_hmac,
+                    'surface': surface,
+                },
+                secret=self._secret,
+            )
+            if comparison is not None:
+                ShadowAuditWriter(settings).append(self._session, comparison)
+            parent.status = 'complete'
+            parent.run_record_phase = 'final'
+            parent.source_window = terminal_source_window(
+                stage='shadow', surface=surface, backend=backend
+            )
+            parent.cache_key = 'rag-v2-final-shadow:' + terminal_hmac
+            parent.projection_owner_fence_hmac = None
+            parent.completed_at = datetime.now(UTC)
+            parent.metadata_ = {
+                **parent.metadata_,
+                'outcome': outcome,
+                'runtime_cost_snapshot_hmac': terminal_runtime_hmac,
+                'shadow_comparison_hmac': (
+                    comparison.comparison_hmac if comparison is not None else None
+                ),
+                'terminal_identity_hmac': terminal_hmac,
+            }
+            self._commit()
+            self._pending_projection_identities.pop(run_id, None)
+            self._answer_reservations.pop(run_id, None)
+            self._admission_budgets.pop((run_id, 'answer_generation'), None)
+        finals = cast(
+            tuple[RagComponentFinal, RagComponentFinal],
+            tuple(self._component_final(parent, row) for row in rows),
+        )
+        return RagRunTerminal(
+            agent_run_id=parent.id,
+            status='complete',
+            run_record_phase='final',
+            outcome=outcome,  # type: ignore[arg-type]
+            admission_cache_identity_hmac=admission_hmac,
+            source_window=parent.source_window,  # type: ignore[arg-type]
+            cache_key=parent.cache_key,
+            total_reserved_cost_usd=sum(
+                (Decimal(row.reserved_cost_usd) for row in rows), _ZERO
+            ),
+            total_charged_cost_usd=Decimal(parent.total_charged_cost_usd),
+            component_finals=finals,
+            projection_owner_fence_hmac=None,
+            runtime_cost_snapshot_hmac=terminal_runtime_hmac,
+            terminal_identity_hmac=terminal_hmac,
+            completed_at=parent.completed_at,
         )
 
     @contextmanager
