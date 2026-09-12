@@ -963,6 +963,131 @@ test("conversation-create client-upgrade stays reload-only across client navigat
   expect(createPostCount).toBe(1);
 });
 
+test("late conversation-create client-upgrade after unmount latches before Assistant re-entry", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "desktop shell navigation drives this held-response probe");
+  let releaseCreate!: () => void;
+  let signalCreateStarted!: () => void;
+  const createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+  const createStarted = new Promise<void>((resolve) => { signalCreateStarted = resolve; });
+  let latchObserved = false;
+  let assistantRequestCount = 0;
+  let assistantRequestsAfterLatch = 0;
+  let createPostCount = 0;
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", async (route, request) => {
+    assistantRequestCount += 1;
+    if (latchObserved) assistantRequestsAfterLatch += 1;
+    if (request.method() === "GET") {
+      await route.fulfill({ json: { conversations: [conversation] } });
+      return;
+    }
+    createPostCount += 1;
+    signalCreateStarted();
+    await createGate;
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      json: { detail: { code: "client_upgrade_required" } },
+    });
+  });
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    assistantRequestCount += 1;
+    if (latchObserved) assistantRequestsAfterLatch += 1;
+    if (request.method() !== "GET") throw new Error("upgrade latch must block message POST");
+    await route.fulfill({ json: { conversation, messages: [emailDraftMessage] } });
+  });
+
+  await page.goto("/search");
+  await expect(page.getByText(emailDraftMessage.content)).toBeVisible();
+  await page.evaluate(() => {
+    const taskWindow = window as unknown as Window & { __task20LateCreateStorageWrites: number };
+    const originalSetItem = Storage.prototype.setItem;
+    taskWindow.__task20LateCreateStorageWrites = 0;
+    Storage.prototype.setItem = function setItem(key: string, value: string) {
+      taskWindow.__task20LateCreateStorageWrites += 1;
+      return originalSetItem.call(this, key, value);
+    };
+  });
+  const openConversationList = page.getByRole("button", { name: "대화 목록 펼치기" });
+  if (await openConversationList.isVisible()) await openConversationList.click();
+  await page.getByRole("button", { name: "새 대화 만들기" }).click();
+  await createStarted;
+
+  await page.getByRole("link", { name: "대시보드", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  releaseCreate();
+  await page.waitForTimeout(100);
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText("새 버전이 필요합니다");
+  await expect(page.locator("body")).not.toContainText("client_upgrade_required");
+  latchObserved = true;
+
+  await page.getByRole("link", { name: "AI 비서", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/search$/);
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "새 대화 만들기", includeHidden: true })).toBeDisabled();
+  await expect(page.locator("body")).not.toContainText("client_upgrade_required");
+  await page.waitForTimeout(100);
+  expect(assistantRequestsAfterLatch).toBe(0);
+  expect(createPostCount).toBe(1);
+  expect(await page.evaluate(() => (
+    window as unknown as Window & { __task20LateCreateStorageWrites: number }
+  ).__task20LateCreateStorageWrites)).toBe(0);
+
+  const beforeReload = assistantRequestCount;
+  latchObserved = false;
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeEnabled();
+  expect(assistantRequestCount).toBeGreaterThan(beforeReload);
+  expect(createPostCount).toBe(1);
+});
+
+test("late non-upgrade conversation-create failure after unmount does not latch", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "desktop shell navigation drives this held-response control");
+  let releaseCreate!: () => void;
+  let signalCreateStarted!: () => void;
+  const createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+  const createStarted = new Promise<void>((resolve) => { signalCreateStarted = resolve; });
+  let createPostCount = 0;
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", async (route, request) => {
+    if (request.method() === "GET") {
+      await route.fulfill({ json: { conversations: [conversation] } });
+      return;
+    }
+    createPostCount += 1;
+    signalCreateStarted();
+    await createGate;
+    await route.fulfill({ status: 500, contentType: "text/plain", body: "private late create failure" });
+  });
+  await page.route("**/api/v1/assistant/conversations/19/messages", (route) => route.fulfill({
+    json: { conversation, messages: [emailDraftMessage] },
+  }));
+
+  await page.goto("/search");
+  await expect(page.getByText(emailDraftMessage.content)).toBeVisible();
+  const openConversationList = page.getByRole("button", { name: "대화 목록 펼치기" });
+  if (await openConversationList.isVisible()) await openConversationList.click();
+  await page.getByRole("button", { name: "새 대화 만들기" }).click();
+  await createStarted;
+  await page.getByRole("link", { name: "대시보드", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  releaseCreate();
+  await page.waitForTimeout(100);
+  await expect(page.locator("body")).not.toContainText("private late create failure");
+
+  await page.getByRole("link", { name: "AI 비서", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/search$/);
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeEnabled();
+  await expect(page.getByText(emailDraftMessage.content)).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("private late create failure");
+  expect(createPostCount).toBe(1);
+});
+
 test("POST client-upgrade survives client navigation and blocks Assistant transport until hard reload", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "desktop shell navigation drives this client-lifetime probe");
   let latchObserved = false;
