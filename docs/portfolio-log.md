@@ -1,6 +1,6 @@
 # ParaWorks Portfolio Log
 
-## 2026-09-12 D Core Task18 supported-schema closeout candidate
+## 2026-09-12 D Core Task18 CLEAN
 
 - Independent review found two uncommon schema spellings that d7 accepted but
   could not safely pass through every generation layer: `$function$` could close
@@ -13,12 +13,17 @@
   that does not echo the input. `public`, quoted names, spaces and Unicode remain
   supported. This documented spelling limit replaces the earlier blanket claim
   that every PostgreSQL-legal schema identifier is supported.
-- Fresh local evidence: 16 d7/F11 tests; 86 v3/golden/applicable retained probes;
-  237 affected Assistant/Task18 and offline-migration tests; and the isolated 23
-  offline migration tests passed. PostgreSQL-named server tests remain deselected
-  and no actual PostgreSQL parser/server, role, commit or concurrency check was
-  run. This is a local candidate pending independent rereview, not CLEAN or
-  rollout-ready; no push, deploy, provider, network or Docker action occurred.
+- Independent cumulative review of `a693b091` is **CLEAN**: F1–F11 are addressed
+  with no open Critical, Important or Minor finding. The reviewer freshly passed
+  358 tests with no failures across v3/golden/d7, retained and new review probes,
+  the SQLite F6 matrix, and affected Assistant/Task18/migration suites.
+- CLEAN is bounded to code review, static PostgreSQL SQL, and SQLite execution.
+  Actual PostgreSQL parser/server, least-privileged role, TEMP/direct-execute,
+  deferred-commit, concurrency and deployment-role verification remain separate
+  unapproved release gates. Empty-v3 downgrade restores known-unsafe c6 only for
+  offline recovery and must be followed by re-upgrade before serving. No rollout,
+  deployment, push, provider, network or Docker action occurred. Task19 frontend
+  DTO/capability transport is the next implementation task.
 
 ## 2026-09-12 D Core Task18 PostgreSQL authority hardening candidate
 
@@ -47,8 +52,8 @@
   Ask/RAG/search SQLite gate passed 1,085 tests with two skips and 40
   deselections; seven backend-selection PG-static tests passed separately with
   a non-connecting dummy PostgreSQL locator. No actual PostgreSQL/TEMP-role/
-  commit-time execution or concurrency test was run, so this remains static SQL
-  and SQLite evidence pending independent rereview, not CLEAN or rollout-ready.
+  commit-time execution or concurrency test was run. This was the round-5
+  pre-review checkpoint; the final CLEAN entry above supersedes its status.
 
 ## 2026-09-12 D Core Task18 legacy-v3 database hardening candidate
 
@@ -75,7 +80,7 @@
   two skips and 33 PostgreSQL-named deselections; its seven PG-bootstrap static
   cases were then isolated behind a non-connecting dummy PostgreSQL locator and
   all passed. Existing Alembic configuration warnings remain. This remains a
-  local candidate pending independent rereview, not CLEAN or rollout-ready.
+  historical round-4 candidate; the final CLEAN entry above supersedes it.
 
 ## 2026-09-12 D Core Task18 approved legacy-integrity v3 candidate
 
@@ -101,10 +106,10 @@
   Final API/email/local-migration gate: 193 passed; final marker-guard/
   Task18/reader/writer gate: 204 passed. Ruff, compile and diff checks pass;
   credential-pattern scans have zero matches.
-- This supersedes the earlier unapproved/blocked F2 status. Task18 is a
-  DONE_WITH_CONCERNS candidate pending independent rereview, never CLEAN or
-  rollout-ready. F1/F3/F4/F5 and deterministic contact/email branch isolation
-  remain covered. No live provider, network, Docker, real PG, push or merge.
+- This superseded the earlier unapproved/blocked F2 status at the round-3
+  checkpoint. The final CLEAN entry above supersedes that candidate status.
+  F1/F3/F4/F5 and deterministic contact/email branch isolation remain covered.
+  No live provider, network, Docker, real PG, push or merge occurred then.
 
 ## 2026-09-12 D Core Task18 provider-ordering review fix
 
@@ -120,9 +125,10 @@
 - Unchanged reviewer probes first reproduced both provider calls and the wrong
   detail. Focused GREEN: 73 passed; affected gate: 228 passed with only F2
   deselected; final focused gate: 76 passed. Ruff, compile and diff checks passed.
-  The separate F2 content-tamper probe still
-  fails; its schema proposal remains unapproved/unimplemented and Task18 remains
-  INCOMPLETE/BLOCKED, not CLEAN. No provider/network/PG/rollout claim.
+  At this historical checkpoint the separate F2 content-tamper probe still
+  failed and its schema proposal was unapproved/unimplemented. The approved v3
+  implementation and final CLEAN entry above supersede that blocked status. No
+  provider/network/PG/rollout claim was made for this round.
 
 ## 2026-09-12 D Core Task18 review fixes; F2 blocks completion
 

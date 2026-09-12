@@ -2,7 +2,7 @@
 
 Updated: 2026-09-12
 
-## 2026-09-12 Task18 F11 supported-schema closeout candidate
+## 2026-09-12 Task18 CLEAN; continue with Task19
 
 - Round-5 independent review retained F1–F10 but found d7 accepted legal quoted
   schema spellings that its fixed `$function$` delimiter and SQLAlchemy
@@ -15,14 +15,18 @@ Updated: 2026-09-12
   upgrade/downgrade generates DDL/query text. The stable ValueError does not echo
   the name. Supported spellings include `public`, single/double quotes, spaces
   and Unicode; arbitrary PostgreSQL-legal schema names are not claimed.
-- Fresh green: d7/F11 16 passed; v3/golden/applicable retained probes 86 passed
-  with seven superseded cases deselected; affected Assistant/Task18/local
-  migrations 237 passed with 94 PostgreSQL-named deselected; offline migrations
-  alone 23 passed with the same 94 deselections. Existing Alembic path warnings
-  remain. Independent rereview is required before CLEAN or Task19.
-- Real PostgreSQL parser/server, TEMP/direct-execute, deferred commit,
-  concurrency and deployment-role verification remain release gaps. No
-  provider/network/Docker/push/merge/rollout was used.
+- Independent cumulative review of `a693b091` is CLEAN. F1–F11 are addressed;
+  no Critical, Important or Minor finding remains. Reviewer-fresh evidence is
+  358 passed with no failures: 109 v3/golden/d7 and review-probe cases, 12
+  SQLite/current-head controls, and 237 affected Assistant/Task18/migration
+  cases. Existing Alembic warnings and PostgreSQL-name deselections remain.
+- This CLEAN verdict covers code review, static PostgreSQL SQL and SQLite
+  execution only. Real PostgreSQL parser/server, least-privileged-role,
+  TEMP/direct-execute, deferred-commit, concurrency and deployment-role gates
+  remain unapproved and unrun. Empty-v3 downgrade restores known-unsafe c6 for
+  offline recovery only; re-upgrade is mandatory before serving. No
+  provider/network/Docker/push/merge/deploy/rollout was used.
+- Next actual implementation: Task19 frontend DTO and capability transport.
 
 ## 2026-09-12 Task18 F9-F10 PostgreSQL authority hardening candidate
 
@@ -79,14 +83,14 @@ Updated: 2026-09-12
   run passed 1,085 with two skips/33 PostgreSQL-named deselections. Its seven
   PG-bootstrap static cases were rerun separately with a non-connecting dummy
   PostgreSQL locator and all passed. Existing Alembic path warning only. No live
-  provider, network, Docker, real PG, push, merge or rollout. Independent
-  cumulative rereview is still required before Task18 can be called CLEAN.
+  provider, network, Docker, real PG, push, merge or rollout. This historical
+  round-4 checkpoint is superseded by the final CLEAN entry above.
 
 ## 2026-09-12 Task18 F2 v3 approved implementation candidate
 
 - The user approved `2026-09-12-task18-legacy-integrity-contract-proposal.md`;
   its frozen section is normative. Round 3 supersedes the F2 blocked status
-  below. Candidate status is DONE_WITH_CONCERNS pending independent rereview.
+  below. The final CLEAN entry above supersedes this round-3 candidate status.
 - New writes dispatch to `assistant/legacy_integrity_v3.py`; old signed v2
   and null historical rows keep their existing read paths. No historical
   backfill/re-signing or unsigned future fallback is authorized. Email-send
@@ -135,15 +139,16 @@ Updated: 2026-09-12
   affected gate, full RED/GREEN and commit identity.
   Affected gate: 228 passed, only F2 deselected; Ruff/compile/diff checks passed.
   Final focused gate after live-source additions and import cleanup: 76 passed.
-- F2 still fails its retained new-write tamper test. No legacy schema/model/
-  migration/writer/reader changes were made in this round. Keep Task18 marked
-  INCOMPLETE/BLOCKED pending the existing human contract decision and rereview.
+- At this historical checkpoint F2 still failed its retained new-write tamper
+  test and no legacy schema/model/migration/writer/reader changes belonged to
+  this round. The later approved v3 implementation and final CLEAN entry above
+  supersede that blocked status.
 
 ## 2026-09-12 D Core Task18 F1/F3 fixes; F2 remains Important blocker
 
-- The earlier DONE_WITH_CONCERNS label is superseded: Task18 is INCOMPLETE /
-  BLOCKED on full future keyed legacy coverage. Independent review is NOT CLEAN.
-  The retained future explicit-approval tampered-content probe still fails;
+- At this historical checkpoint Task18 was blocked on full future keyed legacy
+  coverage and the independent review was not clean. The retained future
+  explicit-approval tampered-content probe still failed;
   preserve it and the selected-effect revocation regression without weakening.
 - F1 adds invocation-owned execution disposition in `rag_v2_state.py`, facade,
   graph and default request composition. Only an identical exception positively
@@ -202,7 +207,8 @@ Updated: 2026-09-12
   exact dependency write/read path (including email's empty-citation evidence
   behavior); do not weaken the historical production regression or invent an
   approval-identity schema union. Human schema/spec decision is required for
-  full all-future keyed coverage. Candidate is DONE_WITH_CONCERNS, not CLEAN.
+  full all-future keyed coverage. The later approved v3 implementation and final
+  CLEAN entry above supersede this historical candidate status.
 - Verification commands, RED checkpoints and final gates are in the local
   `.superpowers/sdd/2026-08-31-deliverable-d-core-rag-answer-graph-v2/task-18-report.md`.
   No live/paid/provider/network/Docker/real-PG/push/merge or rollout activation.
