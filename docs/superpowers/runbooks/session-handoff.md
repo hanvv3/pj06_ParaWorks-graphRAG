@@ -4327,7 +4327,7 @@ tests passed with 53 tests; ruff passed.
   skipped, 2128 deselected`. Real PostgreSQL is URL-gated and unrun because the
   URL is absent. Candidate only; Task 14 remains blocked pending rereview.
 
-## 2026-09-01 PAUSED — Deliverable D Core Task 13 twenty-second remediation start point
+## 2026-09-01 PAUSED — Deliverable D Core Task 13 twenty-second remediation start point (historical; resumed below)
 
 - The user explicitly requested a documentation checkpoint and stop. The
   implementation subagent was interrupted before Task 13's twenty-second RED
@@ -4427,3 +4427,15 @@ tests passed with 53 tests; ruff passed.
 - The finite failure model is unchanged. This correction requires independent
   rereview; Task 14 remains blocked. PostgreSQL URL is absent, so no real PG
   release gate is claimed. No dotenv/provider/network/Docker/paid/push/merge.
+
+## 2026-09-12 Task 13 CLEAN; Task 14 resumed
+
+- Independent scoped review approved `d95eb3d`: both recorded P1 findings are
+  addressed, with no new actionable finding. Task 13 implementation review is
+  complete. The finite failure model documented above remains the boundary.
+- Fresh affected evidence: 395 passed, 10 PostgreSQL URL skips, three unchanged
+  SQLAlchemy rollback warnings. Controller independently reran all 11 listener
+  publication regression tests successfully. Real PostgreSQL remains unverified.
+- Continue actual implementation with Task 14 (compiled LangGraph, request-local
+  runtime context, rollout policy, composition and application facade) under the
+  already approved D Core plan. Independent task review remains required.

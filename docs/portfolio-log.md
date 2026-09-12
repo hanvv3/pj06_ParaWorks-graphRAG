@@ -5992,7 +5992,7 @@ Cost/security note:
   `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate only; no `CLEAN` claim and
   Task 14 remains blocked.
 
-## 2026-09-01 Deliverable D Core Task 13 paused after twenty-first rereview
+## 2026-09-01 Deliverable D Core Task 13 paused after twenty-first rereview (historical)
 
 - Work is intentionally paused at clean commit `d15e9d0` on
   `codex/rag-orchestrator-agent`; the twenty-second remediation has not changed
