@@ -5313,3 +5313,22 @@ tests passed with 53 tests; ruff passed.
   requires `PARAWORKS_TEST_POSTGRES_URL`; absence is a documented release gate,
   not a pass. Do not run live providers/network, activate rollout, or start
   Task 22 until independent rereview is CLEAN.
+
+## 2026-09-13 Task 21 review fix round 2 handoff
+
+- Rereview of `3e3f9ae9e2dd8cbefeca8d7dfb223c408efd7eac`
+  resolved F1-F7 and left only Minor F8 in the provider-free golden gate.
+- `backend/tests/test_rag_v2_provider_free_golden.py` now makes all six
+  `v1_parity` labels executable: case-specific fake V1 observation plus the
+  actual keyword/pgvector LangChain Runnable are passed to the production
+  `ShadowComparator`. Required results are `shadow_match`, common/exact cohort
+  `1/1`, all intended deltas zero, and unclassified mismatch zero.
+- The same executor builds pgvector input through
+  `StrictQueryEmbeddingAdapter` and a countable in-process fake transport.
+  Counts derive from its real `dispatch()` calls, never an assigned post-hoc
+  value. No live transport or network is reachable.
+- TDD evidence: first golden RED was `67 failed, 121 passed`; additional
+  case-specific fields were `6 failed`; final golden is `188 passed`. Relevant
+  Task 21 suite is `658 passed in 193.32s`, the review probe is `6 passed`, and
+  Ruff is clean. Await final independent rereview before Task 22; do not push,
+  merge, deploy, or activate rollout.

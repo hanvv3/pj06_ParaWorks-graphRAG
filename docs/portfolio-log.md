@@ -6738,3 +6738,25 @@ Cost/security note:
   **DONE_WITH_CONCERNS** pending independent rereview; no rollout activation,
   push, merge, deploy, Task 22+, Slack, CDC, Redis/D.1, or Deliverable E work is
   included.
+
+## 2026-09-13 Deliverable D Core Task 21 review fix round 2
+
+- Cumulative rereview resolved F1-F7 and found one remaining golden-gate gap:
+  the six `v1_parity` cases executed only an ordinary V2 raw candidate, while
+  pgvector's embedding count was assigned after injecting a prepared result.
+- Each parity case now constructs a case-specific deterministic V1 observation
+  for its surface, backend, permission, and query-context contract; executes
+  the actual V2 LangChain Runnable; and compares both through
+  `ShadowComparator`. The gate asserts exact common cohort, parity outcome,
+  zero intended delta, and zero unclassified mismatch. Relabeling parity as raw
+  demonstrably removes the V1/comparator execution.
+- Pgvector golden execution now uses the production
+  `StrictQueryEmbeddingAdapter` with a countable in-process fake transport. The
+  recorded count comes from actual fake `dispatch()` calls: keyword zero and
+  pgvector exactly one. The exact 60-case manifest and all permission,
+  stale/revoked, evidence-slot, provider-zero, and network-zero gates remain.
+- Fresh local evidence is `188 passed` for the golden module, `658 passed` for
+  the Task 21 relevant suite, reviewer probes `6 passed`, and changed-file Ruff
+  clean. This is still **DONE_WITH_CONCERNS** pending final independent
+  rereview; no production runtime behavior, live provider/network, rollout,
+  push, merge, deploy, Task 22+, or Deliverable E work changed.
