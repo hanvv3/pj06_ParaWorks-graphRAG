@@ -6650,3 +6650,38 @@ Cost/security note:
   baseline remain unrun. This local candidate is **DONE_WITH_CONCERNS** pending
   independent rereview; no backend, network, provider, database, push, merge,
   deploy, Slack, CDC, Redis/D.1, or E work occurred.
+
+## 2026-09-13 Deliverable D Core Task 20 COMPLETE / CLEAN
+
+- Independent cumulative review approved implementation HEAD
+  `78ec7abf57a5a26f6935fa39803334b00266559b` as **CLEAN**, with no open
+  Important or Minor finding. The local Task 20 chain is
+  `f1442699cd4374932904358b77212272fc91ee50` ->
+  `a958c071cca08f5988a6e06a4f1105bee07bc65a` ->
+  `bbe8281d1b4f0583e6cbac0b256eade09697f98a` ->
+  `ccb50b961b3be3a24452d2f4f2ff66240bc9c572` ->
+  `8e674b632d45e80d3c13b02992388623facab825` ->
+  `6aa53b1cd6d449645edf7d0cd9c0e4026f7f6a3c` ->
+  `78ec7abf57a5a26f6935fa39803334b00266559b`.
+- Final behavior includes literal V2/unknown RAG rendering, strict citation URL
+  validation, immediate permission notice placement, consume-once raw-free
+  same-screen handoff, request-owned uncertain delivery reconciliation, and a
+  browser-document-lifetime hard-reload-only capability latch. All six exact
+  Assistant upgrade ingress owners classify and activate that latch before
+  mounted, request-id, conversation-owner, or presentation guards; paired late
+  non-upgrade failures remain non-latching and raw-free.
+- Reviewer-fresh static evidence: non-incremental TypeScript, warning-free lint,
+  and production build each exited 0; the build generated 18 routes. Browser
+  case results were focused ingress `12/12`, desktop Task 20 plus Assistant
+  memory `48/48`, mobile `26 passed, 21 intentional desktop-shell/unmount
+  skips`, and mock-only handoff visual `2/2`.
+- Windows managed Playwright teardown hung after each final case result in the
+  independent review. The processes were interrupted only after the complete
+  expected results appeared, so a clean Playwright process exit is not claimed;
+  port 3000 was confirmed free afterward. Normal live-seed visual smoke, the
+  separately known Review polling baseline, live backend/provider, external
+  network, paid model, database, rollout/deploy, push, and merge remain outside
+  this closure.
+- The next approved-plan item is **Task 21 in Phase E of the D Core plan**:
+  staged rollout and retrieval-only shadow. It is an **actual implementation
+  task**, not planning, and it is not Deliverable E Neo4j GraphRAG.

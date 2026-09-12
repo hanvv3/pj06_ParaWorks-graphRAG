@@ -5216,3 +5216,37 @@ tests passed with 53 tests; ruff passed.
   **DONE_WITH_CONCERNS** pending independent rereview. Normal live-seed visual
   and known Review polling baseline are not claimed; no backend, network,
   provider, database, release, push, merge, or deploy.
+
+## 2026-09-13 Deliverable D Core Task 20 COMPLETE / CLEAN
+
+- Worktree/branch remains `.worktrees/review-hitl-v2-design` on
+  `codex/rag-orchestrator-agent`. Independent cumulative review marked
+  `78ec7abf57a5a26f6935fa39803334b00266559b` **CLEAN** with no open Important
+  or Minor finding.
+- Task 20 implementation chain from base `24c1d8a0e3369e9d47501acf8f12e36d3f212a0e`
+  is `f1442699cd4374932904358b77212272fc91ee50` ->
+  `a958c071cca08f5988a6e06a4f1105bee07bc65a` ->
+  `bbe8281d1b4f0583e6cbac0b256eade09697f98a` ->
+  `ccb50b961b3be3a24452d2f4f2ff66240bc9c572` ->
+  `8e674b632d45e80d3c13b02992388623facab825` ->
+  `6aa53b1cd6d449645edf7d0cd9c0e4026f7f6a3c` ->
+  `78ec7abf57a5a26f6935fa39803334b00266559b`.
+- Reviewer-fresh evidence: non-incremental TypeScript, warning-free lint, and
+  production build exit 0 with 18 routes; focused six-ingress held-response
+  cases `12/12`; desktop Task 20 plus Assistant memory `48/48`; mobile `26
+  passed, 21 intentional desktop-shell/unmount skips`; explicit mock-only
+  visual handoff `2/2`. Every exact upgrade ingress latches before local
+  lifecycle/ownership guards, while paired late 500 controls do not latch or
+  expose raw failure content.
+- The independent Windows managed Playwright processes hung during teardown
+  only after the final expected case results had printed. They were interrupted
+  at that point; do not claim a clean Playwright process exit. Port 3000 was
+  confirmed free. Normal live-seed visual smoke and the separately known Review
+  polling timeout remain unclaimed.
+- No live backend/provider, external network, paid model, Docker/PostgreSQL,
+  rollout/deploy, push, or merge was performed. Do not infer operational release
+  readiness from this mock/static frontend closure.
+- Next is **Task 21, Phase E of the D Core implementation plan**: staged rollout
+  and retrieval-only shadow. This is the next **actual implementation** step;
+  it is not a planning task and must not be confused with Deliverable E Neo4j
+  GraphRAG.
