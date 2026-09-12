@@ -92,6 +92,7 @@ function SearchPageContent() {
   const deliveryRequestTokenRef = useRef(0);
   const mountedRef = useRef(false);
   const typingTimerRef = useRef<number | undefined>(undefined);
+  const copyFeedbackTimerRef = useRef<number | undefined>(undefined);
 
   const upsertConversationByUpdatedAt = useCallback((conversation: AssistantConversation) => {
     setConversations((current) => sortConversationsByUpdatedAt([
@@ -111,7 +112,6 @@ function SearchPageContent() {
       setActiveConversation(response.conversation);
       setMessages([]);
       setUnknownDelivery(undefined);
-      setClientUpgradeRequired(false);
       setOpenEvidenceMessageIds(new Set());
       upsertConversationByUpdatedAt(response.conversation);
     }
@@ -169,7 +169,6 @@ function SearchPageContent() {
       activeConversationIdRef.current = response.conversation.id;
       setActiveConversation(response.conversation);
       setMessages(response.messages);
-      setClientUpgradeRequired(false);
       setOpenEvidenceMessageIds(new Set());
       upsertConversationByUpdatedAt(response.conversation);
       return response.messages;
@@ -427,7 +426,14 @@ function SearchPageContent() {
       await navigator.clipboard.writeText(message.content);
       if (!mountedRef.current) return;
       setCopiedMessageId(message.id);
-      window.setTimeout(() => setCopiedMessageId((current) => current === message.id ? undefined : current), 1600);
+      if (copyFeedbackTimerRef.current !== undefined) {
+        window.clearTimeout(copyFeedbackTimerRef.current);
+      }
+      copyFeedbackTimerRef.current = window.setTimeout(() => {
+        copyFeedbackTimerRef.current = undefined;
+        if (!mountedRef.current) return;
+        setCopiedMessageId((current) => current === message.id ? undefined : current);
+      }, 1600);
     } catch {
       if (mountedRef.current) setError("메시지를 복사하지 못했습니다.");
     }
@@ -479,6 +485,10 @@ function SearchPageContent() {
       if (typingTimerRef.current !== undefined) {
         window.clearInterval(typingTimerRef.current);
         typingTimerRef.current = undefined;
+      }
+      if (copyFeedbackTimerRef.current !== undefined) {
+        window.clearTimeout(copyFeedbackTimerRef.current);
+        copyFeedbackTimerRef.current = undefined;
       }
     };
   }, []);

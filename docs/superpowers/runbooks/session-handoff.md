@@ -5180,3 +5180,19 @@ tests passed with 53 tests; ruff passed.
   Candidate remains **DONE_WITH_CONCERNS** pending independent rereview. Normal
   live-seed visual smoke and the unchanged broad Review polling baseline were
   not rerun; no backend, provider, database, release, push, merge, or deploy.
+- Task20 fix round 2 addresses cumulative rereview F6/F7. Pre-edit focused RED
+  was `3 failed, 1 passed`: delayed unrelated GET and delayed create success
+  each cleared an already visible upgrade latch, copy-unmount executed one late
+  1.6-second callback, and normal mounted feedback clearing was the passing
+  control.
+- Search now has no `setClientUpgradeRequired(false)` transition. The only
+  false state is initial mount state, so exact upgrade remains a global monotonic
+  latch until hard reload/remount. Copy feedback retains one timeout ref, clears
+  the previous timer, checks mounted state when firing, retires the handle, and
+  is cleared during lifecycle cleanup.
+- Fix-round-2 green: focused `5 passed`; managed desktop Task20+Assistant memory
+  `32 passed`; mobile `25 passed, 6 intended skips`; mock-only visual `2 passed`;
+  AutoReview trust/badge `5 passed`; tsc, lint, and build exit 0. Candidate is
+  **DONE_WITH_CONCERNS** pending independent rereview. Normal live-seed visual
+  and the known broad Review polling baseline are not claimed; no backend,
+  provider, database, release, push, merge, or deploy.

@@ -6596,3 +6596,30 @@ Cost/security note:
   **DONE_WITH_CONCERNS** pending independent rereview. No backend, provider,
   external network, paid model, database, release gate, push, merge, deploy,
   Slack, CDC, Redis/D.1, or E work occurred.
+
+## 2026-09-13 Deliverable D Core Task 20 fix round 2 candidate
+
+- Cumulative rereview approved F1-F5 but reproduced two additional lifecycle
+  races. A delayed conversation GET or create success could clear a previously
+  latched client-upgrade state, and the 1.6-second copy feedback callback could
+  execute after Search unmounted.
+- Four tracked browser probes were run before product edits: delayed GET,
+  delayed create, and copy-unmount failed for the expected reasons, while the
+  normal mounted copy-feedback control passed. This separated the missing
+  lifecycle behavior from test setup.
+- Client upgrade is now monotonic for a mounted Search lifetime. No asynchronous
+  success resets it; only a real hard reload/remount initializes a fresh false
+  state. Delayed work may still finish under its existing ownership guards, but
+  cannot remove reload-only UI, reveal retry, or re-enable Assistant actions.
+- Copy feedback owns one timeout handle. A new copy cancels the previous handle,
+  the callback checks mount state and retires its handle, and unmount clears the
+  timer alongside the typing timer.
+- Fresh verification: focused F6/F7 `5 passed`; managed desktop Task 20 plus
+  Assistant memory `32 passed`; mobile Task 20 `25 passed, 6 desktop-only
+  skipped`; mock-only visual handoff `2 passed`; AutoReview trust/badge `5
+  passed`; non-incremental TypeScript, warning-free lint, and production build
+  exit 0. Normal live-seed visual smoke and the unchanged broad Review polling
+  baseline remain unrun. This local candidate is **DONE_WITH_CONCERNS** pending
+  independent rereview; no backend, provider, external network, paid model,
+  database, release gate, push, merge, deploy, Slack, CDC, Redis/D.1, or E work
+  occurred.

@@ -903,6 +903,130 @@ test("a delayed stale POST client-upgrade latches globally without replacing the
   expect(postCount).toBe(1);
 });
 
+test("a delayed conversation GET cannot clear an already latched client upgrade", async ({ page }) => {
+  const secondConversation = {
+    ...createdConversation,
+    id: 21,
+    title: "업그레이드 뒤 완료되는 대화",
+    created_at: "2026-09-11T00:00:00+00:00",
+    updated_at: "2026-09-11T00:00:00+00:00",
+  };
+  const secondMessage = assistantRow({
+    id: 631,
+    conversation_id: 21,
+    content: "늦은 GET이 가져온 보존할 내용",
+  });
+  let releasePost!: () => void;
+  let signalPostStarted!: () => void;
+  let releaseSecondGet!: () => void;
+  let signalSecondGetStarted!: () => void;
+  const postGate = new Promise<void>((resolve) => { releasePost = resolve; });
+  const postStarted = new Promise<void>((resolve) => { signalPostStarted = resolve; });
+  const secondGetGate = new Promise<void>((resolve) => { releaseSecondGet = resolve; });
+  const secondGetStarted = new Promise<void>((resolve) => { signalSecondGetStarted = resolve; });
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", (route) => route.fulfill({
+    json: { conversations: [conversation, secondConversation] },
+  }));
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    if (request.method() === "GET") {
+      await route.fulfill({ json: { conversation, messages: [] } });
+      return;
+    }
+    signalPostStarted();
+    await postGate;
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      json: { detail: { code: "client_upgrade_required" } },
+    });
+  });
+  await page.route("**/api/v1/assistant/conversations/21/messages", async (route) => {
+    signalSecondGetStarted();
+    await secondGetGate;
+    await route.fulfill({ json: { conversation: secondConversation, messages: [secondMessage] } });
+  });
+
+  await page.goto("/search");
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await expect(input).toBeEnabled();
+  await input.fill("GET보다 먼저 실패하는 업그레이드 요청");
+  await input.press("Enter");
+  await postStarted;
+  const openConversationList = page.getByRole("button", { name: "대화 목록 펼치기" });
+  if (await openConversationList.isVisible()) await openConversationList.click();
+  await page.getByRole("button", { name: secondConversation.title, exact: true }).click();
+  await secondGetStarted;
+
+  releasePost();
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(input).toBeDisabled();
+  releaseSecondGet();
+  await expect(page.getByText(secondMessage.content)).toBeVisible();
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "상태 다시 확인" })).toHaveCount(0);
+  await expect(input).toBeDisabled();
+  await expect(page.getByRole("button", { name: "새 대화 만들기" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: secondConversation.title, exact: true })).toBeDisabled();
+});
+
+test("a delayed conversation create cannot clear an already latched client upgrade", async ({ page }) => {
+  let releaseMessagePost!: () => void;
+  let signalMessagePostStarted!: () => void;
+  let releaseCreate!: () => void;
+  let signalCreateStarted!: () => void;
+  const messagePostGate = new Promise<void>((resolve) => { releaseMessagePost = resolve; });
+  const messagePostStarted = new Promise<void>((resolve) => { signalMessagePostStarted = resolve; });
+  const createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+  const createStarted = new Promise<void>((resolve) => { signalCreateStarted = resolve; });
+  const otherRequests: Request[] = [];
+  await fulfillShellApis(page, otherRequests);
+  await page.route("**/api/v1/assistant/conversations", async (route, request) => {
+    if (request.method() === "GET") {
+      await route.fulfill({ json: { conversations: [conversation] } });
+      return;
+    }
+    signalCreateStarted();
+    await createGate;
+    await route.fulfill({ status: 201, json: { conversation: createdConversation } });
+  });
+  await page.route("**/api/v1/assistant/conversations/19/messages", async (route, request) => {
+    if (request.method() === "GET") {
+      await route.fulfill({ json: { conversation, messages: [] } });
+      return;
+    }
+    signalMessagePostStarted();
+    await messagePostGate;
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      json: { detail: { code: "client_upgrade_required" } },
+    });
+  });
+
+  await page.goto("/search");
+  const input = page.getByRole("textbox", { name: "AI 비서에게 질문" });
+  await expect(input).toBeEnabled();
+  await input.fill("대화 생성보다 먼저 실패하는 업그레이드 요청");
+  await input.press("Enter");
+  await messagePostStarted;
+  const openConversationList = page.getByRole("button", { name: "대화 목록 펼치기" });
+  if (await openConversationList.isVisible()) await openConversationList.click();
+  await page.getByRole("button", { name: "새 대화 만들기" }).click();
+  await createStarted;
+
+  releaseMessagePost();
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(input).toBeDisabled();
+  releaseCreate();
+  await expect(page.getByRole("button", { name: "페이지 새로고침" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "상태 다시 확인" })).toHaveCount(0);
+  await expect(input).toBeDisabled();
+  await expect(page.getByRole("button", { name: "새 대화 만들기" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: createdConversation.title, exact: true })).toBeDisabled();
+});
+
 test("a stale reconciliation GET cannot overwrite a newly selected conversation", async ({ page }) => {
   const secondConversation = {
     ...createdConversation,
@@ -1027,4 +1151,84 @@ test("late Assistant failure after Search unmount cannot latch a later Search mo
 
   await expect(page.getByText("새 버전이 필요합니다. 페이지를 새로고침해 주세요.")).toHaveCount(0);
   await expect(page.getByRole("textbox", { name: "AI 비서에게 질문" })).toBeEnabled();
+});
+
+test("copy feedback clears normally while Search remains mounted", async ({ context, page }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const copyMessageRow = assistantRow({ id: 731, content: "복사 피드백 정상 해제" });
+  await installSingleConversation(page, [copyMessageRow]);
+  await page.goto("/search");
+
+  const bubble = page.locator("article").filter({ hasText: copyMessageRow.content });
+  await bubble.getByRole("button", { name: "복사" }).click();
+  await expect(bubble.getByRole("button", { name: "복사됨" })).toBeVisible();
+  await expect(bubble.getByRole("button", { name: "복사" })).toBeVisible({ timeout: 3_000 });
+});
+
+test("a newer copy cancels the previous feedback timeout", async ({ context, page }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const firstCopyRow = assistantRow({ id: 733, content: "첫 번째 복사 답변" });
+  const secondCopyRow = assistantRow({ id: 734, content: "두 번째 복사 답변" });
+  await installSingleConversation(page, [firstCopyRow, secondCopyRow]);
+  await page.goto("/search");
+  await page.evaluate(() => {
+    const taskWindow = window as unknown as Window & { __task20CopyTimeoutCallbacks: number };
+    const originalSetTimeout = window.setTimeout.bind(window);
+    taskWindow.__task20CopyTimeoutCallbacks = 0;
+    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      if (timeout !== 1600 || typeof handler !== "function") {
+        return originalSetTimeout(handler, timeout, ...args);
+      }
+      return originalSetTimeout(() => {
+        taskWindow.__task20CopyTimeoutCallbacks += 1;
+        handler(...args);
+      }, timeout);
+    }) as typeof window.setTimeout;
+  });
+
+  const firstBubble = page.locator("article").filter({ hasText: firstCopyRow.content });
+  const secondBubble = page.locator("article").filter({ hasText: secondCopyRow.content });
+  await firstBubble.getByRole("button", { name: "복사" }).click();
+  await expect(firstBubble.getByRole("button", { name: "복사됨" })).toBeVisible();
+  await secondBubble.getByRole("button", { name: "복사" }).click();
+  await expect(secondBubble.getByRole("button", { name: "복사됨" })).toBeVisible();
+  await page.waitForTimeout(1_750);
+
+  expect(await page.evaluate(() => (
+    window as unknown as Window & { __task20CopyTimeoutCallbacks: number }
+  ).__task20CopyTimeoutCallbacks)).toBe(1);
+  await expect(secondBubble.getByRole("button", { name: "복사" })).toBeVisible();
+});
+
+test("copy feedback timeout is cancelled when Search unmounts", async ({ context, page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "desktop shell navigation drives this unmount probe");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const copyMessageRow = assistantRow({ id: 732, content: "언마운트 전 복사할 답변" });
+  await installSingleConversation(page, [copyMessageRow]);
+  await page.goto("/search");
+  await page.evaluate(() => {
+    const taskWindow = window as unknown as Window & { __task20CopyTimeoutCallbacks: number };
+    const originalSetTimeout = window.setTimeout.bind(window);
+    taskWindow.__task20CopyTimeoutCallbacks = 0;
+    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      if (timeout !== 1600 || typeof handler !== "function") {
+        return originalSetTimeout(handler, timeout, ...args);
+      }
+      return originalSetTimeout(() => {
+        taskWindow.__task20CopyTimeoutCallbacks += 1;
+        handler(...args);
+      }, timeout);
+    }) as typeof window.setTimeout;
+  });
+
+  const bubble = page.locator("article").filter({ hasText: copyMessageRow.content });
+  await bubble.getByRole("button", { name: "복사" }).click();
+  await expect(bubble.getByRole("button", { name: "복사됨" })).toBeVisible();
+  await page.getByRole("link", { name: "대시보드", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await page.waitForTimeout(1_750);
+
+  expect(await page.evaluate(() => (
+    window as unknown as Window & { __task20CopyTimeoutCallbacks: number }
+  ).__task20CopyTimeoutCallbacks)).toBe(0);
 });
