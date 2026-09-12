@@ -492,7 +492,11 @@ class RagProviderSafetyService:
         try:
             raw = self._authority._read_bytes_unlocked()
             parsed = json.loads(raw.decode('utf-8'))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        except OSError as exc:
+            raise RagProviderSafetyInspectionError(
+                'provider safety authority inspection failed'
+            ) from exc
+        except (UnicodeError, json.JSONDecodeError) as exc:
             raise RagProviderSafetyError(
                 'provider safety authority is inconsistent'
             ) from exc

@@ -2,6 +2,22 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task15 review fix round 3
+
+- Round2 preclaim/failure-only accounting was addressed. Scoped rereview found
+  one inner wrapper still merged low-level OSError with malformed JSON/Unicode.
+  `_read_unlocked` now preserves operational inspection provenance; actual
+  read/stat/close failures yield unexpected500, not authenticated safety503.
+  Malformed/canonical/signature validation, missing-artifact paths, existing
+  real blocked-authority503 and all failure/success barriers are unchanged.
+- Real authority-inode fault injection covers os.read/os.fstat/os.close on
+  Ask and Search, without replacing the durable reader or cleanup. Focused:
+  10 passed in18.09s; proportional safety/cost/preclaim gate79 passed in76.57s,
+  no warnings/skips. Ruff2 files, compile1 production, whitespace and staged
+  credential-pattern scan (zero matches) pass.
+- No CLEAN claim or Task16 start yet. Prior PostgreSQL/Slack caveats remain;
+  exact commands and candidate status are in task15-report.md.
+
 ## 2026-09-12 D Core Task15 review fix round 2
 
 - Round1 `dec62ac` addressed its three findings. Scoped rereview found the

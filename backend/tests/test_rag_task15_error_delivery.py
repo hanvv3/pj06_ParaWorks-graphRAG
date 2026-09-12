@@ -455,3 +455,69 @@ def test_preclaim_read_transaction_release_refuses_uncertainty_without_discard(
         with ledger._session.no_autoflush:
             assert ledger._session.get(AgentRun, 161).metadata_['pending_test_write'] is True
     original_rollback()
+
+
+@pytest.mark.parametrize('surface', ['ask', 'search'])
+@pytest.mark.parametrize('fault', ['read', 'stat', 'close', 'unicode', 'json'])
+def test_low_level_authority_io_is_not_an_authenticated_preclaim_refusal(
+    tmp_path, monkeypatch, surface, fault
+):
+    import os
+
+    context, provider = (_answer_context if surface == 'ask' else _paid_context)(tmp_path)
+    ledger = context.services.cost_ledger
+    authority = context.services.provider_transport._safety._authority
+    identity = authority.path.stat()
+    original_read, original_stat, original_close = os.read, os.fstat, os.close
+    claim = ledger.claim_component
+    faults = []
+
+    def selected(descriptor):
+        current = original_stat(descriptor)
+        return (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino)
+
+    def read(descriptor, size):
+        if not faults and selected(descriptor):
+            faults.append(fault)
+            if fault == 'unicode':
+                return b'\xff'
+            if fault == 'json':
+                return b'{'
+            raise OSError('private authority read failure')
+        return original_read(descriptor, size)
+
+    def stat(descriptor):
+        if not faults and selected(descriptor):
+            faults.append(fault)
+            raise OSError('private authority stat failure')
+        return original_stat(descriptor)
+
+    def close(descriptor):
+        target = not faults and selected(descriptor)
+        original_close(descriptor)
+        if target:
+            faults.append(fault)
+            raise OSError('private authority close acknowledgement failure')
+
+    def claim_with_real_io_fault(**kwargs):
+        name, function = {
+            'read': ('read', read), 'stat': ('fstat', stat), 'close': ('close', close),
+            'unicode': ('read', read), 'json': ('read', read),
+        }[fault]
+        monkeypatch.setattr(os, name, function)
+        return claim(**kwargs)
+
+    monkeypatch.setattr(ledger, 'claim_component', claim_with_real_io_fault)
+    with _graph_http(context) as http:
+        response = _post(http, surface)
+    malformed = fault in {'unicode', 'json'}
+    assert faults == [fault]
+    assert response.status_code == (503 if malformed else 500)
+    assert response.json() == {'detail': {'code': (
+        'provider_safety_unavailable' if malformed else 'unexpected_internal_error'
+    )}}
+    assert provider.seen == []
+    parent = ledger._session.query(AgentRun).one()
+    assert parent.status == ('failed' if malformed else 'running')
+    assert parent.run_record_phase == ('final' if malformed else 'admission')
+    assert parent.metadata_.get('outcome') == ('provider_safety_unavailable' if malformed else None)

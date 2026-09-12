@@ -1,5 +1,14 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core low-level safety inspection provenance
+
+- Task15 round3 separates operational authority-file read/stat/close errors
+  from malformed-content safety refusals. Real low-level fault regressions
+  passed10 cases across Ask/Search; relevant regression gate79 passed, no
+  warnings/skips. Static, compilation and staged hygiene checks pass.
+- No barrier, accounting policy, public schema or rollout changes. Scoped
+  rereview is still required; no PostgreSQL/live-provider proof is claimed.
+
 ## 2026-09-12 D Core preclaim refusal accounting correction
 
 - Task15 round2 preserves authentic preclaim safety refusal through the graph
