@@ -5,6 +5,7 @@ import hmac
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from time import monotonic_ns
 from typing import TypeVar
 
 from langsmith import tracing_context
@@ -31,6 +32,7 @@ from backend.app.agent_runtime.rag_provider_safety import (
 from backend.app.agent_runtime.rag_runtime_contracts import (
     AuthorizedProviderPolicySnapshot,
     CommittedRagDispatchGrant,
+    RagComponentFinal,
     RagProviderSafetyBinding,
     _ClassifiedProviderObservation,
     _issue_classified_provider_observation,
@@ -47,6 +49,7 @@ from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
     ANSWER_OUTPUT_SCHEMA_PROVIDER_BYTES,
     ANSWER_OUTPUT_SCHEMA_PROVIDER_FORMAT,
     RagAnswerOutputValidator,
+    ValidatedAnswerBlocks,
 )
 from backend.app.core.config import Settings
 from backend.app.db.initialization import (
@@ -54,10 +57,13 @@ from backend.app.db.initialization import (
     TrustedPostgresEngineBootstrap,
     TrustedPostgresRuntimeHealth,
 )
+from backend.app.rag.embeddings import validate_query_embedding_vector
 from backend.app.rag.retrieval import (
     AnswerGenerationCostInput,
     PreparedQueryEmbedding,
+    QueryEmbeddingCallResult,
     QueryEmbeddingCostInput,
+    QueryEmbeddingReceipt,
     validate_prepared_query_embedding,
     validate_rag_serving_index_readiness,
 )
@@ -71,6 +77,25 @@ _PROVIDER_CLIENT_SEAL = object()
 
 class RagProviderTransportError(RuntimeError):
     """Body-blind provider transport refusal."""
+
+
+@dataclass(frozen=True, slots=True)
+class RagProviderDelivery:
+    """Request-local validated output, released only after durable cost finalization."""
+
+    component_final: RagComponentFinal
+    output: QueryEmbeddingCallResult | ValidatedAnswerBlocks | None = field(repr=False)
+
+    def __reduce_ex__(self, _protocol: int):
+        raise TypeError('RAG provider delivery cannot be serialized')
+
+
+@dataclass(frozen=True, slots=True)
+class _ClassifiedDelivery:
+    observation: _ClassifiedProviderObservation
+    output: QueryEmbeddingCallResult | ValidatedAnswerBlocks | None = field(
+        default=None, repr=False,
+    )
 
 
 class _DirectOpenAIProviderClient:
@@ -764,6 +789,31 @@ class RagProviderDispatchAuthority:
         grant: CommittedRagDispatchGrant,
         prepared: object,
     ) -> _ClassifiedProviderObservation:
+        return self._dispatch_with_delivery(grant=grant, prepared=prepared).observation
+
+    def dispatch_and_finalize(
+        self,
+        *,
+        grant: CommittedRagDispatchGrant,
+        prepared: object,
+    ) -> RagProviderDelivery:
+        delivery = self._dispatch_with_delivery(grant=grant, prepared=prepared)
+        final = self.finalize(grant=grant, observation=delivery.observation)
+        return RagProviderDelivery(
+            component_final=final,
+            output=(
+                delivery.output
+                if final.terminal_outcome == 'component_succeeded'
+                else None
+            ),
+        )
+
+    def _dispatch_with_delivery(
+        self,
+        *,
+        grant: CommittedRagDispatchGrant,
+        prepared: object,
+    ) -> _ClassifiedDelivery:
         try:
             with self._runtime_health._effect('rag_provider_dispatch'):
                 return self._dispatch_under_health(
@@ -785,7 +835,7 @@ class RagProviderDispatchAuthority:
         *,
         grant: CommittedRagDispatchGrant,
         prepared: object,
-    ) -> _ClassifiedProviderObservation:
+    ) -> _ClassifiedDelivery:
         state = self._prepared.get(id(prepared))
         if (
             type(prepared) is not _PreparedProviderDispatch
@@ -814,7 +864,7 @@ class RagProviderDispatchAuthority:
         sidecar_capability = order.acquire('provider_stable_sidecar')
         safety_capability = order.acquire('provider_safety_rows')
         try:
-            def send() -> _ClassifiedProviderObservation:
+            def send() -> _ClassifiedDelivery:
                 self._store.revalidate_c5_before_send(
                     state.domain_prepared,
                     order=order,
@@ -829,6 +879,7 @@ class RagProviderDispatchAuthority:
                 )
                 assistant_capability = order.acquire('optional_assistant')
                 order.finish()
+                started_ns = monotonic_ns()
                 with tracing_context(enabled=False):
                     try:
                         result = self._client.send(
@@ -839,10 +890,13 @@ class RagProviderDispatchAuthority:
                             order_capability=assistant_capability,
                         )
                     except Exception:
-                        return self._response_less_observation(
-                            state.request.component
+                        return _ClassifiedDelivery(
+                            self._response_less_observation(state.request.component)
                         )
-                return self._classify_response(state, result)
+                return self._classify_response(
+                    state, result,
+                    latency_ms=max(0, (monotonic_ns() - started_ns) // 1_000_000),
+                )
 
             with (
                 self._connection_factory() as connection,
@@ -933,10 +987,45 @@ class RagProviderDispatchAuthority:
         self,
         state: _PreparedState,
         response: object,
-    ) -> _ClassifiedProviderObservation:
+        *,
+        latency_ms: int,
+    ) -> _ClassifiedDelivery:
         if state.request.component == 'query_embedding':
-            return self._classify_embedding(state, response)
-        return self._classify_answer(state, response)
+            observation = self._classify_embedding(state, response)
+        else:
+            observation = self._classify_answer(state, response)
+        if observation.classification != 'validated_success':
+            return _ClassifiedDelivery(observation)
+        if state.request.component == 'query_embedding':
+            prepared = state.domain_prepared
+            assert type(prepared) is PreparedQueryEmbedding
+            assert observation.strict_usage is not None
+            assert observation.actual_cost_usd is not None
+            receipt = QueryEmbeddingReceipt(
+                attempted=True,
+                input_tokens=observation.strict_usage.input_tokens,
+                actual_cost_usd=observation.actual_cost_usd,
+                latency_ms=latency_ms,
+                outcome='component_succeeded',
+                model_config_snapshot_hmac=prepared.model_config_snapshot_hmac,
+                provider_policy_snapshot_hmac=prepared.provider_policy_snapshot_hmac,
+            )
+            output = QueryEmbeddingCallResult(
+                prepared=prepared,
+                vector=validate_query_embedding_vector(response['data'][0]['embedding']),
+                attempted=True,
+                validated_input_tokens=observation.strict_usage.input_tokens,
+                actual_cost_usd=observation.actual_cost_usd,
+                receipt=receipt,
+            )
+        else:
+            validator = RagAnswerOutputValidator(
+                signer=self._store.cost_policy_authority.sign_answer_artifact,
+            )
+            output = validator.validate(
+                response['parsed'], slots=state.domain_prepared.evidence_slots,
+            )
+        return _ClassifiedDelivery(observation, output)
 
     def _classify_embedding(
         self,

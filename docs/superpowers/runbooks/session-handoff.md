@@ -4439,3 +4439,17 @@ tests passed with 53 tests; ruff passed.
 - Continue actual implementation with Task 14 (compiled LangGraph, request-local
   runtime context, rollout policy, composition and application facade) under the
   already approved D Core plan. Independent task review remains required.
+
+## 2026-09-12 Task 14 prerequisite checkpoint
+
+- Added cumulative rollout policy and validated provider output delivery after
+  existing cost finalization. Focused plus adjacent tests: `102 passed`; five
+  delivery and 39 rollout cases were observed RED first.
+- Graph/facade are not implemented yet. Controller requested independent review
+  before wiring graph nodes to prerequisite money/authority interfaces.
+- Remaining gaps: request-owned factories, staged concrete answer-budget
+  binding, provider-free/embedding-only pending entry, and graph fallback edges
+  around the existing pgvector Runnable. Preserve Task 13 atomic finalization.
+- See `.superpowers/sdd/2026-08-31-deliverable-d-core-rag-answer-graph-v2/task-14-report.md`.
+  Existing interpreter fallback remains needed; UV intermittently fails querying
+  default `.venv`. No dotenv, network or provider calls.

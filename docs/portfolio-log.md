@@ -1,5 +1,15 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Task 14 prerequisite candidate
+
+- Added exhaustive cumulative rollout routing and a single-dispatch provider
+  result path that releases only validated output after durable cost finalization.
+  Invalid provider payload/citation and failed cost commit release no output.
+- Test-first evidence: 39 rollout and five delivery failures before implementation;
+  current slice plus existing transport/cost regression is `102 passed`.
+- Candidate awaits independent review. Actual LangGraph/facade wiring and staged
+  billing integration remain unfinished; no graph-readiness claim or live API call.
+
 Last updated: 2026-09-01
 
 This document records ParaWorks work in a portfolio-friendly format. Keep adding
