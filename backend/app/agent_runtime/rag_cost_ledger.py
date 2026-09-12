@@ -316,6 +316,7 @@ class RagCostLedger:
         ] = {}
         self._terminal_bindings: dict[tuple[int, str], RagProviderSafetyBinding] = {}
         self._terminal_cost_rows: dict[tuple[int, str], tuple[tuple[str, object], ...]] = {}
+        self._pending_projection_identities: dict[int, tuple[str, str, str]] = {}
         self._process_hmac = process_instance_identity(
             {
                 'designated_environment_id_bytes': exact_utf8_bytes(
@@ -383,6 +384,7 @@ class RagCostLedger:
         RagProviderSafetyBinding,
         PreparedPaidCallBudget,
         str,
+        str,
     ]:
         try:
             key = (grant.agent_run_id, grant.component)
@@ -404,7 +406,10 @@ class RagCostLedger:
             raise RagCostLedgerError('dispatch grant is not transport-authorized')
         retrieval_query_hmac = parent.metadata_.get('retrieval_query_hmac')
         require_lower_hmac(retrieval_query_hmac, 'retrieval_query_hmac')
-        return snapshot, binding, budget, retrieval_query_hmac
+        context_version = parent.metadata_.get('query_context_version')
+        if context_version not in {'direct-query:v1', 'assistant-context:v1'}:
+            raise RagCostLedgerError('request query context is invalid')
+        return snapshot, binding, budget, retrieval_query_hmac, context_version
 
     @staticmethod
     def _admission_runtime_component(
@@ -1339,9 +1344,55 @@ class RagCostLedger:
         if outcome.classification == 'validated_success':
             self._terminal_bindings[key] = binding
             self._terminal_cost_rows[key] = tuple(sorted(self._row_runtime_component(row).items()))
+            if parent.run_record_phase == 'cost_finalized_pending_projection':
+                self._pending_projection_identities[parent.id] = (
+                    parent.projection_owner_fence_hmac,
+                    parent.metadata_['security_scope_fingerprint'],
+                    parent.metadata_['runtime_cost_snapshot_hmac'],
+                )
         self._active_grants.pop(key, None)
         self._grant_bindings.pop(key, None)
         return self._component_final(parent, row)
+
+    @_runtime_health_effect
+    def load_pending_projection(
+        self, *, run_id: int, corpus_generation: int,
+        vector_index_generation: int | None,
+    ) -> RagProjectionPending:
+        """Read this request's committed phase-1 receipt; never renew ownership."""
+        from backend.app.agent_runtime.rag_finalization import RagProjectionPending
+
+        expected = self._pending_projection_identities.get(run_id)
+        if expected is None:
+            raise RagCostLedgerError('request-owned pending projection is unavailable')
+        parent, rows = self._locked_run(run_id)
+        actual = (
+            parent.projection_owner_fence_hmac,
+            parent.metadata_.get('security_scope_fingerprint'),
+            parent.metadata_.get('runtime_cost_snapshot_hmac'),
+        )
+        snapshot = self._runtime_cost_identity(
+            agent_run_id=run_id,
+            components=[self._row_runtime_component(row) for row in rows],
+            parent_outcome=None, parent_run_record_phase='cost_finalized_pending_projection',
+            parent_status='running', snapshot_stage='pre_projection',
+        )
+        if (
+            actual != expected or snapshot != expected[2]
+            or parent.status != 'running'
+            or parent.run_record_phase != 'cost_finalized_pending_projection'
+            or parent.completed_at is not None
+            or any(row.dispatch_state != 'terminal' for row in rows)
+            or parent.total_charged_cost_usd != sum((Decimal(row.charged_cost_usd) for row in rows), _ZERO)
+        ):
+            raise RagCostLedgerError('committed pending projection changed')
+        return RagProjectionPending(
+            parent_agent_run_id=run_id, projection_owner_fence_hmac=expected[0],
+            security_scope_fingerprint=expected[1],
+            prepared_corpus_generation=corpus_generation,
+            prepared_vector_index_generation=vector_index_generation,
+            terminal_cost_snapshot_hmac=expected[2],
+        )
 
     @_runtime_health_effect
     def commit_provider_free_pending(
@@ -1463,6 +1514,11 @@ class RagCostLedger:
             self._answer_reservations.pop(run_id, None)
             self._admission_budgets.pop((run_id, 'answer_generation'), None)
             self._commit()
+            self._pending_projection_identities[run_id] = (
+                pending.projection_owner_fence_hmac,
+                pending.security_scope_fingerprint,
+                pending.terminal_cost_snapshot_hmac,
+            )
         return pending
 
     def _require_terminal_cost_row(self, run_id: int, row: AgentRunCostComponent) -> None:

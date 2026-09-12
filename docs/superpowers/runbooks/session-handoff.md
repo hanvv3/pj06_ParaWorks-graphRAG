@@ -4473,3 +4473,32 @@ tests passed with 53 tests; ruff passed.
 - Final six-file affected gate: `194 passed, 1 skipped`, including 20 new
   staged/pending cases. Ruff, compile/import and diff checks passed. The skip is
   the existing PostgreSQL URL gate; real PostgreSQL concurrency remains unrun.
+
+## 2026-09-12 Task 14 embedding-finalizer bridge candidate
+
+- Controller accepted staged-cost checkpoint `908f96d` CLEAN. This next slice
+  resolves three identity-domain mismatches without changing public/DB schemas:
+  transport derives the admission query identity from validated embedding bytes
+  and the stored request context; finalizer compares cost-policy identity to the
+  prepared budget; preparation attempt is not relabeled as dispatch fence.
+- `QueryEmbeddingCallResult.committed_dispatch_hmac` is internal/transient,
+  excluded from repr, and issued only after successful cost commit. It binds
+  exact vector digest/usage/preparation to run/dispatch/process. Finalizer checks
+  it against the locked paid row; same-query cross-dispatch replay is rejected.
+- `RagCostLedger.load_pending_projection(run_id=..., corpus_generation=...,
+  vector_index_generation=...)` reads the request's successful committed receipt
+  and current exact-two costs. It neither writes nor repeats the pending
+  transition. It leaves a read transaction; request-scoped composition must end
+  that read transaction before opening the independent fresh finalizer owner.
+- Existing tests that manually equated different HMAC domains now use actual
+  admission/prepared text and actual ledger -> fake transport rows. The new
+  integration port uses real production finalization validation/projection and
+  parent commit, but fakes PG synchronization and retrieval with empty results.
+  This is not evidence of real PostgreSQL locks/concurrency; no PG URL exists.
+- Full StateGraph, per-request factory wiring, facade and startup isolation are
+  still incomplete. Do not start Task 15 based only on this prerequisite slice.
+- Final eight-file affected gate: `245 passed, 1 PostgreSQL URL skip` in 136.74s.
+  Ruff `--no-fix`, compile and diff checks passed. Safe imports also passed via
+  `uv run --no-cache --locked --offline --no-sync` with the explicitly selected
+  existing `.venv-task4-r3-review` interpreter; tests used that interpreter
+  directly with `Settings.model_config['env_file']=None` and fresh basetemp.

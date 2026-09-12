@@ -32,6 +32,9 @@ from backend.app.agent_runtime.rag_cost_ledger import (
     PendingProjectionRecoverySnapshot,
     RagCostLedger,
 )
+from backend.app.agent_runtime.rag_embedding_delivery import (
+    embedding_dispatch_receipt_hmac,
+)
 from backend.app.agent_runtime.rag_postgres_binding import (
     RagPostgresDatabaseAuthority,
     RagPostgresDatabaseCleanupFailure,
@@ -1627,7 +1630,7 @@ class SqlAlchemyRagFinalizationBoundary:
         if embedding is None:
             if not _exact_terminal_zero(query):
                 raise RagFinalizationError('query embedding cost shape is invalid')
-        elif not _exact_paid_embedding_cost(query, embedding):
+        elif not _exact_paid_embedding_cost(query, embedding, secret=self._secret):
             raise RagFinalizationError('paid embedding cost shape is invalid')
         if branch == 'paid_embedding_only':
             if embedding is None or not _exact_terminal_zero(answer):
@@ -2456,6 +2459,8 @@ def _exact_terminal_zero(row: AgentRunCostComponent) -> bool:
 def _exact_paid_embedding_cost(
     row: AgentRunCostComponent,
     result: QueryEmbeddingCallResult,
+    *,
+    secret: bytes,
 ) -> bool:
     prepared = result.prepared
     return bool(
@@ -2467,13 +2472,20 @@ def _exact_paid_embedding_cost(
         and Decimal(row.charged_cost_usd) == result.actual_cost_usd
         and row.charge_basis == 'actual'
         and row.overrun is False
-        and row.dispatch_fence_hmac == prepared.attempt_fence_hmac
+        and _lower_hmac(row.dispatch_fence_hmac)
         and _lower_hmac(row.process_instance_hmac)
+        # Preparation, dispatch, and vector identities stay separate. The
+        # post-commit receipt binds this validated result to the locked row.
+        and result.committed_dispatch_hmac == embedding_dispatch_receipt_hmac(
+            result, agent_run_id=row.agent_run_id,
+            dispatch_fence_hmac=row.dispatch_fence_hmac,
+            process_instance_hmac=row.process_instance_hmac, secret=secret,
+        )
         and row.terminal_outcome == 'component_succeeded'
         and row.authorized_model_config_snapshot_hmac
         == prepared.model_config_snapshot_hmac
         and row.authorized_policy_snapshot_hmac
-        == prepared.provider_policy_snapshot_hmac
+        == prepared.budget.cost_policy_snapshot_hmac
     )
 
 

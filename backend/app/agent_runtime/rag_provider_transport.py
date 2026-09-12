@@ -4,14 +4,17 @@ import hashlib
 import hmac
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic_ns
 from typing import TypeVar
 
 from langsmith import tracing_context
 from sqlalchemy.engine import Connection
 
-from backend.app.agent_runtime.fingerprints import canonical_json_bytes
+from backend.app.agent_runtime.fingerprints import (
+    canonical_json_bytes,
+    keyed_fingerprint,
+)
 from backend.app.agent_runtime.provider_send_fence import (
     ProviderSendFenceError,
     RagEvidenceSendBarrier,
@@ -22,6 +25,9 @@ from backend.app.agent_runtime.provider_usage import (
 )
 from backend.app.agent_runtime.rag_advisory_locks import begin_rag_lock_order
 from backend.app.agent_runtime.rag_cost_ledger import RagCostLedger, RagCostLedgerError
+from backend.app.agent_runtime.rag_embedding_delivery import (
+    embedding_dispatch_receipt_hmac,
+)
 from backend.app.agent_runtime.rag_postgres_binding import (
     RagPostgresAdvisoryTransport,
 )
@@ -40,6 +46,10 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
 from backend.app.agent_runtime.rag_safety_identity import (
     rag_identity_hmac,
     require_lower_hmac,
+)
+from backend.app.agent_runtime.rag_v2_identity import (
+    exact_utf8_bytes,
+    fingerprint_secret_bytes,
 )
 from backend.app.agents.rag_orchestrator_agent.v2_answer import (
     PreparedAnswerInvocation,
@@ -622,13 +632,25 @@ class RagProviderDispatchAuthority:
                 'frozen provider invocation is invalid'
             ) from None
         try:
-            snapshot, binding, budget, query_identity_hmac = (
+            snapshot, binding, budget, query_identity_hmac, context_version = (
                 self._store._transport_context(grant)
             )
         except RagCostLedgerError as exc:
             raise RagProviderTransportError('committed dispatch grant is unavailable') from exc
         try:
             request, body, expected_budget = self._canonical_request(prepared)
+            # Embedding preparation has its own model-policy identity. Bind the
+            # exact validated bytes separately to the admission's text context.
+            prepared_query_identity = (
+                keyed_fingerprint(
+                    exact_utf8_bytes(prepared.transient_query_utf8.decode('utf-8')),
+                    secret=fingerprint_secret_bytes(self._settings)[0],
+                    schema_version='rag-retrieval-query-bytes:v1',
+                    policy_version=context_version,
+                )
+                if type(prepared) is PreparedQueryEmbedding
+                else prepared.retrieval_query_hmac
+            )
         except (TypeError, ValueError):
             self._cancel_unconsumed_claim(
                 grant,
@@ -650,7 +672,7 @@ class RagProviderDispatchAuthority:
                 binding.provider_safety_snapshot_hmac,
             )
             or not hmac.compare_digest(
-                prepared.retrieval_query_hmac,
+                prepared_query_identity,
                 query_identity_hmac,
             )
         ):
@@ -799,13 +821,17 @@ class RagProviderDispatchAuthority:
     ) -> RagProviderDelivery:
         delivery = self._dispatch_with_delivery(grant=grant, prepared=prepared)
         final = self.finalize(grant=grant, observation=delivery.observation)
+        output = delivery.output if final.terminal_outcome == 'component_succeeded' else None
+        if type(output) is QueryEmbeddingCallResult:
+            output = replace(output, committed_dispatch_hmac=embedding_dispatch_receipt_hmac(
+                output, agent_run_id=final.agent_run_id,
+                dispatch_fence_hmac=final.dispatch_fence_hmac,
+                process_instance_hmac=final.process_instance_hmac,
+                secret=self._secret,
+            ))
         return RagProviderDelivery(
             component_final=final,
-            output=(
-                delivery.output
-                if final.terminal_outcome == 'component_succeeded'
-                else None
-            ),
+            output=output,
         )
 
     def _dispatch_with_delivery(

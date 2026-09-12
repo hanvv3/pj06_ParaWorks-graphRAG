@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, cast
 
@@ -226,6 +226,7 @@ class QueryEmbeddingCallResult:
     validated_input_tokens: int
     actual_cost_usd: Decimal
     receipt: QueryEmbeddingReceipt
+    committed_dispatch_hmac: str | None = field(default=None, repr=False)
 
 
 def validate_query_embedding_call_result(

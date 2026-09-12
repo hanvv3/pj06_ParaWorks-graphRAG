@@ -137,9 +137,13 @@ def _prepared_query(query_budget) -> PreparedQueryEmbedding:
     )
 
 
-def _admit_transport(ledger, run_id: int):
-    retrieval_query_hmac = build_query_embedding_retrieval_query_hmac_from_utf8(
-        '민감한 근거'.encode(), settings=_TEST_SETTINGS
+def _admit_transport(ledger, run_id: int, *, surface='ask', scope_hmac='3' * 64):
+    from backend.app.agents.rag_orchestrator_agent.v2_input import (
+        prepare_direct_request_text,
+    )
+
+    text = prepare_direct_request_text(
+        '민감한 근거', key=_TEST_SETTINGS.agent_runtime_fingerprint_secret.encode(),
     )
     query_budget = _TEST_COST_POLICY.prepare_query_embedding(
         QueryEmbeddingCostInput(
@@ -151,21 +155,22 @@ def _admit_transport(ledger, run_id: int):
     )
     ledger.create_admission(
         agent_run_id=run_id,
-        surface='ask',
+        surface=surface,
         mode='enforce',
-        cutover_stage='ask',
+        cutover_stage=surface,
         configured_backend='pgvector',
         query_context_version='direct-query:v1',
-        current_text_hmac='1' * 64,
-        retrieval_query_hmac=retrieval_query_hmac,
-        security_scope_fingerprint='3' * 64,
+        current_text_hmac=text.current_text_hmac,
+        retrieval_query_hmac=text.retrieval_query_hmac,
+        security_scope_fingerprint=scope_hmac,
         admission_cache_identity_hmac=None,
-        source_window='rag-v2:admission:enforce:ask:pgvector',
+        source_window=f'rag-v2:admission:enforce:{surface}:pgvector',
         components=(
             (_snapshot('query_embedding', _TEST_COST_POLICY), query_budget),
             (
                 _snapshot('answer_generation', _TEST_COST_POLICY),
-                _budget('answer_generation', '0.002000'),
+                _TEST_COST_POLICY.reserve_unused_component('answer_generation')
+                if surface == 'search' else _budget('answer_generation', '0.002000'),
             ),
         ),
     )

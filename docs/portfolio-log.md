@@ -1,5 +1,20 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core embedding-finalizer bridge candidate
+
+- Bound a validated embedding result to its exact committed paid dispatch using
+  a transient authenticated receipt. Request-query, embedding-preparation,
+  dispatch-fence and cost-policy identities retain their separate meanings.
+- Added a read-only request-owned pending-projection carrier for searches whose
+  costs were already finalized. It does not renew ownership or charge again.
+- A fake-provider integration test now reaches the fresh production finalizer
+  and commits the search product; another dispatch's same-query result is
+  rejected without losing the paid charge. Public/DB schemas and budgets are
+  unchanged. PostgreSQL synchronization remains explicitly faked in this gate;
+  full graph/facade implementation and independent review are still pending.
+- Fresh affected verification: `245 passed, 1 PostgreSQL URL skip` in 136.74s;
+  14 focused bridge cases passed, and Ruff/compile/import/diff checks passed.
+
 ## 2026-09-12 D Core staged-cost integration candidate
 
 - Added conservative answer reservation followed by one-time concrete prompt

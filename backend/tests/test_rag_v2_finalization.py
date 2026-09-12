@@ -66,7 +66,6 @@ from backend.app.rag.index_readiness import RagServingIndexReadiness
 from backend.app.rag.retrieval import RetrievalResult, SanitizedRetrievalTrace
 from backend.app.rag.serving_locks import ServingProjectionReadCoordinator
 from backend.tests.test_rag_v2_costs import _snapshot
-from backend.tests.test_rag_v2_pgvector_retriever import _embedding_result
 
 
 def _prepared() -> PreparedRagFinalization:
@@ -1572,119 +1571,31 @@ def test_provider_free_branch_requires_both_exact_terminal_zero_children() -> No
         boundary.validate_branch_costs(_prepared(), branch='provider_free')
 
 
-def test_paid_embedding_only_requires_exact_attempt_vector_receipt_and_fence() -> None:
-    result = _embedding_result(query='  민감한 질의  ')
-    snapshot, binding = _safety_requirement('query_embedding')
-    snapshot = replace(
-        snapshot,
-        authorized_model_config_snapshot_hmac=(
-            result.prepared.model_config_snapshot_hmac
-        ),
-        authorized_policy_snapshot_hmac=(
-            result.prepared.provider_policy_snapshot_hmac
-        ),
+@pytest.mark.parametrize(
+    ('field', 'error'),
+    (('dispatch_fence_hmac', 'paid embedding cost shape'),
+     ('authorized_policy_snapshot_hmac', 'committed cost')),
+)
+def test_paid_embedding_locked_cost_authority_rejects_tampering(tmp_path, field, error):
+    # Obtain actual rows/receipt from the production ledger and fake transport;
+    # do not assign a preparation/config digest to the dispatch/cost domains.
+    from backend.tests.test_rag_task14_finalization_bridge import (
+        _search_case,
+        _search_finalization,
+        _SQLiteFinalizationPort,
     )
-    binding = replace(binding, policy_snapshot=snapshot)
-    query = _cost_child('query_embedding', 0)
-    query.attempted = True
-    query.dispatch_count = 1
-    query.actual_input_tokens = result.validated_input_tokens
-    query.actual_output_tokens = 0
-    query.charged_cost_usd = result.actual_cost_usd
-    query.charge_basis = 'actual'
-    query.dispatch_fence_hmac = result.prepared.attempt_fence_hmac
-    query.process_instance_hmac = 'c' * 64
-    query.terminal_outcome = 'component_succeeded'
-    query.provider = snapshot.provider
-    query.model = snapshot.model
-    query.authorized_model_config_version = snapshot.authorized_model_config_version
-    query.authorized_model_config_snapshot_hmac = (
-        snapshot.authorized_model_config_snapshot_hmac
+
+    ledger, delivery, _ = _search_case(tmp_path)
+    pending = ledger.load_pending_projection(
+        run_id=151, corpus_generation=1, vector_index_generation=1,
     )
-    query.authorized_cost_policy_version = snapshot.authorized_cost_policy_version
-    query.authorized_token_estimator_version = (
-        snapshot.authorized_token_estimator_version
-    )
-    query.authorized_policy_snapshot_hmac = (
-        snapshot.authorized_policy_snapshot_hmac
-    )
-    children = [query, _cost_child('answer_generation', 1)]
-    boundary, pending = _pending_boundary(children)
-    boundary._phase2_authority = _assemble_paid_rag_phase2_authority(
-        provider_safety=object.__new__(RagProviderSafetyService),
-        safety_connection_factory=_ClosableConnection,
-        safety_requirements=((snapshot, binding),),
-        owner_connection_factory=_ClosableConnection,
-        owner_capability_factory=_owner_capability,
-        load_current_owner_fence=lambda _run_id: '2' * 64,
-        evidence_barrier=_assemble_rag_evidence_barrier(
-            load_current_identity=lambda: 'a' * 64
-        ),
-        load_current_readiness=_readiness,
-    )
+    prepared = _search_finalization(delivery)
+    boundary = _SQLiteFinalizationPort(ledger, prepared)
     boundary.validate_pending(pending)
-    prepared = replace(_prepared(), query_embedding_result=result)
     boundary.validate_branch_costs(prepared, branch='paid_embedding_only')
-    query.dispatch_fence_hmac = 'd' * 64
+    setattr(boundary._pending_children[0], field, 'd' * 64)
 
-    with pytest.raises(RagFinalizationError, match='paid embedding cost shape'):
-        boundary.validate_branch_costs(prepared, branch='paid_embedding_only')
-
-
-def test_paid_phase2_safety_hmacs_must_match_locked_cost_rows() -> None:
-    result = _embedding_result(query='  민감한 질의  ')
-    snapshot, binding = _safety_requirement('query_embedding')
-    snapshot = replace(
-        snapshot,
-        authorized_model_config_snapshot_hmac=(
-            result.prepared.model_config_snapshot_hmac
-        ),
-        authorized_policy_snapshot_hmac=(
-            result.prepared.provider_policy_snapshot_hmac
-        ),
-    )
-    binding = replace(binding, policy_snapshot=snapshot)
-    query = _cost_child('query_embedding', 0)
-    query.attempted = True
-    query.dispatch_count = 1
-    query.actual_input_tokens = result.validated_input_tokens
-    query.actual_output_tokens = 0
-    query.charged_cost_usd = result.actual_cost_usd
-    query.charge_basis = 'actual'
-    query.dispatch_fence_hmac = result.prepared.attempt_fence_hmac
-    query.process_instance_hmac = 'c' * 64
-    query.terminal_outcome = 'component_succeeded'
-    query.provider = snapshot.provider
-    query.model = snapshot.model
-    query.authorized_model_config_version = snapshot.authorized_model_config_version
-    query.authorized_model_config_snapshot_hmac = (
-        snapshot.authorized_model_config_snapshot_hmac
-    )
-    query.authorized_cost_policy_version = snapshot.authorized_cost_policy_version
-    query.authorized_token_estimator_version = (
-        snapshot.authorized_token_estimator_version
-    )
-    query.authorized_policy_snapshot_hmac = snapshot.authorized_policy_snapshot_hmac
-    children = [query, _cost_child('answer_generation', 1)]
-    boundary, pending = _pending_boundary(children)
-    boundary._phase2_authority = _assemble_paid_rag_phase2_authority(
-        provider_safety=object.__new__(RagProviderSafetyService),
-        safety_connection_factory=_ClosableConnection,
-        safety_requirements=((snapshot, binding),),
-        owner_connection_factory=_ClosableConnection,
-        owner_capability_factory=_owner_capability,
-        load_current_owner_fence=lambda _run_id: '2' * 64,
-        evidence_barrier=_assemble_rag_evidence_barrier(
-            load_current_identity=lambda: 'a' * 64
-        ),
-        load_current_readiness=_readiness,
-    )
-    boundary.validate_pending(pending)
-    prepared = replace(_prepared(), query_embedding_result=result)
-    boundary.validate_branch_costs(prepared, branch='paid_embedding_only')
-    query.authorized_policy_snapshot_hmac = 'd' * 64
-
-    with pytest.raises(RagFinalizationError, match='committed cost'):
+    with pytest.raises(RagFinalizationError, match=error):
         boundary.validate_branch_costs(prepared, branch='paid_embedding_only')
 
 
