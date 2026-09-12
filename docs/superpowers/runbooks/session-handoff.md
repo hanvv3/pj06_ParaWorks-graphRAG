@@ -5332,3 +5332,21 @@ tests passed with 53 tests; ruff passed.
   Task 21 suite is `658 passed in 193.32s`, the review probe is `6 passed`, and
   Ruff is clean. Await final independent rereview before Task 22; do not push,
   merge, deploy, or activate rollout.
+
+## 2026-09-13 Task 21 review fix round 3 handoff
+
+- Rereview of `44f0448cc032320b6331a47c2f8f28e0c56f7fb6`
+  resolved F8 and left Minor F9: golden provider/network counts were literals.
+- `_execute_provider_free_case()` now wraps one case in a locked context guard.
+  It observes socket creation/direct connect, sync/async `httpx` sends, direct
+  RAG provider sends, and `OpenAIEmbeddingModel.embed_many`; real calls are
+  blocked while prior test fakes remain callable for adversarial observation.
+  `ExitStack` restores every boundary even on failure.
+- Tracked negative controls inject socket and provider-send regressions into
+  the actual keyword Runnable and observe count one instead of zero. The normal
+  exact-60 executions observe zero external provider/network calls; pgvector's
+  allowed in-process fake embedding dispatch remains a separate count.
+- Initial F9 RED was `2 failed`; focused guard/reviewer probes and full golden
+  are green. Relevant Task 21 regression is `660 passed in 191.82s`. Await
+  independent rereview. No production code, live I/O, rollout, Task 22+, push,
+  merge, or deploy.

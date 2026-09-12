@@ -6760,3 +6760,24 @@ Cost/security note:
   clean. This is still **DONE_WITH_CONCERNS** pending final independent
   rereview; no production runtime behavior, live provider/network, rollout,
   push, merge, deploy, Task 22+, or Deliverable E work changed.
+
+## 2026-09-13 Deliverable D Core Task 21 review fix round 3
+
+- Fix-round-2 rereview resolved F8 but found that provider/network zeroes were
+  still authored constants rather than runtime observations. A retriever could
+  open a socket while the golden gate continued to report zero.
+- Every executable golden case now runs inside a serialized, per-case guard
+  that counts and blocks socket, sync/async HTTP, direct provider-client, and
+  production embedding-provider boundaries. The guard restores all patched
+  boundaries deterministically. The approved in-process fake query-embedding
+  transport remains separate and still records keyword zero/pgvector one.
+- Permanent negative controls inject one socket call and one external-provider
+  send into the real keyword Runnable. Both calls are blocked/countable and
+  reported as one, proving the ordinary zero-call assertions would fail under
+  either regression. No live network or provider call is performed.
+- The exact 60-case manifest, V1 parity comparator execution, and all existing
+  permission, stale/revoked, evidence-slot, and no-generation gates remain
+  unchanged. Fresh evidence is golden `190 passed`, Task 21 relevant regression
+  `660 passed`, reviewer probes `7 passed`, and Ruff clean. This candidate is
+  **DONE_WITH_CONCERNS** pending final independent rereview; no production
+  runtime, rollout, Task 22+, push, merge, deploy, or Deliverable E work changed.

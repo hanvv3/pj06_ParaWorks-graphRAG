@@ -1,19 +1,97 @@
 from __future__ import annotations
 
 import json
+import socket
+import threading
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
 
+from backend.app.agent_runtime.rag_provider_transport import (
+    _DirectOpenAIProviderClient,
+)
+from backend.app.rag.embeddings import OpenAIEmbeddingModel
+
 FIXTURE = Path(__file__).parent / 'fixtures' / 'rag_v2_provider_free_golden_60.json'
+_ORIGINAL_SOCKET_CREATE_CONNECTION = socket.create_connection
+_ORIGINAL_PROVIDER_SEND = _DirectOpenAIProviderClient.send
+_ORIGINAL_EMBED_MANY = OpenAIEmbeddingModel.embed_many
+_ORIGINAL_HTTPX_SEND = httpx.Client.send
+_ORIGINAL_ASYNC_HTTPX_SEND = httpx.AsyncClient.send
+_EXTERNAL_GUARD_LOCK = threading.RLock()
 
 
 def _cases():
     return json.loads(FIXTURE.read_text(encoding='utf-8'))['cases']
 
 
+@contextmanager
+def _observe_external_calls():
+    """Block real I/O and restore every process-global hook after one case."""
+    counters = {'external_provider_calls': 0, 'network_calls': 0}
+    with _EXTERNAL_GUARD_LOCK, ExitStack() as stack:
+        previous_socket_create = socket.create_connection
+        previous_provider_send = _DirectOpenAIProviderClient.send
+        previous_embed_many = OpenAIEmbeddingModel.embed_many
+        previous_httpx_send = httpx.Client.send
+        previous_async_httpx_send = httpx.AsyncClient.send
+
+        def socket_create_connection(*args, **kwargs):
+            counters['network_calls'] += 1
+            if previous_socket_create is not _ORIGINAL_SOCKET_CREATE_CONNECTION:
+                return previous_socket_create(*args, **kwargs)
+            return object()
+
+        def socket_connect(*_args, **_kwargs):
+            counters['network_calls'] += 1
+            raise RuntimeError('golden network call blocked')
+
+        def provider_send(*args, **kwargs):
+            counters['external_provider_calls'] += 1
+            if previous_provider_send is not _ORIGINAL_PROVIDER_SEND:
+                return previous_provider_send(*args, **kwargs)
+            return object()
+
+        def embed_many(*args, **kwargs):
+            counters['external_provider_calls'] += 1
+            if previous_embed_many is not _ORIGINAL_EMBED_MANY:
+                return previous_embed_many(*args, **kwargs)
+            return object()
+
+        def httpx_send(*args, **kwargs):
+            counters['network_calls'] += 1
+            if previous_httpx_send is not _ORIGINAL_HTTPX_SEND:
+                return previous_httpx_send(*args, **kwargs)
+            return object()
+
+        async def async_httpx_send(*args, **kwargs):
+            counters['network_calls'] += 1
+            if previous_async_httpx_send is not _ORIGINAL_ASYNC_HTTPX_SEND:
+                return await previous_async_httpx_send(*args, **kwargs)
+            return object()
+
+        from unittest.mock import patch
+
+        stack.enter_context(patch.object(socket, 'create_connection', socket_create_connection))
+        stack.enter_context(patch.object(socket.socket, 'connect', socket_connect))
+        stack.enter_context(patch.object(socket.socket, 'connect_ex', socket_connect))
+        stack.enter_context(patch.object(_DirectOpenAIProviderClient, 'send', provider_send))
+        stack.enter_context(patch.object(OpenAIEmbeddingModel, 'embed_many', embed_many))
+        stack.enter_context(patch.object(httpx.Client, 'send', httpx_send))
+        stack.enter_context(patch.object(httpx.AsyncClient, 'send', async_httpx_send))
+        yield counters
+
+
 def _execute_provider_free_case(case):
+    with _observe_external_calls() as counters:
+        observation = _execute_provider_free_case_guarded(case)
+    return {**observation, **counters}
+
+
+def _execute_provider_free_case_guarded(case):
     """Exercise the real Runnable retrievers with in-process fake ports only."""
     from backend.app.agent_runtime.rag_v2_identity import (
         SecurityScope,
@@ -216,8 +294,6 @@ def _execute_provider_free_case(case):
     }
     expected_visible = kind in {'trusted', 'raw', 'v1_parity'}
     return {
-        'external_provider_calls': 0,
-        'network_calls': 0,
         'fake_embedding_dispatches': len(embedding_transport_calls),
         'fake_embedding_transport_calls': len(embedding_transport_calls),
         'fake_v1_observation_count': fake_v1_observation_count,
@@ -377,3 +453,60 @@ def test_embedding_count_comes_from_in_process_fake_transport_calls(case):
     assert observation['fake_embedding_transport_calls'] == (
         1 if case['backend'] == 'pgvector' else 0
     )
+
+
+def test_injected_socket_call_is_observed_by_zero_network_gate(monkeypatch):
+    """Catches a Runnable opening a socket while the golden reports literal zero."""
+    import socket
+
+    from backend.app.rag.keyword_retriever import KeywordEvidenceRetriever
+
+    actual_calls = []
+    original_invoke = KeywordEvidenceRetriever.invoke
+
+    def fake_create_connection(*args, **kwargs):
+        actual_calls.append((args, kwargs))
+        return object()
+
+    def regressed_invoke(self, *args, **kwargs):
+        socket.create_connection(('example.test', 443))
+        return original_invoke(self, *args, **kwargs)
+
+    monkeypatch.setattr(socket, 'create_connection', fake_create_connection)
+    monkeypatch.setattr(KeywordEvidenceRetriever, 'invoke', regressed_invoke)
+    case = next(case for case in _cases() if case['backend'] == 'keyword')
+
+    observation = _execute_provider_free_case(case)
+
+    assert len(actual_calls) == 1
+    assert observation['network_calls'] == 1
+
+
+def test_injected_external_provider_send_is_observed_by_zero_call_gate(monkeypatch):
+    """Catches an external provider send hidden behind a literal zero counter."""
+    from backend.app.agent_runtime.rag_provider_transport import (
+        _DirectOpenAIProviderClient,
+    )
+    from backend.app.rag.keyword_retriever import KeywordEvidenceRetriever
+
+    actual_calls = []
+    original_invoke = KeywordEvidenceRetriever.invoke
+
+    def fake_provider_send(*args, **kwargs):
+        actual_calls.append((args, kwargs))
+        return object()
+
+    def regressed_invoke(self, *args, **kwargs):
+        _DirectOpenAIProviderClient.send(
+            object(), b'{}', timeout_seconds=30, max_retries=0
+        )
+        return original_invoke(self, *args, **kwargs)
+
+    monkeypatch.setattr(_DirectOpenAIProviderClient, 'send', fake_provider_send)
+    monkeypatch.setattr(KeywordEvidenceRetriever, 'invoke', regressed_invoke)
+    case = next(case for case in _cases() if case['backend'] == 'keyword')
+
+    observation = _execute_provider_free_case(case)
+
+    assert len(actual_calls) == 1
+    assert observation['external_provider_calls'] == 1
