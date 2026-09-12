@@ -50,6 +50,168 @@ def enforce(client):
     return client.app.state.rag_application_facade
 
 
+@pytest.mark.parametrize('invalid', ('prior', 'blank'))
+def test_preflight_refuses_before_any_email_provider_or_product_mutation(
+    client, db_session, monkeypatch, invalid,
+):
+    from types import SimpleNamespace
+
+    from backend.app.api.v1 import assistant
+    from backend.app.assistant.email_agent import (
+        EmailIntentGate,
+        LangChainEmailIntentGateModel,
+    )
+    from backend.app.models import AssistantConversation
+    enforce(client)
+    conversation = create_conversation(db_session, USERS['viewer'])
+    if invalid == 'prior':
+        stale = helpers.write_canned(db_session, conversation, 'old answer')
+        stale.content = 'tampered answer'
+        db_session.commit()
+    before = (conversation.title, conversation.updated_at, conversation.summary,
+              db_session.query(AssistantConversation).count(),
+              db_session.query(AssistantMessage).count(), db_session.query(AgentRun).count())
+    calls = []
+    class Provider:
+        def invoke(self, messages):
+            calls.append('classifier')
+            return SimpleNamespace(content='{"email_intent":false,"confidence_score":1.0}')
+    gate = EmailIntentGate(model=LangChainEmailIntentGateModel(
+        chat_model=Provider(), model_name='fake-only', max_input_chars=6000))
+    monkeypatch.setattr(assistant, 'build_email_intent_gate', lambda settings: gate)
+    def unexpected(*args, **kwargs):
+        calls.append('composer-or-rag')
+        raise AssertionError('preflight must precede provider work')
+    monkeypatch.setattr(assistant, 'build_email_draft_composer', unexpected)
+    monkeypatch.setattr(RagApplicationFacade, 'invoke_graph', unexpected)
+    response = client.post(f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        json={'content': 'ordinary question' if invalid == 'prior' else ' \t\n '},
+        headers=CAPABILITY_HEADERS)
+    assert calls == []
+    assert response.status_code == (502 if invalid == 'prior' else 422)
+    assert response.json() == {'detail': 'assistant answer generation failed' if invalid == 'prior'
+                              else 'assistant message content is required'}
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert response.headers['vary'] == 'X-ParaWorks-Rag-Render-Capability'
+    db_session.expire_all()
+    assert (conversation.title, conversation.updated_at, conversation.summary,
+            db_session.query(AssistantConversation).count(),
+            db_session.query(AssistantMessage).count(), db_session.query(AgentRun).count()) == before
+
+
+@pytest.mark.parametrize('action', ('email_draft', 'not_email'))
+def test_email_provider_fallthrough_reuses_one_preflight(client, db_session, monkeypatch, action):
+    from types import SimpleNamespace
+
+    from backend.app.api.v1 import assistant
+    from backend.app.assistant.email_agent import (
+        EmailDraftComposer,
+        EmailIntentGate,
+        LangChainEmailDraftComposerModel,
+        LangChainEmailIntentGateModel,
+    )
+    enforce(client)
+    conversation = create_conversation(db_session, USERS['viewer'])
+    events = []
+    original = RagApplicationFacade.prepare_assistant_ingress
+    def prepare(self, **kwargs):
+        events.append('preflight')
+        assert db_session.query(AssistantMessage).count() == 0
+        return original(self, **kwargs)
+    monkeypatch.setattr(RagApplicationFacade, 'prepare_assistant_ingress', prepare)
+    class Provider:
+        def __init__(self, kind):
+            self.kind = kind
+        def invoke(self, messages):
+            events.append(self.kind)
+            if self.kind == 'classifier':
+                return SimpleNamespace(content='{"email_intent":true,"confidence_score":1.0}')
+            return SimpleNamespace(content='{"action_type":"' + action + '","to":["partner@example.com"],"subject":"회의","body":"회의 취소"}')
+    gate = EmailIntentGate(model=LangChainEmailIntentGateModel(
+        chat_model=Provider('classifier'), model_name='fake', max_input_chars=6000))
+    composer = EmailDraftComposer(model=LangChainEmailDraftComposerModel(
+        chat_model=Provider('composer'), model_name='fake', max_input_chars=6000))
+    monkeypatch.setattr(assistant, 'build_email_intent_gate', lambda settings: gate)
+    monkeypatch.setattr(assistant, 'build_email_draft_composer', lambda settings, **kwargs: composer)
+    response = client.post(f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        json={'content': 'partner@example.com에 오늘 회의 취소됐다고 메일 보내줘.'},
+        headers=CAPABILITY_HEADERS)
+    assert response.status_code == 200, response.text
+    assert events == ['preflight', 'classifier', 'composer']
+    assert db_session.query(AssistantMessage).count() == 2
+    assert db_session.query(AgentRun).count() == (1 if action == 'not_email' else 0)
+    if action == 'email_draft':
+        assert response.json()['assistant_message']['metadata']['email_draft'] == {
+            'to': ['partner@example.com'], 'subject': '회의', 'body': '회의 취소'}
+
+
+@pytest.mark.parametrize('composer_mode', ('noop', 'injected', 'configured'))
+@pytest.mark.parametrize('stale_prior', (True, False))
+def test_source_email_only_deterministic_response_bypasses_stale_prior(
+    client, db_session, monkeypatch, composer_mode, stale_prior,
+):
+    import sys
+    from types import SimpleNamespace
+
+    from backend.app.api.v1 import assistant
+    from backend.app.assistant.email_agent import (
+        EmailDraftComposer,
+        LangChainEmailDraftComposerModel,
+    )
+    from backend.app.assistant.service import append_assistant_message
+    facade = enforce(client)
+    conversation = create_conversation(db_session, USERS['viewer'])
+    stale = helpers.write_canned(db_session, conversation, 'old RAG answer')
+    if stale_prior:
+        stale.content = 'tampered prior'
+        db_session.commit()
+    append_assistant_message(db_session, USERS['viewer'], conversation,
+        content='독립적인 회의 안내입니다.', citations=[], source_ids=[], source_links=[], source_snippets=[],
+        permission_level=None, hidden_match_count=0, permission_notice=None, agent_run_id=None,
+        metadata={})
+    events = []
+    preparations = []
+    original_prepare = RagApplicationFacade.prepare_assistant_ingress
+    def prepare(self, **kwargs):
+        preparations.append(1)
+        assert db_session.query(AssistantMessage).count() == 2
+        return original_prepare(self, **kwargs)
+    monkeypatch.setattr(RagApplicationFacade, 'prepare_assistant_ingress', prepare)
+    class Provider:
+        def __init__(self, **kwargs):
+            events.append('construct')
+        def invoke(self, messages):
+            events.append('invoke')
+            return '{"action_type":"not_email"}'
+    if composer_mode == 'configured':
+        settings = facade._settings.model_copy(update={'paraworks_demo_mode': False,
+            'assistant_email_agent_enabled': True, 'openai_api_key': 'test-key'})
+        client.app.dependency_overrides[assistant.get_settings] = lambda: settings
+        monkeypatch.setitem(sys.modules, 'langchain_openai', SimpleNamespace(ChatOpenAI=Provider))
+    elif composer_mode == 'injected':
+        composer = EmailDraftComposer(model=LangChainEmailDraftComposerModel(
+            chat_model=Provider(), model_name='fake', max_input_chars=6000))
+        events.clear()
+        monkeypatch.setattr(assistant, 'build_email_draft_composer', lambda settings, **kwargs: composer)
+    def unexpected(*args, **kwargs):
+        events.append('classifier-or-rag')
+        raise AssertionError('source branch must not call classifier or RAG')
+    monkeypatch.setattr(assistant, 'build_email_intent_gate', unexpected)
+    monkeypatch.setattr(RagApplicationFacade, 'invoke_graph', unexpected)
+    response = client.post(f'/api/v1/assistant/conversations/{conversation.id}/messages',
+        json={'content': '이 내용을 partner@example.com에 메일로 보내줘.'}, headers=CAPABILITY_HEADERS)
+    refused = stale_prior and composer_mode != 'noop'
+    assert events == ([] if refused or composer_mode == 'noop' else
+                      ['construct', 'invoke'] if composer_mode == 'configured' else ['invoke'])
+    assert preparations == ([] if composer_mode == 'noop' else [1])
+    assert response.status_code == (502 if refused else 200), response.text
+    assert db_session.query(AssistantMessage).count() == (2 if refused else 4)
+    assert db_session.query(AgentRun).count() == 1
+    if not refused:
+        assert response.json()['assistant_message']['metadata']['action_type'] == 'email_draft'
+        assert '독립적인 회의 안내입니다.' in response.json()['assistant_message']['content']
+
+
 def test_ordinary_writer_needs_no_reserved_id_or_flush_hook(db_session, monkeypatch):
     conversation = create_conversation(db_session, USERS['viewer'])
     monkeypatch.setattr(helpers, 'sqlite_writer_insert', lambda *a: nullcontext())
@@ -359,7 +521,9 @@ def test_stale_rag_prior_is_not_independent_action_authority(client, db_session,
     text = '김종우님 이메일 알려줘.' if action == 'contact' else 'partner@example.com에 오늘 회의 취소됐다고 메일 보내줘.'
     response = client.post(f'/api/v1/assistant/conversations/{conversation.id}/messages',
         json={'content': text}, headers=CAPABILITY_HEADERS)
-    if mode == 'enforce' and action == 'email_fallthrough':
+    # A classifier/composer-selected email is not a fully deterministic action;
+    # both its successful and fallthrough branches now require preflight.
+    if mode == 'enforce' and action != 'contact':
         assert response.status_code == 502
         assert db_session.query(AssistantMessage).count() == 1
     else:

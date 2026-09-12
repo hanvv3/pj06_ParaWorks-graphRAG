@@ -129,7 +129,7 @@ def _patch_email_flow(monkeypatch, *, intent_decision, draft_decision=None) -> N
             return draft_decision
 
     monkeypatch.setattr(assistant_api, 'build_email_intent_gate', lambda settings: FakeEmailIntentGate())
-    monkeypatch.setattr(assistant_api, 'build_email_draft_composer', lambda settings: FakeEmailDraftComposer())
+    monkeypatch.setattr(assistant_api, 'build_email_draft_composer', lambda settings, **kwargs: FakeEmailDraftComposer())
 
 
 def test_assistant_conversation_api_preserves_owner_hidden_scope(client: TestClient) -> None:

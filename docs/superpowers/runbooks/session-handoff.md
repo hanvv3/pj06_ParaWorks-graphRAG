@@ -2,6 +2,29 @@
 
 Updated: 2026-09-12
 
+## 2026-09-12 D Core Task18 F4/F5 candidate; F2 still blocks
+
+- Fix round 2 supersedes the ambiguous-provider planning allowance in round 1.
+  `ensure_v2_preflight()` is request-local, one-shot and never persists a user.
+  It precedes ambiguous email classification, generated-email RAG and configured
+  or injected source composers. Later RAG fallthrough reuses the exact prepared
+  ingress; the facade's post-user current-authority reauthentication is unchanged.
+- `email_agent.build_email_draft_composer` adds an optional callback after the
+  demo/disabled/no-key Noop return, before import/construction. Source-email
+  handling also guards every non-exact-Noop instance before compose, so an
+  injected implementation cannot claim deterministic authority. Exact Noop
+  source fallback, contact and recipient corrections stay independent.
+- Blank content is rejected before planning/mutation with exact
+  `422 {"detail":"assistant message content is required"}` and existing
+  capability cache headers. Reviewer provider-zero probes and new real-wrapper
+  fake-provider tests pass; focused gate 73 passed. See local report for later
+  affected gate, full RED/GREEN and commit identity.
+  Affected gate: 228 passed, only F2 deselected; Ruff/compile/diff checks passed.
+  Final focused gate after live-source additions and import cleanup: 76 passed.
+- F2 still fails its retained new-write tamper test. No legacy schema/model/
+  migration/writer/reader changes were made in this round. Keep Task18 marked
+  INCOMPLETE/BLOCKED pending the existing human contract decision and rereview.
+
 ## 2026-09-12 D Core Task18 F1/F3 fixes; F2 remains Important blocker
 
 - The earlier DONE_WITH_CONCERNS label is superseded: Task18 is INCOMPLETE /

@@ -476,7 +476,10 @@ def _append_source_email_draft_message(
     source_context,
     resolved_recipients: list[dict[str, object]],
     before_write=None,
+    before_provider=None,
 ):
+    from backend.app.assistant.email_agent import NoopEmailDraftComposer
+
     source_rag_context = render_email_source_context(
         source_context,
         max_chars=settings.assistant_email_agent_max_input_chars,
@@ -489,7 +492,12 @@ def _append_source_email_draft_message(
         reason=source_context.reason,
         model_name='deterministic',
     )
-    email_decision: EmailActionDecision = build_email_draft_composer(settings).compose(
+    composer = build_email_draft_composer(settings, before_provider=before_provider)
+    # An injected implementation is not proof of provider-free behavior. Only
+    # the exact built-in Noop can bypass preflight for deterministic fallback.
+    if type(composer) is not NoopEmailDraftComposer and before_provider is not None:
+        before_provider()
+    email_decision: EmailActionDecision = composer.compose(
         conversation_context=email_context,
         latest_message=user_message.content,
         intent=source_intent,
@@ -651,6 +659,8 @@ def create_assistant_message(
     user: AssistantPostCurrentUser,
     settings: AssistantPostSettings,
 ) -> dict:
+    if not request.content.strip():
+        raise HTTPException(status_code=422, detail='assistant message content is required')
     conversation = require_conversation(db, user, conversation_id)
     _require_post_capability(raw_request, settings)
     _require_assistant_ingress_scan(request.content)
@@ -659,9 +669,19 @@ def create_assistant_message(
     v2_rag_owner = facade.execution_owner('assistant') == 'v2'
     # Non-RAG planning sees only eligible immutable prior snapshots and current
     # input. Defer the V2 user INSERT until an action actually writes a product,
-    # or until RAG-only ingress has passed. A tentative email decision cannot
+    # or until provider/RAG ingress has passed. A tentative email decision cannot
     # downgrade a later RAG fallback or leave an invalid-prior user row behind.
     user_message = SimpleNamespace(id=None, content=request.content.strip())
+
+    def ensure_v2_preflight():
+        nonlocal prepared_ingress
+        if v2_rag_owner and prepared_ingress is None:
+            try:
+                prepared_ingress = facade.prepare_assistant_ingress(
+                    actor=user, conversation_id=conversation.id, caller_text=request.content,
+                )
+            except AssistantIngressError as exc:
+                _map_assistant_delivery(exc.result)
 
     def persist_user_message():
         nonlocal user_message
@@ -787,6 +807,7 @@ def create_assistant_message(
                 f'recipient_count={len(resolved_recipients)}'
             ),
         )
+        ensure_v2_preflight()
         answer = _answer_question_or_raise(
             db=db,
             user=user,
@@ -813,6 +834,7 @@ def create_assistant_message(
             source_context=source_context,
             resolved_recipients=resolved_recipients,
             before_write=persist_user_message,
+            before_provider=ensure_v2_preflight,
         )
         if assistant_message is not None:
             return {
@@ -872,6 +894,7 @@ def create_assistant_message(
             source_context=source_context,
             resolved_recipients=resolved_recipients,
             before_write=persist_user_message,
+            before_provider=ensure_v2_preflight,
         )
         if assistant_message is not None:
             return {
@@ -882,6 +905,10 @@ def create_assistant_message(
                 ),
             }
 
+    # Ambiguous routing can dispatch a classifier even when it returns non-email.
+    # Validate once before that first provider-capable boundary and reuse it if
+    # composition later falls through to the V2 graph.
+    ensure_v2_preflight()
     tool_logger.log(
         'email_intent_gate',
         f'start conversation_id={conversation.id} message_id={user_message.id}',
@@ -1041,12 +1068,7 @@ def create_assistant_message(
             }
 
     if v2_rag_owner:
-        try:
-            prepared_ingress = facade.prepare_assistant_ingress(
-                actor=user, conversation_id=conversation.id, caller_text=request.content,
-            )
-        except AssistantIngressError as exc:
-            _map_assistant_delivery(exc.result)
+        ensure_v2_preflight()
         persist_user_message()
         # Close route reads before the facade opens its finalizer transaction.
         db.rollback()

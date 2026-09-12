@@ -2,6 +2,8 @@ import json
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from backend.app.assistant.email_agent import (
     EmailIntentDecision,
     LangChainEmailDraftComposerModel,
@@ -13,6 +15,53 @@ from backend.app.assistant.email_agent import (
     render_recent_assistant_context_for_email,
 )
 from backend.app.core.config import Settings
+
+
+@pytest.mark.parametrize('disabled', ('demo', 'disabled', 'no_key'))
+def test_noop_composer_needs_no_preflight(monkeypatch, disabled):
+    settings = Settings(paraworks_demo_mode=disabled == 'demo',
+        assistant_email_agent_enabled=disabled != 'disabled',
+        openai_api_key='' if disabled == 'no_key' else 'test-key')
+    def unexpected():
+        raise AssertionError('no provider means no preflight')
+    composer = build_email_draft_composer(settings, before_provider=unexpected)
+    assert composer.compose().action_type == 'not_email'
+
+
+@pytest.mark.parametrize('refuse', (False, True))
+def test_composer_preflight_precedes_provider_import_and_construction(monkeypatch, refuse):
+    import builtins
+
+    from backend.app.assistant.email_agent import EmailIntentDecision
+    events = []
+    original_import = builtins.__import__
+    class Provider:
+        def __init__(self, **kwargs):
+            events.append('construct')
+        def invoke(self, messages):
+            events.append('invoke')
+            return '{"action_type":"not_email"}'
+    def import_provider(name, *args, **kwargs):
+        if name == 'langchain_openai':
+            events.append('import')
+            return SimpleNamespace(ChatOpenAI=Provider)
+        return original_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', import_provider)
+    def preflight():
+        events.append('preflight')
+        if refuse:
+            raise ValueError('ingress refused')
+    settings = Settings(paraworks_demo_mode=False, assistant_email_agent_enabled=True,
+        openai_api_key='test-key')
+    if refuse:
+        with pytest.raises(ValueError, match='ingress refused'):
+            build_email_draft_composer(settings, before_provider=preflight)
+        assert events == ['preflight']
+    else:
+        composer = build_email_draft_composer(settings, before_provider=preflight)
+        composer.compose(conversation_context='', latest_message='draft',
+                         intent=EmailIntentDecision(email_intent=True))
+        assert events == ['preflight', 'import', 'construct', 'invoke']
 
 
 class FakeChatModel:

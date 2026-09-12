@@ -1,5 +1,23 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-12 D Core Task18 provider-ordering review fix
+
+- F4/F5 fixes add lazy, one-shot V2 ingress preflight before any ambiguous
+  provider-backed email classification, generated-email RAG, or source composer.
+  Exact built-in Noop composition can still produce a deterministic source-email
+  response; contact and recipient-only branches retain their independent path.
+- The composer builder accepts an optional preflight callback after its
+  deterministic early return and before provider import/construction. Injected
+  non-Noop composers are also gated before invocation. A later RAG fallthrough
+  reuses the prepared ingress; final invocation still authenticates current
+  evidence as required. Whitespace returns the frozen 422 `required` detail.
+- Unchanged reviewer probes first reproduced both provider calls and the wrong
+  detail. Focused GREEN: 73 passed; affected gate: 228 passed with only F2
+  deselected; final focused gate: 76 passed. Ruff, compile and diff checks passed.
+  The separate F2 content-tamper probe still
+  fails; its schema proposal remains unapproved/unimplemented and Task18 remains
+  INCOMPLETE/BLOCKED, not CLEAN. No provider/network/PG/rollout claim.
+
 ## 2026-09-12 D Core Task18 review fixes; F2 blocks completion
 
 - Independent review found three Important issues. F1/F3 fixes now distinguish

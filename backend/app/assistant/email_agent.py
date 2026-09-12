@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -238,10 +239,14 @@ def build_email_intent_gate(settings: Settings) -> EmailIntentGate | NoopEmailIn
     )
 
 
-def build_email_draft_composer(settings: Settings) -> EmailDraftComposer | NoopEmailDraftComposer:
+def build_email_draft_composer(
+    settings: Settings, *, before_provider: Callable[[], None] | None = None,
+) -> EmailDraftComposer | NoopEmailDraftComposer:
     if settings.paraworks_demo_mode or not settings.assistant_email_agent_enabled or not settings.openai_api_key:
         return NoopEmailDraftComposer()
 
+    if before_provider is not None:
+        before_provider()
     try:
         from langchain_openai import ChatOpenAI
     except ImportError:  # pragma: no cover - 선택 의존성 누락 경로
