@@ -6842,3 +6842,25 @@ Cost/security note:
   actual PostgreSQL serialization is therefore still a release gate. No live
   provider/network/paid call, rollout, push, merge, or deploy occurred. This
   candidate remains **DONE_WITH_CONCERNS pending independent review**.
+
+### Task 22 round-1 security review remediation
+
+- Independent review found two P1 and three P2 gaps. The remediation adds a
+  runtime-key-authenticated owner-only append-only review ledger, committed
+  review-key verifier registry, durable one-use nonce reservation/consumption,
+  and exact partial-bootstrap recovery identity binding. Settings-only key/id
+  replacement, nil/reused nonce, and a recovery review replayed against a
+  replacement partial latch now fail closed.
+- Latch-absent status now reads all authority/readiness/history sets without
+  creating or repairing artifacts. DB target comparison canonicalizes terminal
+  DNS dots, IDNA, IP literals, loopback aliases and default PostgreSQL ports;
+  ambiguous same-database hostname pairs are refused. Operation-specific
+  successor and acknowledgement fields are exact rather than silently ignored.
+- The retained six adversarial review probes are now green, together with
+  crash-before-mutation retry, crash-after-mutation no-double-commit, ledger
+  tamper, registry, and operation-schema controls. Public status/result DTOs and
+  PostgreSQL schema are unchanged; the new local ledger sidecar is an
+  operational artifact. Actual disposable PostgreSQL evidence and independent
+  rereview remain required. Fresh focused evidence is `36 passed, 1 skipped`
+  and direct-impact regression is `138 passed, 14 skipped`, so status stays
+  **DONE_WITH_CONCERNS**.

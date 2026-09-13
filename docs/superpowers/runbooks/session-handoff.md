@@ -5414,3 +5414,27 @@ tests passed with 53 tests; ruff passed.
   `PARAWORKS_TEST_POSTGRES_URL`, so actual advisory/concurrency behavior remains
   a release gate. Await independent review before Task 23. No provider/network,
   paid model, rollout, push, merge, or deploy occurred.
+
+## 2026-09-13 Task 22 round-1 review remediation handoff
+
+- Round-1 review was not clean (2 P1, 3 P2). The six retained adversarial
+  probes now pass after adding committed review-key verifier admission plus an
+  owner-only runtime-key-authenticated append-only review ledger adjacent to
+  the provider-safety latch. Its immutable header pins target, plan HMAC, key
+  id and opaque key-material verifier; its events reserve and consume one
+  canonical nonzero nonce without persisting key material or reviewed payload.
+- Recovery review context now binds the exact partial latch UUID, environment,
+  generation-zero digest and original reviewed reference in addition to the
+  target/plan/key pin. Replacement partial files, nonce replay, settings-only
+  key replacement, ledger tamper and operation-inapplicable fields fail closed.
+- No database migration or public status/result DTO change is introduced. A new
+  `*.admin-review-ledger.json` plus stable `.lock` is created only by reviewed
+  mutation; status remains read-only and checks all three DB authority sets when
+  the latch is absent. Existing deployed authority without a ledger may only
+  establish the pin through an exact committed verifier; otherwise mutation is
+  refused and key rotation remains out of scope.
+- Retained review probes and focused controls are green. Run the full
+  direct-impact regression is now `138 passed, 14 skipped`; focused evidence is
+  `36 passed, 1 skipped`. Run Ruff, diff/credential checks, and the conditional
+  disposable PostgreSQL test before committing, then request independent
+  rereview. Do not proceed to Task 23 while Task 22 is not CLEAN.

@@ -2588,6 +2588,21 @@ historical-block acknowledgement, target kind와 DB/latch identity HMAC, current
 successor snapshot(해당 시), 그리고 외부에서 고정해 공급한 implementation-plan reference HMAC을 모두
 서명한다. CLI가 plan HMAC을 파일 내용에서 유추하거나 파생하지 않는다.
 
+review authority key id와 key material의 opaque verifier는 committed-code allowlist를 통과해야 하고,
+최초 mutation 때 runtime-key HMAC으로 보호된 owner-only admin review ledger에도 target/plan과 함께
+고정된다. raw key material은 code/ledger/DB 어디에도 저장하지 않는다. ledger는 canonical nonce별
+`reserved -> consumed` event만 append하며 nil/noncanonical nonce, 다른 envelope에서 재사용된 nonce,
+consumed nonce, settings-only key/id replacement와 ledger tamper를 fail closed한다. mutation 전에 죽은
+동일 pending envelope만 exact retry할 수 있고, mutation 뒤 consume 전에 죽으면 provider-safety CAS가
+같은 transition의 재실행을 막는다. key rotation은 이 pin을 수정하는 우회 경로가 아니며 별도 설계 전
+지원하지 않는다.
+
+bootstrap recovery의 signed context는 대상 partial latch의 environment, authority UUID, generation-zero
+envelope digest, original reviewed transition reference, fixed plan HMAC과 review-key pin을 exact하게 포함한다.
+review 검증과 nonce reservation 뒤 recovery 직전에 partial file/empty DB를 다시 inspect하므로 A에 대한
+review로 같은 path에 새로 생긴 B를 복구할 수 없다. operation별 schema도 exact하다. init/recovery/mark/reset은
+successor가 null이고, rebind/supersede는 exact successor가 필수이며, 무관한 acknowledgement는 거부한다.
+
 rebind는 서로 다른 reviewed envelope를 요구하는 `ready -> rebind_required`와
 `rebind_required -> ready` 두 transition이다. production/application과 live-validation은 서로 다른
 DB와 latch 설정 및 target identity를 사용하고 어느 한쪽의 authority/review가 다른 쪽을 만족시키지

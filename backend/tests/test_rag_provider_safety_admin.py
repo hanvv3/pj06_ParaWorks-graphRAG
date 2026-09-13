@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import io
+import json
 import socket
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, func, select
@@ -21,6 +23,7 @@ from backend.app.admin.rag_provider_safety import (
     _configured_target,
     _run_cli,
     build_cli_parser,
+    review_key_material_verifier,
     successor_registry_from_snapshots,
     verify_review_envelope,
 )
@@ -99,13 +102,15 @@ def _review_bytes(
     key_id: str = 'provider-safety-review-v1',
     plan_hmac: str = _PLAN_HMAC,
     acknowledged: bool = False,
+    nonce: str | None = None,
+    actor_subject_hmac: str = '4' * 64,
 ) -> bytes:
     payload = {
-        'actor_subject_hmac': '4' * 64,
+        'actor_subject_hmac': actor_subject_hmac,
         'expected_context': context,
         'historical_block_acknowledged': acknowledged,
         'implementation_plan_reference_hmac': plan_hmac,
-        'nonce': '879c1400-2f11-4ac6-82a1-112f8f2431cb',
+        'nonce': nonce or str(uuid4()),
         'operation': operation,
         'review_authority_key_id': key_id,
         'schema_version': 'rag-provider-safety-admin-review:v1',
@@ -142,6 +147,9 @@ def _service(tmp_path: Path, *, kind: str = 'production'):
         review_key_id='provider-safety-review-v1',
         implementation_plan_reference_hmac=_PLAN_HMAC,
         successor_registry={},
+        review_key_registry={
+            'provider-safety-review-v1': review_key_material_verifier(_REVIEW_KEY)
+        },
     )
     return engine, target, runtime, admin
 
@@ -165,6 +173,15 @@ def test_review_envelope_is_exact_bounded_and_binds_external_authority_target_an
     assert reviewed.operation == 'provider-safety-init'
     assert reviewed.reviewed_gate_reference_hmac == _PLAN_HMAC
 
+    nil_nonce = json.loads(raw)
+    nil_nonce['signed_payload']['nonce'] = '00000000-0000-0000-0000-000000000000'
+    nil_nonce['hmac_sha256'] = hmac.new(
+        _REVIEW_KEY,
+        b'paraworks:provider-safety-admin-review:v1\x00'
+        + canonical_json_bytes(nil_nonce['signed_payload']),
+        hashlib.sha256,
+    ).hexdigest()
+
     refused = (
         raw + b' ',
         _review_bytes(target, 'provider-safety-init', key=b'wrong-review-key'),
@@ -172,6 +189,7 @@ def test_review_envelope_is_exact_bounded_and_binds_external_authority_target_an
         _review_bytes(_target(tmp_path, kind='live_validation'), 'provider-safety-init'),
         _review_bytes(target, 'provider-safety-init', plan_hmac='8' * 64),
         _review_bytes(target, 'provider-safety-init', key_id='rotated-unapproved-key'),
+        canonical_json_bytes(nil_nonce),
         b'{' + b'x' * MAX_REVIEW_ENVELOPE_BYTES + b'}',
     )
     for candidate in refused:
@@ -214,6 +232,38 @@ def test_review_authority_key_must_be_distinct_from_runtime_latch_key(
         )
 
 
+def test_committed_review_key_registry_is_required_when_supplied(
+    tmp_path: Path,
+) -> None:
+    target = _target(tmp_path)
+    engine = create_engine(target.database_url)
+    Base.metadata.create_all(engine)
+    runtime = RagProviderSafetyService(
+        latch_path=target.latch_path,
+        identity_secret=_RUNTIME_KEY,
+        designated_environment_id=target.designated_environment_id,
+    )
+    common = {
+        'target': target,
+        'connection_factory': engine.connect,
+        'provider_safety': runtime,
+        'snapshots': (_snapshot('query_embedding'), _snapshot('answer_generation')),
+        'runtime_identity_secret': _RUNTIME_KEY,
+        'review_secret': _REVIEW_KEY,
+        'review_key_id': 'provider-safety-review-v1',
+        'implementation_plan_reference_hmac': _PLAN_HMAC,
+        'successor_registry': {},
+    }
+    with pytest.raises(ProviderSafetyReviewError, match='committed registry'):
+        RagProviderSafetyAdminService(**common, review_key_registry={})
+    RagProviderSafetyAdminService(
+        **common,
+        review_key_registry={
+            'provider-safety-review-v1': review_key_material_verifier(_REVIEW_KEY)
+        },
+    )
+
+
 def test_mutating_parser_accepts_no_review_payload_or_secret_arguments() -> None:
     parser = build_cli_parser()
     parsed = parser.parse_args(['provider-safety-reset'])
@@ -232,6 +282,8 @@ def test_status_is_read_only_and_does_not_create_authority_artifacts(
     assert status.blocked_family_count == 0
     assert not target.latch_path.exists()
     assert not Path(str(target.latch_path) + '.lock').exists()
+    assert not Path(str(target.latch_path) + '.admin-review-ledger.json').exists()
+    assert not Path(str(target.latch_path) + '.admin-review-ledger.json.lock').exists()
     with engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(RagProviderSafetyAuthority)) == 0
 
@@ -247,6 +299,38 @@ def test_status_reports_db_latch_drift_without_repairing_or_recreating_file(
     assert not target.latch_path.exists()
 
 
+def test_status_refuses_orphan_readiness_or_history_without_creating_artifacts(
+    tmp_path: Path,
+) -> None:
+    engine, target, _runtime, admin = _service(tmp_path)
+    admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    target.latch_path.unlink()
+    with engine.begin() as connection:
+        connection.execute(RagProviderSafetyAuthority.__table__.delete())
+    with pytest.raises(RagProviderSafetyError, match='inconsistent'):
+        admin.status()
+    assert not target.latch_path.exists()
+
+
+def test_status_refuses_orphan_review_ledger_without_creating_latch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _engine, target, runtime, admin = _service(tmp_path)
+    monkeypatch.setattr(
+        runtime,
+        'bootstrap',
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RagProviderSafetyError('simulated pre-mutation crash')
+        ),
+    )
+    with pytest.raises(RagProviderSafetyError):
+        admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    with pytest.raises(RagProviderSafetyError, match='inconsistent'):
+        admin.status()
+    assert not target.latch_path.exists()
+    assert not Path(str(target.latch_path) + '.lock').exists()
+
+
 def test_init_requires_external_review_and_refuses_second_init(tmp_path: Path) -> None:
     engine, target, _runtime, admin = _service(tmp_path)
     with pytest.raises(ProviderSafetyReviewError):
@@ -260,6 +344,145 @@ def test_init_requires_external_review_and_refuses_second_init(tmp_path: Path) -
         assert connection.scalar(select(func.count()).select_from(RagProviderSafetyTransition)) == 1
     with pytest.raises(RagProviderSafetyError, match='already exists'):
         admin.initialize(_review_bytes(target, 'provider-safety-init'))
+
+
+def test_review_nonce_is_durable_one_use_and_key_pin_rejects_settings_drift(
+    tmp_path: Path,
+) -> None:
+    engine, target, runtime, admin = _service(tmp_path)
+    init = _review_bytes(target, 'provider-safety-init')
+    admin.initialize(init)
+    with pytest.raises(ProviderSafetyReviewError, match='nonce'):
+        admin.initialize(init)
+
+    replacement_key = b'unapproved-replacement-review-authority'
+    changed_target = ProviderSafetyAdminTarget.build(
+        kind=target.kind,
+        database_url=target.database_url,
+        latch_path=target.latch_path,
+        designated_environment_id=target.designated_environment_id,
+        review_secret=replacement_key,
+    )
+    changed = RagProviderSafetyAdminService(
+        target=changed_target,
+        connection_factory=engine.connect,
+        provider_safety=runtime,
+        snapshots=(_snapshot('query_embedding'), _snapshot('answer_generation')),
+        runtime_identity_secret=_RUNTIME_KEY,
+        review_secret=replacement_key,
+        review_key_id='unapproved-replacement',
+        implementation_plan_reference_hmac=_PLAN_HMAC,
+        successor_registry={},
+    )
+    with engine.connect() as connection:
+        context = runtime.review_context(connection, 'answer_generation')
+    with pytest.raises(ProviderSafetyReviewError, match='pin'):
+        changed.mark_rebind_required(
+            _review_bytes(
+                changed_target,
+                'provider-safety-mark-rebind-required',
+                context=_context(context),
+                key=replacement_key,
+                key_id='unapproved-replacement',
+            )
+        )
+
+
+def test_pending_nonce_allows_exact_retry_after_pre_mutation_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _engine, target, runtime, admin = _service(tmp_path)
+    reviewed = _review_bytes(target, 'provider-safety-init')
+    original_bootstrap = runtime.bootstrap
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RagProviderSafetyError('simulated pre-mutation crash')
+        return original_bootstrap(*args, **kwargs)
+
+    monkeypatch.setattr(runtime, 'bootstrap', fail_once)
+    with pytest.raises(RagProviderSafetyError, match='pre-mutation'):
+        admin.initialize(reviewed)
+    assert not target.latch_path.exists()
+    assert admin.initialize(reviewed).global_safety_generation == 0
+    with pytest.raises(ProviderSafetyReviewError, match='nonce'):
+        admin.initialize(reviewed)
+
+
+def test_same_nonce_with_different_signed_envelope_is_refused_while_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _engine, target, runtime, admin = _service(tmp_path)
+    nonce = str(uuid4())
+    first = _review_bytes(target, 'provider-safety-init', nonce=nonce)
+    monkeypatch.setattr(
+        runtime,
+        'bootstrap',
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RagProviderSafetyError('simulated pre-mutation crash')
+        ),
+    )
+    with pytest.raises(RagProviderSafetyError):
+        admin.initialize(first)
+    changed = _review_bytes(
+        target,
+        'provider-safety-init',
+        nonce=nonce,
+        actor_subject_hmac='5' * 64,
+    )
+    with pytest.raises(ProviderSafetyReviewError, match='nonce'):
+        admin.initialize(changed)
+
+
+def test_post_mutation_consume_crash_cannot_double_mutate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _engine, target, runtime, admin = _service(tmp_path)
+    admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    with admin.connection_factory() as connection:
+        context = runtime.review_context(connection, 'answer_generation')
+    reviewed = _review_bytes(
+        target,
+        'provider-safety-mark-rebind-required',
+        context=_context(context),
+    )
+    original_consume = admin._ledger.consume
+    monkeypatch.setattr(
+        admin._ledger,
+        'consume',
+        lambda value: (_ for _ in ()).throw(
+            ProviderSafetyReviewError('simulated post-mutation crash')
+        ),
+    )
+    with pytest.raises(ProviderSafetyReviewError, match='post-mutation'):
+        admin.mark_rebind_required(reviewed)
+    monkeypatch.setattr(admin._ledger, 'consume', original_consume)
+    with pytest.raises(ProviderSafetyReviewError, match='context'):
+        admin.mark_rebind_required(reviewed)
+    with admin.connection_factory() as connection:
+        current = runtime.review_context(connection, 'answer_generation')
+    assert current.global_safety_generation == 1
+    assert current.state == 'rebind_required'
+
+
+def test_review_ledger_tamper_fails_closed_before_state_read(tmp_path: Path) -> None:
+    _engine, target, runtime, admin = _service(tmp_path)
+    admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    ledger = Path(str(target.latch_path) + '.admin-review-ledger.json')
+    ledger.write_bytes(b'{}')
+    with admin.connection_factory() as connection:
+        context = runtime.review_context(connection, 'answer_generation')
+    with pytest.raises(ProviderSafetyReviewError, match='ledger'):
+        admin.mark_rebind_required(
+            _review_bytes(
+                target,
+                'provider-safety-mark-rebind-required',
+                context=_context(context),
+            )
+        )
 
 
 def test_rebind_is_two_reviewed_transitions_and_rejects_direct_ready_rebind(
@@ -374,14 +597,78 @@ def test_bootstrap_recovery_requires_a_separate_signed_review_and_only_repairs_f
     assert target.latch_path.exists()
     with pytest.raises(ProviderSafetyReviewError):
         admin.recover_bootstrap(b'')
+    with pytest.raises(RagProviderSafetyError, match='already exists'):
+        admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    recovery_context = admin.bootstrap_recovery_review_context()
     recovered = admin.recover_bootstrap(
-        _review_bytes(target, 'provider-safety-bootstrap-recovery')
+        _review_bytes(
+            target,
+            'provider-safety-bootstrap-recovery',
+            context=recovery_context,
+        )
     )
     assert recovered.global_safety_generation == 0
     with pytest.raises(RagProviderSafetyError, match='not eligible'):
         admin.recover_bootstrap(
-            _review_bytes(target, 'provider-safety-bootstrap-recovery')
+            _review_bytes(
+                target,
+                'provider-safety-bootstrap-recovery',
+                context=recovery_context,
+            )
         )
+
+
+def test_recovery_review_is_bound_to_exact_partial_latch(tmp_path: Path) -> None:
+    engine, target, runtime, admin = _service(tmp_path)
+    snapshots = (_snapshot('query_embedding'), _snapshot('answer_generation'))
+
+    class FailingCommit:
+        def __init__(self, connection):
+            self.connection = connection
+            self.dialect = connection.dialect
+
+        def execute(self, *args, **kwargs):
+            return self.connection.execute(*args, **kwargs)
+
+        def scalar(self, *args, **kwargs):
+            return self.connection.scalar(*args, **kwargs)
+
+        def commit(self):
+            raise RuntimeError('simulated crash')
+
+        def rollback(self):
+            self.connection.rollback()
+
+    first = engine.connect()
+    with pytest.raises(RagProviderSafetyError):
+        runtime.bootstrap(
+            FailingCommit(first),
+            snapshots,
+            reviewed_transition_reference_hmac=_PLAN_HMAC,
+        )
+    first.close()
+    # Establish the durable admin key pin for this partial initialization.
+    with pytest.raises(RagProviderSafetyError, match='already exists'):
+        admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    first_context = admin.bootstrap_recovery_review_context()
+    first_review = _review_bytes(
+        target,
+        'provider-safety-bootstrap-recovery',
+        context=first_context,
+    )
+
+    target.latch_path.unlink()
+    second = engine.connect()
+    with pytest.raises(RagProviderSafetyError):
+        runtime.bootstrap(
+            FailingCommit(second),
+            snapshots,
+            reviewed_transition_reference_hmac=_PLAN_HMAC,
+        )
+    second.close()
+    assert admin.bootstrap_recovery_review_context() != first_context
+    with pytest.raises(ProviderSafetyReviewError, match='context'):
+        admin.recover_bootstrap(first_review)
 
 
 def test_reset_preserves_blocker_and_appends_monotonic_reviewed_history(
@@ -596,6 +883,74 @@ def test_configured_production_and_live_validation_targets_are_disjoint(
                 paraworks_provider_safety_admin_target='live_validation',
             ),
             review_secret=_REVIEW_KEY,
+        )
+    with pytest.raises(ProviderSafetyReviewError, match='separate'):
+        _configured_target(
+            Settings(
+                **{
+                    **common,
+                    'paraworks_database_url': (
+                        'postgresql+psycopg://app:a@localhost/shared_db'
+                    ),
+                    'paraworks_rag_live_validation_database_url': (
+                        'postgresql+psycopg://gate:b@localhost./shared_db'
+                    ),
+                },
+                paraworks_provider_safety_admin_target='live_validation',
+            ),
+            review_secret=_REVIEW_KEY,
+        )
+
+
+@pytest.mark.parametrize(
+    'operation',
+    [
+        'provider-safety-init',
+        'provider-safety-bootstrap-recovery',
+        'provider-safety-mark-rebind-required',
+        'provider-safety-reset',
+    ],
+)
+def test_operations_without_successors_reject_signed_successor(
+    tmp_path: Path, operation: str
+) -> None:
+    target = _target(tmp_path)
+    raw = _review_bytes(
+        target,
+        operation,
+        successor=_successor(_snapshot('answer_generation')),
+    )
+    with pytest.raises(ProviderSafetyReviewError, match='successor'):
+        verify_review_envelope(
+            raw,
+            expected_operation=operation,
+            expected_target=target,
+            expected_context=None,
+            expected_successor=None,
+            review_secret=_REVIEW_KEY,
+            review_key_id='provider-safety-review-v1',
+            implementation_plan_reference_hmac=_PLAN_HMAC,
+            successor_registry={},
+        )
+
+
+def test_operation_inapplicable_acknowledgement_is_refused(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    with pytest.raises(ProviderSafetyReviewError, match='inapplicable'):
+        verify_review_envelope(
+            _review_bytes(
+                target,
+                'provider-safety-init',
+                acknowledged=True,
+            ),
+            expected_operation='provider-safety-init',
+            expected_target=target,
+            expected_context=None,
+            expected_successor=None,
+            review_secret=_REVIEW_KEY,
+            review_key_id='provider-safety-review-v1',
+            implementation_plan_reference_hmac=_PLAN_HMAC,
+            successor_registry={},
         )
 
 

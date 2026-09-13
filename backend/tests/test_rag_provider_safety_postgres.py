@@ -18,6 +18,7 @@ from sqlalchemy.engine.url import make_url
 from backend.app.admin.rag_provider_safety import (
     ProviderSafetyAdminTarget,
     RagProviderSafetyAdminService,
+    review_key_material_verifier,
 )
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
 from backend.app.agent_runtime.rag_advisory_locks import (
@@ -138,6 +139,9 @@ def _admin(engine: Engine, tmp_path: Path):
         review_key_id='provider-safety-review-v1',
         implementation_plan_reference_hmac='9' * 64,
         successor_registry={},
+        review_key_registry={
+            'provider-safety-review-v1': review_key_material_verifier(_REVIEW_KEY)
+        },
     )
     return target, runtime, admin
 

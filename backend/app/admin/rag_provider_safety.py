@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import stat
@@ -15,7 +16,10 @@ from uuid import UUID
 
 from sqlalchemy import Connection, create_engine, func, select
 
-from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
+from backend.app.agent_runtime.durable_file_authority import (
+    DurableFileAuthority,
+    DurableFileAuthorityError,
+)
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
 from backend.app.agent_runtime.rag_provider_safety import (
     RagProviderSafetyError,
@@ -29,7 +33,9 @@ from backend.app.agent_runtime.rag_runtime_contracts import (
 from backend.app.agent_runtime.rag_safety_identity import require_lower_hmac
 from backend.app.core.config import Settings
 from backend.app.models.rag_runtime import (
+    RagProviderReadiness,
     RagProviderSafetyAuthority,
+    RagProviderSafetyTransition,
 )
 
 MAX_REVIEW_ENVELOPE_BYTES = 32_768
@@ -79,6 +85,18 @@ _CONTEXT_KEYS = frozenset(
         'has_historical_blocker',
     }
 )
+_RECOVERY_CONTEXT_KEYS = frozenset(
+    {
+        'authority_uuid',
+        'designated_environment_id',
+        'envelope_digest',
+        'global_safety_generation',
+        'implementation_plan_reference_hmac',
+        'review_authority_key_id',
+        'review_key_material_verifier',
+        'reviewed_transition_reference_hmac',
+    }
+)
 _SUCCESSOR_KEYS = frozenset(
     {
         'authorized_cost_policy_version',
@@ -101,9 +119,40 @@ COMMITTED_PROVIDER_SAFETY_SUCCESSORS: tuple[
     AuthorizedProviderPolicySnapshot, ...
 ] = ()
 
+# A production key is enabled only by committing its opaque verifier. The key
+# bytes remain in the owner-controlled external file and are never committed.
+COMMITTED_PROVIDER_SAFETY_REVIEW_KEYS: Mapping[str, str] = {}
+
+_LEDGER_SCHEMA = 'rag-provider-safety-admin-review-ledger:v1'
+_LEDGER_DOMAIN = b'paraworks:provider-safety-admin-review-ledger:v1\x00'
+_REVIEW_KEY_VERIFIER_DOMAIN = (
+    b'paraworks:provider-safety-admin-review-key-verifier:v1\x00'
+)
+_LEDGER_SIGNED_KEYS = frozenset(
+    {
+        'events',
+        'implementation_plan_reference_hmac',
+        'review_authority_key_id',
+        'review_key_material_verifier',
+        'schema_version',
+        'target',
+    }
+)
+_LEDGER_EVENT_KEYS = frozenset(
+    {'envelope_digest', 'event', 'nonce', 'sequence'}
+)
+
 
 class ProviderSafetyReviewError(RagProviderSafetyError):
     pass
+
+
+def review_key_material_verifier(review_secret: bytes) -> str:
+    if type(review_secret) is not bytes or len(review_secret) < 32:
+        raise ProviderSafetyReviewError('review authority is unavailable')
+    return hmac.new(
+        review_secret, _REVIEW_KEY_VERIFIER_DOMAIN, hashlib.sha256
+    ).hexdigest()
 
 
 def _identity_hmac(value: object, *, secret: bytes, domain: bytes) -> str:
@@ -172,6 +221,185 @@ class VerifiedProviderSafetyReview:
     expected_context: dict[str, object] | None
     successor: dict[str, object] | None
     historical_block_acknowledged: bool
+    nonce: str
+    envelope_digest: str
+
+
+class _ProviderSafetyReviewLedger:
+    """Runtime-key-authenticated, logically append-only review consumption log."""
+
+    def __init__(
+        self,
+        *,
+        path: Path,
+        runtime_secret: bytes,
+        target: Mapping[str, object],
+        review_key_id: str,
+        review_key_verifier: str,
+        plan_hmac: str,
+    ) -> None:
+        self.path = DurableFileAuthority.validate_configured_path(path)
+        self._runtime_secret = runtime_secret
+        self._target = dict(target)
+        self._review_key_id = review_key_id
+        self._review_key_verifier = review_key_verifier
+        self._plan_hmac = plan_hmac
+
+    def _signature(self, payload: Mapping[str, object]) -> str:
+        return hmac.new(
+            self._runtime_secret,
+            _LEDGER_DOMAIN + canonical_json_bytes(dict(payload)),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _wrap(self, payload: dict[str, object]) -> dict[str, object]:
+        return {'hmac_sha256': self._signature(payload), 'signed_payload': payload}
+
+    def _new_payload(self) -> dict[str, object]:
+        return {
+            'events': [],
+            'implementation_plan_reference_hmac': self._plan_hmac,
+            'review_authority_key_id': self._review_key_id,
+            'review_key_material_verifier': self._review_key_verifier,
+            'schema_version': _LEDGER_SCHEMA,
+            'target': self._target,
+        }
+
+    def _validate(self, value: dict[str, object]) -> dict[str, object]:
+        if set(value) != {'hmac_sha256', 'signed_payload'}:
+            raise ProviderSafetyReviewError('review ledger is inconsistent')
+        payload = value.get('signed_payload')
+        signature = value.get('hmac_sha256')
+        if (
+            type(payload) is not dict
+            or set(payload) != _LEDGER_SIGNED_KEYS
+            or type(signature) is not str
+            or not hmac.compare_digest(signature, self._signature(payload))
+            or payload['schema_version'] != _LEDGER_SCHEMA
+            or payload['target'] != self._target
+            or payload['review_authority_key_id'] != self._review_key_id
+            or payload['review_key_material_verifier'] != self._review_key_verifier
+            or payload['implementation_plan_reference_hmac'] != self._plan_hmac
+        ):
+            raise ProviderSafetyReviewError('review authority pin differs')
+        events = payload['events']
+        if type(events) is not list:
+            raise ProviderSafetyReviewError('review ledger is inconsistent')
+        reservations: dict[str, str] = {}
+        consumed: set[str] = set()
+        for sequence, event in enumerate(events):
+            if (
+                type(event) is not dict
+                or set(event) != _LEDGER_EVENT_KEYS
+                or event['sequence'] != sequence
+                or event['event'] not in {'reserved', 'consumed'}
+            ):
+                raise ProviderSafetyReviewError('review ledger is inconsistent')
+            try:
+                nonce = UUID(event['nonce'])  # type: ignore[arg-type]
+                require_lower_hmac(event['envelope_digest'])
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ProviderSafetyReviewError(
+                    'review ledger is inconsistent'
+                ) from exc
+            nonce_text = str(nonce)
+            if nonce.int == 0 or event['nonce'] != nonce_text:
+                raise ProviderSafetyReviewError('review ledger is inconsistent')
+            digest = event['envelope_digest']
+            if event['event'] == 'reserved':
+                if nonce_text in reservations:
+                    raise ProviderSafetyReviewError('review ledger is inconsistent')
+                reservations[nonce_text] = digest
+            elif (
+                reservations.get(nonce_text) != digest or nonce_text in consumed
+            ):
+                raise ProviderSafetyReviewError('review ledger is inconsistent')
+            else:
+                consumed.add(nonce_text)
+        return payload
+
+    @staticmethod
+    def _event(
+        *, sequence: int, event: str, reviewed: VerifiedProviderSafetyReview
+    ) -> dict[str, object]:
+        return {
+            'envelope_digest': reviewed.envelope_digest,
+            'event': event,
+            'nonce': reviewed.nonce,
+            'sequence': sequence,
+        }
+
+    def assert_pin(self) -> None:
+        if not self.path.exists():
+            raise ProviderSafetyReviewError('review authority pin is unavailable')
+        try:
+            value = DurableFileAuthority.open_runtime(self.path).read()
+            self._validate(value)
+        except ProviderSafetyReviewError:
+            raise
+        except DurableFileAuthorityError as exc:
+            raise ProviderSafetyReviewError(
+                'review authority pin is unavailable'
+            ) from exc
+
+    def reserve(self, reviewed: VerifiedProviderSafetyReview) -> None:
+        def reserve_in(value: dict[str, object]) -> dict[str, object]:
+            payload = self._validate(value)
+            events = list(payload['events'])
+            matching = [event for event in events if event['nonce'] == reviewed.nonce]
+            if matching:
+                if (
+                    matching[0]['envelope_digest'] != reviewed.envelope_digest
+                    or any(event['event'] == 'consumed' for event in matching)
+                ):
+                    raise ProviderSafetyReviewError('review nonce was already used')
+                return value
+            events.append(
+                self._event(
+                    sequence=len(events), event='reserved', reviewed=reviewed
+                )
+            )
+            return self._wrap({**payload, 'events': events})
+
+        try:
+            if self.path.exists():
+                DurableFileAuthority.open_runtime(self.path).update(reserve_in)
+                return
+            initializer = DurableFileAuthority(self.path)
+            payload = self._new_payload()
+            payload['events'] = [
+                self._event(sequence=0, event='reserved', reviewed=reviewed)
+            ]
+            initializer.write(self._wrap(payload))
+        except ProviderSafetyReviewError:
+            raise
+        except DurableFileAuthorityError as exc:
+            raise ProviderSafetyReviewError('review ledger is unavailable') from exc
+
+    def consume(self, reviewed: VerifiedProviderSafetyReview) -> None:
+        def consume_in(value: dict[str, object]) -> dict[str, object]:
+            payload = self._validate(value)
+            events = list(payload['events'])
+            matching = [event for event in events if event['nonce'] == reviewed.nonce]
+            if (
+                len(matching) != 1
+                or matching[0]['event'] != 'reserved'
+                or matching[0]['envelope_digest'] != reviewed.envelope_digest
+            ):
+                raise ProviderSafetyReviewError('review nonce was already used')
+            events.append(
+                self._event(
+                    sequence=len(events), event='consumed', reviewed=reviewed
+                )
+            )
+            return self._wrap({**payload, 'events': events})
+
+        try:
+            DurableFileAuthority.open_runtime(self.path).update(consume_in)
+        except ProviderSafetyReviewError:
+            raise
+        except DurableFileAuthorityError as exc:
+            raise ProviderSafetyReviewError('review ledger is unavailable') from exc
 
 
 def _read_review(raw: bytes) -> dict[str, object]:
@@ -246,11 +474,13 @@ def verify_review_envelope(
     ):
         raise ProviderSafetyReviewError('review envelope operation is invalid')
     try:
-        UUID(payload['nonce'])  # type: ignore[arg-type]
+        nonce = UUID(payload['nonce'])  # type: ignore[arg-type]
         require_lower_hmac(payload['actor_subject_hmac'])
         require_lower_hmac(payload['implementation_plan_reference_hmac'])
     except (TypeError, ValueError, AttributeError) as exc:
         raise ProviderSafetyReviewError('review envelope identity is invalid') from exc
+    if nonce.int == 0 or payload['nonce'] != str(nonce):
+        raise ProviderSafetyReviewError('review envelope nonce is invalid')
     if not hmac.compare_digest(
         payload['implementation_plan_reference_hmac'],
         implementation_plan_reference_hmac,
@@ -263,12 +493,6 @@ def verify_review_envelope(
         or target != expected_target.review_identity
     ):
         raise ProviderSafetyReviewError('review envelope target differs')
-    context = payload['expected_context']
-    expected_context_value = None if expected_context is None else dict(expected_context)
-    if context != expected_context_value:
-        raise ProviderSafetyReviewError('review envelope context differs')
-    if context is not None and (type(context) is not dict or set(context) != _CONTEXT_KEYS):
-        raise ProviderSafetyReviewError('review envelope context is invalid')
     successor = payload['successor']
     expected_successor_value = (
         None if expected_successor is None else dict(expected_successor)
@@ -279,8 +503,33 @@ def verify_review_envelope(
         type(successor) is not dict or set(successor) != _SUCCESSOR_KEYS
     ):
         raise ProviderSafetyReviewError('review envelope successor is invalid')
+    successor_operations = {'provider-safety-rebind', 'provider-safety-supersede'}
+    if (expected_operation in successor_operations) != (successor is not None):
+        raise ProviderSafetyReviewError('review envelope successor is invalid')
+    context = payload['expected_context']
+    expected_context_value = None if expected_context is None else dict(expected_context)
+    if context != expected_context_value:
+        raise ProviderSafetyReviewError('review envelope context differs')
+    if expected_operation == 'provider-safety-init':
+        valid_context = context is None
+    elif expected_operation == 'provider-safety-bootstrap-recovery':
+        valid_context = type(context) is dict and set(context) == _RECOVERY_CONTEXT_KEYS
+    else:
+        valid_context = type(context) is dict and set(context) == _CONTEXT_KEYS
+    if not valid_context:
+        raise ProviderSafetyReviewError('review envelope context is invalid')
     if type(payload['historical_block_acknowledged']) is not bool:
         raise ProviderSafetyReviewError('review acknowledgement is invalid')
+    if (
+        expected_operation
+        in {
+            'provider-safety-init',
+            'provider-safety-bootstrap-recovery',
+            'provider-safety-mark-rebind-required',
+        }
+        and payload['historical_block_acknowledged']
+    ):
+        raise ProviderSafetyReviewError('review acknowledgement is inapplicable')
     if expected_operation == 'provider-safety-supersede':
         if successor is None:
             raise ProviderSafetyReviewError('provider successor is required')
@@ -296,6 +545,8 @@ def verify_review_envelope(
         expected_context=context,
         successor=successor,
         historical_block_acknowledged=payload['historical_block_acknowledged'],
+        nonce=str(nonce),
+        envelope_digest=hashlib.sha256(raw).hexdigest(),
     )
 
 
@@ -338,6 +589,7 @@ class RagProviderSafetyAdminService:
         review_key_id: str,
         implementation_plan_reference_hmac: str,
         successor_registry: Mapping[str, AuthorizedProviderPolicySnapshot],
+        review_key_registry: Mapping[str, str] | None = None,
     ) -> None:
         require_lower_hmac(implementation_plan_reference_hmac)
         if (
@@ -350,6 +602,20 @@ class RagProviderSafetyAdminService:
             raise ProviderSafetyReviewError(
                 'review authority key must be distinct from runtime authority key'
             )
+        if (
+            type(review_key_id) is not str
+            or not review_key_id
+            or review_key_id != review_key_id.strip()
+        ):
+            raise ProviderSafetyReviewError('review authority key id is invalid')
+        key_verifier = review_key_material_verifier(review_secret)
+        if review_key_registry is not None:
+            committed = review_key_registry.get(review_key_id)
+            if committed is None or not hmac.compare_digest(committed, key_verifier):
+                raise ProviderSafetyReviewError(
+                    'review authority key is absent from committed registry'
+                )
+        self._committed_review_key = review_key_registry is not None
         self.target = target
         self.connection_factory = connection_factory
         self.provider_safety = provider_safety
@@ -357,8 +623,17 @@ class RagProviderSafetyAdminService:
         self._runtime_secret = runtime_identity_secret
         self._review_secret = review_secret
         self._review_key_id = review_key_id
+        self._review_key_verifier = key_verifier
         self._plan_hmac = implementation_plan_reference_hmac
         self._successor_registry = successor_registry
+        self._ledger = _ProviderSafetyReviewLedger(
+            path=Path(str(target.latch_path) + '.admin-review-ledger.json'),
+            runtime_secret=runtime_identity_secret,
+            target=target.review_identity,
+            review_key_id=review_key_id,
+            review_key_verifier=key_verifier,
+            plan_hmac=implementation_plan_reference_hmac,
+        )
 
     def _verify(
         self,
@@ -380,15 +655,30 @@ class RagProviderSafetyAdminService:
             successor_registry=self._successor_registry,
         )
 
+    def _reserve(self, reviewed: VerifiedProviderSafetyReview) -> None:
+        if (
+            not self._ledger.path.exists()
+            and self.target.latch_path.exists()
+            and not self._committed_review_key
+        ):
+            raise ProviderSafetyReviewError('review authority pin is unavailable')
+        self._ledger.reserve(reviewed)
+
     def status(self) -> ProviderSafetyAdminStatus:
         if not self.target.latch_path.exists():
             with self.connection_factory() as connection:
-                present = bool(
+                counts = (
                     connection.scalar(
                         select(func.count()).select_from(RagProviderSafetyAuthority)
-                    )
+                    ),
+                    connection.scalar(
+                        select(func.count()).select_from(RagProviderReadiness)
+                    ),
+                    connection.scalar(
+                        select(func.count()).select_from(RagProviderSafetyTransition)
+                    ),
                 )
-            if present:
+            if counts != (0, 0, 0) or self._ledger.path.exists():
                 raise RagProviderSafetyError(
                     'provider safety DB/latch authority is inconsistent'
                 )
@@ -421,24 +711,53 @@ class RagProviderSafetyAdminService:
         reviewed = self._verify(
             raw, operation='provider-safety-init', context=None, successor=None
         )
+        self._reserve(reviewed)
         with self.connection_factory() as connection:
             self.provider_safety.bootstrap(
                 connection,
                 self.snapshots,
                 reviewed_transition_reference_hmac=reviewed.reviewed_gate_reference_hmac,
             )
+        self._ledger.consume(reviewed)
         return self._result(reviewed.operation)
+
+    def bootstrap_recovery_review_context(self) -> dict[str, object]:
+        self._ledger.assert_pin()
+        with self.connection_factory() as connection:
+            context = self.provider_safety.bootstrap_recovery_context(
+                connection, self.snapshots
+            )
+        if not hmac.compare_digest(
+            context['reviewed_transition_reference_hmac'], self._plan_hmac
+        ):
+            raise ProviderSafetyReviewError(
+                'partial bootstrap implementation plan reference differs'
+            )
+        return {
+            **context,
+            'implementation_plan_reference_hmac': self._plan_hmac,
+            'review_authority_key_id': self._review_key_id,
+            'review_key_material_verifier': self._review_key_verifier,
+        }
+
     def recover_bootstrap(self, raw: bytes) -> ProviderSafetyAdminResult:
+        envelope = _read_review(raw)
+        context_value = envelope['signed_payload']['expected_context']
+        if type(context_value) is not dict:
+            raise ProviderSafetyReviewError('review envelope context is invalid')
         reviewed = self._verify(
             raw,
             operation='provider-safety-bootstrap-recovery',
-            context=None,
+            context=context_value,
             successor=None,
         )
-        del reviewed
+        self._reserve(reviewed)
+        if context_value != self.bootstrap_recovery_review_context():
+            raise ProviderSafetyReviewError('review envelope context differs')
         with self.connection_factory() as connection:
             self.provider_safety.recover_partial_bootstrap(connection, self.snapshots)
-        return self._result('provider-safety-bootstrap-recovery')
+        self._ledger.consume(reviewed)
+        return self._result(reviewed.operation)
 
     def _current_review(
         self, raw: bytes, operation: str
@@ -451,12 +770,19 @@ class RagProviderSafetyAdminService:
         if component not in {'query_embedding', 'answer_generation'}:
             raise ProviderSafetyReviewError('review envelope component is invalid')
         successor = envelope['signed_payload']['successor']
+        expected_successor = (
+            successor
+            if operation in {'provider-safety-rebind', 'provider-safety-supersede'}
+            and isinstance(successor, dict)
+            else None
+        )
         reviewed = self._verify(
             raw,
             operation=operation,
             context=context_value,
-            successor=successor if isinstance(successor, dict) else None,
+            successor=expected_successor,
         )
+        self._reserve(reviewed)
         with self.connection_factory() as connection:
             context = self.provider_safety.review_context(connection, component)
         if context_value != _context_payload(context):
@@ -491,6 +817,7 @@ class RagProviderSafetyAdminService:
         )
         with self.connection_factory() as connection:
             self.provider_safety.mark_rebind_required(connection, command)
+        self._ledger.consume(reviewed)
         return self._result(reviewed.operation)
 
     def rebind(self, raw: bytes) -> ProviderSafetyAdminResult:
@@ -501,6 +828,7 @@ class RagProviderSafetyAdminService:
         )
         with self.connection_factory() as connection:
             self.provider_safety.reviewed_rebind(connection, command, successor)
+        self._ledger.consume(reviewed)
         return self._result(reviewed.operation)
 
     def reset(self, raw: bytes) -> ProviderSafetyAdminResult:
@@ -510,6 +838,7 @@ class RagProviderSafetyAdminService:
         )
         with self.connection_factory() as connection:
             self.provider_safety.reviewed_reset(connection, command)
+        self._ledger.consume(reviewed)
         return self._result(reviewed.operation)
 
     def supersede(self, raw: bytes) -> ProviderSafetyAdminResult:
@@ -520,6 +849,7 @@ class RagProviderSafetyAdminService:
         )
         with self.connection_factory() as connection:
             self.provider_safety.reviewed_supersession(connection, command, successor)
+        self._ledger.consume(reviewed)
         return self._result(reviewed.operation)
 
 
@@ -530,9 +860,21 @@ def _configured_target(
 
     def database_identity(value: str) -> tuple[str, str | None, int | None, str | None]:
         parsed = make_url(value)
-        host = parsed.host.casefold() if parsed.host else None
-        if host in {'localhost', '127.0.0.1', '::1'}:
-            host = 'loopback'
+        host = parsed.host.rstrip('.').casefold() if parsed.host else None
+        if host is not None:
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                try:
+                    host = host.encode('idna').decode('ascii')
+                except UnicodeError as exc:
+                    raise ProviderSafetyReviewError(
+                        'provider safety database target is ambiguous'
+                    ) from exc
+                if host == 'localhost':
+                    host = 'loopback'
+            else:
+                host = 'loopback' if address.is_loopback else address.compressed
         port = parsed.port
         if parsed.get_backend_name() == 'postgresql' and port is None:
             port = 5432
@@ -542,9 +884,18 @@ def _configured_target(
     live_latch = settings.paraworks_rag_live_validation_provider_safety_latch_path
     if live_database and live_latch:
         production_latch = Path(settings.paraworks_provider_safety_latch_path)
+        production_database_identity = database_identity(
+            settings.resolved_database_url()
+        )
+        live_database_identity = database_identity(live_database)
+        same_database_on_ambiguous_hosts = (
+            production_database_identity[0] == live_database_identity[0]
+            and production_database_identity[2:] == live_database_identity[2:]
+            and production_database_identity[1] != live_database_identity[1]
+        )
         if (
-            database_identity(live_database)
-            == database_identity(settings.resolved_database_url())
+            live_database_identity == production_database_identity
+            or same_database_on_ambiguous_hosts
             or os.path.normcase(str(Path(live_latch).absolute()))
             == os.path.normcase(str(production_latch.absolute()))
             or settings.paraworks_rag_live_validation_environment_id
@@ -675,6 +1026,7 @@ def _build_default_admin_resources(settings: Settings) -> _DefaultAdminResources
                 successor_registry=successor_registry_from_snapshots(
                     COMMITTED_PROVIDER_SAFETY_SUCCESSORS
                 ),
+                review_key_registry=COMMITTED_PROVIDER_SAFETY_REVIEW_KEYS,
             ),
             engine=engine,
         )

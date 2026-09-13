@@ -661,6 +661,62 @@ class RagProviderSafetyService:
         )
         return counts == (0, 0, 0) and attempted == 0
 
+    def bootstrap_recovery_context(
+        self,
+        connection: Connection,
+        snapshots: tuple[
+            AuthorizedProviderPolicySnapshot, AuthorizedProviderPolicySnapshot
+        ],
+    ) -> dict[str, object]:
+        """Inspect, but never repair, the exact eligible file-first bootstrap."""
+        self._validate_snapshots(snapshots)
+        try:
+            with self._authority.locked(), self._registered_advisory(connection):
+                body = self._read_unlocked()
+                if body[
+                    'global_safety_generation'
+                ] != 0 or not self._db_is_empty_and_unattempted(connection):
+                    raise RagProviderSafetyError(
+                        'provider safety bootstrap recovery is not eligible'
+                    )
+                self._match_external_snapshots(body, snapshots)
+                records = list(body['_records_by_identity'].values())
+                references = {
+                    record['reviewed_transition_reference_hmac'] for record in records
+                }
+                if (
+                    len(records) != 2
+                    or len(references) != 1
+                    or None in references
+                    or any(
+                        record['state'] != 'ready'
+                        or record['state_version'] != 1
+                        or record['family_safety_generation'] != 0
+                        or record['first_blocker_agent_run_hmac'] is not None
+                        or record['first_blocker_category'] is not None
+                        or record['first_blocker_observed_at'] is not None
+                        for record in records
+                    )
+                ):
+                    raise RagProviderSafetyError(
+                        'provider safety bootstrap recovery shape is invalid'
+                    )
+                reviewed_reference = references.pop()
+                require_lower_hmac(reviewed_reference)
+                return {
+                    'authority_uuid': body['authority_uuid'],
+                    'designated_environment_id': body['designated_environment_id'],
+                    'envelope_digest': body['envelope_digest'],
+                    'global_safety_generation': body['global_safety_generation'],
+                    'reviewed_transition_reference_hmac': reviewed_reference,
+                }
+        except RagProviderSafetyError:
+            raise
+        except Exception:
+            raise RagProviderSafetyError(
+                'provider safety bootstrap recovery inspection failed'
+            ) from None
+
     def _insert_bootstrap_rows(
         self,
         connection: Connection,
