@@ -2663,6 +2663,22 @@ evidence is `150 passed`; broader release/provider evidence is `1010 passed,
 `3 passed`. PostgreSQL is unavailable and independent CLEAN review is pending.
 Do not proceed to the composite runner/evaluator or authorize a release.
 
+**Independent-review round 1 correction (2026-09-14).** Implementation
+`cb6b99f` closes the review's eight saved regressions: five post-DML provider
+service dispatches and three malformed historical chains. Capability preparation
+now HMAC-binds the complete physical provider image. The authority-owned,
+non-virtual commit operation returns immutable latch and complete
+before/prospective/actual provider images; post-DML publication uses those images
+and callback-free private reads. History validation preserves physical identity
+order and enforces bootstrap, block, reviewed reset, rebind and supersession state
+matrices, with reverse digest authentication wherever the v1 rows retain enough
+material. Release inspection refuses a provider-only incident left beside a
+`started` authorization for the predecessor digest. Fresh frozen evidence is
+`160 passed` focused, `8 passed` saved probes, `1594 passed, 15 skipped`
+comprehensive release/provider, `221 passed, 14 skipped` direct impact and
+`3 passed` credential hygiene. PostgreSQL and independent CLEAN rereview remain
+open. Do not start the composite runner/evaluator or execute a release.
+
 **Files:**
 
 - Create: `backend/app/rag/release_quality.py`

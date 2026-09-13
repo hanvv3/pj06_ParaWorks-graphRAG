@@ -2,6 +2,32 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task25 provider-incident independent-review round 1 correction
+
+- Implementation `cb6b99f` supersedes candidate `e94bd96` for independent
+  rereview. It closes all eight saved findings: five post-DML service override
+  seams and three accepted physical/history-chain corruptions.
+- Keep the new boundary: capability preparation domain-separates and HMAC-binds
+  the complete private SQL image; the non-virtual incident operation owns exact
+  latch bytes and complete before/prospective/actual provider images. After the
+  first provider DML, release code may consume only that owned result and
+  callback-free private/raw checks. Do not restore `_apply_release_incident`
+  virtual dispatch or post-DML `_freeze_release_peer` reconstruction.
+- History remains in physical identity order. Preserve the exact bootstrap,
+  block-overrun, block-remediation, reviewed reset, rebind and supersession
+  matrices, reverse authentication of reconstructible envelope digests, and the
+  immutable first-blocker evidence. A provider-only committed incident beside a
+  `started` predecessor-bound authorization must remain an explicit mismatch that
+  release `inspect()` refuses; it must not auto-repair.
+- Fresh frozen evidence: focused `160 passed`; saved probes `8 passed`;
+  comprehensive release/provider `1594 passed, 15 skipped`; direct impact
+  `221 passed, 14 skipped` with 11 existing warnings; credential `3 passed`;
+  Ruff/format/compile/diff green. PostgreSQL URL is absent.
+- Independent CLEAN rereview is pending. Do not begin Task25 composite/evaluator,
+  add a production reader, or execute/authorize a release. No provider/network/
+  paid call, push, merge or deployment ran. Detailed evidence is in ignored
+  `.tmp/task25-r1-provider-incident-carryover.md`.
+
 ## 2026-09-14 Task25 mandatory provider-incident prerequisite candidate
 
 - Implementation `e94bd96` replaces sealed incident use of shared ORM metadata

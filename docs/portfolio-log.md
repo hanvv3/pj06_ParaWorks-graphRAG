@@ -1,5 +1,30 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-14 D Core Task25 provider-incident independent-review round 1
+
+- Implementation `cb6b99f` closes the eight saved review regressions against
+  `e94bd96`: five provider-service callbacks reachable after incident DML and
+  three accepted physical/history-chain corruptions.
+- Incident preparation now HMAC-binds the complete private provider SQL image.
+  The authority-owned non-virtual commit path publishes the latch first, applies
+  private-schema SQL, and returns immutable exact latch plus complete
+  before/prospective/actual authority, readiness and history images. Release
+  publication no longer re-enters provider service overrides after DML.
+- Complete physical history order and the bootstrap/block/reset/rebind/
+  supersession state matrix are validated. Reconstructible signed-envelope
+  digests are authenticated in reverse, and a committed provider-only incident
+  is an explicit release/provider mismatch that `inspect()` refuses while the
+  authorization remains `started` on the predecessor digest.
+- RED: saved review probes `8 failed`; permanent focused selection `9 failed,
+  8 passed`. GREEN: focused incident `160 passed`; saved probes `8 passed`;
+  comprehensive release/provider `1594 passed, 15 skipped`; direct impact
+  `221 passed, 14 skipped` with 11 existing Alembic warnings; credential hygiene
+  `3 passed`. Ruff, format, compile and diff checks pass.
+- PostgreSQL is unavailable, so conditional skips remain open. Independent
+  CLEAN rereview is pending; composite/evaluator work, production readers and
+  actual release remain blocked. No provider/network/paid/release operation,
+  push, merge or deployment ran.
+
 ## 2026-09-14 D Core Task25 provider-incident persistence candidate
 
 - Implementation `e94bd96` removes shared ORM Table/Column/Type objects from

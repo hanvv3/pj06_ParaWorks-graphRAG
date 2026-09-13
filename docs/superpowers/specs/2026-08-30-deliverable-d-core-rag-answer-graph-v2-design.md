@@ -3237,6 +3237,23 @@ evidence is `150 passed`; broader release/provider evidence is `1010 passed,
 `3 passed`. PostgreSQL and independent CLEAN review remain open, so this does not
 make Task24/Task24-B release-clean or authorize Task25 composite/evaluator work.
 
+**Task25 prerequisite independent-review round 1 correction (2026-09-14).**
+Implementation `cb6b99f` supersedes the candidate above. The sealed provider
+incident is prepared with a domain-separated HMAC over the complete private SQL
+image, including physical history order. Before the first mutation it validates
+the exact authority/readiness roster, full transition state/kind/version matrix,
+every reconstructible signed-envelope digest, and the prospective image. A
+private non-virtual operation then replaces the latch first and performs only
+private-schema SQL plus raw owned-image checks. Its immutable result contains
+exact latch bytes and complete provider before/prospective/actual images; release
+publication consumes that result without re-entering provider service overrides.
+Release inspection rejects a persisted provider incident while its bound release
+authorization remains `started` on the predecessor digest. Fresh evidence is
+focused `160 passed`, saved independent probes `8 passed`, comprehensive
+release/provider `1594 passed, 15 skipped`, direct impact `221 passed, 14 skipped`
+and credential `3 passed`. PostgreSQL and independent CLEAN rereview remain open;
+no composite/evaluator or release execution is authorized.
+
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
 skipped** (11 existing Alembic warnings); focused contracts **38 passed**;

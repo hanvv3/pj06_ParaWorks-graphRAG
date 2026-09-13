@@ -206,10 +206,13 @@ Next priorities:
 1. Keep C.5 rollout disabled unless a separate operational rollout action is
    explicitly authorized. Both C.5 paid release gates are complete.
 2. Deliverable D Core has reached Task25's mandatory first prerequisite.
-   Implementation `e94bd96` isolates sealed provider-incident persistence in
-   private service-owned SQL metadata and verifies complete provider/release
-   atomicity. Independent CLEAN review and PostgreSQL execution remain required
-   before composite runner or quality work; actual release stays blocked.
+   Round-1 correction `cb6b99f` supersedes candidate `e94bd96`: sealed incidents
+   now finish every service callback before external-first mutation, publish
+   through one private non-virtual operation, HMAC-bind and validate the complete
+   physical provider history, and make release inspection refuse a committed
+   provider-only/started-authorization mismatch. Independent CLEAN rereview and
+   PostgreSQL execution remain required before composite runner or quality work;
+   actual release stays blocked.
 3. Reach a separate D Core green checkpoint, then design, plan, approve, and
    reach a separate green checkpoint for D.1 PostgreSQL answer cache.
 4. Follow D.1 with Deliverable E Neo4j GraphRAG, then handle Slack data
