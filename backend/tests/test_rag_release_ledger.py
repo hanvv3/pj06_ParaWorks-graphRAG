@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -122,8 +123,8 @@ def _capture_bootstrap_authorization(connection, ledger, payload):
             embedding_dispatch_count=0,
             generation_dispatch_count=0,
             total_dispatch_count=0,
-            reserved_cost_usd='0.000000',
-            charged_cost_usd='0.000000',
+            reserved_cost_usd=Decimal('0.000000'),
+            charged_cost_usd=Decimal('0.000000'),
         ),
         row,
     )

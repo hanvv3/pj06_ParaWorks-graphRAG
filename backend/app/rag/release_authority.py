@@ -219,6 +219,23 @@ class ValidationDatabaseIdentity:
             raise ValueError('validation database identity is invalid')
 
 
+def _native_database_identity(supplied):
+    """Detach public identity inputs before any callback or publication."""
+    if supplied is None:
+        return None
+    if type(supplied) is not ValidationDatabaseIdentity:
+        raise RagReleaseAuthorityError('validation database identity is invalid')
+    try:
+        return ValidationDatabaseIdentity(
+            database_name=object.__getattribute__(supplied, 'database_name'),
+            database_oid=object.__getattribute__(supplied, 'database_oid'),
+        )
+    except (AttributeError, ValueError):
+        raise RagReleaseAuthorityError(
+            'validation database identity is invalid'
+        ) from None
+
+
 @dataclass(frozen=True, slots=True)
 class RagReleaseSnapshot:
     marker_schema_version: Literal['rag-release-ledger-marker-body:v1']
@@ -246,6 +263,16 @@ RecoveryReviewVerifier = Callable[[Connection, bytes | None], tuple[str, str, st
 
 class ExternalAuthorityPathSetValidator:
     """Validate the provider/release data+stable-lock leaves as one set."""
+
+    @staticmethod
+    def freeze(path):
+        try:
+            text = os.fspath(path)
+        except TypeError:
+            raise RagReleaseAuthorityError('authority path is invalid') from None
+        if type(text) is not str:
+            raise RagReleaseAuthorityError('authority path is invalid')
+        return str(DurableFileAuthority.validate_configured_path(text))
 
     @staticmethod
     def _is_within(candidate: Path, root: Path) -> bool:
@@ -347,11 +374,17 @@ class RagReleaseAuthority:
                 or '\x00' in value
             ):
                 raise ValueError(f'release {label} is invalid')
+        # Consume each iterable once and every caller path protocol once. Later
+        # filesystem checks retain canonical native strings, never caller objects.
+        roots = tuple(repository_roots), tuple(database_backup_roots)
+        freeze = ExternalAuthorityPathSetValidator.freeze
+        self._repository_roots = tuple(freeze(root) for root in roots[0])
+        self._database_backup_roots = tuple(freeze(root) for root in roots[1])
         paths = ExternalAuthorityPathSetValidator.validate(
-            provider_path=provider_safety_latch_path,
-            release_path=marker_path,
-            repository_roots=repository_roots,
-            database_backup_roots=database_backup_roots,
+            provider_path=freeze(provider_safety_latch_path),
+            release_path=freeze(marker_path),
+            repository_roots=self._repository_roots,
+            database_backup_roots=self._database_backup_roots,
         )
         self._provider_path, _provider_lock, self._marker_path, _release_lock = paths
         self._secret = identity_secret
@@ -368,8 +401,6 @@ class RagReleaseAuthority:
             'rag-live-designated-host-id:v1',
             {'designated_host_id_bytes': exact_utf8_bytes(designated_host_id)},
         )
-        self._repository_roots = tuple(repository_roots)
-        self._database_backup_roots = tuple(database_backup_roots)
         self._advisory_capability = advisory_capability
         from backend.app.admin.rag_provider_safety import RagProviderSafetyReleasePeer
 
@@ -439,6 +470,7 @@ class RagReleaseAuthority:
         connection: Connection,
         supplied: ValidationDatabaseIdentity | None,
     ) -> ValidationDatabaseIdentity:
+        supplied = _native_database_identity(supplied)
         if connection.dialect.name != 'postgresql':
             raise RagReleaseAuthorityError('release authority requires PostgreSQL')
         row = connection.exec_driver_sql(
@@ -836,6 +868,7 @@ class RagReleaseAuthority:
         review_envelope_hmac: str,
         review_nonce_hmac: str,
     ) -> RagReleaseSnapshot:
+        database_identity = _native_database_identity(database_identity)
         self._validate_path_set()
         if self._marker_path.exists():
             raise RagReleaseAuthorityError('release authority already exists')
@@ -996,6 +1029,7 @@ class RagReleaseAuthority:
         *,
         database_identity: ValidationDatabaseIdentity | None = None,
     ) -> RagReleaseSnapshot:
+        database_identity = _native_database_identity(database_identity)
         self._validate_path_set()
         marker = DurableFileAuthority.open_runtime(self._marker_path)
         try:
@@ -1124,6 +1158,7 @@ class RagReleaseAuthority:
         database_identity: ValidationDatabaseIdentity | None = None,
         review_verifier: RecoveryReviewVerifier,
     ) -> RagReleaseSnapshot:
+        database_identity = _native_database_identity(database_identity)
         self._validate_path_set()
         marker = DurableFileAuthority.open_runtime(self._marker_path)
         try:
@@ -1233,6 +1268,7 @@ class RagReleaseAuthority:
         database_identity: ValidationDatabaseIdentity | None = None,
         review_verifier: RecoveryReviewVerifier,
     ) -> RagReleaseSnapshot:
+        database_identity = _native_database_identity(database_identity)
         self._validate_path_set()
         marker = (
             DurableFileAuthority.open_runtime(self._marker_path)

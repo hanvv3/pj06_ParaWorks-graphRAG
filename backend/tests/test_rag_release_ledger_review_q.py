@@ -161,8 +161,8 @@ def test_bootstrap_rejects_authorization_identity_different_from_payload(
                 embedding_dispatch_count=0,
                 generation_dispatch_count=0,
                 total_dispatch_count=0,
-                reserved_cost_usd='0.000000',
-                charged_cost_usd='0.000000',
+                reserved_cost_usd=Decimal('0.000000'),
+                charged_cost_usd=Decimal('0.000000'),
             ),
             ReleaseRowPrimaryKey('authorization', key),
         )

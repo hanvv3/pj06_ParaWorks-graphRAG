@@ -67,6 +67,7 @@ def append_audit(monkeypatch):
         staticmethod(cache(RagReleaseMutationSet._table)),
     )
     recorded = []
+    roster_probed = set()
 
     def audited(self, connection, payload, *, actual_mutations, **kwargs):
         tables = release_tables(build_rag_release_metadata())
@@ -103,6 +104,44 @@ def append_audit(monkeypatch):
             actual_mutations._snapshot(connection, plan.row)
             for plan in actual_mutations._plans
         ] == before
+        transition = payload['transition_kind'], payload['outcome']
+        if transition not in roster_probed:
+            from sqlalchemy import event
+
+            if payload['transition_kind'] == 'authorization_bootstrap':
+                # The synthetic harness seeds provider peers just before this
+                # first append. Preserve only that test setup across refusal.
+                connection.commit()
+            roster_probed.add(transition)
+            missing = self.mutation_set(connection)
+            for plan in actual_mutations._plans[1:]:
+                missing.plan(plan.statement, plan.row)
+            for row in actual_mutations.observation_rows:
+                missing.observe(row)
+            dml = []
+
+            def count_dml(_connection, _cursor, sql, *_):
+                if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+                    dml.append(sql)
+
+            event.listen(connection.engine, 'before_cursor_execute', count_dml)
+            try:
+                with pytest.raises(RagReleaseLedgerError):
+                    original(
+                        self, connection, payload, actual_mutations=missing, **kwargs
+                    )
+            finally:
+                event.remove(connection.engine, 'before_cursor_execute', count_dml)
+            assert dml == []
+            assert self._authority.marker_path.read_bytes() == old_marker
+            assert [
+                dict(row)
+                for row in connection.execute(select(tables.transitions)).mappings()
+            ] == old_history
+            assert [
+                actual_mutations._snapshot(connection, plan.row)
+                for plan in actual_mutations._plans
+            ] == before
         advanced = original(
             self, connection, payload, actual_mutations=actual_mutations, **kwargs
         )
@@ -849,6 +888,368 @@ def test_literal_plan_reordering_is_safe_and_executes_no_callback(
     assert harness.records('authorization')[0]['case_claim_count'] == 1
     assert len(harness.records('case')) == len(harness.records('agent_run')) == 1
     assert len(harness.records('cost_component')) == 2
+
+
+@pytest.mark.parametrize(
+    'mutation',
+    [
+        'extra',
+        'missing',
+        'duplicate',
+        'child_order',
+        'semantic',
+        'wrong_table',
+        'wrong_operation',
+        'wrong_identity',
+    ],
+)
+def test_frozen_plan_roster_refuses_before_any_dml(tmp_path, monkeypatch, mutation):
+    from sqlalchemy import event, insert
+
+    harness = incident_harness(tmp_path, monkeypatch)
+    old_auth = harness.records('authorization')
+    old_marker = harness.authority.marker_path.read_bytes()
+    original = RagReleaseLedger.append
+    dml = []
+
+    def attack(self, connection, payload, *, actual_mutations, **kwargs):
+        plans = actual_mutations._plans
+        if mutation == 'extra':
+            row = {
+                **old_auth[0],
+                'approval_id_hmac': 'f' * 64,
+                'approval_hmac': 'e' * 64,
+            }
+            table, _ = actual_mutations._table('authorization')
+            actual_mutations.plan(
+                insert(table).values(**row), row_key('authorization', row)
+            )
+        elif mutation == 'missing':
+            plans.pop(0)
+        elif mutation == 'duplicate':
+            plans.append(plans[0])
+        elif mutation == 'child_order':
+            plans[-2:] = reversed(plans[-2:])
+        elif mutation == 'wrong_table':
+            plans[0] = type(plans[0])(plans[1].statement, plans[0].row)
+        elif mutation == 'wrong_operation':
+            table, _ = actual_mutations._table('authorization')
+            plans[0] = type(plans[0])(insert(table).values(**old_auth[0]), plans[0].row)
+        elif mutation == 'wrong_identity':
+            from backend.app.rag.release_ledger import ReleaseRowPrimaryKey
+
+            plan = plans[1]
+            row = ReleaseRowPrimaryKey(
+                'case', {**plan.row.primary_key, 'case_id_hmac': 'f' * 64}
+            )
+            plans[1] = type(plan)(plan.statement, row)
+        else:
+            plan = plans[0]
+            plans[0] = type(plan)(
+                plan.statement.values(total_dispatch_count=1), plan.row
+            )
+        return original(
+            self, connection, payload, actual_mutations=actual_mutations, **kwargs
+        )
+
+    monkeypatch.setattr(RagReleaseLedger, 'append', attack)
+    event.listen(
+        harness.engine,
+        'before_cursor_execute',
+        lambda _c, _u, sql, *_: (
+            dml.append(sql)
+            if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))
+            else None
+        ),
+    )
+    with pytest.raises(RagReleaseLedgerError):
+        harness.claim()
+    assert harness.records('authorization') == old_auth
+    assert (
+        harness.records('case')
+        == harness.records('agent_run')
+        == harness.records('cost_component')
+        == []
+    )
+    assert harness.authority.marker_path.read_bytes() == old_marker
+    assert dml == []
+
+
+@pytest.mark.parametrize(
+    'row_kind',
+    [
+        'authorization',
+        'case',
+        'dispatch',
+        'quality_report',
+        'release_ledger',
+        'release_transition',
+        'agent_run',
+        'cost_component',
+    ],
+)
+def test_extra_native_plan_for_every_table_refuses_before_dml(
+    tmp_path, monkeypatch, row_kind
+):
+    from sqlalchemy import event, insert
+
+    from backend.app.rag.release_ledger import (
+        ReleaseRowPrimaryKey,
+        _ReleaseMutationPlan,
+    )
+
+    harness = incident_harness(tmp_path, monkeypatch)
+    old_marker = harness.authority.marker_path.read_bytes()
+    kinds = (
+        'authorization',
+        'case',
+        'dispatch',
+        'quality_report',
+        'agent_run',
+        'cost_component',
+    )
+    before = {kind: harness.records(kind) for kind in kinds}
+    original = RagReleaseLedger.append
+    dml = []
+
+    def attack(self, connection, payload, *, actual_mutations, **kwargs):
+        if row_kind in {'release_ledger', 'release_transition'}:
+            tables = release_tables(build_rag_release_metadata())
+            table = (
+                tables.ledgers if row_kind == 'release_ledger' else tables.transitions
+            )
+            values = dict(connection.execute(select(table)).mappings().first())
+            key = {
+                'ledger_uuid': payload['ledger_uuid'],
+                'ledger_epoch': payload['ledger_epoch'],
+            }
+            if row_kind == 'release_transition':
+                key['to_generation'] = payload['to_generation']
+                values['generation'] = payload['to_generation']
+            row = ReleaseRowPrimaryKey(row_kind, key)
+        else:
+            table, _ = actual_mutations._table(row_kind)
+            key = {
+                key: payload[key]
+                for key in ('ledger_uuid', 'ledger_epoch', 'approval_id_hmac')
+            }
+            if row_kind == 'authorization':
+                values = {
+                    **before['authorization'][0],
+                    'approval_id_hmac': 'f' * 64,
+                    'approval_hmac': 'e' * 64,
+                }
+            elif row_kind == 'dispatch':
+                values = {
+                    **key,
+                    'case_id_hmac': payload['case_id_hmac'],
+                    'component': 'answer_generation',
+                    'state': 'not_attempted',
+                    'dispatch_count': 0,
+                    'dispatch_fence_hmac': None,
+                    'charge_basis': 'reserved',
+                    'reserved_cost_usd': Decimal('0.000000'),
+                    'charged_cost_usd': Decimal('0.000000'),
+                }
+            elif row_kind == 'quality_report':
+                values = {
+                    **key,
+                    'quality_report_hmac': 'a' * 64,
+                    'manifest_hmac': '9' * 64,
+                    'baseline_hmac': 'b' * 64,
+                    'reviewer_roster_hmac': 'c' * 64,
+                    'payload_canonical_bytes': b'{}',
+                }
+            else:
+                plan = next(
+                    plan
+                    for plan in actual_mutations._plans
+                    if plan.row.row_kind == row_kind
+                )
+                values = {
+                    str(key): binding.value
+                    for key, binding in plan.statement._values.items()
+                }
+                if row_kind == 'case':
+                    values.update(
+                        case_id_hmac='f' * 64,
+                        manifest_ordinal=1,
+                        runtime_agent_run_id_hmac='e' * 64,
+                    )
+                elif row_kind == 'agent_run':
+                    values.update(id=999, cache_key='extra-native-run')
+                else:
+                    values['id'] = 999
+            row = row_key(row_kind, values)
+        # Include even a duplicate key to exercise the final authority boundary,
+        # not merely the public collector's earlier convenience check.
+        actual_mutations._plans.append(
+            _ReleaseMutationPlan(insert(table).values(**values), row)
+        )
+        return original(
+            self, connection, payload, actual_mutations=actual_mutations, **kwargs
+        )
+
+    monkeypatch.setattr(RagReleaseLedger, 'append', attack)
+    event.listen(
+        harness.engine,
+        'before_cursor_execute',
+        lambda _c, _u, sql, *_: (
+            dml.append(sql)
+            if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))
+            else None
+        ),
+    )
+    with pytest.raises(RagReleaseLedgerError):
+        harness.claim()
+    assert dml == []
+    assert {kind: harness.records(kind) for kind in kinds} == before
+    assert harness.authority.marker_path.read_bytes() == old_marker
+
+
+@pytest.mark.parametrize('subclass', [False, True])
+def test_append_never_reuses_caller_database_identity_after_dml(
+    tmp_path, monkeypatch, subclass
+):
+    from sqlalchemy import event
+
+    from backend.app.rag.release_authority import (
+        RagReleaseAuthorityError,
+        ValidationDatabaseIdentity,
+    )
+
+    harness = incident_harness(tmp_path, monkeypatch)
+    identity = harness.database_identity
+    old_marker = harness.authority.marker_path.read_bytes()
+    old_auth = harness.records('authorization')
+    calls, dml = [], []
+
+    class CallbackIdentity(ValidationDatabaseIdentity):
+        def __getattribute__(self, name):
+            if dml:
+                calls.append(name)
+                active[0].commit()
+            return object.__getattribute__(self, name)
+
+    if subclass:
+        identity = CallbackIdentity(identity.database_name, identity.database_oid)
+    harness.database_identity = identity
+    active = [None]
+
+    def observe(connection, _u, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            active[0] = connection
+            dml.append(sql)
+            if not subclass:
+                object.__setattr__(identity, 'database_name', 'mutated-after-entry')
+
+    event.listen(harness.engine, 'before_cursor_execute', observe)
+    if subclass:
+        with pytest.raises((RagReleaseAuthorityError, RagReleaseLedgerError)):
+            harness.claim()
+        assert dml == []
+        assert harness.records('authorization') == old_auth
+        assert harness.records('case') == []
+        assert harness.authority.marker_path.read_bytes() == old_marker
+    else:
+        harness.claim()
+        assert harness.snapshot.generation == 2
+        assert len(harness.records('case')) == 1
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    'row_kind,column',
+    [
+        ('authorization', 'reserved_cost_usd'),
+        ('authorization', 'charged_cost_usd'),
+        ('case', 'embedding_reserved_cost_usd'),
+        ('case', 'generation_reserved_cost_usd'),
+        ('case', 'total_reserved_cost_usd'),
+        ('dispatch', 'reserved_cost_usd'),
+        ('dispatch', 'charged_cost_usd'),
+        ('agent_run', 'total_charged_cost_usd'),
+        ('cost_component', 'reserved_cost_usd'),
+        ('cost_component', 'charged_cost_usd'),
+    ],
+)
+@pytest.mark.parametrize(
+    'representation',
+    [
+        'str',
+        'int',
+        'float',
+        'bool',
+        'subclass',
+        'subprecision',
+        'nan',
+        'infinity',
+        'negative',
+        'negative_zero',
+        'excess_scale',
+        'overflow',
+    ],
+)
+def test_every_numeric_caller_literal_refuses_laundering_before_dml(
+    tmp_path, monkeypatch, row_kind, column, representation
+):
+    from sqlalchemy import event
+
+    harness = incident_harness(tmp_path, monkeypatch)
+    if row_kind == 'dispatch':
+        harness.claim()
+    old_marker = harness.authority.marker_path.read_bytes()
+    kinds = ('authorization', 'case', 'dispatch', 'agent_run', 'cost_component')
+    old_rows = {kind: harness.records(kind) for kind in kinds}
+    original = RagReleaseLedger.append
+    dml = []
+
+    class DecimalSubclass(Decimal):
+        pass
+
+    def attack(self, connection, payload, *, actual_mutations, **kwargs):
+        plan = next(
+            item for item in actual_mutations._plans if item.row.row_kind == row_kind
+        )
+        binding = plan.statement._values.get(column)
+        value = binding.value if binding is not None else old_rows[row_kind][0][column]
+        conversions = {
+            'str': str,
+            'int': int,
+            'float': float,
+            'bool': bool,
+            'subclass': DecimalSubclass,
+            'subprecision': lambda v: v + Decimal('0.0000001'),
+            'nan': lambda v: Decimal('NaN'),
+            'infinity': lambda v: Decimal('Infinity'),
+            'negative': lambda v: Decimal('-0.000001'),
+            'negative_zero': lambda v: Decimal('-0.000000'),
+            'excess_scale': lambda v: v.quantize(Decimal('0.0000000')),
+            'overflow': lambda v: Decimal('1e30'),
+        }
+        actual_mutations._plans[actual_mutations._plans.index(plan)] = type(plan)(
+            plan.statement.values({column: conversions[representation](value)}),
+            plan.row,
+        )
+        return original(
+            self, connection, payload, actual_mutations=actual_mutations, **kwargs
+        )
+
+    monkeypatch.setattr(RagReleaseLedger, 'append', attack)
+    event.listen(
+        harness.engine,
+        'before_cursor_execute',
+        lambda _c, _u, sql, *_: (
+            dml.append(sql)
+            if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))
+            else None
+        ),
+    )
+    with pytest.raises(RagReleaseLedgerError):
+        harness.claim_generation() if row_kind == 'dispatch' else harness.claim()
+    assert {kind: harness.records(kind) for kind in kinds} == old_rows
+    assert harness.authority.marker_path.read_bytes() == old_marker
+    assert dml == []
 
 
 @pytest.mark.parametrize(

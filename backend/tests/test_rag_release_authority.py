@@ -9,7 +9,10 @@ from sqlalchemy import create_engine, func, select
 
 from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
+from backend.app.rag.release_authority import RagReleaseAuthority as _RealAuthority
 from backend.app.rag.release_schema import build_rag_release_metadata, release_tables
+
+_REAL_DATABASE_IDENTITY = _RealAuthority._current_database_identity
 
 _SECRET = b'task23-release-runtime-key-material-32-bytes'
 
@@ -101,6 +104,241 @@ def _recovery_review(seed: str, reason: str):
         values['review_nonce_hmac'],
         reason,
     )
+
+
+@pytest.mark.parametrize(
+    'operation', ['initialize', 'disaster_initialize', 'rebootstrap', 'inspect']
+)
+@pytest.mark.parametrize('generator', [False, True])
+@pytest.mark.parametrize('change_target', [False, True])
+def test_roots_are_converted_once_before_any_authority_publication(
+    tmp_path, operation, generator, change_target
+):
+    from sqlalchemy import event, update
+
+    engine = create_engine('sqlite://')
+    calls, dml = [], []
+    target = [str(tmp_path / 'excluded')]
+    active = [None]
+
+    class CallbackPath:
+        def __fspath__(self):
+            calls.append(len(dml))
+            if dml and active[0] is not None:
+                active[0].commit()
+            return target[0]
+
+    root = CallbackPath()
+    roots = (item for item in [root]) if generator else [root]
+    authority, marker, _ = _service(tmp_path, repository_roots=roots)
+    tables = release_tables(build_rag_release_metadata())
+    with engine.connect() as connection:
+        active[0] = connection
+        if operation in {'inspect', 'rebootstrap'}:
+            authority.initialize(
+                connection, database_identity=_identity(), **_review_args()
+            )
+        if operation == 'rebootstrap':
+            connection.execute(
+                update(tables.ledgers).values(
+                    generation=9, last_transition_digest='9' * 64
+                )
+            )
+            connection.commit()
+        # A retained mutable callback would now move the exclusion to the marker.
+        if change_target:
+            target[0] = str(marker.parent)
+        event.listen(
+            engine,
+            'before_cursor_execute',
+            lambda _c, _u, sql, *_: (
+                dml.append(sql)
+                if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))
+                else None
+            ),
+        )
+        kwargs = {'database_identity': _identity()}
+        if operation == 'initialize':
+            kwargs.update(_review_args())
+        elif operation != 'inspect':
+            kwargs['review_verifier'] = _recovery_review('3', '5' * 64)
+        result = getattr(authority, operation)(connection, **kwargs)
+        assert result.ledger_epoch == (2 if operation == 'rebootstrap' else 1)
+        assert calls == [0]
+        assert authority.inspect(connection, database_identity=_identity()) == result
+        assert calls == [0]
+
+
+def test_root_generator_exclusions_survive_construction(tmp_path, monkeypatch):
+    from backend.app.rag.release_authority import ExternalAuthorityPathSetValidator
+
+    root = str(tmp_path / 'excluded')
+    authority, _, _ = _service(tmp_path, repository_roots=(item for item in [root]))
+    original = ExternalAuthorityPathSetValidator.validate.__func__
+    seen = []
+
+    def observe(cls, **kwargs):
+        seen.extend(kwargs['repository_roots'])
+        return original(cls, **kwargs)
+
+    monkeypatch.setattr(
+        ExternalAuthorityPathSetValidator, 'validate', classmethod(observe)
+    )
+    authority._validate_path_set()
+    assert [str(item) for item in seen] == [root]
+
+
+def test_path_subclass_protocol_is_not_retained(tmp_path):
+    calls = []
+
+    class CallerPath(type(tmp_path)):
+        def __fspath__(self):
+            calls.append('converted')
+            return super().__fspath__()
+
+    authority, _, _ = _service(
+        tmp_path, database_backup_roots=[CallerPath(tmp_path / 'backup')]
+    )
+    engine = create_engine('sqlite://')
+    with engine.connect() as connection:
+        initial = authority.initialize(
+            connection, database_identity=_identity(), **_review_args()
+        )
+        assert authority.inspect(connection, database_identity=_identity()) == initial
+    assert calls == ['converted']
+
+
+@pytest.mark.parametrize('invalid', ['relative', '', b'/bytes', None])
+def test_invalid_root_refuses_before_marker_or_database_work(tmp_path, invalid):
+    from backend.app.agent_runtime.durable_file_authority import (
+        DurableFileAuthorityError,
+    )
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    with pytest.raises((RagReleaseAuthorityError, DurableFileAuthorityError)):
+        _service(tmp_path, database_backup_roots=(item for item in [invalid]))
+    assert not (tmp_path / 'release' / 'ledger.json').exists()
+
+
+@pytest.mark.parametrize(
+    'operation', ['initialize', 'disaster_initialize', 'rebootstrap', 'inspect']
+)
+@pytest.mark.parametrize('subclass', [False, True])
+def test_nonappend_identity_detaches_before_callbacks(tmp_path, operation, subclass):
+    from sqlalchemy import event, update
+
+    from backend.app.rag.release_authority import (
+        RagReleaseAuthorityError,
+        ValidationDatabaseIdentity,
+    )
+
+    authority, marker, _ = _service(tmp_path)
+    engine = create_engine('sqlite://')
+    tables = release_tables(build_rag_release_metadata())
+    if operation in {'rebootstrap', 'inspect'}:
+        with engine.connect() as connection:
+            authority.initialize(
+                connection, database_identity=_identity(), **_review_args()
+            )
+            if operation == 'rebootstrap':
+                connection.execute(
+                    update(tables.ledgers).values(
+                        generation=9, last_transition_digest='9' * 64
+                    )
+                )
+                connection.commit()
+    old_marker = marker.read_bytes() if marker.exists() else None
+    calls, dml = [], []
+
+    class CallerIdentity(ValidationDatabaseIdentity):
+        def __getattribute__(self, key):
+            calls.append(key)
+            return object.__getattribute__(self, key)
+
+    supplied = CallerIdentity('validation_test', 41) if subclass else _identity()
+    calls.clear()
+
+    def observe(_connection, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+            object.__setattr__(supplied, 'database_oid', 99)
+
+    event.listen(engine, 'before_cursor_execute', observe)
+    with engine.connect() as connection:
+        kwargs = {'database_identity': supplied}
+        if operation == 'initialize':
+            kwargs.update(_review_args())
+        elif operation != 'inspect':
+            kwargs['review_verifier'] = _recovery_review('3', '5' * 64)
+        if subclass:
+            with pytest.raises(RagReleaseAuthorityError):
+                getattr(authority, operation)(connection, **kwargs)
+            assert dml == []
+            assert (marker.read_bytes() if marker.exists() else None) == old_marker
+        else:
+            result = getattr(authority, operation)(connection, **kwargs)
+            assert (
+                authority.inspect(connection, database_identity=_identity()) == result
+            )
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    'field,value',
+    [
+        ('database_name', 4),
+        ('database_name', ' invalid '),
+        ('database_oid', True),
+        ('database_oid', 0),
+    ],
+)
+def test_database_identity_rechecks_mutated_native_fields_without_callbacks(
+    field, value
+):
+    from types import SimpleNamespace
+
+    from backend.app.rag.release_authority import (
+        RagReleaseAuthorityError,
+    )
+
+    identity = _identity()
+    object.__setattr__(identity, field, value)
+    connection = SimpleNamespace(
+        dialect=SimpleNamespace(name='postgresql'),
+        exec_driver_sql=lambda _: SimpleNamespace(one=lambda: ('validation_test', 41)),
+    )
+    with pytest.raises((RagReleaseAuthorityError, ValueError)):
+        _REAL_DATABASE_IDENTITY(connection, identity)
+
+
+def test_database_identity_subclass_refuses_before_comparison_or_attribute_callback():
+    from types import SimpleNamespace
+
+    from backend.app.rag.release_authority import (
+        RagReleaseAuthorityError,
+        ValidationDatabaseIdentity,
+    )
+
+    calls = []
+
+    class CallbackIdentity(ValidationDatabaseIdentity):
+        def __getattribute__(self, name):
+            calls.append(name)
+            return object.__getattribute__(self, name)
+
+        def __eq__(self, other):
+            calls.append('comparison')
+            return True
+
+    identity = CallbackIdentity('validation_test', 41)
+    calls.clear()
+    connection = SimpleNamespace(
+        dialect=SimpleNamespace(name='postgresql'),
+        exec_driver_sql=lambda _: SimpleNamespace(one=lambda: ('validation_test', 41)),
+    )
+    with pytest.raises(RagReleaseAuthorityError):
+        _REAL_DATABASE_IDENTITY(connection, identity)
+    assert calls == []
 
 
 @pytest.mark.parametrize('exceptional_exit', [False, True])

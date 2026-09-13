@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TypeAlias
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -179,6 +179,24 @@ def _literal_binding(binding):
     ):
         raise RagReleaseLedgerError('release mutation requires literal bindings')
     return _literal_value(binding.value)
+
+
+def _decimal_literal(value, column):
+    if type(value) is not Decimal or not value.is_finite():
+        raise RagReleaseLedgerError('release money literal is invalid')
+    quantum = Decimal(1).scaleb(-column.type.scale)
+    limit = Decimal(10) ** (column.type.precision - column.type.scale)
+    try:
+        if (
+            value.is_signed()
+            or value.as_tuple().exponent < -column.type.scale
+            or value >= limit
+            or value != value.quantize(quantum)
+        ):
+            raise RagReleaseLedgerError('release money literal is invalid')
+    except InvalidOperation:
+        raise RagReleaseLedgerError('release money literal is invalid') from None
+    return value
 
 
 class RagReleaseMutationSet:
@@ -536,6 +554,8 @@ class RagReleaseMutationSet:
                 if name not in table.c:
                     raise RagReleaseLedgerError('release mutation column is not exact')
                 values[name] = _literal_binding(binding)
+                if table.c[name].type.python_type is Decimal:
+                    _decimal_literal(values[name], table.c[name])
             after = {**(before or {}), **values}
             # Runtime images must be exact before any SQL coercion/default fill.
             if plan.row.row_kind in {'agent_run', 'cost_component'}:
@@ -545,6 +565,9 @@ class RagReleaseMutationSet:
                 if name not in after:
                     if column.default is not None and column.default.is_scalar:
                         after[name] = _literal_value(column.default.arg)
+                        # Only schema-owned scalar defaults may be normalized.
+                        if column.type.python_type is Decimal:
+                            after[name] = Decimal(after[name])
                     elif column.nullable:
                         after[name] = None
                     else:
@@ -553,13 +576,9 @@ class RagReleaseMutationSet:
                         )
                 value = after[name]
                 expected = column.type.python_type
-                if expected is Decimal and type(value) in {str, int, Decimal}:
-                    value = Decimal(value)
-                    if not value.is_finite() or value != value.quantize(
-                        Decimal('0.000001')
-                    ):
-                        raise RagReleaseLedgerError('release money literal is invalid')
-                    after[name] = value.quantize(Decimal('0.000001'))
+                if expected is Decimal and value is not None:
+                    _decimal_literal(value, column)
+                    after[name] = value.quantize(Decimal(1).scaleb(-column.type.scale))
                 elif (value is not None and type(value) is not expected) or (
                     value is None and not column.nullable
                 ):
@@ -587,6 +606,134 @@ class RagReleaseMutationSet:
             raise RagReleaseLedgerError('release mutation transaction changed')
         self._frozen_plans = tuple(frozen)
 
+    def _projected_mutations(self, payload, *, identity_secret, provider_incident):
+        """Build the complete prospective roster from frozen literals, before DML."""
+        projected = RagReleaseMutationSet(self._connection, seal=_MUTATION_SET_SEAL)
+        projected._transaction = self._transaction
+        projected._frozen_plans = self._frozen_plans
+        projected._observation_rows = self._observation_rows
+        projected._observation_snapshots = self._observation_snapshots
+        for plan in self._frozen_plans:
+            if plan.before == plan.after or (
+                plan.before is not None
+                and not _meaningful_changed(
+                    plan.before, plan.after, ignored=frozenset({'updated_at'})
+                )
+            ):
+                raise RagReleaseLedgerError('release row mutation was not exact')
+            projected._rows.append(plan.row)
+            projected._before_snapshots.append(plan.before)
+            projected._after_snapshots.append(plan.after)
+        if provider_incident is not None:
+            # The sealed Task22 plan owns the incident delta. Its real execution
+            # still supplies independently captured post-SQL evidence afterward.
+            prepared = provider_incident._prepared
+            for kind in ('provider_safety_authority', 'provider_readiness'):
+                table, _ = self._table(kind)
+                statement = select(table)
+                if kind == 'provider_readiness':
+                    statement = statement.where(
+                        table.c.active.is_(True),
+                        table.c.component == prepared.component,
+                    )
+                if self._connection.dialect.name == 'postgresql':
+                    statement = statement.with_for_update()
+                before = dict(self._connection.execute(statement).mappings().one())
+                if kind == 'provider_safety_authority':
+                    row = ReleaseRowPrimaryKey(
+                        kind, {'authority_uuid': before['authority_uuid']}
+                    )
+                    if (
+                        before['envelope_digest'] != prepared.old_envelope_digest
+                        or before['global_safety_generation']
+                        != prepared.old_global_generation
+                    ):
+                        raise RagReleaseLedgerError('provider incident plan CAS failed')
+                    after = {
+                        **before,
+                        'global_safety_generation': prepared.old_global_generation + 1,
+                        'envelope_digest': prepared.new_envelope_digest,
+                    }
+                else:
+                    row = ReleaseRowPrimaryKey(
+                        kind,
+                        {
+                            'component': before['component'],
+                            'provider_bytes': before['provider'],
+                            'model_bytes': before['model'],
+                            'reasoning_or_config_identity_bytes': before[
+                                'reasoning_or_config_identity'
+                            ],
+                        },
+                    )
+                    if (
+                        before['state'] != 'ready'
+                        or before['state_version'] != prepared.old_state_version
+                    ):
+                        raise RagReleaseLedgerError('provider incident plan CAS failed')
+                    after = {
+                        **before,
+                        'state': prepared.state,
+                        'state_version': prepared.old_state_version + 1,
+                        'family_safety_generation': prepared.old_global_generation + 1,
+                        'reviewed_gate_reference_hmac': prepared.reviewed_reference,
+                    }
+                    if before['overrun_agent_run_id'] is None:
+                        after.update(
+                            overrun_agent_run_id=prepared.agent_run_id,
+                            overrun_input_tokens=prepared.input_tokens,
+                            overrun_output_tokens=prepared.output_tokens,
+                            overrun_cost_usd=prepared.cost_usd,
+                            overrun_observed_at=prepared.observed_at,
+                        )
+                projected._rows.append(row)
+                projected._before_snapshots.append(before)
+                projected._after_snapshots.append(after)
+        actual = sorted(
+            (
+                row.row_kind,
+                release_row_identity_hmac(
+                    row.row_kind, row.primary_key, identity_secret=identity_secret
+                ),
+            )
+            for row in projected._rows
+        )
+        expected = sorted(
+            (item['row_kind'], item['row_identity_hmac'])
+            for item in payload['affected_rows']
+            if item['row_kind'] not in {'release_ledger', 'release_transition'}
+        )
+        if actual != expected or len(set(actual)) != len(actual):
+            raise RagReleaseLedgerError('planned affected rows differ from payload')
+        return projected
+
+    def _project_roster(self, row_kind, rows):
+        """Overlay frozen literal deltas on independently locked current rows."""
+        result = list(rows)
+        for row, before, after in zip(
+            self._rows, self._before_snapshots, self._after_snapshots, strict=True
+        ):
+            if row.row_kind != row_kind:
+                continue
+            _table, aliases = self._table(row_kind)
+            matches = [
+                index
+                for index, item in enumerate(result)
+                if all(
+                    item[aliases.get(key, key)] == value
+                    for key, value in row.primary_key.items()
+                )
+            ]
+            if before is None:
+                if matches:
+                    raise RagReleaseLedgerError('planned insert already exists')
+                result.append(after)
+            elif len(matches) != 1 or result[matches[0]] != before:
+                raise RagReleaseLedgerError('planned before-image changed')
+            else:
+                result[matches[0]] = after
+        return result
+
     def _preflight_runtime_mutations(
         self,
         payload: Mapping[str, object],
@@ -595,63 +742,17 @@ class RagReleaseMutationSet:
         approved_case_claim: object = None,
         barrier_guard: object = None,
     ) -> None:
-        """Validate literal runtime before/after images before *any* write/incident.
+        """Validate the frozen full roster, including runtime, before any DML.
 
-        Runtime inserts supply every column explicitly. This removes implicit
-        defaults, expression evaluation and server clocks from the signed image.
-        Actual SQL after-images are checked against the same HMAC after execution.
+        Case-source acquisition happens once here. Actual SQL images are checked
+        against the same contract afterward using the pinned pure checkpoint.
         """
-        projected = []
-        for plan in self._plans:
-            if plan.row.row_kind not in {'agent_run', 'cost_component'}:
-                continue
-            table, _aliases = self._table(plan.row.row_kind)
-            statement = plan.statement
-            if (
-                not isinstance(statement, (Insert, Update))
-                or statement.table.name != table.name
-            ):
-                raise RagReleaseLedgerError('runtime mutation statement is invalid')
-            values = {}
-            for field, binding in (statement._values or {}).items():
-                name = str(field)
-                if (
-                    name not in table.c
-                    or not isinstance(binding, BindParameter)
-                    or binding.callable
-                ):
-                    raise RagReleaseLedgerError(
-                        'runtime mutation must use explicit values'
-                    )
-                values[name] = binding.value
-            before = self._snapshot(self._connection, plan.row, for_update=True)
-            if (before is None) != isinstance(statement, Insert):
-                raise RagReleaseLedgerError('runtime mutation before-image is invalid')
-            after = {**(before or {}), **values}
-            projected.append((plan.row, before, after))
-        self._assert_approved_case_claim(
+        self.assert_payload_projection(
             payload,
-            [(row.row_kind, after) for row, _, after in projected],
             approved_case_claim=approved_case_claim,
             identity_secret=identity_secret,
             barrier_guard=barrier_guard,
         )
-        costs = [
-            after
-            for row, _before, after in projected
-            if row.row_kind == 'cost_component'
-        ] + [
-            snapshot
-            for row, snapshot in zip(
-                self._observation_rows, self._observation_snapshots, strict=True
-            )
-            if row.row_kind == 'cost_component'
-        ]
-        for row, before, after in projected:
-            _assert_runtime_column_delta(payload, row.row_kind, before, after, costs)
-            self._assert_runtime_mutation_hmac(
-                payload, row, before, after, identity_secret=identity_secret
-            )
 
     def _assert_approved_case_claim(
         self,
@@ -676,19 +777,12 @@ class RagReleaseMutationSet:
             ]
         else:
             case_rows = []
-            for plan in self._plans:
+            for plan in self._frozen_plans:
                 if plan.row.row_kind != 'case':
                     continue
                 if not isinstance(plan.statement, Insert):
                     raise RagReleaseLedgerError('case claim must insert case')
-                values = {}
-                for field, binding in (plan.statement._values or {}).items():
-                    if not isinstance(binding, BindParameter) or binding.callable:
-                        raise RagReleaseLedgerError(
-                            'case claim must use literal values'
-                        )
-                    values[str(field)] = binding.value
-                case_rows.append(values)
+                case_rows.append(plan.after)
         validate_case_claim_projection(
             approved_case_claim,
             connection=self._connection,
@@ -1963,12 +2057,9 @@ def _runtime_projection(row_kind, snapshot):
             result[str(column.name)] = value
         else:
             if expected_type is Decimal and value is not None:
-                if not value.is_finite():
-                    raise RagReleaseLedgerError('runtime money literal is invalid')
-                quantized = value.quantize(Decimal('0.000001'))
-                if value != quantized:
-                    raise RagReleaseLedgerError('runtime money literal is invalid')
-                value = quantized
+                value = _decimal_literal(value, column).quantize(
+                    Decimal(1).scaleb(-column.type.scale)
+                )
             result[str(column.name)] = _observation_json_value(value)
     return result
 
@@ -2853,8 +2944,17 @@ class RagReleaseLedger:
         connection: Connection,
         payload: Mapping[str, object],
         actual_mutations: RagReleaseMutationSet | None = None,
+        *,
+        before_execution: bool = False,
     ) -> None:
         """Substantiate aggregate transition fields from the locked DB roster."""
+
+        def roster(kind, statement):
+            rows = [dict(row) for row in connection.execute(statement).mappings()]
+            if before_execution:
+                return actual_mutations._project_roster(kind, rows)
+            return rows
+
         tables = release_tables(build_rag_release_metadata())
         scope = (
             tables.cases.c.ledger_uuid == payload['ledger_uuid'],
@@ -2876,11 +2976,9 @@ class RagReleaseLedger:
             case_statement = case_statement.with_for_update()
             dispatch_statement = dispatch_statement.with_for_update()
             report_statement = report_statement.with_for_update()
-        cases = [dict(row) for row in connection.execute(case_statement).mappings()]
-        dispatches = [
-            dict(row) for row in connection.execute(dispatch_statement).mappings()
-        ]
-        reports = [dict(row) for row in connection.execute(report_statement).mappings()]
+        cases = roster('case', case_statement)
+        dispatches = roster('dispatch', dispatch_statement)
+        reports = roster('quality_report', report_statement)
         if len(cases) != payload['case_claim_count'] or sorted(
             row['manifest_ordinal'] for row in cases
         ) != list(range(len(cases))):
@@ -2960,14 +3058,14 @@ class RagReleaseLedger:
                 statement = statement.with_for_update()
             actual_mutations._assert_roster_rows(
                 row_kind,
-                [dict(row) for row in connection.execute(statement).mappings()],
+                roster(row_kind, statement),
             )
-        for row_kind, roster in (
+        for row_kind, captured_roster in (
             ('case', cases),
             ('dispatch', dispatches),
             ('quality_report', reports),
         ):
-            actual_mutations._assert_roster_rows(row_kind, roster)
+            actual_mutations._assert_roster_rows(row_kind, captured_roster)
 
         if not cases:
             actual_mutations._assert_roster_rows('agent_run', [])
@@ -2983,9 +3081,7 @@ class RagReleaseLedger:
         )
         if connection.dialect.name == 'postgresql':
             run_statement = run_statement.with_for_update()
-        candidate_runs = [
-            dict(row) for row in connection.execute(run_statement).mappings()
-        ]
+        candidate_runs = roster('agent_run', run_statement)
         actual_mutations._assert_roster_rows('agent_run', candidate_runs)
         runs_by_hmac: dict[str, dict[str, object]] = {}
         for run in candidate_runs:
@@ -3007,7 +3103,7 @@ class RagReleaseLedger:
         )
         if connection.dialect.name == 'postgresql':
             cost_statement = cost_statement.with_for_update()
-        costs = [dict(row) for row in connection.execute(cost_statement).mappings()]
+        costs = roster('cost_component', cost_statement)
         actual_mutations._assert_roster_rows('cost_component', costs)
         costs_by_run: dict[int, list[dict[str, object]]] = {}
         for row in costs:
@@ -3153,6 +3249,9 @@ class RagReleaseLedger:
         provider_incident: object = None,
         approved_case_claim: object = None,
     ) -> RagReleaseSnapshot:
+        from backend.app.rag.release_authority import _native_database_identity
+
+        database_identity = _native_database_identity(database_identity)
         validated = validate_transition_payload(payload, identity_secret=self._secret)
         if self._authority._after_marker_replace is not None:
             raise RagReleaseLedgerError('append refuses publication callbacks')
@@ -3203,6 +3302,9 @@ class RagReleaseLedger:
                 _rollback_before_barrier_exit(connection),
             ):
                 _body, current = self._authority._parse(marker._read_bytes_unlocked())
+                database_identity = self._authority._current_database_identity(
+                    connection, database_identity
+                )
                 self._authority._inspect_locked(
                     connection,
                     current,
@@ -3225,11 +3327,19 @@ class RagReleaseLedger:
                     payload, identity_secret=self._secret
                 )
                 actual_mutations._freeze_all_mutations()
-                actual_mutations._preflight_runtime_mutations(
+                projected_mutations = actual_mutations._projected_mutations(
+                    payload,
+                    identity_secret=self._secret,
+                    provider_incident=provider_incident,
+                )
+                projected_mutations._preflight_runtime_mutations(
                     payload,
                     identity_secret=self._secret,
                     approved_case_claim=approved_case_claim,
                     barrier_guard=barrier_guard,
+                )
+                self._assert_database_roster(
+                    connection, payload, projected_mutations, before_execution=True
                 )
 
                 # Complete all adapter acquisition and envelope construction before
