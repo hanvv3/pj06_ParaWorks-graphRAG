@@ -10,7 +10,9 @@ def test_manifest_freezes_exact_profiles_and_deferred_baseline():
     manifest = build_manifest()
     assert tuple(manifest.profiles) == ('settings-diagnostic', 'postgres', 'compatibility', 'non-slack', 'full')
     assert len(SLACK_TEN) == 10
-    assert len(POSTGRES_MODULES) == 9
+    # Task 23 adds the isolated release-authority PostgreSQL gate. Keeping the
+    # count exact prevents the controller from silently dropping this module.
+    assert len(POSTGRES_MODULES) == 10
     assert len(manifest.profiles['compatibility'].expected_deselected_nodeids) == 4
     assert manifest.profiles['non-slack'].expected_deselected_nodeids == SLACK_TEN
     assert manifest.profiles['full'].expected_deselected_nodeids == ()

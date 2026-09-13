@@ -102,12 +102,14 @@ POSTGRES_MODULES = (
     'backend/tests/test_review_v2_postgres.py',
     'backend/tests/test_pgvector_integration.py',
     'backend/tests/test_auto_review_postgres.py',
+    'backend/tests/test_rag_release_authority_postgres.py',
 )
 POSTGRES_IDS = (
     'postgres-isolation-contract', 'postgres-agent-runtime-checkpoint',
     'postgres-auto-review-migration', 'postgres-auto-review-provenance',
     'postgres-review-transition', 'postgres-review-v21-extraction',
     'postgres-review-v2', 'postgres-pgvector', 'postgres-auto-review-c5',
+    'postgres-rag-release-authority',
 )
 SLACK_TEN = (
     'backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_runs_real_agent_services',
