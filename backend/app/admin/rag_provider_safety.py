@@ -23,6 +23,7 @@ from backend.app.agent_runtime.durable_file_authority import (
 )
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
 from backend.app.agent_runtime.rag_provider_safety import (
+    _RELEASE_INCIDENT_PLAN_SEAL,
     RagProviderSafetyError,
     RagProviderSafetyReviewAuthority,
     RagProviderSafetyReviewContext,
@@ -694,6 +695,60 @@ def _provider_peer_lifetime():
 _provider_scope, _require_provider_guard = _provider_peer_lifetime()
 
 
+@dataclass(frozen=True, slots=True)
+class _ProviderReleaseCheckpoint:
+    connection: Connection
+    pin_path: Path
+    latch_path: Path
+    pin_bytes: bytes
+    latch_bytes: bytes
+    provider_image: tuple
+
+    @property
+    def envelope_digest(self) -> str:
+        return hashlib.sha256(
+            b'paraworks:provider-safety-envelope-file:v1\x00' + self.latch_bytes
+        ).hexdigest()
+
+    def with_incident(
+        self, evidence: _AppliedReleaseProviderIncident
+    ) -> _ProviderReleaseCheckpoint:
+        from backend.app.agent_runtime.rag_provider_incident import _same
+
+        if (
+            type(evidence) is not _AppliedReleaseProviderIncident
+            or evidence._seal is not _RELEASE_INCIDENT_PLAN_SEAL
+            or evidence.latch_before != self.latch_bytes
+            or evidence.provider_before != self.provider_image
+            or not _same(evidence.provider_actual, evidence.provider_prospective)
+        ):
+            raise RagProviderSafetyError('provider incident evidence differs')
+        return _ProviderReleaseCheckpoint(
+            connection=self.connection,
+            pin_path=self.pin_path,
+            latch_path=self.latch_path,
+            pin_bytes=self.pin_bytes,
+            latch_bytes=evidence.latch_after,
+            provider_image=evidence.provider_actual,
+        )
+
+    def __call__(self) -> None:
+        from backend.app.agent_runtime.rag_provider_incident import (
+            _freeze,
+            _image,
+            _raw_authority_bytes,
+        )
+        from backend.app.agent_runtime.rag_provider_schema import _provider_tables
+
+        if (
+            _raw_authority_bytes(self.pin_path) != self.pin_bytes
+            or _raw_authority_bytes(self.latch_path) != self.latch_bytes
+            or _freeze(_image(self.connection, _provider_tables()))
+            != self.provider_image
+        ):
+            raise RagProviderSafetyError('provider release checkpoint changed')
+
+
 def _freeze_release_peer(owner, guard, connection):
     """Pin a verified peer for callback-free release publication checks.
 
@@ -701,6 +756,11 @@ def _freeze_release_peer(owner, guard, connection):
     release owner calls this before its first write, then compares the complete
     pinned file/SQL images while both authority locks and the transaction live.
     """
+    from backend.app.agent_runtime.rag_provider_incident import (
+        _freeze,
+        _image,
+        _raw_authority_bytes,
+    )
     from backend.app.agent_runtime.rag_provider_schema import _provider_tables
 
     _require_provider_guard(owner, guard, connection)
@@ -715,31 +775,14 @@ def _freeze_release_peer(owner, guard, connection):
     latch = DurableFileAuthority.open_runtime(guard._provider_safety._latch_path)
     tables = _provider_tables()
 
-    def database_image():
-        return tuple(
-            tuple(
-                tuple(row)
-                for row in connection.execute(
-                    select(table).order_by(*table.primary_key.columns)
-                )
-            )
-            for table in tables
-        )
-
-    pin_bytes = pin._read_bytes_unlocked()
-    latch_bytes = latch._read_bytes_unlocked()
-    database = database_image()
-
-    def checkpoint():
-        _require_provider_guard(owner, guard, connection)
-        if (
-            pin._read_bytes_unlocked() != pin_bytes
-            or latch._read_bytes_unlocked() != latch_bytes
-            or database_image() != database
-        ):
-            raise RagProviderSafetyError('provider release checkpoint changed')
-
-    return checkpoint
+    return _ProviderReleaseCheckpoint(
+        connection=connection,
+        pin_path=pin.path,
+        latch_path=latch.path,
+        pin_bytes=_raw_authority_bytes(pin.path),
+        latch_bytes=_raw_authority_bytes(latch.path),
+        provider_image=_freeze(_image(connection, tables)),
+    )
 
 
 class RagProviderSafetyReleasePeerGuard:
@@ -810,10 +853,14 @@ class RagProviderSafetyReleasePeerGuard:
             raise ProviderSafetyReviewError('provider incident plan is invalid')
         self._ledger.assert_pin()
         plan._consumed = True
-        evidence = self._provider_safety._apply_release_incident(
-            connection, plan._prepared
+        from backend.app.agent_runtime.rag_provider_incident import (
+            _execute_incident_operation,
+            _prepare_incident_operation,
         )
-        self._body = evidence.new_body
+
+        operation = _prepare_incident_operation(connection, plan._prepared)
+        evidence = _execute_incident_operation(operation)
+        self._body = _AppliedReleaseProviderIncident._body(evidence.latch_after)
         return evidence
 
 

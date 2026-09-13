@@ -134,6 +134,8 @@ class _PreparedReleaseProviderIncident:
     actor_subject_hmac: str
     new_envelope: Mapping[str, object]
     new_envelope_digest: str
+    provider_before_image: bytes
+    provider_before_image_hmac: str
     _seal: object
 
     def __post_init__(self) -> None:
@@ -143,17 +145,68 @@ class _PreparedReleaseProviderIncident:
 
 @dataclass(frozen=True, slots=True)
 class _AppliedReleaseProviderIncident:
-    old_body: Mapping[str, object]
-    new_body: Mapping[str, object]
-    authority_before: Mapping[str, object]
-    authority_after: Mapping[str, object]
-    readiness_before: Mapping[str, object]
-    readiness_after: Mapping[str, object]
+    latch_before: bytes
+    latch_after: bytes
+    provider_before: tuple
+    provider_prospective: tuple
+    provider_actual: tuple
+    target_readiness_id: int
     _seal: object
 
     def __post_init__(self) -> None:
         if self._seal is not _RELEASE_INCIDENT_PLAN_SEAL:
             raise RagProviderSafetyError('provider incident evidence is invalid')
+
+    @staticmethod
+    def _body(raw: bytes) -> dict[str, object]:
+        envelope = json.loads(raw.decode('utf-8'))
+        signed = envelope['signed_payload']
+        body = dict(signed['body'])
+        body['envelope_digest'] = hashlib.sha256(
+            b'paraworks:provider-safety-envelope-file:v1\x00' + raw
+        ).hexdigest()
+        body['_envelope'] = envelope
+        body['_signed_payload'] = signed
+        body['_records_by_identity'] = {
+            _identity_tuple(item): item for item in body['family_records']
+        }
+        return body
+
+    @staticmethod
+    def _rows(image: tuple) -> tuple[list[dict[str, object]], ...]:
+        return tuple([dict(row) for row in rows] for rows in image)
+
+    @property
+    def old_body(self) -> Mapping[str, object]:
+        return self._body(self.latch_before)
+
+    @property
+    def new_body(self) -> Mapping[str, object]:
+        return self._body(self.latch_after)
+
+    @property
+    def authority_before(self) -> Mapping[str, object]:
+        return self._rows(self.provider_before)[0][0]
+
+    @property
+    def authority_after(self) -> Mapping[str, object]:
+        return self._rows(self.provider_actual)[0][0]
+
+    @property
+    def readiness_before(self) -> Mapping[str, object]:
+        return next(
+            row
+            for row in self._rows(self.provider_before)[1]
+            if row['id'] == self.target_readiness_id
+        )
+
+    @property
+    def readiness_after(self) -> Mapping[str, object]:
+        return next(
+            row
+            for row in self._rows(self.provider_actual)[1]
+            if row['id'] == self.target_readiness_id
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1398,6 +1451,13 @@ class RagProviderSafetyService:
         with self._authority.locked(), self._registered_advisory(connection):
             old = self._read_unlocked()
             self._match_db_whole_set(connection, old, for_update=True)
+            from backend.app.agent_runtime.rag_provider_incident import (
+                _capture_prepared_image,
+            )
+
+            provider_before_image, provider_before_image_hmac = _capture_prepared_image(
+                connection, old, self
+            )
             record = self._active_record(old, component)
             if record['state'] != 'ready':
                 raise RagProviderSafetyError('provider family is blocked')
@@ -1459,6 +1519,8 @@ class RagProviderSafetyService:
                 actor_subject_hmac=actor_reference,
                 new_envelope=envelope,
                 new_envelope_digest=str(prepared['envelope_digest']),
+                provider_before_image=provider_before_image,
+                provider_before_image_hmac=provider_before_image_hmac,
                 _seal=_RELEASE_INCIDENT_PLAN_SEAL,
             )
 
@@ -1467,73 +1529,14 @@ class RagProviderSafetyService:
         connection: Connection,
         prepared: _PreparedReleaseProviderIncident,
     ) -> _AppliedReleaseProviderIncident:
-        """Apply one prepared incident while the caller holds both locks."""
-        if (
-            type(prepared) is not _PreparedReleaseProviderIncident
-            or prepared._seal is not _RELEASE_INCIDENT_PLAN_SEAL
-            or prepared.service is not self
-        ):
-            raise RagProviderSafetyError('provider incident plan is invalid')
-        old = self._read_unlocked()
-        authority_before, rows_before = self._match_db_whole_set(
-            connection, old, for_update=True
+        """Compatibility entry; the release peer uses the non-virtual operation."""
+        from backend.app.agent_runtime.rag_provider_incident import (
+            _execute_incident_operation,
+            _prepare_incident_operation,
         )
-        record = self._active_record(old, prepared.component)
-        readiness_before = next(
-            row
-            for row in rows_before
-            if row['active'] and row['component'] == prepared.component
-        )
-        if (
-            old['envelope_digest'] != prepared.old_envelope_digest
-            or old['global_safety_generation'] != prepared.old_global_generation
-            or record['state'] != 'ready'
-            or record['state_version'] != prepared.old_state_version
-        ):
-            raise RagProviderSafetyError('provider incident plan CAS failed')
-        # Build and validate the complete authority/readiness/history delta while
-        # rollback and an unchanged latch are still possible. The private SQL
-        # schema never aliases ORM or release-plan objects, including defaults.
-        from backend.app.agent_runtime.rag_provider_incident import _incident_write
 
-        prospective = self._validate_envelope(
-            dict(prepared.new_envelope),
-            raw=canonical_json_bytes(dict(prepared.new_envelope)),
-        )
-        write = _incident_write(connection, prepared, old, prospective)
-        self._match_database_rows(
-            prospective, write.authority_after, write.readiness_after
-        )
-        # External authority always moves first.  A later DB failure deliberately
-        # leaves a detectable external/DB mismatch and therefore fails stopped.
-        self._authority._replace_unlocked(dict(prepared.new_envelope))
-        new = self._read_unlocked()
-        if new['envelope_digest'] != prepared.new_envelope_digest:
-            raise RagProviderSafetyError('provider incident envelope differs')
-        try:
-            # Ordinary admin transitions retain their existing path. Sealed
-            # incidents never enter the ORM-backed _commit_transition routine.
-            authority_rows, rows_after, _history_after = write.execute()
-            authority_after = authority_rows[0]
-        except Exception:
-            connection.rollback()
-            raise RagProviderSafetyError(
-                'external provider incident persisted but DB transition failed'
-            ) from None
-        readiness_after = next(
-            row
-            for row in rows_after
-            if row['active'] and row['component'] == prepared.component
-        )
-        return _AppliedReleaseProviderIncident(
-            old_body=old,
-            new_body=new,
-            authority_before=dict(authority_before),
-            authority_after=dict(authority_after),
-            readiness_before=dict(readiness_before),
-            readiness_after=dict(readiness_after),
-            _seal=_RELEASE_INCIDENT_PLAN_SEAL,
-        )
+        operation = _prepare_incident_operation(connection, prepared)
+        return _execute_incident_operation(operation)
 
     def _commit_transition(
         self,

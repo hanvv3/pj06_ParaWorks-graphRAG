@@ -121,15 +121,21 @@ def _release_barrier_boundary():
         def apply_provider_incident(self, plan):
             from backend.app.admin.rag_provider_safety import (
                 RagProviderSafetyReleasePeerGuard,
-                _freeze_release_peer,
+                _ProviderReleaseCheckpoint,
             )
 
             _owner, connection, provider, _thread = state(self)
+            if self not in provider_checkpoints:
+                self.freeze_provider()
+            checkpoint, authorization_table = provider_checkpoints[self]
             evidence = RagProviderSafetyReleasePeerGuard.apply_incident(
                 provider, connection, plan
             )
-            provider_checkpoints[self] = _freeze_release_peer(
-                _owner._provider_safety_release_peer, provider, connection
+            if type(checkpoint) is not _ProviderReleaseCheckpoint:
+                raise RagReleaseAuthorityError('provider checkpoint is invalid')
+            provider_checkpoints[self] = (
+                _ProviderReleaseCheckpoint.with_incident(checkpoint, evidence),
+                authorization_table,
             )
             return evidence
 
@@ -139,14 +145,42 @@ def _release_barrier_boundary():
             owner, connection, provider, _thread = state(self)
             if self in provider_checkpoints:
                 raise RagReleaseAuthorityError('provider checkpoint is already frozen')
-            provider_checkpoints[self] = _freeze_release_peer(
+            checkpoint = _freeze_release_peer(
                 owner._provider_safety_release_peer, provider, connection
             )
+            authorization_table = None
+            if owner._table_state(connection) == set(RAG_RELEASE_TABLE_NAMES):
+                authorization_table = release_tables(
+                    build_rag_release_metadata()
+                ).authorizations
+            provider_checkpoints[self] = (checkpoint, authorization_table)
 
         def revalidate_provider(self):
             _owner, connection, provider, _thread = state(self)
             if self in provider_checkpoints:
-                provider_checkpoints[self]()
+                from backend.app.admin.rag_provider_safety import (
+                    _ProviderReleaseCheckpoint,
+                )
+
+                checkpoint, authorization_table = provider_checkpoints[self]
+                if type(checkpoint) is _ProviderReleaseCheckpoint:
+                    _ProviderReleaseCheckpoint.__call__(checkpoint)
+                    provider_digest = _ProviderReleaseCheckpoint.envelope_digest.fget(
+                        checkpoint
+                    )
+                else:
+                    checkpoint()
+                    provider_digest = None
+                if authorization_table is not None and provider_digest is not None:
+                    started_digests = connection.execute(
+                        select(
+                            authorization_table.c.provider_safety_envelope_digest
+                        ).where(authorization_table.c.state == 'started')
+                    ).scalars()
+                    if any(digest != provider_digest for digest in started_digests):
+                        raise RagReleaseAuthorityError(
+                            'release/provider incident authority differs'
+                        )
             else:
                 provider.revalidate_database_peer(connection)
 

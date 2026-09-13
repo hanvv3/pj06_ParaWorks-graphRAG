@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -434,6 +435,8 @@ def _owned_provider_incident(plan):
         expected = (
             dict
             if name == 'new_envelope'
+            else bytes
+            if name == 'provider_before_image'
             else datetime
             if name == 'observed_at'
             else Decimal
@@ -638,6 +641,7 @@ class RagReleaseMutationSet:
         self._observation_rows.append(stored)
 
     def _capture_provider_incident(self, evidence: object) -> None:
+        from backend.app.agent_runtime.rag_provider_incident import _thaw
         from backend.app.agent_runtime.rag_provider_safety import (
             _RELEASE_INCIDENT_PLAN_SEAL,
             _AppliedReleaseProviderIncident,
@@ -649,8 +653,18 @@ class RagReleaseMutationSet:
             or self._executed
         ):
             raise RagReleaseLedgerError('provider incident evidence is invalid')
-        authority_uuid = str(evidence.new_body['authority_uuid'])
-        readiness = evidence.readiness_after
+        body = _AppliedReleaseProviderIncident._body(evidence.latch_after)
+        before = _thaw(evidence.provider_before)
+        after = _thaw(evidence.provider_actual)
+        authority_before = before[0][0]
+        authority_after = after[0][0]
+        readiness_before = next(
+            row for row in before[1] if row['id'] == evidence.target_readiness_id
+        )
+        readiness = next(
+            row for row in after[1] if row['id'] == evidence.target_readiness_id
+        )
+        authority_uuid = str(body['authority_uuid'])
         rows = (
             ReleaseRowPrimaryKey(
                 'provider_safety_authority', {'authority_uuid': authority_uuid}
@@ -670,12 +684,8 @@ class RagReleaseMutationSet:
         if any(plan.row in rows for plan in self._plans):
             raise RagReleaseLedgerError('provider incident rows cannot be SQL planned')
         self._rows.extend(rows)
-        self._before_snapshots.extend(
-            [dict(evidence.authority_before), dict(evidence.readiness_before)]
-        )
-        self._after_snapshots.extend(
-            [dict(evidence.authority_after), dict(evidence.readiness_after)]
-        )
+        self._before_snapshots.extend([dict(authority_before), dict(readiness_before)])
+        self._after_snapshots.extend([dict(authority_after), dict(readiness)])
 
     def _capture_observations_under_barrier(
         self,
@@ -3770,10 +3780,11 @@ class RagReleaseLedger:
                     incident_evidence = barrier_guard.apply_provider_incident(
                         provider_incident
                     )
-                    if (
-                        incident_evidence.new_body['envelope_digest']
-                        != payload['provider_safety_envelope_digest']
-                    ):
+                    incident_digest = hashlib.sha256(
+                        b'paraworks:provider-safety-envelope-file:v1\x00'
+                        + incident_evidence.latch_after
+                    ).hexdigest()
+                    if incident_digest != payload['provider_safety_envelope_digest']:
                         raise RagReleaseLedgerError(
                             'provider incident envelope differs from payload'
                         )

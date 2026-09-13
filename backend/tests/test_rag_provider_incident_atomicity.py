@@ -339,6 +339,39 @@ def test_incident_accepts_complete_prior_provider_history(tmp_path, monkeypatch)
     ]
 
 
+def test_incident_preparation_refuses_preexisting_historical_digest_corruption(
+    tmp_path, monkeypatch
+):
+    from decimal import Decimal
+
+    h = incident_harness(tmp_path, monkeypatch, prior_provider_history=True)
+    runtime = h.authority._provider_safety_release_peer._provider_safety
+    with h.engine.connect() as connection:
+        connection.execute(
+            text(
+                'UPDATE rag_provider_safety_transitions '
+                'SET envelope_digest = :value WHERE global_safety_generation = 1'
+            ),
+            {'value': 'f' * 64},
+        )
+        connection.commit()
+        before = database_image(connection)
+    latch = runtime._latch_path.read_bytes()
+    with h.engine.connect() as connection, pytest.raises(RagProviderSafetyError):
+        h.authority._provider_safety_release_peer.prepare_incident(
+            connection,
+            component='answer_generation',
+            category='provider_usage_overrun',
+            agent_run_id=99,
+            input_tokens=20,
+            output_tokens=30,
+            cost_usd=Decimal('0.100000'),
+        )
+    with h.engine.connect() as connection:
+        assert database_image(connection) == before
+    assert runtime._latch_path.read_bytes() == latch
+
+
 @pytest.mark.parametrize(
     'damage',
     [
@@ -348,6 +381,9 @@ def test_incident_accepts_complete_prior_provider_history(tmp_path, monkeypatch)
         'history_actor',
         'history_review_reference',
         'history_chain',
+        'history_old_digest',
+        'history_reordered',
+        'history_kind',
         'inactive_extra',
     ],
 )
@@ -355,7 +391,10 @@ def test_incident_refuses_inconsistent_complete_roster_before_latch_or_dml(
     tmp_path, monkeypatch, damage
 ):
     h = incident_harness(
-        tmp_path, monkeypatch, prior_provider_history=damage == 'history_chain'
+        tmp_path,
+        monkeypatch,
+        prior_provider_history=damage
+        in {'history_chain', 'history_old_digest', 'history_reordered', 'history_kind'},
     )
     original = RagReleaseLedger.append
     phase = {'dml': []}
@@ -396,6 +435,24 @@ def test_incident_refuses_inconsistent_complete_roster_before_latch_or_dml(
             connection.exec_driver_sql(
                 'UPDATE rag_provider_safety_transitions '
                 'SET prior_state_version = 99 WHERE global_safety_generation = 2'
+            )
+        elif damage == 'history_old_digest':
+            connection.execute(
+                text(
+                    'UPDATE rag_provider_safety_transitions '
+                    'SET envelope_digest = :value WHERE global_safety_generation = 1'
+                ),
+                {'value': 'f' * 64},
+            )
+        elif damage == 'history_reordered':
+            connection.exec_driver_sql(
+                'UPDATE rag_provider_safety_transitions '
+                'SET id = 99 WHERE global_safety_generation = 0'
+            )
+        elif damage == 'history_kind':
+            connection.exec_driver_sql(
+                "UPDATE rag_provider_safety_transitions SET transition_kind = 'reset' "
+                'WHERE global_safety_generation = 1'
             )
         else:
             connection.exec_driver_sql(
@@ -510,13 +567,24 @@ def test_incident_owned_sql_matches_physical_native_columns_without_aliases():
             assert column.default is None and column.onupdate is None
 
 
-def test_incident_does_not_reenter_overridable_service_reader_after_dml(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    'target',
+    [
+        '_match_db_whole_set',
+        '_match_database_rows',
+        '_validate_envelope',
+        '_signature',
+        '_file_digest_bytes',
+        '_apply_release_incident',
+    ],
+)
+def test_incident_does_not_reenter_overridable_service_after_dml(
+    tmp_path, monkeypatch, target
 ):
     h = incident_harness(tmp_path, monkeypatch)
     runtime = h.authority._provider_safety_release_peer._provider_safety
     original_append = RagReleaseLedger.append
-    original_match = runtime._match_db_whole_set
+    original_method = getattr(runtime, target)
     phase = {'incident': False, 'dml': [], 'calls': []}
 
     def append(self, connection, payload, **kwargs):
@@ -528,11 +596,18 @@ def test_incident_does_not_reenter_overridable_service_reader_after_dml(
             phase['latch'] = runtime._latch_path.read_bytes()
         return original_append(self, connection, payload, **kwargs)
 
-    def match(connection, body, *, for_update=False):
+    def callback(*args, **kwargs):
+        if target == '_apply_release_incident':
+            result = original_method(*args, **kwargs)
+            attack()
+            return result
+        attack()
+        return original_method(*args, **kwargs)
+
+    def attack():
         if phase['incident'] and phase['dml'] and not phase['calls']:
-            phase['calls'].append('commit')
+            phase['calls'].append(target)
             phase['connection'].commit()
-        return original_match(connection, body, for_update=for_update)
 
     def observe(_connection, _cursor, sql, *_):
         if phase['incident'] and sql.lstrip().upper().startswith(
@@ -541,14 +616,14 @@ def test_incident_does_not_reenter_overridable_service_reader_after_dml(
             phase['dml'].append(sql)
 
     monkeypatch.setattr(RagReleaseLedger, 'append', append)
-    monkeypatch.setattr(runtime, '_match_db_whole_set', match)
+    monkeypatch.setattr(runtime, target, callback)
     event.listen(h.engine, 'before_cursor_execute', observe)
     failure = None
     try:
         incident_abort(h)
     except Exception as exc:
         failure = exc
-    assert phase['calls'] == [], 'overridable service reader ran after first DML'
+    assert phase['calls'] == [], 'overridable service callback ran after first DML'
     assert failure is None, repr(failure)
     with h.engine.connect() as connection:
         after = database_image(connection)
@@ -560,3 +635,42 @@ def test_incident_does_not_reenter_overridable_service_reader_after_dml(
         phase['latch'],
         'provider_usage_overrun',
     )
+
+
+def test_release_inspection_rejects_committed_provider_only_incident(
+    tmp_path, monkeypatch
+):
+    from decimal import Decimal
+
+    from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    h = incident_harness(tmp_path, monkeypatch)
+    h.claim()
+    h.claim_generation()
+    run = h.records('agent_run')[-1]
+    with h.engine.connect() as connection:
+        incident = h.authority._provider_safety_release_peer.prepare_incident(
+            connection,
+            component='answer_generation',
+            category='provider_usage_overrun',
+            agent_run_id=run['id'],
+            input_tokens=20,
+            output_tokens=30,
+            cost_usd=Decimal('0.100000'),
+        )
+    marker_before = h.authority.marker_path.read_bytes()
+    marker = DurableFileAuthority.open_runtime(h.authority.marker_path)
+    with (
+        h.engine.connect() as connection,
+        h.authority._authority_barrier(connection, marker=marker) as guard,
+    ):
+        guard.apply_provider_incident(incident)
+        connection.commit()
+    with h.engine.connect() as connection:
+        image = database_image(connection)
+        with pytest.raises(RagReleaseAuthorityError):
+            h.authority.inspect(connection, database_identity=h.database_identity)
+    assert image[PROVIDER[0]][0]['global_safety_generation'] == 1
+    assert image['rag_live_gate_authorizations'][0]['state'] == 'started'
+    assert h.authority.marker_path.read_bytes() == marker_before
