@@ -3044,6 +3044,17 @@ truncation. Declarations that lose all effective prior context refuse. Source
 bytes and clean Git identity are rechecked after the final reader/oracle read
 and derivation, then again after lock exit immediately before provenance issue.
 
+**Task24-A round-2 oracle alias boundary.** Before calling the adapter, retain
+the six exact expected request scalars in an independent private snapshot that
+is never passed to it. Compare both the exposed request and the returned
+request against that snapshot, with exact native scalar types, and serialize
+only the retained expected binding into the oracle result/HMAC preimage.
+Frozen dataclasses, deep copies, or equality to an exposed object are not the
+authority. A restored input with a tampered returned copy still refuses. If
+both are restored to the exact expected binding, adapter mutation history is
+observationally irrelevant: preview bytes and identity must remain identical;
+no mutation-tracking API or new execution authority is introduced.
+
 ```text
 fixture_manifest_hmac = keyed_fingerprint(
   schema_version="rag-live-fixture-manifest:v1",

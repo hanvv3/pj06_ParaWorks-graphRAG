@@ -7233,3 +7233,24 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   warnings), credential `3 passed`, Ruff/format/compile/diff clean. The skips
   remain unexecuted PostgreSQL gates; no live/network/paid/release operation,
   OAuth, push, merge or deployment occurred.
+
+## 2026-09-13 Task24-A round-2 oracle request alias remediation candidate
+
+- Implementation commit: `a3444d8`; independent re-review pending.
+- Independent rereview reproduced a shared-request alias: the adapter could
+  mutate a frozen request and thereby alter the value used as its own baseline.
+  The preview now keeps an unexposed immutable scalar snapshot, verifies both
+  request objects against it, and serializes only the independently retained
+  binding. Oracle-result and preview HMACs bind the reader's definition identity
+  together with the independently retained exact manifest identity.
+- All six fields are tested with aliases, copies, container replacements and
+  adapter failures. Restored inputs cannot validate a tampered returned copy;
+  fully restored exact bindings preserve canonical preview bytes and HMAC.
+- This is a single-boundary fix, not a new authority or request-tracking API.
+  Fixture, pricing, runtime images, Task24-B refusal and Task25 readiness remain
+  unchanged. Independent re-review and PostgreSQL verification remain pending.
+- Verified RED `12 failed, 26 passed` before the production change; final alias
+  probes `44 passed`; release/A/remediation/CLI regression `900 passed, 14 skipped`;
+  direct impact `259 passed, 13 skipped` (11 existing Alembic warnings), credential
+  `3 passed`, Ruff/format/compile/diff clean. No live/network/paid/OAuth/release
+  operation, push, merge or deployment occurred. Task24 overall remains incomplete.

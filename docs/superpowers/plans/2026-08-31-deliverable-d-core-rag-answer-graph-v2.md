@@ -2308,6 +2308,22 @@ complete release/carryover selection `856 passed, 14 skipped`; preview impact
 (11 existing Alembic warnings); credential `3 passed`; Ruff/format/compile/diff
 clean. PostgreSQL DSN remains absent; Task24 overall remains incomplete.
 
+**Task24-A round-2 remediation:** retain an unexposed immutable scalar snapshot
+of the oracle request before invoking the reader. Validate both exposed and
+returned request values against it, and serialize only independently retained
+expected values. An adapter cannot change the manifest/query binding by
+mutating a shared frozen-dataclass instance. Preserve zero-call, zero-DML and
+zero-provenance-issuance refusal for aliased/copied mismatch, mutable-container
+substitution, adapter failure and restored-input/tampered-copy cases. An exact
+restored binding must produce identical canonical bytes/HMAC. No new authority,
+request mutation tracker, evaluator or production adapter is added.
+
+Round-2 candidate `a3444d8` is pending independent re-review. Confirmed RED:
+`12 failed, 26 passed`; final alias probes `44 passed`; complete release/A/CLI
+regression `900 passed, 14 skipped`; direct impact `259 passed, 13 skipped`
+(11 existing Alembic warnings); credential `3 passed`; Ruff/format/compile/diff
+clean. PostgreSQL and Task24-B/Task25 gates remain; Task24 is not complete.
+
 **Interfaces:**
 
 ```text

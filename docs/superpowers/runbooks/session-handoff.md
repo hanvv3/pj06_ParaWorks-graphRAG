@@ -2,6 +2,27 @@
 
 Updated: 2026-09-13
 
+## 2026-09-13 Task24-A round-2 oracle alias remediation candidate
+
+- Implementation commit: `a3444d8` (`fix: isolate task24-a oracle request binding`).
+- A rereview found that mutating the shared frozen request could also alter
+  the expected comparison baseline. Oracle calls now retain a private tuple
+  of six native scalar bindings before invoking the adapter; both exposed and
+  returned requests must match it, and only those expected values are serialized.
+- Tests cover every field through aliased/copied results, container replacement,
+  adapter failure, changed input with a valid copy, and restored input with a
+  tampered copy. Fully restored exact results retain identical preview bytes/HMAC.
+- The fixture/root identity, runtime images, limits, Task24-B default refusal
+  and Task25 evaluator readiness gate are unchanged. Independent re-review is
+  pending; Task24 overall remains incomplete. No live/provider/release operation
+  or authorization was performed.
+- Verified: RED `12 failed, 26 passed`; final alias probes `44 passed`; complete
+  release/A/remediation/CLI selection `900 passed, 14 skipped`; direct-impact
+  provider/cost/runtime/input selection `259 passed, 13 skipped` with 11 existing
+  Alembic warnings. Credential scan `3 passed`; all nine A Python files pass
+  Ruff/format/compile, and diff checks are clean. PostgreSQL DSN remains absent;
+  the 27 conditional skips remain unexecuted gates.
+
 ## 2026-09-13 Task24-A round-1 remediation candidate
 
 - Implementation commit: `b2f247e` (`fix: close task24-a preview evidence and drift gaps`).
