@@ -5524,8 +5524,8 @@ tests passed with 53 tests; ruff passed.
 
 ## 2026-09-13 Task 23 F1-F9 remediation handoff
 
-- The first Task 23 independent review was NOT CLEAN. The current uncommitted
-  remediation requires a sealed pinned Task 22 provider-safety peer on the same
+- The first Task 23 independent review was NOT CLEAN. Implementation commit
+  `330b9a7` requires a sealed pinned Task 22 provider-safety peer on the same
   PostgreSQL connection, then acquires provider stable/advisory locks before
   release stable/advisory locks and holds them through release commit. Never
   replace this peer with a path-only or owner-only check.
@@ -5549,6 +5549,7 @@ tests passed with 53 tests; ruff passed.
   Task22/advisory PostgreSQL gates. `PARAWORKS_TEST_POSTGRES_URL` is unavailable.
   Do not claim SQLite as physical PostgreSQL evidence.
 - Before requesting rereview, finish compile/import/diff/credential checks,
-  commit locally, and record the exact SHA/range. Do not run a real release
+  then use remediation range `66d2477..330b9a7` or cumulative range
+  `0771405..330b9a7`. Do not run a real release
   command, provider/network/paid call, rollout, push, merge or deploy. Task 24
   remains blocked until independent CLEAN and is an actual implementation task.

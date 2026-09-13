@@ -6977,3 +6977,7 @@ Cost/security note:
   been released. An earlier Task 23 candidate validation database is
   incompatible and must not be repaired in place. No live release/provider/
   network/paid/rollout/push/merge/deploy operation occurred.
+- F1-F9 implementation is recorded locally at `330b9a7`. Independent review
+  must inspect `66d2477..330b9a7` for the remediation or
+  `0771405..330b9a7` cumulatively. Status remains **DONE_WITH_CONCERNS pending
+  independent rereview**.
