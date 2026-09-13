@@ -170,16 +170,17 @@ def test_affected_runtime_signature_binds_exact_completion_timestamp(harness):
 
 
 def test_completion_cannot_precede_start_within_the_same_second(harness, monkeypatch):
-    from backend.tests import test_rag_release_ledger_review_q as fixtures
+    from backend.app.rag import release_review
 
-    original = fixtures._agent_run_values
+    class Clock:
+        @staticmethod
+        def now(_zone):
+            return datetime(2026, 9, 13, 1, 2, 3, 500000, tzinfo=UTC)
+
     monkeypatch.setattr(
-        fixtures,
-        '_agent_run_values',
-        lambda run_id=41: {
-            **original(run_id),
-            'started_at': datetime(2026, 9, 13, 1, 2, 3, 500000, tzinfo=UTC),
-        },
+        release_review,
+        'datetime',
+        Clock,
     )
     harness.claim()
     changes, failed = failure_changes(harness)
@@ -299,7 +300,7 @@ def test_mutation_seal_rejects_stale_or_changed_plan_before_sql(harness, tamper)
         if tamper == 'before':
             connection.execute(
                 update(AgentRun.__table__)
-                .where(AgentRun.id == 41)
+                .where(AgentRun.id == harness.records('agent_run')[0]['id'])
                 .values(metadata={'revision': 2})
             )
             connection.commit()

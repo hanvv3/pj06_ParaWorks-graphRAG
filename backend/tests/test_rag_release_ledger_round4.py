@@ -220,12 +220,18 @@ def test_component_outcome_cannot_rotate_claimed_child_process():
 
 
 @pytest.fixture
-def harness(tmp_path):
+def harness(tmp_path, request):
     from backend.tests.release_ledger_fixtures import ReleaseHarness
     from backend.tests.test_rag_release_ledger import _authority, _identity
 
     engine = create_engine('sqlite://')
-    yield ReleaseHarness(engine, _authority(tmp_path), _SECRET, _identity())
+    yield ReleaseHarness(
+        engine,
+        _authority(tmp_path),
+        _SECRET,
+        _identity(),
+        query_reserves=getattr(request, 'param', ()),
+    )
     engine.dispose()
 
 
@@ -383,6 +389,7 @@ def test_equal_ready_provider_cannot_fabricate_control_abort(harness):
     assert harness.records('case')[0]['state'] == 'claimed'
 
 
+@pytest.mark.parametrize('harness', [('0.001000',)], indirect=True)
 def test_query_success_observes_parent_and_generation_sibling(harness):
     from decimal import Decimal
 
@@ -653,7 +660,7 @@ def test_prior_runtime_projection_changes_terminal_transition_digest(harness):
     with harness.engine.begin() as connection:
         connection.execute(
             update(AgentRun.__table__)
-            .where(AgentRun.id == 41)
+            .where(AgentRun.id == harness.records('agent_run')[0]['id'])
             .values(metadata={'fixture_revision': 2})
         )
     with harness.engine.begin() as connection:

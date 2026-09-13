@@ -9,7 +9,6 @@ import pytest
 from sqlalchemy import create_engine, insert
 
 from backend.app.models.agent_runs import AgentRun
-from backend.app.models.rag_runtime import AgentRunCostComponent
 from backend.app.rag.release_schema import build_rag_release_metadata, release_tables
 from backend.tests.test_rag_release_ledger import (
     _SECRET,
@@ -385,106 +384,14 @@ def test_case_claim_appends_with_logical_run_identity_and_exact_runtime_roster(
     tmp_path: Path,
 ) -> None:
     """Catches the logical/physical PK bridge failing in a real append path."""
-    from sqlalchemy import update
-
-    from backend.app.rag.release_ledger import (
-        RagReleaseLedger,
-        ReleaseRowPrimaryKey,
-    )
-    from backend.tests.test_rag_release_ledger import (
-        _capture_bootstrap_authorization,
-    )
+    from backend.tests.release_ledger_fixtures import ReleaseHarness
 
     authority = _authority(tmp_path)
-    ledger = RagReleaseLedger(authority=authority, identity_secret=_SECRET)
     engine = create_engine('sqlite+pysqlite:///:memory:')
-    with engine.begin() as connection:
-        AgentRun.__table__.create(connection)
-        AgentRunCostComponent.__table__.create(connection)
-        initial = authority.initialize(
-            connection,
-            database_identity=_identity(),
-            review_envelope_hmac='1' * 64,
-            review_nonce_hmac='2' * 64,
-        )
-    bootstrap = _bootstrap_payload(initial)
-    with engine.begin() as connection:
-        first = ledger.append(
-            connection,
-            bootstrap,
-            actual_mutations=_capture_bootstrap_authorization(
-                connection, ledger, bootstrap
-            ),
-            database_identity=_identity(),
-        )
-    payload = _valid_payload_for_kind(first, 'case_claim')
+    harness = ReleaseHarness(engine, authority, _SECRET, _identity())
+    harness.claim()
     tables = release_tables(build_rag_release_metadata())
-    common = {
-        'ledger_uuid': payload['ledger_uuid'],
-        'ledger_epoch': payload['ledger_epoch'],
-        'approval_id_hmac': payload['approval_id_hmac'],
-    }
-    with engine.begin() as connection:
-        mutations = ledger.mutation_set(connection)
-        mutations.plan(
-            update(tables.authorizations)
-            .where(
-                tables.authorizations.c.ledger_uuid == payload['ledger_uuid'],
-                tables.authorizations.c.ledger_epoch == payload['ledger_epoch'],
-                tables.authorizations.c.approval_id_hmac == payload['approval_id_hmac'],
-            )
-            .values(
-                state='started',
-                execution_process_instance_hmac=payload[
-                    'execution_process_instance_hmac'
-                ],
-                execution_runner_fence_hmac=payload['execution_runner_fence_hmac'],
-                case_claim_count=1,
-            ),
-            ReleaseRowPrimaryKey('authorization', common),
-        )
-        case_key = {**common, 'case_id_hmac': payload['case_id_hmac']}
-        mutations.plan(
-            insert(tables.cases).values(
-                **case_key,
-                manifest_ordinal=0,
-                case_projection_hmac=None,
-                state='claimed',
-                runtime_agent_run_id_hmac=payload['runtime_agent_run_id_hmac'],
-                embedding_reserved_cost_usd='0.000000',
-                generation_reserved_cost_usd='0.000000',
-                total_reserved_cost_usd='0.000000',
-            ),
-            ReleaseRowPrimaryKey('case', case_key),
-        )
-        mutations.plan(
-            insert(AgentRun.__table__).values(**_agent_run_values()),
-            ReleaseRowPrimaryKey('agent_run', {'agent_run_id': 41}),
-        )
-        for component in ('query_embedding', 'answer_generation'):
-            mutations.plan(
-                insert(AgentRunCostComponent.__table__).values(
-                    **_not_attempted_component(41, component)
-                ),
-                ReleaseRowPrimaryKey(
-                    'cost_component',
-                    {'agent_run_id': 41, 'component': component},
-                ),
-            )
-        from backend.tests.release_ledger_fixtures import (
-            observe_provider_fixture,
-            sign_runtime_plans,
-        )
-
-        observe_provider_fixture(connection, mutations)
-        sign_runtime_plans(payload, mutations, connection, _SECRET)
-        advanced = ledger.append(
-            connection,
-            payload,
-            actual_mutations=mutations,
-            database_identity=_identity(),
-        )
-    assert advanced.generation == 2
+    assert harness.snapshot.generation == 2
     with engine.connect() as connection:
         assert (
             connection.scalar(
@@ -496,7 +403,7 @@ def test_case_claim_appends_with_logical_run_identity_and_exact_runtime_roster(
             connection.scalar(
                 AgentRun.__table__.select().with_only_columns(AgentRun.id)
             )
-            == 41
+            == 1
         )
 
 

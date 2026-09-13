@@ -462,7 +462,7 @@ def incident_abort(harness):
             connection,
             component='answer_generation',
             category='provider_usage_overrun',
-            agent_run_id=41,
+            agent_run_id=run['id'],
             input_tokens=20,
             output_tokens=30,
             cost_usd=Decimal('0.100000'),
@@ -578,7 +578,13 @@ def test_every_kind_appends_real_sql_with_paired_invalid_proof(
         incident_abort(harness)
     else:
         harness = ReleaseHarness(
-            create_engine('sqlite://'), _authority(tmp_path), _SECRET, _identity()
+            create_engine('sqlite://'),
+            _authority(tmp_path),
+            _SECRET,
+            _identity(),
+            query_reserves=('0.001000',) * 10
+            if kind in {'authorization_complete', 'authorization_finish_quality_failed'}
+            else (),
         )
         if kind == 'authorization_bootstrap':
             pass

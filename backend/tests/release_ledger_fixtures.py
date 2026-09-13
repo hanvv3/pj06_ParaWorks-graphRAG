@@ -49,10 +49,16 @@ def provider_rows():
             'model': 'text-embedding-3-small' if query else 'gpt-5.4-mini-2026-03-17',
             'reasoning_or_config_identity': 'dimensions:1536' if query else 'low',
             'active': True,
-            'authorized_model_config_version': 'fixture:v1',
+            'authorized_model_config_version': 'rag-query-embedding-config:v1'
+            if query
+            else 'rag-answer-model-config:v1',
             'authorized_model_config_snapshot_hmac': '1' * 64,
-            'authorized_cost_policy_version': 'fixture:v1',
-            'authorized_token_estimator_version': 'fixture:v1',
+            'authorized_cost_policy_version': 'rag-query-embedding-cost:v1'
+            if query
+            else 'rag-answer-cost:v1',
+            'authorized_token_estimator_version': 'openai-cl100k-text-embedding-3-small:v1'
+            if query
+            else 'openai-o200k-rag-answer:v1',
             'authorized_fingerprint_key_version': 'v1',
             'authorized_fingerprint_key_material_verifier': '1' * 64,
             'authorized_policy_snapshot_hmac': '2' * 64,
@@ -231,10 +237,70 @@ def row_key(kind, row):
     return ReleaseRowPrimaryKey(kind, {key: row[key] for key in keys})
 
 
+def claim_manifest_fixture(*, provider_records=None, query_reserves=()):
+    """Independent reviewed fake policy inputs, frozen before bootstrap/SQL plans."""
+    from backend.app.agent_runtime.rag_runtime_contracts import (
+        AuthorizedProviderPolicySnapshot,
+    )
+    from backend.app.rag.release_review import (
+        FrozenCaseClaimCase,
+        FrozenCaseClaimComponent,
+        FrozenCaseClaimManifest,
+    )
+
+    provider_records = provider_records or [
+        row for key, row in provider_rows() if key.row_kind == 'provider_readiness'
+    ]
+    policies = []
+    for component in ('query_embedding', 'answer_generation'):
+        row = next(
+            row
+            for row in provider_records
+            if row['component'] == component and row['active']
+        )
+        policies.append(
+            AuthorizedProviderPolicySnapshot(
+                **{
+                    name: row[
+                        'authorized_' + name
+                        if name.startswith('fingerprint_')
+                        else name
+                    ]
+                    for name in AuthorizedProviderPolicySnapshot.__dataclass_fields__
+                }
+            )
+        )
+    return FrozenCaseClaimManifest(
+        cases=tuple(
+            FrozenCaseClaimCase(
+                ordinal=ordinal,
+                case_id_hmac=f'{ordinal + 1:064x}',
+                surface='ask',
+                configured_backend='pgvector' if query else 'keyword',
+                current_text_hmac='4' * 64,
+                retrieval_query_hmac='5' * 64,
+                security_scope_fingerprint='6' * 64,
+                components=(
+                    FrozenCaseClaimComponent(policies[0], 10 if query else 0, 0, query),
+                    FrozenCaseClaimComponent(policies[1], 10, 10, Decimal('0.001000')),
+                ),
+            )
+            for ordinal in range(30)
+            for query in [
+                Decimal(query_reserves[ordinal])
+                if ordinal < len(query_reserves)
+                else Decimal('0.000000')
+            ]
+        )
+    )
+
+
 class ReleaseHarness:
     """Real SQL mutation/append harness; only authority transport is a test seam."""
 
-    def __init__(self, engine, authority, secret, database_identity):
+    def __init__(
+        self, engine, authority, secret, database_identity, *, query_reserves=()
+    ):
         from backend.app.models.agent_runs import AgentRun
         from backend.app.models.rag_runtime import AgentRunCostComponent
         from backend.app.rag.release_ledger import RagReleaseLedger
@@ -292,6 +358,25 @@ class ReleaseHarness:
                     provider_safety_envelope_digest=payload[
                         'provider_safety_envelope_digest'
                     ]
+                ),
+                mutations._plans[0].row,
+            )
+            from backend.app.rag.release_review import case_claim_manifest_hmac
+
+            self.manifest = claim_manifest_fixture(
+                provider_records=[
+                    dict(row)
+                    for row in connection.execute(
+                        select(RagProviderReadiness.__table__)
+                    ).mappings()
+                ],
+                query_reserves=query_reserves,
+            )
+            mutations._plans[0] = type(mutations._plans[0])(
+                mutations._plans[0].statement.values(
+                    manifest_hmac=case_claim_manifest_hmac(
+                        self.manifest, identity_secret=secret
+                    )
                 ),
                 mutations._plans[0].row,
             )
@@ -469,7 +554,7 @@ class ReleaseHarness:
         sign_runtime_plans(payload, mutations, connection, self.secret)
         return payload, mutations
 
-    def append(self, kind, changes, **kwargs):
+    def append(self, kind, changes, *, approved_case_claim=None, **kwargs):
         with self.engine.connect() as connection:
             payload, mutations = self.prepare(connection, kind, changes, **kwargs)
             self.snapshot = self.ledger.append(
@@ -477,6 +562,7 @@ class ReleaseHarness:
                 payload,
                 actual_mutations=mutations,
                 database_identity=self.database_identity,
+                approved_case_claim=approved_case_claim,
             )
         return payload
 
@@ -484,10 +570,7 @@ class ReleaseHarness:
         self, ordinal=0, *, generation_reserve='0.001000', query_reserve='0.000000'
     ):
         from backend.app.agent_runtime.rag_safety_identity import rag_identity_hmac
-        from backend.tests.test_rag_release_ledger_review_q import (
-            _agent_run_values,
-            _not_attempted_component,
-        )
+        from backend.app.rag.release_review import prepare_case_claim_projection
 
         before = self.records('authorization')[0]
         reserve = Decimal(generation_reserve)
@@ -500,6 +583,21 @@ class ReleaseHarness:
             'execution_runner_fence_hmac': 'e' * 64,
             'reserved_cost_usd': before['reserved_cost_usd'] + reserve + query_budget,
         }
+        projection_payload = {
+            **self.base,
+            'from_generation': self.snapshot.generation,
+            'case_id_hmac': f'{ordinal + 1:064x}',
+            'execution_process_instance_hmac': auth['execution_process_instance_hmac'],
+            'execution_runner_fence_hmac': auth['execution_runner_fence_hmac'],
+        }
+        with self.engine.connect() as connection:
+            projection = prepare_case_claim_projection(
+                connection,
+                manifest=self.manifest,
+                payload=projection_payload,
+                identity_secret=self.secret,
+            )
+        parent, query, generation = projection.runtime_images
         case = {
             **{
                 key: before[key]
@@ -510,7 +608,7 @@ class ReleaseHarness:
             'state': 'claimed',
             'case_projection_hmac': None,
             'runtime_agent_run_id_hmac': rag_identity_hmac(
-                {'agent_run_id': 41 + ordinal},
+                {'agent_run_id': parent['id']},
                 secret=self.secret,
                 schema_version='rag-runtime-agent-run-id:v1',
                 policy_version='rag-run:v2',
@@ -519,27 +617,17 @@ class ReleaseHarness:
             'generation_reserved_cost_usd': reserve,
             'total_reserved_cost_usd': reserve + query_budget,
         }
-        query = {
-            **_not_attempted_component(41 + ordinal, 'query_embedding'),
-            'dispatch_state': 'terminal' if query_budget == 0 else 'not_attempted',
-            'reserved_cost_usd': query_budget,
-        }
-        generation = {
-            **_not_attempted_component(41 + ordinal, 'answer_generation'),
-            'reserved_cost_usd': reserve,
-            'reserved_input_tokens': 10,
-            'reserved_output_tokens': 10,
-        }
         self.append(
             'case_claim',
             [
                 ('authorization', before, auth),
                 ('case', None, case),
-                ('agent_run', None, _agent_run_values(41 + ordinal)),
+                ('agent_run', None, parent),
                 ('cost_component', None, query),
                 ('cost_component', None, generation),
             ],
             case=case,
+            approved_case_claim=projection,
         )
 
     def claim_generation(self, component='answer_generation'):

@@ -338,7 +338,11 @@ class RagReleaseMutationSet:
         self._executed = True
 
     def _preflight_runtime_mutations(
-        self, payload: Mapping[str, object], *, identity_secret: bytes
+        self,
+        payload: Mapping[str, object],
+        *,
+        identity_secret: bytes,
+        approved_case_claim: object = None,
     ) -> None:
         """Validate literal runtime before/after images before *any* write/incident.
 
@@ -374,6 +378,12 @@ class RagReleaseMutationSet:
                 raise RagReleaseLedgerError('runtime mutation before-image is invalid')
             after = {**(before or {}), **values}
             projected.append((plan.row, before, after))
+        self._assert_approved_case_claim(
+            payload,
+            [(row.row_kind, after) for row, _, after in projected],
+            approved_case_claim=approved_case_claim,
+            identity_secret=identity_secret,
+        )
         costs = [
             after
             for row, _before, after in projected
@@ -390,6 +400,52 @@ class RagReleaseMutationSet:
             self._assert_runtime_mutation_hmac(
                 payload, row, before, after, identity_secret=identity_secret
             )
+
+    def _assert_approved_case_claim(
+        self, payload, runtime_rows, *, approved_case_claim, identity_secret
+    ):
+        if payload['transition_kind'] != 'case_claim':
+            if approved_case_claim is not None:
+                raise RagReleaseLedgerError('case claim projection kind is invalid')
+            return
+        from backend.app.rag.release_review import validate_case_claim_projection
+
+        if self._executed:
+            case_rows = [
+                after
+                for row, after in zip(self._rows, self._after_snapshots, strict=True)
+                if row.row_kind == 'case'
+            ]
+        else:
+            case_rows = []
+            for plan in self._plans:
+                if plan.row.row_kind != 'case':
+                    continue
+                if not isinstance(plan.statement, Insert):
+                    raise RagReleaseLedgerError('case claim must insert case')
+                values = {}
+                for field, binding in (plan.statement._values or {}).items():
+                    if not isinstance(binding, BindParameter) or binding.callable:
+                        raise RagReleaseLedgerError(
+                            'case claim must use literal values'
+                        )
+                    values[str(field)] = binding.value
+                case_rows.append(values)
+        validate_case_claim_projection(
+            approved_case_claim,
+            connection=self._connection,
+            payload=payload,
+            runtime_rows=runtime_rows,
+            case_rows=case_rows,
+            after_execution=self._executed,
+            observations=[
+                (row.row_kind, snapshot)
+                for row, snapshot in zip(
+                    self._observation_rows, self._observation_snapshots, strict=True
+                )
+            ],
+            identity_secret=identity_secret,
+        )
 
     @staticmethod
     def _assert_runtime_mutation_hmac(payload, row, before, after, *, identity_secret):
@@ -462,7 +518,11 @@ class RagReleaseMutationSet:
                 )
 
     def assert_payload_projection(
-        self, payload: Mapping[str, object], *, identity_secret: bytes
+        self,
+        payload: Mapping[str, object],
+        *,
+        identity_secret: bytes,
+        approved_case_claim: object = None,
     ) -> None:
         by_kind: dict[str, list[dict[str, object]]] = {}
         before_by_kind: dict[str, list[dict[str, object] | None]] = {}
@@ -1058,6 +1118,16 @@ class RagReleaseMutationSet:
             raise RagReleaseLedgerError('unexpected provider safety mutation')
         _assert_exact_transition_snapshots(
             payload, by_kind, before_by_kind, mutated_by_kind
+        )
+        self._assert_approved_case_claim(
+            payload,
+            [
+                (row.row_kind, after)
+                for row, after in zip(self._rows, self._after_snapshots, strict=True)
+                if row.row_kind in {'agent_run', 'cost_component'}
+            ],
+            approved_case_claim=approved_case_claim,
+            identity_secret=identity_secret,
         )
         for row, before, after in zip(
             self._rows, self._before_snapshots, self._after_snapshots, strict=True
@@ -2763,6 +2833,7 @@ class RagReleaseLedger:
         actual_mutations: RagReleaseMutationSet,
         database_identity: ValidationDatabaseIdentity | None = None,
         provider_incident: object = None,
+        approved_case_claim: object = None,
     ) -> RagReleaseSnapshot:
         validated = validate_transition_payload(payload, identity_secret=self._secret)
         from backend.app.admin.rag_provider_safety import (
@@ -2831,7 +2902,9 @@ class RagReleaseLedger:
                     payload, identity_secret=self._secret
                 )
                 actual_mutations._preflight_runtime_mutations(
-                    payload, identity_secret=self._secret
+                    payload,
+                    identity_secret=self._secret,
+                    approved_case_claim=approved_case_claim,
                 )
                 if provider_incident is not None:
                     authorization_before = actual_mutations._snapshot(
@@ -2872,7 +2945,9 @@ class RagReleaseLedger:
                 )
                 actual_mutations.assert_current(connection)
                 actual_mutations.assert_payload_projection(
-                    payload, identity_secret=self._secret
+                    payload,
+                    identity_secret=self._secret,
+                    approved_case_claim=approved_case_claim,
                 )
                 self._assert_database_roster(connection, payload, actual_mutations)
                 derived_actual = tuple(
