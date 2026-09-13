@@ -10,6 +10,7 @@ from backend.app.agent_runtime.durable_file_authority import DurableFileAuthorit
 from backend.app.rag.release_schema import build_rag_release_metadata, release_tables
 
 _SECRET = b'task23-release-runtime-key-material-32-bytes'
+_REVIEW = {'review_envelope_hmac': '1' * 64, 'review_nonce_hmac': '2' * 64}
 
 
 def _authority(tmp_path: Path):
@@ -96,7 +97,9 @@ def test_transition_validator_accepts_exact_bootstrap_and_is_deterministic(
     authority = _authority(tmp_path)
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
-        snapshot = authority.initialize(connection, database_identity=_identity())
+        snapshot = authority.initialize(
+            connection, database_identity=_identity(), **_REVIEW
+        )
     payload = _bootstrap_payload(snapshot)
     first = validate_transition_payload(payload, identity_secret=_SECRET)
     second = validate_transition_payload(deepcopy(payload), identity_secret=_SECRET)
@@ -131,10 +134,44 @@ def test_transition_validator_rejects_noncanonical_or_wrong_matrix(
     authority = _authority(tmp_path)
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
-        snapshot = authority.initialize(connection, database_identity=_identity())
+        snapshot = authority.initialize(
+            connection, database_identity=_identity(), **_REVIEW
+        )
     payload = _bootstrap_payload(snapshot)
     mutation(payload)
     with pytest.raises(RagReleaseLedgerError, match=message):
+        validate_transition_payload(payload, identity_secret=_SECRET)
+
+
+@pytest.mark.parametrize(
+    ('kind', 'outcome'),
+    [
+        ('case_claim', None),
+        ('component_claim', None),
+        ('authorization_complete', 'quality_gate_green'),
+        ('authorization_abort_execution_crash', 'abandoned_unknown'),
+    ],
+)
+def test_transition_validator_rejects_cross_kind_null_and_state_matrix(
+    tmp_path: Path,
+    kind: str,
+    outcome: str | None,
+) -> None:
+    from backend.app.rag.release_ledger import (
+        RagReleaseLedgerError,
+        validate_transition_payload,
+    )
+
+    authority = _authority(tmp_path)
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    with engine.begin() as connection:
+        snapshot = authority.initialize(
+            connection, database_identity=_identity(), **_REVIEW
+        )
+    payload = _bootstrap_payload(snapshot)
+    payload['transition_kind'] = kind
+    payload['outcome'] = outcome
+    with pytest.raises(RagReleaseLedgerError, match='matrix'):
         validate_transition_payload(payload, identity_secret=_SECRET)
 
 
@@ -150,7 +187,9 @@ def test_append_transition_is_gapless_cas_and_exact_affected_set(
     ledger = RagReleaseLedger(authority=authority, identity_secret=_SECRET)
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
-        snapshot = authority.initialize(connection, database_identity=_identity())
+        snapshot = authority.initialize(
+            connection, database_identity=_identity(), **_REVIEW
+        )
     payload = _bootstrap_payload(snapshot)
     actual = tuple(
         (row['row_kind'], row['row_identity_hmac'])
@@ -212,3 +251,38 @@ def test_runtime_links_are_hmac_only_and_not_foreign_keys() -> None:
         for foreign_key in table.foreign_keys
     )
 
+
+def test_inspection_reconstructs_transition_history_and_rejects_tamper(
+    tmp_path: Path,
+) -> None:
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+    from backend.app.rag.release_ledger import RagReleaseLedger
+
+    authority = _authority(tmp_path)
+    ledger = RagReleaseLedger(authority=authority, identity_secret=_SECRET)
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    with engine.begin() as connection:
+        snapshot = authority.initialize(
+            connection, database_identity=_identity(), **_REVIEW
+        )
+    payload = _bootstrap_payload(snapshot)
+    affected = tuple(
+        (row['row_kind'], row['row_identity_hmac'])
+        for row in payload['affected_rows']
+    )
+    with engine.begin() as connection:
+        ledger.append(
+            connection,
+            payload,
+            actual_affected_rows=affected,
+            database_identity=_identity(),
+        )
+    tables = release_tables(build_rag_release_metadata())
+    with engine.begin() as connection:
+        connection.execute(
+            tables.transitions.update().values(payload_canonical_bytes=b'{}')
+        )
+    with engine.connect() as connection, pytest.raises(
+        RagReleaseAuthorityError, match='transition'
+    ):
+        authority.inspect(connection, database_identity=_identity())

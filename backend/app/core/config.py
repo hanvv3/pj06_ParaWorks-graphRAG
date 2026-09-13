@@ -48,7 +48,19 @@ class Settings(BaseSettings):
     paraworks_provider_safety_implementation_plan_reference_hmac: str | None = None
     paraworks_rag_live_validation_database_url: str | None = None
     paraworks_rag_live_validation_provider_safety_latch_path: str | None = None
-    paraworks_rag_live_validation_environment_id: str = 'rag-live-validation'
+    paraworks_rag_live_validation_environment_id: str = Field(
+        default='rag-live-validation', frozen=True
+    )
+    paraworks_rag_live_validation_host_id: str | None = Field(
+        default=None, frozen=True
+    )
+    paraworks_release_ledger_authority_path: str | None = Field(
+        default=None, frozen=True
+    )
+    paraworks_release_review_key_path: str | None = None
+    paraworks_release_review_key_id: str = 'rag-release-review-v1'
+    paraworks_release_implementation_plan_reference_hmac: str | None = None
+    paraworks_rag_live_validation_database_backup_path: str | None = None
     auto_review_mode: Literal['disabled', 'shadow', 'enforce'] = 'disabled'
     auto_review_enforce_percentage: Annotated[
         Literal[0, 10, 100], BeforeValidator(_coerce_integer_literal)

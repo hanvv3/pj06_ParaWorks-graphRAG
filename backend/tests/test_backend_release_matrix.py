@@ -7,7 +7,9 @@ from scripts.backend_release_matrix import _coverage_counts, _lease_counts
 
 def test_controller_uses_exact_profile_children_and_argument_vectors():
     manifest = build_manifest()
-    assert len(manifest.profiles['postgres'].children) == 10
+    # Canonical collection plus nine existing PostgreSQL gates and the
+    # validation-only Task 23 release-authority gate.
+    assert len(manifest.profiles['postgres'].children) == 11
     assert all(isinstance(child.pytest_argv, tuple) for profile in manifest.profiles.values() for child in profile.children)
     assert all(';' not in arg and '&&' not in arg for profile in manifest.profiles.values() for child in profile.children for arg in child.pytest_argv)
 

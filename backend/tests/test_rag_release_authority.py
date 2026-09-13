@@ -44,6 +44,13 @@ def _identity(name: str = 'validation_test', oid: int = 41):
     return ValidationDatabaseIdentity(database_name=name, database_oid=oid)
 
 
+def _review_args(seed: str = '1') -> dict[str, str]:
+    return {
+        'review_envelope_hmac': seed * 64,
+        'review_nonce_hmac': str((int(seed, 16) + 1) % 16)[-1] * 64,
+    }
+
+
 def test_initialize_writes_canonical_hmac_marker_and_generation_zero_db_peer(
     tmp_path: Path,
 ) -> None:
@@ -51,7 +58,9 @@ def test_initialize_writes_canonical_hmac_marker_and_generation_zero_db_peer(
     engine = create_engine('sqlite+pysqlite:///:memory:')
 
     with engine.begin() as connection:
-        snapshot = authority.initialize(connection, database_identity=_identity())
+        snapshot = authority.initialize(
+            connection, database_identity=_identity(), **_review_args()
+        )
 
     assert snapshot.ledger_epoch == 1
     assert snapshot.generation == 0
@@ -86,9 +95,9 @@ def test_initialize_refuses_second_init_and_marker_first_crash_is_fail_stop(
     authority, marker_path, _provider_path = _service(tmp_path)
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
-        authority.initialize(connection, database_identity=_identity())
+        authority.initialize(connection, database_identity=_identity(), **_review_args())
     with engine.begin() as connection, pytest.raises(RagReleaseAuthorityError, match='already'):
-        authority.initialize(connection, database_identity=_identity())
+        authority.initialize(connection, database_identity=_identity(), **_review_args())
 
     other, other_marker, _provider_path = _service(
         tmp_path / 'crash',
@@ -96,14 +105,22 @@ def test_initialize_refuses_second_init_and_marker_first_crash_is_fail_stop(
     )
     other_engine = create_engine('sqlite+pysqlite:///:memory:')
     with other_engine.begin() as connection, pytest.raises(RuntimeError, match='crash'):
-        other.initialize(connection, database_identity=_identity('other', 42))
+        other.initialize(
+            connection,
+            database_identity=_identity('other', 42),
+            **_review_args('3'),
+        )
     assert other_marker.exists()
     with other_engine.connect() as connection:
         assert not build_rag_release_metadata().tables.keys() <= set(
             __import__('sqlalchemy').inspect(connection).get_table_names()
         )
     with other_engine.begin() as connection, pytest.raises(RagReleaseAuthorityError):
-        other.initialize(connection, database_identity=_identity('other', 42))
+        other.initialize(
+            connection,
+            database_identity=_identity('other', 42),
+            **_review_args('3'),
+        )
     assert marker_path.exists()
 
 
@@ -115,7 +132,7 @@ def test_inspection_rejects_marker_tamper_database_identity_and_host_drift(
     authority, marker_path, provider_path = _service(tmp_path)
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
-        authority.initialize(connection, database_identity=_identity())
+        authority.initialize(connection, database_identity=_identity(), **_review_args())
     with engine.connect() as connection:
         assert authority.inspect(connection, database_identity=_identity()).generation == 0
         with pytest.raises(RagReleaseAuthorityError, match='database'):
@@ -142,7 +159,7 @@ def test_inspection_rejects_noncanonical_marker_bytes(tmp_path: Path) -> None:
     authority, marker_path, _provider_path = _service(tmp_path)
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
-        authority.initialize(connection, database_identity=_identity())
+        authority.initialize(connection, database_identity=_identity(), **_review_args())
     parsed = json.loads(marker_path.read_text(encoding='utf-8'))
     marker_path.write_text(json.dumps(parsed, indent=2), encoding='utf-8')
     with engine.connect() as connection, pytest.raises(
@@ -209,7 +226,9 @@ def test_rebootstrap_preserves_old_epoch_and_disaster_uses_fresh_ledger(
     authority, marker_path, provider_path = _service(tmp_path)
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
-        first = authority.initialize(connection, database_identity=_identity())
+        first = authority.initialize(
+            connection, database_identity=_identity(), **_review_args()
+        )
     reason = 'a' * 64
     with engine.begin() as connection, pytest.raises(
         __import__(
@@ -221,6 +240,7 @@ def test_rebootstrap_preserves_old_epoch_and_disaster_uses_fresh_ledger(
             connection,
             database_identity=_identity(),
             rebootstrap_reason_hmac=reason,
+            **_review_args('3'),
         )
     tables = release_tables(build_rag_release_metadata())
     with engine.begin() as connection:
@@ -237,6 +257,7 @@ def test_rebootstrap_preserves_old_epoch_and_disaster_uses_fresh_ledger(
             connection,
             database_identity=_identity(),
             rebootstrap_reason_hmac=reason,
+            **_review_args('3'),
         )
     assert second.ledger_uuid == first.ledger_uuid
     assert second.ledger_epoch == 2
@@ -256,6 +277,7 @@ def test_rebootstrap_preserves_old_epoch_and_disaster_uses_fresh_ledger(
             connection,
             database_identity=_identity(),
             rebootstrap_reason_hmac='b' * 64,
+            **_review_args('5'),
         )
     assert third.ledger_uuid not in {first.ledger_uuid, second.ledger_uuid}
     assert third.ledger_epoch == 1

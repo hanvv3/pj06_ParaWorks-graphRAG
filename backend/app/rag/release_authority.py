@@ -448,7 +448,18 @@ class RagReleaseAuthority:
         snapshot: RagReleaseSnapshot,
         database_identity_uuid: UUID,
         database_identity: ValidationDatabaseIdentity,
+        review_envelope_hmac: str,
+        review_nonce_hmac: str,
+        review_operation: str,
     ) -> None:
+        require_lower_hmac(review_envelope_hmac)
+        require_lower_hmac(review_nonce_hmac)
+        if review_operation not in {
+            'release-ledger-init',
+            'release-ledger-rebootstrap',
+            'release-ledger-disaster-init',
+        }:
+            raise RagReleaseAuthorityError('release review operation is invalid')
         metadata = build_rag_release_metadata()
         metadata.create_all(connection)
         table = release_tables(metadata).ledgers
@@ -461,6 +472,9 @@ class RagReleaseAuthority:
                 predecessor_marker_digest=snapshot.predecessor_marker_digest,
                 rebootstrap_reason_hmac=snapshot.rebootstrap_reason_hmac,
                 marker_file_digest=snapshot.marker_file_digest,
+                bootstrap_review_envelope_hmac=review_envelope_hmac,
+                bootstrap_review_nonce_hmac=review_nonce_hmac,
+                bootstrap_operation=review_operation,
                 fingerprint_key_version=snapshot.fingerprint_key_version,
                 fingerprint_key_material_verifier=(
                     snapshot.fingerprint_key_material_verifier
@@ -479,57 +493,57 @@ class RagReleaseAuthority:
         if result.rowcount != 1:
             raise RagReleaseAuthorityError('release ledger insert failed')
 
-    def _replace_marker(
-        self,
-        envelope: dict[str, object],
-        *,
-        allow_existing: bool,
-    ) -> None:
-        authority = (
-            DurableFileAuthority.open_runtime(self._marker_path)
-            if allow_existing and self._marker_path.exists()
-            else DurableFileAuthority(self._marker_path)
-        )
-        authority.write(envelope)
-        self._validate_path_set()
-        if self._after_marker_replace is not None:
-            self._after_marker_replace()
-
     def initialize(
         self,
         connection: Connection,
         *,
         database_identity: ValidationDatabaseIdentity | None = None,
+        review_envelope_hmac: str,
+        review_nonce_hmac: str,
     ) -> RagReleaseSnapshot:
         self._validate_path_set()
         if self._marker_path.exists():
             raise RagReleaseAuthorityError('release authority already exists')
         current = self._current_database_identity(connection, database_identity)
-        with self._registered_advisory(connection):
-            self._require_fresh_database(connection)
-            identity_uuid = uuid4()
-            database_hmac = self._database_hmac(current, identity_uuid)
-            envelope = self._wrap(
-                self._body(
-                    ledger_uuid=uuid4(),
-                    ledger_epoch=1,
-                    generation=0,
-                    last_transition_digest=None,
-                    predecessor_marker_digest=None,
-                    rebootstrap_reason_hmac=None,
-                    database_identity_hmac=database_hmac,
+        marker = DurableFileAuthority(self._marker_path)
+        try:
+            with marker.locked(), self._registered_advisory(connection):
+                if self._marker_path.exists():
+                    raise RagReleaseAuthorityError(
+                        'release authority already exists'
+                    )
+                self._require_fresh_database(connection)
+                identity_uuid = uuid4()
+                database_hmac = self._database_hmac(current, identity_uuid)
+                envelope = self._wrap(
+                    self._body(
+                        ledger_uuid=uuid4(),
+                        ledger_epoch=1,
+                        generation=0,
+                        last_transition_digest=None,
+                        predecessor_marker_digest=None,
+                        rebootstrap_reason_hmac=None,
+                        database_identity_hmac=database_hmac,
+                    )
                 )
-            )
-            raw = canonical_json_bytes(envelope)
-            _body, snapshot = self._parse(raw)
-            self._replace_marker(envelope, allow_existing=False)
-            self._insert_ledger(
-                connection,
-                snapshot=snapshot,
-                database_identity_uuid=identity_uuid,
-                database_identity=current,
-            )
-            return snapshot
+                _body, snapshot = self._parse(canonical_json_bytes(envelope))
+                marker._replace_unlocked(envelope)
+                self._validate_path_set()
+                if self._after_marker_replace is not None:
+                    self._after_marker_replace()
+                self._insert_ledger(
+                    connection,
+                    snapshot=snapshot,
+                    database_identity_uuid=identity_uuid,
+                    database_identity=current,
+                    review_envelope_hmac=review_envelope_hmac,
+                    review_nonce_hmac=review_nonce_hmac,
+                    review_operation='release-ledger-init',
+                )
+                connection.commit()
+                return snapshot
+        except DurableFileAuthorityError as exc:
+            raise RagReleaseAuthorityError('release authority lock failed') from exc
 
     def _read_marker(self) -> tuple[dict[str, object], RagReleaseSnapshot]:
         self._validate_path_set()
@@ -565,7 +579,26 @@ class RagReleaseAuthority:
         *,
         database_identity: ValidationDatabaseIdentity | None = None,
     ) -> RagReleaseSnapshot:
-        _body, snapshot = self._read_marker()
+        self._validate_path_set()
+        marker = DurableFileAuthority.open_runtime(self._marker_path)
+        try:
+            with marker.locked(), self._registered_advisory(connection):
+                _body, snapshot = self._parse(marker._read_bytes_unlocked())
+                return self._inspect_locked(
+                    connection,
+                    snapshot,
+                    database_identity=database_identity,
+                )
+        except DurableFileAuthorityError as exc:
+            raise RagReleaseAuthorityError('release marker is unavailable') from exc
+
+    def _inspect_locked(
+        self,
+        connection: Connection,
+        snapshot: RagReleaseSnapshot,
+        *,
+        database_identity: ValidationDatabaseIdentity | None,
+    ) -> RagReleaseSnapshot:
         current = self._current_database_identity(connection, database_identity)
         row = self._ledger_row(connection, snapshot)
         try:
@@ -591,7 +624,61 @@ class RagReleaseAuthority:
             or any(row[key] != value for key, value in exact.items())
         ):
             raise RagReleaseAuthorityError('release marker and database identity differ')
+        self._verify_transition_history(connection, snapshot)
         return snapshot
+
+    def _verify_transition_history(
+        self,
+        connection: Connection,
+        snapshot: RagReleaseSnapshot,
+    ) -> None:
+        table = release_tables(build_rag_release_metadata()).transitions
+        rows = connection.execute(
+            select(table)
+            .where(
+                table.c.ledger_uuid == str(snapshot.ledger_uuid),
+                table.c.ledger_epoch == snapshot.ledger_epoch,
+            )
+            .order_by(table.c.generation)
+        ).mappings().all()
+        if len(rows) != snapshot.generation:
+            raise RagReleaseAuthorityError('release transition history is not gapless')
+        for expected_generation, row in enumerate(rows, start=1):
+            raw = bytes(row['payload_canonical_bytes'])
+            try:
+                payload = json.loads(raw.decode('utf-8'))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise RagReleaseAuthorityError(
+                    'release transition payload is invalid'
+                ) from exc
+            if type(payload) is not dict or canonical_json_bytes(payload) != raw:
+                raise RagReleaseAuthorityError(
+                    'release transition payload is noncanonical'
+                )
+            expected_digest = rag_identity_hmac(
+                payload,
+                secret=self._secret,
+                schema_version='rag-release-ledger-transition:v1',
+                policy_version=_POLICY_VERSION,
+            )
+            if (
+                row['generation'] != expected_generation
+                or payload.get('from_generation') != expected_generation - 1
+                or payload.get('to_generation') != expected_generation
+                or payload.get('ledger_uuid') != str(snapshot.ledger_uuid)
+                or payload.get('ledger_epoch') != snapshot.ledger_epoch
+                or payload.get('validation_database_identity_hmac')
+                != snapshot.validation_database_identity_hmac
+                or payload.get('transition_kind') != row['transition_kind']
+                or row['transition_digest'] != expected_digest
+            ):
+                raise RagReleaseAuthorityError(
+                    'release transition history verification failed'
+                )
+        if rows and rows[-1]['transition_digest'] != snapshot.last_transition_digest:
+            raise RagReleaseAuthorityError(
+                'release transition history tail differs from marker'
+            )
 
     def rebootstrap(
         self,
@@ -599,63 +686,67 @@ class RagReleaseAuthority:
         *,
         database_identity: ValidationDatabaseIdentity | None = None,
         rebootstrap_reason_hmac: str,
+        review_envelope_hmac: str,
+        review_nonce_hmac: str,
     ) -> RagReleaseSnapshot:
         require_lower_hmac(rebootstrap_reason_hmac)
         self._validate_path_set()
-        body, prior = self._read_marker()
         current = self._current_database_identity(connection, database_identity)
-        with self._registered_advisory(connection):
-            row = self._ledger_row(connection, prior)
-            identity_uuid = UUID(str(row['validation_database_identity_uuid']))
-            if (
-                row['validation_database_identity_hmac']
-                != self._database_hmac(current, identity_uuid)
-                or prior.validation_database_identity_hmac
-                != row['validation_database_identity_hmac']
-            ):
-                raise RagReleaseAuthorityError('release database identity differs')
-            if (
-                row['generation'] == prior.generation
-                and row['last_transition_digest'] == prior.last_transition_digest
-                and row['marker_file_digest'] == prior.marker_file_digest
-            ):
-                raise RagReleaseAuthorityError(
-                    'healthy release authority cannot be rebootstraped'
+        marker = DurableFileAuthority.open_runtime(self._marker_path)
+        try:
+            with marker.locked(), self._registered_advisory(connection):
+                body, prior = self._parse(marker._read_bytes_unlocked())
+                row = self._ledger_row(connection, prior)
+                identity_uuid = UUID(str(row['validation_database_identity_uuid']))
+                if (
+                    row['validation_database_identity_hmac']
+                    != self._database_hmac(current, identity_uuid)
+                    or prior.validation_database_identity_hmac
+                    != row['validation_database_identity_hmac']
+                ):
+                    raise RagReleaseAuthorityError(
+                        'release database identity differs'
+                    )
+                if (
+                    row['generation'] == prior.generation
+                    and row['last_transition_digest']
+                    == prior.last_transition_digest
+                    and row['marker_file_digest'] == prior.marker_file_digest
+                ):
+                    raise RagReleaseAuthorityError(
+                        'healthy release authority cannot be rebootstraped'
+                    )
+                envelope = self._wrap(
+                    self._body(
+                        ledger_uuid=prior.ledger_uuid,
+                        ledger_epoch=prior.ledger_epoch + 1,
+                        generation=0,
+                        last_transition_digest=None,
+                        predecessor_marker_digest=prior.marker_file_digest,
+                        rebootstrap_reason_hmac=rebootstrap_reason_hmac,
+                        database_identity_hmac=(
+                            prior.validation_database_identity_hmac
+                        ),
+                    )
                 )
-            envelope = self._wrap(
-                self._body(
-                    ledger_uuid=prior.ledger_uuid,
-                    ledger_epoch=prior.ledger_epoch + 1,
-                    generation=0,
-                    last_transition_digest=None,
-                    predecessor_marker_digest=prior.marker_file_digest,
-                    rebootstrap_reason_hmac=rebootstrap_reason_hmac,
-                    database_identity_hmac=prior.validation_database_identity_hmac,
+                _new_body, snapshot = self._parse(canonical_json_bytes(envelope))
+                marker._replace_unlocked(envelope)
+                self._validate_path_set()
+                if self._after_marker_replace is not None:
+                    self._after_marker_replace()
+                self._insert_ledger(
+                    connection,
+                    snapshot=snapshot,
+                    database_identity_uuid=identity_uuid,
+                    database_identity=current,
+                    review_envelope_hmac=review_envelope_hmac,
+                    review_nonce_hmac=review_nonce_hmac,
+                    review_operation='release-ledger-rebootstrap',
                 )
-            )
-            _new_body, snapshot = self._parse(canonical_json_bytes(envelope))
-
-            def replace_exact(current_envelope: dict[str, object]) -> dict[str, object]:
-                if current_envelope != self._wrap(body):
-                    raise RagReleaseAuthorityError('release marker changed during rebootstrap')
-                return envelope
-
-            DurableFileAuthority.open_runtime(self._marker_path).update(
-                replace_exact,
-                after_replace=(
-                    None
-                    if self._after_marker_replace is None
-                    else lambda _value: self._after_marker_replace()
-                ),
-            )
-            self._validate_path_set()
-            self._insert_ledger(
-                connection,
-                snapshot=snapshot,
-                database_identity_uuid=identity_uuid,
-                database_identity=current,
-            )
-            return snapshot
+                connection.commit()
+                return snapshot
+        except DurableFileAuthorityError as exc:
+            raise RagReleaseAuthorityError('release marker lock failed') from exc
 
     def disaster_initialize(
         self,
@@ -663,51 +754,68 @@ class RagReleaseAuthority:
         *,
         database_identity: ValidationDatabaseIdentity | None = None,
         rebootstrap_reason_hmac: str,
+        review_envelope_hmac: str,
+        review_nonce_hmac: str,
     ) -> RagReleaseSnapshot:
         require_lower_hmac(rebootstrap_reason_hmac)
         self._validate_path_set()
         current = self._current_database_identity(connection, database_identity)
-        if self._marker_path.exists():
-            try:
-                _body, valid = self._read_marker()
-                row = self._ledger_row(connection, valid)
-                prior_uuid = UUID(str(row['validation_database_identity_uuid']))
-                if (
-                    row['validation_database_identity_hmac']
-                    == self._database_hmac(current, prior_uuid)
-                ):
-                    raise RagReleaseAuthorityError(
-                        'valid release authority requires same-ledger rebootstrap'
+        marker = (
+            DurableFileAuthority.open_runtime(self._marker_path)
+            if self._marker_path.exists()
+            else DurableFileAuthority(self._marker_path)
+        )
+        try:
+            with marker.locked(), self._registered_advisory(connection):
+                if self._marker_path.exists():
+                    try:
+                        _body, valid = self._parse(marker._read_bytes_unlocked())
+                        row = self._ledger_row(connection, valid)
+                        prior_uuid = UUID(
+                            str(row['validation_database_identity_uuid'])
+                        )
+                        if (
+                            row['validation_database_identity_hmac']
+                            == self._database_hmac(current, prior_uuid)
+                        ):
+                            raise RagReleaseAuthorityError(
+                                'valid release authority requires '
+                                'same-ledger rebootstrap'
+                            )
+                    except RagReleaseAuthorityError as exc:
+                        if 'requires same-ledger' in str(exc):
+                            raise
+                state = self._table_state(connection)
+                if state and state != set(RAG_RELEASE_TABLE_NAMES):
+                    raise RagReleaseAuthorityError('release schema is partial')
+                identity_uuid = uuid4()
+                database_hmac = self._database_hmac(current, identity_uuid)
+                envelope = self._wrap(
+                    self._body(
+                        ledger_uuid=uuid4(),
+                        ledger_epoch=1,
+                        generation=0,
+                        last_transition_digest=None,
+                        predecessor_marker_digest=None,
+                        rebootstrap_reason_hmac=rebootstrap_reason_hmac,
+                        database_identity_hmac=database_hmac,
                     )
-            except RagReleaseAuthorityError as exc:
-                if 'requires same-ledger' in str(exc):
-                    raise
-        state = self._table_state(connection)
-        if state and state != set(RAG_RELEASE_TABLE_NAMES):
-            raise RagReleaseAuthorityError('release schema is partial')
-        with self._registered_advisory(connection):
-            identity_uuid = uuid4()
-            database_hmac = self._database_hmac(current, identity_uuid)
-            envelope = self._wrap(
-                self._body(
-                    ledger_uuid=uuid4(),
-                    ledger_epoch=1,
-                    generation=0,
-                    last_transition_digest=None,
-                    predecessor_marker_digest=None,
-                    rebootstrap_reason_hmac=rebootstrap_reason_hmac,
-                    database_identity_hmac=database_hmac,
                 )
-            )
-            _body, snapshot = self._parse(canonical_json_bytes(envelope))
-            self._replace_marker(
-                envelope,
-                allow_existing=self._marker_path.exists(),
-            )
-            self._insert_ledger(
-                connection,
-                snapshot=snapshot,
-                database_identity_uuid=identity_uuid,
-                database_identity=current,
-            )
-            return snapshot
+                _body, snapshot = self._parse(canonical_json_bytes(envelope))
+                marker._replace_unlocked(envelope)
+                self._validate_path_set()
+                if self._after_marker_replace is not None:
+                    self._after_marker_replace()
+                self._insert_ledger(
+                    connection,
+                    snapshot=snapshot,
+                    database_identity_uuid=identity_uuid,
+                    database_identity=current,
+                    review_envelope_hmac=review_envelope_hmac,
+                    review_nonce_hmac=review_nonce_hmac,
+                    review_operation='release-ledger-disaster-init',
+                )
+                connection.commit()
+                return snapshot
+        except DurableFileAuthorityError as exc:
+            raise RagReleaseAuthorityError('release authority lock failed') from exc

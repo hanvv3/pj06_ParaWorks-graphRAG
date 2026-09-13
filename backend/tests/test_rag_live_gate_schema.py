@@ -73,6 +73,8 @@ def test_release_tables_have_composite_scope_and_append_only_payload_shape() -> 
         'ledger_epoch',
     )
     assert {
+        'bootstrap_review_envelope_hmac',
+        'bootstrap_review_nonce_hmac',
         'designated_environment_id_hmac',
         'designated_host_id_hmac',
         'validation_database_identity_hmac',

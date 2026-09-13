@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sqlalchemy import (
+    DDL,
     CheckConstraint,
     Column,
     ForeignKeyConstraint,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     String,
     Table,
     UniqueConstraint,
+    event,
 )
 
 RAG_RELEASE_TABLE_NAMES = frozenset(
@@ -29,6 +31,148 @@ RAG_RELEASE_TABLE_NAMES = frozenset(
 _HMAC = String(64)
 _UUID = String(36)
 _MONEY = Numeric(18, 6)
+
+RELEASE_POSTGRES_IMMUTABILITY_DDL = (
+    """
+CREATE OR REPLACE FUNCTION paraworks_rag_release_guard_ledger() RETURNS trigger
+LANGUAGE plpgsql AS $release_guard$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'rag release ledger rows are append-only';
+  END IF;
+  IF ROW(OLD.ledger_uuid, OLD.ledger_epoch,
+         OLD.predecessor_marker_digest, OLD.rebootstrap_reason_hmac,
+         OLD.fingerprint_key_version, OLD.fingerprint_key_material_verifier,
+         OLD.designated_environment_id_hmac, OLD.designated_host_id_hmac,
+         OLD.validation_database_identity_hmac,
+         OLD.validation_database_identity_uuid, OLD.validation_database_oid,
+         OLD.bootstrap_review_envelope_hmac, OLD.bootstrap_review_nonce_hmac,
+         OLD.bootstrap_operation)
+     IS DISTINCT FROM
+     ROW(NEW.ledger_uuid, NEW.ledger_epoch,
+         NEW.predecessor_marker_digest, NEW.rebootstrap_reason_hmac,
+         NEW.fingerprint_key_version, NEW.fingerprint_key_material_verifier,
+         NEW.designated_environment_id_hmac, NEW.designated_host_id_hmac,
+         NEW.validation_database_identity_hmac,
+         NEW.validation_database_identity_uuid, NEW.validation_database_oid,
+         NEW.bootstrap_review_envelope_hmac, NEW.bootstrap_review_nonce_hmac,
+         NEW.bootstrap_operation) THEN
+    RAISE EXCEPTION 'rag release ledger immutable identity changed';
+  END IF;
+  IF NEW.generation <> OLD.generation + 1 THEN
+    RAISE EXCEPTION 'rag release ledger generation is not gapless';
+  END IF;
+  RETURN NEW;
+END
+$release_guard$
+""",
+    """
+CREATE TRIGGER rag_release_guard_ledger
+BEFORE UPDATE OR DELETE ON rag_live_gate_ledgers
+FOR EACH ROW EXECUTE FUNCTION paraworks_rag_release_guard_ledger()
+""",
+    """
+CREATE OR REPLACE FUNCTION paraworks_rag_release_reject_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $release_immutable$
+BEGIN
+  RAISE EXCEPTION 'rag release append-only row mutation refused';
+END
+$release_immutable$
+""",
+    """
+CREATE TRIGGER rag_release_guard_transition
+BEFORE UPDATE OR DELETE ON rag_live_gate_transitions
+FOR EACH ROW EXECUTE FUNCTION paraworks_rag_release_reject_mutation()
+""",
+    """
+CREATE TRIGGER rag_release_guard_quality_report
+BEFORE UPDATE OR DELETE ON rag_live_gate_quality_reports
+FOR EACH ROW EXECUTE FUNCTION paraworks_rag_release_reject_mutation()
+""",
+    """
+CREATE OR REPLACE FUNCTION paraworks_rag_release_guard_authorization() RETURNS trigger
+LANGUAGE plpgsql AS $release_authorization$
+BEGIN
+  IF TG_OP = 'DELETE' OR
+     ROW(OLD.ledger_uuid, OLD.ledger_epoch, OLD.approval_id_hmac,
+         OLD.approval_hmac, OLD.base_generation,
+         OLD.approved_corpus_snapshot_hmac,
+         OLD.approved_provider_safety_snapshot_hmac,
+         OLD.provider_safety_envelope_digest,
+         OLD.validation_database_identity_hmac, OLD.manifest_hmac,
+         OLD.baseline_hmac, OLD.reviewer_roster_hmac)
+     IS DISTINCT FROM
+     ROW(NEW.ledger_uuid, NEW.ledger_epoch, NEW.approval_id_hmac,
+         NEW.approval_hmac, NEW.base_generation,
+         NEW.approved_corpus_snapshot_hmac,
+         NEW.approved_provider_safety_snapshot_hmac,
+         NEW.provider_safety_envelope_digest,
+         NEW.validation_database_identity_hmac, NEW.manifest_hmac,
+         NEW.baseline_hmac, NEW.reviewer_roster_hmac) OR
+     (OLD.execution_process_instance_hmac IS NOT NULL AND
+      ROW(OLD.execution_process_instance_hmac, OLD.execution_runner_fence_hmac)
+      IS DISTINCT FROM
+      ROW(NEW.execution_process_instance_hmac, NEW.execution_runner_fence_hmac)) THEN
+    RAISE EXCEPTION 'rag release authorization immutable snapshot changed';
+  END IF;
+  RETURN NEW;
+END
+$release_authorization$
+""",
+    """
+CREATE TRIGGER rag_release_guard_authorization
+BEFORE UPDATE OR DELETE ON rag_live_gate_authorizations
+FOR EACH ROW EXECUTE FUNCTION paraworks_rag_release_guard_authorization()
+""",
+    """
+CREATE OR REPLACE FUNCTION paraworks_rag_release_guard_case() RETURNS trigger
+LANGUAGE plpgsql AS $release_case$
+BEGIN
+  IF TG_OP = 'DELETE' OR
+     ROW(OLD.ledger_uuid, OLD.ledger_epoch, OLD.approval_id_hmac,
+         OLD.case_id_hmac, OLD.manifest_ordinal,
+         OLD.runtime_agent_run_id_hmac, OLD.embedding_reserved_cost_usd,
+         OLD.generation_reserved_cost_usd, OLD.total_reserved_cost_usd)
+     IS DISTINCT FROM
+     ROW(NEW.ledger_uuid, NEW.ledger_epoch, NEW.approval_id_hmac,
+         NEW.case_id_hmac, NEW.manifest_ordinal,
+         NEW.runtime_agent_run_id_hmac, NEW.embedding_reserved_cost_usd,
+         NEW.generation_reserved_cost_usd, NEW.total_reserved_cost_usd) THEN
+    RAISE EXCEPTION 'rag release case immutable identity changed';
+  END IF;
+  RETURN NEW;
+END
+$release_case$
+""",
+    """
+CREATE TRIGGER rag_release_guard_case
+BEFORE UPDATE OR DELETE ON rag_live_gate_cases
+FOR EACH ROW EXECUTE FUNCTION paraworks_rag_release_guard_case()
+""",
+    """
+CREATE OR REPLACE FUNCTION paraworks_rag_release_guard_dispatch() RETURNS trigger
+LANGUAGE plpgsql AS $release_dispatch$
+BEGIN
+  IF TG_OP = 'DELETE' OR
+     ROW(OLD.ledger_uuid, OLD.ledger_epoch, OLD.approval_id_hmac,
+         OLD.case_id_hmac, OLD.component, OLD.dispatch_fence_hmac,
+         OLD.reserved_cost_usd)
+     IS DISTINCT FROM
+     ROW(NEW.ledger_uuid, NEW.ledger_epoch, NEW.approval_id_hmac,
+         NEW.case_id_hmac, NEW.component, NEW.dispatch_fence_hmac,
+         NEW.reserved_cost_usd) THEN
+    RAISE EXCEPTION 'rag release dispatch immutable identity changed';
+  END IF;
+  RETURN NEW;
+END
+$release_dispatch$
+""",
+    """
+CREATE TRIGGER rag_release_guard_dispatch
+BEFORE UPDATE OR DELETE ON rag_live_gate_dispatches
+FOR EACH ROW EXECUTE FUNCTION paraworks_rag_release_guard_dispatch()
+""",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +208,9 @@ def build_rag_release_metadata() -> MetaData:
         Column('predecessor_marker_digest', _HMAC),
         Column('rebootstrap_reason_hmac', _HMAC),
         Column('marker_file_digest', _HMAC, nullable=False),
+        Column('bootstrap_review_envelope_hmac', _HMAC, nullable=False),
+        Column('bootstrap_review_nonce_hmac', _HMAC, nullable=False),
+        Column('bootstrap_operation', String(48), nullable=False),
         Column('fingerprint_key_version', String(128), nullable=False),
         Column('fingerprint_key_material_verifier', _HMAC, nullable=False),
         Column('designated_environment_id_hmac', _HMAC, nullable=False),
@@ -81,6 +228,19 @@ def build_rag_release_metadata() -> MetaData:
         CheckConstraint(
             'validation_database_oid > 0',
             name='ck_rag_release_ledger_database_oid',
+        ),
+        CheckConstraint(
+            "bootstrap_operation IN ('release-ledger-init',"
+            "'release-ledger-rebootstrap','release-ledger-disaster-init')",
+            name='ck_rag_release_ledger_bootstrap_operation',
+        ),
+        UniqueConstraint(
+            'bootstrap_review_envelope_hmac',
+            name='uq_rag_release_bootstrap_review_envelope',
+        ),
+        UniqueConstraint(
+            'bootstrap_review_nonce_hmac',
+            name='uq_rag_release_bootstrap_review_nonce',
         ),
     )
     Table(
@@ -249,6 +409,12 @@ def build_rag_release_metadata() -> MetaData:
     )
     assert set(metadata.tables) == RAG_RELEASE_TABLE_NAMES
     assert all(table.schema is None for table in metadata.tables.values())
+    for statement in RELEASE_POSTGRES_IMMUTABILITY_DDL:
+        event.listen(
+            metadata.tables['rag_live_gate_quality_reports'],
+            'after_create',
+            DDL(statement).execute_if(dialect='postgresql'),
+        )
     return metadata
 
 
