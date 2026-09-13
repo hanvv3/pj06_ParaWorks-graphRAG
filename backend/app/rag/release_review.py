@@ -1,4 +1,4 @@
-"""Frozen live-gate preview and case projection; no execution authorization issuer.
+"""Frozen preview, externally verified authorization and sealed case projection.
 
 The manifest preimage is checked against the immutable, already reviewed
 authorization row. Signing arbitrary submitted SQL values cannot authorize them.
@@ -15,13 +15,14 @@ import subprocess
 from collections import Counter
 from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
+from pydantic import SecretStr
 from sqlalchemy import Connection, func, select
 
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
@@ -122,6 +123,418 @@ class LiveGatePreviewError(ValueError):
 def _live_require(condition, code='manifest_invalid'):
     if not condition:
         raise LiveGatePreviewError(code)
+
+
+ReviewerRole = Literal['reviewer_a', 'reviewer_b', 'adjudicator_c']
+_REVIEWER_ROLES = ('reviewer_a', 'reviewer_b', 'adjudicator_c')
+_GOOGLE_ISSUER = 'https://accounts.google.com'
+_GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
+_GOOGLE_USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo'
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewerLoginChallenge:
+    role: ReviewerRole
+    authorization_url: SecretStr
+    redirect_uri: str
+    challenge_hmac: str
+    signed_state_hmac: str
+    pkce_challenge_hmac: str
+    issued_at_utc: datetime
+    expires_at_utc: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedReviewerSubject:
+    role: ReviewerRole
+    auth_user_id: int
+    issuer: Literal['https://accounts.google.com']
+    reviewer_subject_hmac: str
+    challenge_hmac: str
+    authenticated_at_utc: datetime
+
+
+def _reviewer_text(value):
+    _live_require(
+        type(value) is str
+        and bool(value.strip())
+        and value == value.strip()
+        and not any(ord(c) < 32 for c in value),
+        'reviewer_invalid',
+    )
+    return value
+
+
+def _reviewer_time(value):
+    _live_require(
+        type(value) is datetime and value.tzinfo is UTC and value.fold == 0,
+        'reviewer_invalid',
+    )
+    return value
+
+
+def _reviewer_subject_hmac(subject, secret):
+    return rag_identity_hmac(
+        {
+            'authenticated_subject_bytes': exact_utf8_bytes(_reviewer_text(subject)),
+            'issuer_bytes': exact_utf8_bytes(_GOOGLE_ISSUER),
+        },
+        secret=secret,
+        schema_version='rag-live-authenticated-subject:v1',
+        policy_version=LIVE_RUBRIC_VERSION,
+    )
+
+
+def _reviewer_boundary():
+    from threading import RLock
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlsplit
+
+    from backend.app.auth.google_identity import (
+        GoogleIdentityStateSigner,
+        build_google_identity_login_url,
+        pkce_challenge,
+    )
+
+    issued = WeakKeyDictionary()
+
+    class FreshGoogleReviewerVerifier:
+        """Fresh OAuth2 + fixed Google userinfo proof; no session-cookie authority.
+
+        Only the ephemeral pending challenge holds PKCE/state secrets. Completed
+        proofs retain the spec's issuer/subject HMAC and immutable role binding.
+        HTTP and current-user reads are injected boundaries, never CLI inputs.
+        """
+
+        __slots__ = ('__weakref__',)
+
+        def __init__(
+            self,
+            *,
+            settings,
+            redirect_uri,
+            selected_auth_user_ids,
+            auth_user_reader,
+            identity_secret,
+            http_client,
+            clock,
+        ):
+            redirect = urlsplit(redirect_uri)
+            _live_require(
+                redirect.scheme == 'http'
+                and redirect.hostname == '127.0.0.1'
+                and redirect.port is not None
+                and 1024 <= redirect.port <= 65535
+                and redirect.path == '/rag-live-gate/reviewer/callback'
+                and not redirect.username
+                and not redirect.password
+                and not redirect.query
+                and not redirect.fragment,
+                'reviewer_redirect_invalid',
+            )
+            _live_require(
+                type(identity_secret) is bytes and len(identity_secret) >= 32,
+                'key_unavailable',
+            )
+            _live_require(
+                type(selected_auth_user_ids) is dict
+                and set(selected_auth_user_ids) == set(_REVIEWER_ROLES)
+                and all(
+                    type(v) is int and v > 0 for v in selected_auth_user_ids.values()
+                )
+                and len(set(selected_auth_user_ids.values())) == 3,
+                'reviewer_roster_invalid',
+            )
+            config = SimpleNamespace(
+                **{
+                    name: _reviewer_text(getattr(settings, name))
+                    for name in (
+                        'google_client_id',
+                        'google_client_secret',
+                        'google_identity_state_secret',
+                    )
+                }
+            )
+            issued[self] = {
+                'config': config,
+                'redirect': redirect_uri,
+                'users': dict(selected_auth_user_ids),
+                'read_user': auth_user_reader,
+                'secret': identity_secret,
+                'client': http_client,
+                'clock': clock,
+                'pending': {},
+                'proofs': {},
+                'used_codes': set(),
+                'lock': RLock(),
+            }
+
+        def __repr__(self):
+            return '<FreshGoogleReviewerVerifier redacted>'
+
+        def begin(self, *, role: ReviewerRole) -> ReviewerLoginChallenge:
+            s = state(self)
+            with s['lock']:
+                _live_require(
+                    type(role) is str and role in _REVIEWER_ROLES,
+                    'reviewer_role_invalid',
+                )
+                now = _reviewer_time(s['clock']())
+                subjects = current_subjects(s)
+                login = build_google_identity_login_url(
+                    settings=s['config'],
+                    redirect_uri=s['redirect'],
+                    use_pkce=True,
+                )
+                params = parse_qs(urlsplit(login.login_url).query)
+                signed_digest = _live_hmac(
+                    exact_utf8_bytes(login.state),
+                    'rag-live-reviewer-signed-state:v1',
+                    s['secret'],
+                )
+                pkce_digest = _live_hmac(
+                    exact_utf8_bytes(params['code_challenge'][0]),
+                    'rag-live-reviewer-pkce-challenge:v1',
+                    s['secret'],
+                )
+                expires = now + timedelta(minutes=5)
+                challenge_digest = _live_hmac(
+                    {
+                        'role': role,
+                        'auth_user_id': s['users'][role],
+                        'reviewer_subject_hmac': subjects[role],
+                        'redirect_uri_bytes': exact_utf8_bytes(s['redirect']),
+                        'client_id_bytes': exact_utf8_bytes(
+                            s['config'].google_client_id
+                        ),
+                        'signed_state_hmac': signed_digest,
+                        'pkce_challenge_hmac': pkce_digest,
+                        'issued_at_utc': now.isoformat(timespec='microseconds'),
+                        'expires_at_utc': expires.isoformat(timespec='microseconds'),
+                    },
+                    'rag-live-reviewer-login-challenge:v1',
+                    s['secret'],
+                )
+                # Starting again invalidates both a pending and a completed proof.
+                s['proofs'].pop(role, None)
+                s['pending'][role] = (
+                    challenge_digest,
+                    signed_digest,
+                    pkce_digest,
+                    subjects[role],
+                    now,
+                    expires,
+                )
+                return ReviewerLoginChallenge(
+                    role,
+                    SecretStr(login.login_url),
+                    s['redirect'],
+                    challenge_digest,
+                    signed_digest,
+                    pkce_digest,
+                    now,
+                    expires,
+                )
+
+        def complete(
+            self,
+            *,
+            role: ReviewerRole,
+            code: SecretStr,
+            signed_state: SecretStr,
+            expected_challenge_hmac: str,
+        ) -> AuthenticatedReviewerSubject:
+            s = state(self)
+            with s['lock']:
+                try:
+                    _live_require(
+                        type(role) is str and role in _REVIEWER_ROLES,
+                        'reviewer_role_invalid',
+                    )
+                    _live_require(
+                        type(code) is SecretStr and type(signed_state) is SecretStr,
+                        'reviewer_invalid',
+                    )
+                    _reviewer_text(code.get_secret_value())
+                    pending = s['pending'].get(role)
+                    _live_require(pending is not None, 'reviewer_challenge_unavailable')
+                    challenge, signed_digest, pkce_digest, subject, started, expires = (
+                        pending
+                    )
+                    now = _reviewer_time(s['clock']())
+                    _live_require(started <= now < expires, 'reviewer_expired')
+                    _live_require(
+                        type(expected_challenge_hmac) is str
+                        and expected_challenge_hmac == challenge,
+                        'reviewer_challenge_mismatch',
+                    )
+                    _live_require(
+                        _live_hmac(
+                            exact_utf8_bytes(signed_state.get_secret_value()),
+                            'rag-live-reviewer-signed-state:v1',
+                            s['secret'],
+                        )
+                        == signed_digest,
+                        'reviewer_state_mismatch',
+                    )
+                    parsed = GoogleIdentityStateSigner(
+                        s['config'].google_identity_state_secret
+                    ).validate(signed_state.get_secret_value())
+                    _reviewer_text(parsed.nonce)
+                    _reviewer_text(parsed.code_verifier)
+                    _live_require(
+                        _live_hmac(
+                            exact_utf8_bytes(pkce_challenge(parsed.code_verifier)),
+                            'rag-live-reviewer-pkce-challenge:v1',
+                            s['secret'],
+                        )
+                        == pkce_digest,
+                        'reviewer_pkce_mismatch',
+                    )
+                    _live_require(
+                        current_subjects(s)[role] == subject, 'reviewer_subject_changed'
+                    )
+                    code_digest = _live_hmac(
+                        exact_utf8_bytes(code.get_secret_value()),
+                        'rag-live-reviewer-code-replay:v1',
+                        s['secret'],
+                    )
+                    _live_require(
+                        code_digest not in s['used_codes'], 'reviewer_code_reused'
+                    )
+                    # Burn before the only exchange, including failure/timeout paths.
+                    del s['pending'][role]
+                    s['used_codes'].add(code_digest)
+                    token_response = s['client'].post(
+                        _GOOGLE_TOKEN_URL,
+                        data={
+                            'client_id': s['config'].google_client_id,
+                            'client_secret': s['config'].google_client_secret,
+                            'code': code.get_secret_value(),
+                            'grant_type': 'authorization_code',
+                            'redirect_uri': s['redirect'],
+                            'code_verifier': parsed.code_verifier,
+                        },
+                        follow_redirects=False,
+                    )
+                    _live_require(
+                        str(token_response.url) == _GOOGLE_TOKEN_URL
+                        and token_response.status_code == 200,
+                        'reviewer_exchange_failed',
+                    )
+                    token = token_response.json()
+                    _live_require(
+                        type(token) is dict and token.get('token_type') == 'Bearer',
+                        'reviewer_exchange_failed',
+                    )
+                    access_token = _reviewer_text(token.get('access_token'))
+                    userinfo_response = s['client'].get(
+                        _GOOGLE_USERINFO_URL,
+                        headers={'Authorization': f'Bearer {access_token}'},
+                        follow_redirects=False,
+                    )
+                    _live_require(
+                        str(userinfo_response.url) == _GOOGLE_USERINFO_URL
+                        and userinfo_response.status_code == 200,
+                        'reviewer_exchange_failed',
+                    )
+                    userinfo = userinfo_response.json()
+                    # Google userinfo has no required issuer claim. Trust its fixed
+                    # HTTPS endpoint; never substitute id_token/JWKS nonce semantics.
+                    _live_require(
+                        type(userinfo) is dict
+                        and userinfo.get('iss', _GOOGLE_ISSUER) == _GOOGLE_ISSUER,
+                        'reviewer_issuer_mismatch',
+                    )
+                    actual = _reviewer_subject_hmac(userinfo.get('sub'), s['secret'])
+                    _live_require(
+                        actual == subject and current_subjects(s)[role] == subject,
+                        'reviewer_subject_changed',
+                    )
+                    completed = _reviewer_time(s['clock']())
+                    _live_require(now <= completed < expires, 'reviewer_expired')
+                    proof = AuthenticatedReviewerSubject(
+                        role,
+                        s['users'][role],
+                        _GOOGLE_ISSUER,
+                        actual,
+                        challenge,
+                        completed,
+                    )
+                    s['proofs'][role] = (
+                        proof,
+                        tuple(getattr(proof, f.name) for f in fields(proof)),
+                        expires,
+                    )
+                    return proof
+                except LiveGatePreviewError:
+                    raise
+                except Exception:
+                    raise LiveGatePreviewError('reviewer_exchange_failed') from None
+
+        def reviewer_roster_hmac(self, proofs) -> str:
+            s = state(self)
+            with s['lock']:
+                _live_require(
+                    type(proofs) is tuple and len(proofs) == 3,
+                    'reviewer_roster_invalid',
+                )
+                subjects = current_subjects(s)
+                now = _reviewer_time(s['clock']())
+                payload = {'roster_version': 'rag-live-reviewer-roster:v1'}
+                for role, proof in zip(_REVIEWER_ROLES, proofs, strict=True):
+                    saved = s['proofs'].get(role)
+                    _live_require(
+                        saved is not None
+                        and type(proof) is AuthenticatedReviewerSubject
+                        and proof is saved[0],
+                        'reviewer_roster_invalid',
+                    )
+                    actual = tuple(getattr(proof, f.name) for f in fields(proof))
+                    _live_require(
+                        all(
+                            type(a) is type(b) and a == b
+                            for a, b in zip(actual, saved[1], strict=True)
+                        )
+                        and proof.role == role
+                        and proof.authenticated_at_utc <= now < saved[2]
+                        and subjects[role] == proof.reviewer_subject_hmac,
+                        'reviewer_roster_invalid',
+                    )
+                    payload[f'{role}_subject_hmac'] = proof.reviewer_subject_hmac
+                return rag_identity_hmac(
+                    payload,
+                    secret=s['secret'],
+                    schema_version='rag-live-reviewer-roster:v1',
+                    policy_version=LIVE_RUBRIC_VERSION,
+                )
+
+    def state(verifier):
+        _live_require(
+            type(verifier) is FreshGoogleReviewerVerifier and verifier in issued,
+            'reviewer_unavailable',
+        )
+        return issued[verifier]
+
+    def current_subjects(s):
+        result = {}
+        for role in _REVIEWER_ROLES:
+            user = s['read_user'](s['users'][role])
+            _live_require(
+                user is not None
+                and type(user.id) is int
+                and user.id == s['users'][role]
+                and user.status == 'active',
+                'reviewer_user_invalid',
+            )
+            result[role] = _reviewer_subject_hmac(user.external_id, s['secret'])
+        _live_require(len(set(result.values())) == 3, 'reviewer_roster_invalid')
+        return result
+
+    return FreshGoogleReviewerVerifier
+
+
+FreshGoogleReviewerVerifier = _reviewer_boundary()
 
 
 def _fixture_id(value):
@@ -1277,6 +1690,777 @@ def _preview_source_boundary():
 ) = _preview_source_boundary()
 
 
+@dataclass(frozen=True, slots=True)
+class AuthorizedRagLiveGate:
+    live_gate_contract_version: Literal['rag-live-gate:v1']
+    authorization_state: Literal['unused']
+    ledger_uuid: UUID
+    ledger_epoch: int
+    approval_base_generation: int
+    approval_base_release_marker_file_digest: str
+    approval_id_hmac: str
+    approval_hmac: str
+    manifest: FrozenLiveManifestSnapshot
+    corpus: FrozenCorpusSnapshot
+    baseline_hmac: str
+    approved_provider_safety_snapshot_hmac: str
+    reviewer_roster_hmac: str
+    validation_database_identity_hmac: str
+    designated_environment_id_hmac: str
+    designated_host_id_hmac: str
+    implementation_plan_reference_hmac: str
+    limits: LiveGateLimits
+
+
+def _exact_frozen_equal(actual, expected):
+    """No bool/int, list/tuple, dataclass-subclass or nested JSON aliases."""
+    from dataclasses import is_dataclass
+
+    if type(actual) is not type(expected):
+        return False
+    if is_dataclass(expected):
+        return all(
+            _exact_frozen_equal(getattr(actual, f.name), getattr(expected, f.name))
+            for f in fields(expected)
+        )
+    if type(expected) in (list, tuple):
+        return len(actual) == len(expected) and all(
+            _exact_frozen_equal(a, b) for a, b in zip(actual, expected, strict=True)
+        )
+    if type(expected) is dict:
+        return actual.keys() == expected.keys() and all(
+            type(key) is str and _exact_frozen_equal(actual[key], value)
+            for key, value in expected.items()
+        )
+    if type(expected) is datetime:
+        return (
+            actual == expected
+            and actual.tzinfo is expected.tzinfo
+            and actual.fold == expected.fold
+        )
+    return actual == expected
+
+
+def _approval_preimage(preview, *, approval_id, environment, host, identity_secret):
+    value = json.loads(preview.canonical_bytes)
+    keys = (
+        'approval_base_generation',
+        'approved_corpus_snapshot_hmac',
+        'approved_provider_safety_snapshot_hmac',
+        'assistant_context_distribution',
+        'baseline_hmac',
+        'clean_git_commit',
+        'distribution',
+        'fixture_manifest_hmac',
+        'fixture_manifest_path',
+        'fixture_manifest_sha256',
+        'fixture_manifest_version',
+        'ledger_epoch',
+        'ledger_uuid',
+        'limits',
+        'live_gate_contract_version',
+        'approval_base_release_marker_file_digest',
+        'reviewer_roster_hmac',
+        'rubric_version',
+        'validation_database_identity_hmac',
+    )
+    return {key: value[key] for key in keys} | {
+        'approval_id_hmac': _live_hmac(
+            {'approval_id': str(approval_id)},
+            'rag-live-approval-id:v1',
+            identity_secret,
+        ),
+        'designated_environment_id_bytes': exact_utf8_bytes(environment),
+        'designated_host_id_bytes': exact_utf8_bytes(host),
+    }
+
+
+def _authorization_boundary():
+    from contextlib import contextmanager
+    from threading import RLock
+
+    # Neither public DTOs nor preview provenance can insert into these registries.
+    services, sources = WeakKeyDictionary(), WeakKeyDictionary()
+    consumed = set()
+    lock = RLock()
+
+    def locked_release(s, connection, reader):
+        from backend.app.admin.rag_live_gate import (
+            RagReleaseAdminTarget,
+            _database_locator_identity,
+        )
+        from backend.app.agent_runtime.durable_file_authority import (
+            DurableFileAuthority,
+        )
+        from backend.app.rag.release_authority import RagReleaseAuthority
+
+        _live_require(
+            type(s['authority']) is RagReleaseAuthority
+            and connection.engine is s['engine']
+            and s['reader'].authority is s['authority']
+            and s['reader'].engine is s['engine']
+            and _exact_frozen_equal(
+                s['reader'].database_identity, s['database_identity']
+            ),
+            'approved_authority_unavailable',
+        )
+        authority = s['authority']
+        target = s['target']
+        _live_require(
+            type(target) is RagReleaseAdminTarget
+            and authority.marker_path == target.marker_path
+            and authority._provider_path == target.provider_safety_latch_path
+            and _database_locator_identity(str(connection.engine.url))
+            == _database_locator_identity(target.database_url)
+            and _exact_frozen_equal(
+                target,
+                RagReleaseAdminTarget.build(
+                    database_url=target.database_url,
+                    marker_path=target.marker_path,
+                    provider_safety_latch_path=target.provider_safety_latch_path,
+                    designated_environment_id=target.designated_environment_id,
+                    designated_host_id=target.designated_host_id,
+                    review_secret=s['review_secret'],
+                ),
+            ),
+            'target_changed',
+        )
+        authority._assert_barrier_guard(reader.barrier_guard, connection)
+        authority._validate_path_set()
+        marker = DurableFileAuthority.open_runtime(authority.marker_path)
+        _body, snapshot = authority._parse(marker._read_bytes_unlocked())
+        return authority._inspect_locked(
+            connection, snapshot, database_identity=s['database_identity']
+        )
+
+    def locked_inputs(s, connection, reader, inputs, snapshot, *, unused):
+        from backend.app.models.rag_runtime import (
+            RagProviderReadiness,
+            RagProviderSafetyAuthority,
+        )
+        from backend.app.rag.release_schema import (
+            build_rag_release_metadata,
+            release_tables,
+        )
+
+        _live_require(
+            type(inputs) is LiveGatePreviewInputs
+            and _exact_frozen_equal(inputs.release, snapshot)
+            and _exact_frozen_equal(locked_release(s, connection, reader), snapshot),
+            'release_marker_changed',
+        )
+        provider, _policies = _provider_snapshot(inputs, s['secret'])
+        singleton = (
+            connection.execute(
+                select(RagProviderSafetyAuthority.__table__).with_for_update()
+            )
+            .mappings()
+            .all()
+        )
+        families = (
+            connection.execute(
+                select(RagProviderReadiness.__table__)
+                .where(RagProviderReadiness.active.is_(True))
+                .order_by(RagProviderReadiness.component)
+                .with_for_update()
+            )
+            .mappings()
+            .all()
+        )
+        _live_require(
+            len(singleton) == 1
+            and singleton[0]['id'] == 1
+            and all(
+                _exact_frozen_equal(singleton[0][k], v)
+                for k, v in provider.items()
+                if k != 'active_families'
+            )
+            and len(families) == 2,
+            'provider_snapshot_changed',
+        )
+        for actual, expected in zip(families, provider['active_families'], strict=True):
+            _live_require(
+                actual['authority_id'] == 1
+                and actual['active'] is True
+                and actual['authorized_fingerprint_key_material_verifier']
+                == provider['fingerprint_key_material_verifier']
+                and all(_exact_frozen_equal(actual[k], v) for k, v in expected.items()),
+                'provider_snapshot_changed',
+            )
+        if unused:
+            tables = release_tables(build_rag_release_metadata())
+            counts = tuple(
+                (
+                    name,
+                    connection.scalar(
+                        select(func.count())
+                        .select_from(table)
+                        .where(
+                            table.c.ledger_uuid == str(snapshot.ledger_uuid),
+                            table.c.ledger_epoch == snapshot.ledger_epoch,
+                        )
+                    ),
+                )
+                for name, table in (
+                    ('authorization', tables.authorizations),
+                    ('case', tables.cases),
+                    ('dispatch', tables.dispatches),
+                    ('quality_report', tables.quality_reports),
+                    ('release_ledger', tables.ledgers),
+                    ('release_transition', tables.transitions),
+                )
+            )
+            _live_require(
+                _exact_frozen_equal(counts, inputs.release_row_counts),
+                'release_rows_changed',
+            )
+
+    class VerifiedReader:
+        def __init__(self, s):
+            self.s = s
+
+        @contextmanager
+        def locked(self):
+            s = self.s
+            with (
+                s['engine'].connect() as connection,
+                s['reader'].locked_approved(connection) as reader,
+            ):
+                snapshot = locked_release(s, connection, reader)
+                self.connection, self.reader, self.snapshot = (
+                    connection,
+                    reader,
+                    snapshot,
+                )
+                self.last_inputs = None
+                yield self
+                # Oracle/source callbacks also run after read(). Recheck the
+                # independent authorities before releasing the sealed barrier.
+                locked_inputs(
+                    s, connection, reader, self.last_inputs, snapshot, unused=True
+                )
+
+        def read(self):
+            value = self.reader.read()
+            locked_inputs(
+                self.s, self.connection, self.reader, value, self.snapshot, unused=True
+            )
+            self.last_inputs = value
+            return value
+
+        def read_pgvector_baseline_members(self):
+            return self.reader.read_pgvector_baseline_members()
+
+        def read_hard_negative_oracle(self, request):
+            return self.reader.read_hard_negative_oracle(request)
+
+    class ApprovedLiveManifestSource:
+        __slots__ = ('__weakref__',)
+
+        def __init__(self):
+            raise TypeError(
+                'approved sources require externally verified authorization'
+            )
+
+        def __copy__(self):
+            raise TypeError('approved sources cannot be copied')
+
+        def __deepcopy__(self, memo):
+            raise TypeError('approved sources cannot be copied')
+
+        def __reduce_ex__(self, protocol):
+            raise TypeError('approved sources cannot be serialized')
+
+        def __repr__(self):
+            return '<ApprovedLiveManifestSource opaque>'
+
+    class RagLiveGateAuthorizer:
+        """Verifier-only authorization construction; no provider or writer port.
+
+        The reviewed snapshot adapter is required, and is not composed in the
+        production CLI. Authority is minted only from a fresh complete preview,
+        three locally issued proofs and the separately signed canonical envelope.
+        The resulting DTO alone never authorizes ledger writes or paid calls.
+        """
+
+        __slots__ = ('__weakref__',)
+
+        def __init__(
+            self,
+            *,
+            repository,
+            expected_commit,
+            snapshot_reader,
+            reviewer_verifier,
+            identity_secret,
+            target,
+            review_secret,
+            review_key_id,
+            review_key_registry,
+            implementation_plan_reference_hmac,
+        ):
+            _live_require(
+                type(reviewer_verifier) is FreshGoogleReviewerVerifier,
+                'reviewer_unavailable',
+            )
+            _live_require(
+                type(identity_secret) is bytes and len(identity_secret) >= 32,
+                'key_unavailable',
+            )
+            services[self] = {
+                'repository': Path(repository).resolve(),
+                'commit': expected_commit,
+                'reader': snapshot_reader,
+                'engine': getattr(snapshot_reader, 'engine', None),
+                'authority': getattr(snapshot_reader, 'authority', None),
+                'database_identity': getattr(
+                    snapshot_reader, 'database_identity', None
+                ),
+                'reviewer': reviewer_verifier,
+                'secret': identity_secret,
+                'target': deepcopy(target),
+                'review_secret': review_secret,
+                'review_key_id': review_key_id,
+                'registry': review_key_registry,
+                'plan': implementation_plan_reference_hmac,
+                'authorization': None,
+            }
+
+        def __repr__(self):
+            return '<RagLiveGateAuthorizer verifier-only>'
+
+        def authorize(self, *, preview, reviewers, approval_record):
+            from backend.app.admin.rag_live_gate import (
+                MAX_REVIEW_ENVELOPE_BYTES,
+                verify_release_review_envelope,
+            )
+
+            with lock:
+                s = service_state(self)
+                _live_require(s['authorization'] is None, 'approval_already_used')
+                try:
+                    _live_require(type(preview) is LiveGatePreview, 'preview_changed')
+                    current = build_live_gate_preview(
+                        repository=s['repository'],
+                        expected_commit=s['commit'],
+                        snapshot_reader=VerifiedReader(s),
+                        identity_secret=s['secret'],
+                        expected_preview_hmac=preview.preview_hmac,
+                    )
+                    value = json.loads(current.canonical_bytes)
+                    require_verified_preview_source(
+                        preview.source_binding,
+                        manifest=preview.manifest.executable,
+                        authorization=value,
+                        identity_secret=s['secret'],
+                    )
+                    _live_require(
+                        all(
+                            _exact_frozen_equal(
+                                getattr(preview, f.name), getattr(current, f.name)
+                            )
+                            for f in fields(current)
+                            if f.name != 'source_binding'
+                        ),
+                        'preview_changed',
+                    )
+                    roster = s['reviewer'].reviewer_roster_hmac(reviewers)
+                    _live_require(
+                        roster == value['reviewer_roster_hmac'],
+                        'reviewer_roster_changed',
+                    )
+                    _live_require(
+                        s['plan'] == value['implementation_plan_reference_hmac'],
+                        'plan_changed',
+                    )
+                    target = s['target']
+                    for field in ('designated_environment_id', 'designated_host_id'):
+                        _live_require(
+                            _live_hmac(
+                                {
+                                    field + '_bytes': exact_utf8_bytes(
+                                        getattr(target, field)
+                                    )
+                                },
+                                'rag-live-' + field.replace('_', '-') + ':v1',
+                                s['secret'],
+                            )
+                            == value[field + '_hmac'],
+                            'target_changed',
+                        )
+                    _live_require(
+                        type(approval_record) is bytes
+                        and 0 < len(approval_record) <= MAX_REVIEW_ENVELOPE_BYTES,
+                        'approval_invalid',
+                    )
+                    envelope = json.loads(approval_record)
+                    nonce = envelope['signed_payload']['nonce']
+                    approval_id = UUID(nonce)
+                    _live_require(
+                        type(nonce) is str
+                        and str(approval_id) == nonce
+                        and approval_id.int != 0,
+                        'approval_invalid',
+                    )
+                    preimage = _approval_preimage(
+                        current,
+                        approval_id=approval_id,
+                        environment=target.designated_environment_id,
+                        host=target.designated_host_id,
+                        identity_secret=s['secret'],
+                    )
+                    context = {
+                        'preview_hmac': current.preview_hmac,
+                        'approval_preimage': preimage,
+                        'fingerprint_key_version': value['fingerprint_key_version'],
+                        'fingerprint_key_material_verifier': value[
+                            'fingerprint_key_material_verifier'
+                        ],
+                    }
+                    verify_release_review_envelope(
+                        approval_record,
+                        expected_operation='authorization-bootstrap',
+                        expected_target=target,
+                        expected_context=context,
+                        review_secret=s['review_secret'],
+                        review_key_id=s['review_key_id'],
+                        implementation_plan_reference_hmac=s['plan'],
+                        review_key_registry=s['registry'],
+                    )
+                    _live_require(
+                        _exact_frozen_equal(
+                            envelope['signed_payload']['expected_context'], context
+                        ),
+                        'approval_changed',
+                    )
+                    reuse_key = (
+                        value['fingerprint_key_material_verifier'],
+                        preimage['approval_id_hmac'],
+                    )
+                    _live_require(reuse_key not in consumed, 'approval_already_used')
+                    # External verification may yield to readers or key policy. Reread
+                    # all current snapshots and clean sources before issuing anything.
+                    final = build_live_gate_preview(
+                        repository=s['repository'],
+                        expected_commit=s['commit'],
+                        snapshot_reader=VerifiedReader(s),
+                        identity_secret=s['secret'],
+                        expected_preview_hmac=current.preview_hmac,
+                    )
+                    _live_require(
+                        final.canonical_bytes == current.canonical_bytes
+                        and s['reviewer'].reviewer_roster_hmac(reviewers) == roster,
+                        'preview_changed',
+                    )
+                    verify_release_review_envelope(
+                        approval_record,
+                        expected_operation='authorization-bootstrap',
+                        expected_target=target,
+                        expected_context=context,
+                        review_secret=s['review_secret'],
+                        review_key_id=s['review_key_id'],
+                        implementation_plan_reference_hmac=s['plan'],
+                        review_key_registry=s['registry'],
+                    )
+                    authority = AuthorizedRagLiveGate(
+                        _LIVE_POLICY,
+                        'unused',
+                        UUID(value['ledger_uuid']),
+                        value['ledger_epoch'],
+                        value['approval_base_generation'],
+                        value['approval_base_release_marker_file_digest'],
+                        preimage['approval_id_hmac'],
+                        _live_hmac(
+                            preimage, 'rag-live-execution-approval:v1', s['secret']
+                        ),
+                        deepcopy(final.manifest),
+                        deepcopy(final.corpus),
+                        final.baseline_hmac,
+                        value['approved_provider_safety_snapshot_hmac'],
+                        roster,
+                        value['validation_database_identity_hmac'],
+                        value['designated_environment_id_hmac'],
+                        value['designated_host_id_hmac'],
+                        s['plan'],
+                        deepcopy(final.limits),
+                    )
+                    source = object.__new__(ApprovedLiveManifestSource)
+                    # Retain independent snapshots, not objects exposed to callers.
+                    record = {
+                        'owner': s,
+                        'authority': deepcopy(authority),
+                        'value': bytes(final.canonical_bytes),
+                        'preview_hmac': final.preview_hmac,
+                        'preview_source': final.source_binding,
+                        'envelope': bytes(approval_record),
+                        'context': deepcopy(context),
+                        'source': source,
+                        'reviewers': reviewers,
+                    }
+                    sources[source] = record
+                    s['authorization'] = (authority, deepcopy(authority), source)
+                    consumed.add(reuse_key)
+                    return authority
+                except LiveGatePreviewError:
+                    raise
+                except Exception:
+                    raise LiveGatePreviewError('approval_invalid') from None
+
+        def approved_source(self, authorization):
+            s = service_state(self)
+            saved = s['authorization']
+            _live_require(
+                saved is not None
+                and authorization is saved[0]
+                and _exact_frozen_equal(authorization, saved[1]),
+                'authorization_unissued',
+            )
+            return saved[2]
+
+    def service_state(service):
+        _live_require(
+            type(service) is RagLiveGateAuthorizer and service in services,
+            'authorization_unavailable',
+        )
+        return services[service]
+
+    def require_source(
+        connection,
+        *,
+        manifest,
+        source_binding,
+        authorization,
+        identity_secret,
+        barrier_guard=None,
+    ):
+        from dataclasses import replace
+
+        from backend.app.admin.rag_live_gate import verify_release_review_envelope
+        from backend.app.rag.release_authority import RagReleaseAuthority
+        from backend.app.rag.release_ledger import (
+            RagReleaseMutationSet,
+            ReleaseRowPrimaryKey,
+        )
+
+        with lock:
+            try:
+                _live_require(
+                    type(source_binding) is ApprovedLiveManifestSource
+                    and source_binding in sources,
+                    'approved_source_unissued',
+                )
+                record = sources[source_binding]
+                s, approved = record['owner'], record['authority']
+                saved = s['authorization']
+                _live_require(
+                    saved is not None and _exact_frozen_equal(saved[0], saved[1]),
+                    'authorization_changed',
+                )
+                _live_require(
+                    type(identity_secret) is bytes
+                    and identity_secret == s['secret']
+                    and connection.engine is s['engine']
+                    and s['engine'] is not None,
+                    'approved_source_context_changed',
+                )
+                _live_require(
+                    type(s['authority']) is RagReleaseAuthority,
+                    'approved_authority_unavailable',
+                )
+                value = json.loads(record['value'])
+                require_verified_preview_source(
+                    record['preview_source'],
+                    manifest=manifest,
+                    authorization=authorization,
+                    identity_secret=identity_secret,
+                )
+                _live_require(
+                    _exact_frozen_equal(manifest, approved.manifest.executable),
+                    'approved_manifest_changed',
+                )
+                verify_release_review_envelope(
+                    record['envelope'],
+                    expected_operation='authorization-bootstrap',
+                    expected_target=s['target'],
+                    expected_context=record['context'],
+                    review_secret=s['review_secret'],
+                    review_key_id=s['review_key_id'],
+                    implementation_plan_reference_hmac=s['plan'],
+                    review_key_registry=s['registry'],
+                )
+                _live_require(
+                    s['reviewer'].reviewer_roster_hmac(record['reviewers'])
+                    == approved.reviewer_roster_hmac,
+                    'reviewer_roster_changed',
+                )
+                expected_auth = {
+                    'ledger_uuid': str(approved.ledger_uuid),
+                    'ledger_epoch': approved.ledger_epoch,
+                    'approval_id_hmac': approved.approval_id_hmac,
+                    'approval_hmac': approved.approval_hmac,
+                    'base_generation': approved.approval_base_generation,
+                    **{
+                        name: value[name]
+                        for name in (
+                            'approved_corpus_snapshot_hmac',
+                            'approved_provider_safety_snapshot_hmac',
+                            'provider_safety_envelope_digest',
+                            'validation_database_identity_hmac',
+                            'manifest_hmac',
+                            'baseline_hmac',
+                            'reviewer_roster_hmac',
+                        )
+                    },
+                }
+                _live_require(
+                    type(authorization) is dict
+                    and all(
+                        _exact_frozen_equal(authorization.get(key), val)
+                        for key, val in expected_auth.items()
+                    )
+                    and authorization.get('state') in {'unused', 'started'},
+                    'approved_authorization_changed',
+                )
+                key = ReleaseRowPrimaryKey(
+                    'authorization',
+                    {
+                        name: expected_auth[name]
+                        for name in ('ledger_uuid', 'ledger_epoch', 'approval_id_hmac')
+                    },
+                )
+                # The adapter must reuse/hold the actual Task22 -> Task23 barrier
+                # on this connection, plus its corpus/scope snapshot locks. It has
+                # no production implementation until the remaining reader work.
+                guard_options = {}
+                if barrier_guard is not None:
+                    RagReleaseAuthority._assert_barrier_guard(barrier_guard, connection)
+                    guard_options['barrier_guard'] = barrier_guard
+                with s['reader'].locked_approved(connection, **guard_options) as reader:
+                    if barrier_guard is not None:
+                        _live_require(
+                            reader.barrier_guard is barrier_guard, 'barrier_changed'
+                        )
+                    marker_snapshot = locked_release(s, connection, reader)
+                    locked_auth = RagReleaseMutationSet._snapshot(
+                        connection, key, for_update=True
+                    )
+                    _live_require(
+                        _exact_frozen_equal(locked_auth, authorization),
+                        'approved_authorization_changed',
+                    )
+                    files = _source_snapshot(s['repository'], s['commit'])
+                    for _ in range(2):
+                        inputs = reader.read()
+                        locked_inputs(
+                            s, connection, reader, inputs, marker_snapshot, unused=False
+                        )
+                        _live_require(
+                            type(inputs) is LiveGatePreviewInputs
+                            and type(inputs.release) is RagReleaseSnapshot,
+                            'snapshot_invalid',
+                        )
+                        current = inputs.release
+                        _live_require(
+                            _exact_frozen_equal(current, marker_snapshot),
+                            'release_marker_changed',
+                        )
+                        for name in (
+                            'ledger_epoch',
+                            'fingerprint_key_version',
+                            'fingerprint_key_material_verifier',
+                            'designated_environment_id_hmac',
+                            'designated_host_id_hmac',
+                            'validation_database_identity_hmac',
+                        ):
+                            _live_require(
+                                _exact_frozen_equal(
+                                    getattr(current, name), value[name]
+                                ),
+                                'snapshot_changed',
+                            )
+                        _live_require(
+                            type(current.ledger_uuid) is UUID
+                            and str(current.ledger_uuid) == value['ledger_uuid']
+                            and type(current.generation) is int
+                            and current.generation > approved.approval_base_generation,
+                            'approved_source_context_changed',
+                        )
+                        _live_digest(current.marker_file_digest)
+                        _live_digest(current.last_transition_digest)
+                        # Only lifecycle generation/rows advance. Every reviewed
+                        # source/query/scope/corpus/provider/baseline input must
+                        # reproduce the exact approved preview, including oracles.
+                        original_release = replace(
+                            current,
+                            generation=value['approval_base_generation'],
+                            last_transition_digest=None,
+                            marker_file_digest=value[
+                                'approval_base_release_marker_file_digest'
+                            ],
+                        )
+                        normalized = replace(
+                            inputs,
+                            release=original_release,
+                            release_row_counts=(
+                                ('authorization', 0),
+                                ('case', 0),
+                                ('dispatch', 0),
+                                ('quality_report', 0),
+                                ('release_ledger', 1),
+                                ('release_transition', 0),
+                            ),
+                        )
+                        fresh = _preview_from_inputs(
+                            files, s['commit'], normalized, identity_secret, reader
+                        )
+                        _live_require(
+                            fresh.canonical_bytes == record['value']
+                            and fresh.preview_hmac == record['preview_hmac'],
+                            'approved_snapshot_changed',
+                        )
+                    _live_require(
+                        _exact_frozen_equal(
+                            RagReleaseMutationSet._snapshot(
+                                connection, key, for_update=True
+                            ),
+                            locked_auth,
+                        ),
+                        'approved_authorization_changed',
+                    )
+                    _live_require(
+                        _source_snapshot(s['repository'], s['commit']) == files,
+                        'committed_source_changed',
+                    )
+                    locked_inputs(
+                        s, connection, reader, inputs, marker_snapshot, unused=False
+                    )
+                    _live_require(
+                        s['reviewer'].reviewer_roster_hmac(record['reviewers'])
+                        == approved.reviewer_roster_hmac,
+                        'reviewer_roster_changed',
+                    )
+                    verify_release_review_envelope(
+                        record['envelope'],
+                        expected_operation='authorization-bootstrap',
+                        expected_target=s['target'],
+                        expected_context=record['context'],
+                        review_secret=s['review_secret'],
+                        review_key_id=s['review_key_id'],
+                        implementation_plan_reference_hmac=s['plan'],
+                        review_key_registry=s['registry'],
+                    )
+                _source_snapshot(s['repository'], s['commit'])
+            except Exception:
+                _refuse()
+
+    return RagLiveGateAuthorizer, ApprovedLiveManifestSource, require_source
+
+
+(RagLiveGateAuthorizer, ApprovedLiveManifestSource, _require_authorized_case_source) = (
+    _authorization_boundary()
+)
+
+
 def _live_money(value):
     _live_require(
         type(value) is str and re.fullmatch(r'0\.[0-9]{6}', value) is not None
@@ -1577,15 +2761,23 @@ def case_claim_manifest_hmac(
 
 
 def require_approved_case_source(
-    connection, *, manifest, source_binding, authorization, identity_secret
+    connection,
+    *,
+    manifest,
+    source_binding,
+    authorization,
+    identity_secret,
+    barrier_guard=None,
 ):
-    """Task24-B's approved-runtime verifier is deliberately not composed yet.
-
-    A verified preview proves provenance, not human execution approval. B must
-    revalidate its source binding and the separately locked approved runtime
-    snapshots here before returning. There is no self-signed-preimage fallback.
-    """
-    _refuse()
+    """Require B's issued approval and fresh, same-barrier runtime snapshots."""
+    return _require_authorized_case_source(
+        connection,
+        manifest=manifest,
+        source_binding=source_binding,
+        authorization=authorization,
+        identity_secret=identity_secret,
+        barrier_guard=barrier_guard,
+    )
 
 
 _BINDING_TYPES = {
@@ -1915,6 +3107,7 @@ def _projection_boundary():
             'manifest': deepcopy(manifest),
             'manifest_hmac': manifest_hmac,
             'manifest_integrity_hmac': manifest_integrity_hmac,
+            'source_binding': source_binding,
             'authorization': deepcopy(auth),
             'case': deepcopy(case),
             'binding': binding,
@@ -1939,6 +3132,7 @@ def _projection_boundary():
         after_execution,
         observations,
         identity_secret,
+        barrier_guard=None,
     ):
         from backend.app.rag.release_ledger import (
             RagReleaseMutationSet,
@@ -1987,6 +3181,14 @@ def _projection_boundary():
             )
         ):
             _refuse()
+        require_approved_case_source(
+            connection,
+            manifest=state['manifest'],
+            source_binding=state['source_binding'],
+            authorization=auth,
+            identity_secret=identity_secret,
+            barrier_guard=barrier_guard,
+        )
         case = state['case']
         run_hmac = rag_identity_hmac(
             {'agent_run_id': state['images'][0]['id']},

@@ -54,7 +54,7 @@ _OPERATIONS = frozenset(
         'release-ledger-disaster-init',
     }
 )
-_CLI_COMMANDS = (*sorted(_OPERATIONS), 'status', 'preview')
+_CLI_COMMANDS = (*sorted(_OPERATIONS), 'status', 'preview', 'authorization-bootstrap')
 _SIGNED_KEYS = frozenset(
     {
         'actor_subject_hmac',
@@ -249,7 +249,7 @@ def verify_release_review_envelope(
 ) -> VerifiedRagReleaseReview:
     if type(raw) is not bytes or not raw or len(raw) > MAX_REVIEW_ENVELOPE_BYTES:
         raise RagReleaseReviewError('release review envelope is invalid')
-    if expected_operation not in _OPERATIONS:
+    if expected_operation not in _OPERATIONS | {'authorization-bootstrap'}:
         raise RagReleaseReviewError('release review operation is invalid')
     _require_review_hmac(
         implementation_plan_reference_hmac, 'implementation plan reference'
@@ -305,6 +305,9 @@ def verify_release_review_envelope(
             raise RagReleaseReviewError('release review reason is inapplicable')
         if expected_context is not None:
             raise RagReleaseReviewError('release init context is invalid')
+    elif expected_operation == 'authorization-bootstrap':
+        if reason is not None or expected_context is None:
+            raise RagReleaseReviewError('release execution review context is invalid')
     else:
         if reason is None:
             raise RagReleaseReviewError('release review reason is required')
@@ -573,7 +576,9 @@ def _run_cli(
 ) -> CliOutcome:
     if len(argv) != 1 or argv[0] not in _CLI_COMMANDS:
         return CliOutcome(2, {'code': 'command_refused', 'ok': False})
-    if argv[0] == 'preview':
+    if argv[0] in {'preview', 'authorization-bootstrap'}:
+        # The uncomposed production authorization path must fail before reading
+        # stdin or opening any runtime authority. No signing surface exists.
         return _preview_cli()
     try:
         service = service_factory()
@@ -782,10 +787,10 @@ def _build_default_resources(settings: Settings) -> _DefaultResources:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments and arguments[0] == 'preview':
+    if arguments and arguments[0] in {'preview', 'authorization-bootstrap'}:
         outcome = (
             _preview_cli()
-            if arguments == ['preview']
+            if len(arguments) == 1
             else CliOutcome(2, {'code': 'command_refused', 'ok': False})
         )
         sys.stdout.buffer.write(canonical_json_bytes(outcome.payload) + b'\n')

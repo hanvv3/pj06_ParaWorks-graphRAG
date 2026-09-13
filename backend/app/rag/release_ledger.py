@@ -350,6 +350,7 @@ class RagReleaseMutationSet:
         *,
         identity_secret: bytes,
         approved_case_claim: object = None,
+        barrier_guard: object = None,
     ) -> None:
         """Validate literal runtime before/after images before *any* write/incident.
 
@@ -390,6 +391,7 @@ class RagReleaseMutationSet:
             [(row.row_kind, after) for row, _, after in projected],
             approved_case_claim=approved_case_claim,
             identity_secret=identity_secret,
+            barrier_guard=barrier_guard,
         )
         costs = [
             after
@@ -409,7 +411,13 @@ class RagReleaseMutationSet:
             )
 
     def _assert_approved_case_claim(
-        self, payload, runtime_rows, *, approved_case_claim, identity_secret
+        self,
+        payload,
+        runtime_rows,
+        *,
+        approved_case_claim,
+        identity_secret,
+        barrier_guard=None,
     ):
         if payload['transition_kind'] != 'case_claim':
             if approved_case_claim is not None:
@@ -452,6 +460,7 @@ class RagReleaseMutationSet:
                 )
             ],
             identity_secret=identity_secret,
+            barrier_guard=barrier_guard,
         )
 
     @staticmethod
@@ -530,6 +539,7 @@ class RagReleaseMutationSet:
         *,
         identity_secret: bytes,
         approved_case_claim: object = None,
+        barrier_guard: object = None,
     ) -> None:
         by_kind: dict[str, list[dict[str, object]]] = {}
         before_by_kind: dict[str, list[dict[str, object] | None]] = {}
@@ -1135,6 +1145,7 @@ class RagReleaseMutationSet:
             ],
             approved_case_claim=approved_case_claim,
             identity_secret=identity_secret,
+            barrier_guard=barrier_guard,
         )
         for row, before, after in zip(
             self._rows, self._before_snapshots, self._after_snapshots, strict=True
@@ -2957,6 +2968,7 @@ class RagReleaseLedger:
                     payload,
                     identity_secret=self._secret,
                     approved_case_claim=approved_case_claim,
+                    barrier_guard=barrier_guard,
                 )
                 if provider_incident is not None:
                     authorization_before = actual_mutations._snapshot(
@@ -3000,6 +3012,7 @@ class RagReleaseLedger:
                     payload,
                     identity_secret=self._secret,
                     approved_case_claim=approved_case_claim,
+                    barrier_guard=barrier_guard,
                 )
                 self._assert_database_roster(connection, payload, actual_mutations)
                 derived_actual = tuple(

@@ -29,6 +29,7 @@ from backend.app.agent_runtime.rag_safety_identity import (
     rag_identity_hmac,
     require_lower_hmac,
 )
+from backend.app.agent_runtime.rag_v2_identity import exact_utf8_bytes
 from backend.app.rag.release_schema import (
     RAG_RELEASE_TABLE_NAMES,
     assert_rag_release_physical_contract,
@@ -132,9 +133,7 @@ class RagReleaseSnapshot:
     bootstrap_operation: str
 
 
-RecoveryReviewVerifier = Callable[
-    [Connection, bytes | None], tuple[str, str, str]
-]
+RecoveryReviewVerifier = Callable[[Connection, bytes | None], tuple[str, str, str]]
 
 
 class ExternalAuthorityPathSetValidator:
@@ -224,6 +223,10 @@ class RagReleaseAuthority:
     ) -> None:
         if type(identity_secret) is not bytes or len(identity_secret) < 32:
             raise ValueError('release fingerprint key is unavailable')
+        try:
+            identity_secret.decode('utf-8')
+        except UnicodeError:
+            raise ValueError('release fingerprint key is invalid') from None
         for label, value in (
             ('fingerprint key version', fingerprint_key_version),
             ('designated environment', designated_environment_id),
@@ -246,10 +249,16 @@ class RagReleaseAuthority:
         self._secret = identity_secret
         self._key_version = fingerprint_key_version
         self._environment_hmac = self._identity_hmac(
-            'rag-live-designated-environment-id:v1', designated_environment_id
+            'rag-live-designated-environment-id:v1',
+            {
+                'designated_environment_id_bytes': exact_utf8_bytes(
+                    designated_environment_id
+                )
+            },
         )
         self._host_hmac = self._identity_hmac(
-            'rag-live-designated-host-id:v1', designated_host_id
+            'rag-live-designated-host-id:v1',
+            {'designated_host_id_bytes': exact_utf8_bytes(designated_host_id)},
         )
         self._repository_roots = tuple(repository_roots)
         self._database_backup_roots = tuple(database_backup_roots)
@@ -279,11 +288,9 @@ class RagReleaseAuthority:
         return self._marker_path
 
     def _key_verifier(self) -> str:
-        return hmac.new(
-            self._secret,
-            b'paraworks:rag-release-key-material-verifier:v1\x00',
-            hashlib.sha256,
-        ).hexdigest()
+        from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
+
+        return fingerprint_key_material_verifier(self._secret.decode('utf-8'))
 
     def _signature(self, signed_payload: object) -> str:
         return self._identity_hmac(_MARKER_ENVELOPE_SCHEMA, signed_payload)
@@ -309,9 +316,7 @@ class RagReleaseAuthority:
             },
         )
 
-    def _database_locator_hmac(
-        self, identity: ValidationDatabaseIdentity
-    ) -> str:
+    def _database_locator_hmac(self, identity: ValidationDatabaseIdentity) -> str:
         return self._identity_hmac(
             'rag-live-validation-database-locator:v1',
             {
@@ -327,9 +332,7 @@ class RagReleaseAuthority:
         supplied: ValidationDatabaseIdentity | None,
     ) -> ValidationDatabaseIdentity:
         if connection.dialect.name != 'postgresql':
-            raise RagReleaseAuthorityError(
-                'release authority requires PostgreSQL'
-            )
+            raise RagReleaseAuthorityError('release authority requires PostgreSQL')
         row = connection.exec_driver_sql(
             'SELECT current_database(), oid FROM pg_database '
             'WHERE datname = current_database()'
@@ -695,13 +698,9 @@ class RagReleaseAuthority:
         marker = DurableFileAuthority(self._marker_path)
         try:
             with self._authority_barrier(connection, marker=marker):
-                current = self._current_database_identity(
-                    connection, database_identity
-                )
+                current = self._current_database_identity(connection, database_identity)
                 if self._marker_path.exists():
-                    raise RagReleaseAuthorityError(
-                        'release authority already exists'
-                    )
+                    raise RagReleaseAuthorityError('release authority already exists')
                 self._require_fresh_database(connection)
                 self._assert_review_nonce_fresh(
                     connection,
@@ -779,12 +778,16 @@ class RagReleaseAuthority:
                 'release physical schema is inconsistent'
             ) from exc
         table = release_tables(build_rag_release_metadata()).ledgers
-        row = connection.execute(
-            select(table).where(
-                table.c.ledger_uuid == str(snapshot.ledger_uuid),
-                table.c.ledger_epoch == snapshot.ledger_epoch,
+        row = (
+            connection.execute(
+                select(table).where(
+                    table.c.ledger_uuid == str(snapshot.ledger_uuid),
+                    table.c.ledger_epoch == snapshot.ledger_epoch,
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         return None if row is None else dict(row)
 
     def _assert_review_nonce_fresh(
@@ -804,18 +807,15 @@ class RagReleaseAuthority:
                 marker_snapshot = None
             if (
                 marker_snapshot is not None
-                and marker_snapshot.bootstrap_review_nonce_hmac
-                == review_nonce_hmac
+                and marker_snapshot.bootstrap_review_nonce_hmac == review_nonce_hmac
             ):
-                raise RagReleaseAuthorityError(
-                    'release review nonce was already bound'
-                )
+                raise RagReleaseAuthorityError('release review nonce was already bound')
         if self._table_state(connection) == set(RAG_RELEASE_TABLE_NAMES):
             table = release_tables(build_rag_release_metadata()).ledgers
             if connection.scalar(
-                select(func.count()).select_from(table).where(
-                    table.c.bootstrap_review_nonce_hmac == review_nonce_hmac
-                )
+                select(func.count())
+                .select_from(table)
+                .where(table.c.bootstrap_review_nonce_hmac == review_nonce_hmac)
             ):
                 raise RagReleaseAuthorityError(
                     'release review nonce was already consumed'
@@ -868,7 +868,9 @@ class RagReleaseAuthority:
         try:
             identity_uuid = UUID(str(row['validation_database_identity_uuid']))
         except (TypeError, ValueError) as exc:
-            raise RagReleaseAuthorityError('release database identity is invalid') from exc
+            raise RagReleaseAuthorityError(
+                'release database identity is invalid'
+            ) from exc
         expected_database_hmac = self._database_hmac(current, identity_uuid)
         exact = {
             'generation': snapshot.generation,
@@ -893,7 +895,9 @@ class RagReleaseAuthority:
             or row['validation_database_oid'] != current.database_oid
             or any(row[key] != value for key, value in exact.items())
         ):
-            raise RagReleaseAuthorityError('release marker and database identity differ')
+            raise RagReleaseAuthorityError(
+                'release marker and database identity differ'
+            )
         self._verify_transition_history(connection, snapshot)
         return snapshot
 
@@ -903,14 +907,18 @@ class RagReleaseAuthority:
         snapshot: RagReleaseSnapshot,
     ) -> None:
         table = release_tables(build_rag_release_metadata()).transitions
-        rows = connection.execute(
-            select(table)
-            .where(
-                table.c.ledger_uuid == str(snapshot.ledger_uuid),
-                table.c.ledger_epoch == snapshot.ledger_epoch,
+        rows = (
+            connection.execute(
+                select(table)
+                .where(
+                    table.c.ledger_uuid == str(snapshot.ledger_uuid),
+                    table.c.ledger_epoch == snapshot.ledger_epoch,
+                )
+                .order_by(table.c.generation)
             )
-            .order_by(table.c.generation)
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         if len(rows) != snapshot.generation:
             raise RagReleaseAuthorityError('release transition history is not gapless')
         for expected_generation, row in enumerate(rows, start=1):
@@ -960,9 +968,7 @@ class RagReleaseAuthority:
         marker = DurableFileAuthority.open_runtime(self._marker_path)
         try:
             with self._authority_barrier(connection, marker=marker):
-                current = self._current_database_identity(
-                    connection, database_identity
-                )
+                current = self._current_database_identity(connection, database_identity)
                 raw_marker = marker._read_bytes_unlocked()
                 _body, prior = self._parse(raw_marker)
                 (
@@ -981,16 +987,19 @@ class RagReleaseAuthority:
                 row = self._ledger_row_or_none(connection, prior)
                 tables = release_tables(build_rag_release_metadata())
                 if row is None:
-                    row = connection.execute(
-                        select(tables.ledgers)
-                        .where(
-                            tables.ledgers.c.ledger_uuid
-                            == str(prior.ledger_uuid),
-                            tables.ledgers.c.ledger_epoch < prior.ledger_epoch,
+                    row = (
+                        connection.execute(
+                            select(tables.ledgers)
+                            .where(
+                                tables.ledgers.c.ledger_uuid == str(prior.ledger_uuid),
+                                tables.ledgers.c.ledger_epoch < prior.ledger_epoch,
+                            )
+                            .order_by(tables.ledgers.c.ledger_epoch.desc())
+                            .limit(1)
                         )
-                        .order_by(tables.ledgers.c.ledger_epoch.desc())
-                        .limit(1)
-                    ).mappings().one_or_none()
+                        .mappings()
+                        .one_or_none()
+                    )
                     if row is None:
                         raise RagReleaseAuthorityError(
                             'release database peer is missing'
@@ -1003,13 +1012,10 @@ class RagReleaseAuthority:
                     or prior.validation_database_identity_hmac
                     != row['validation_database_identity_hmac']
                 ):
-                    raise RagReleaseAuthorityError(
-                        'release database identity differs'
-                    )
+                    raise RagReleaseAuthorityError('release database identity differs')
                 if row['ledger_epoch'] == prior.ledger_epoch and (
                     row['generation'] == prior.generation
-                    and row['last_transition_digest']
-                    == prior.last_transition_digest
+                    and row['last_transition_digest'] == prior.last_transition_digest
                     and row['marker_file_digest'] == prior.marker_file_digest
                 ):
                     raise RagReleaseAuthorityError(
@@ -1026,9 +1032,7 @@ class RagReleaseAuthority:
                         database_identity_hmac=(
                             prior.validation_database_identity_hmac
                         ),
-                        database_locator_hmac=(
-                            prior.validation_database_locator_hmac
-                        ),
+                        database_locator_hmac=(prior.validation_database_locator_hmac),
                         review_envelope_hmac=review_envelope_hmac,
                         review_nonce_hmac=review_nonce_hmac,
                         review_operation='release-ledger-rebootstrap',
@@ -1068,9 +1072,7 @@ class RagReleaseAuthority:
         )
         try:
             with self._authority_barrier(connection, marker=marker):
-                current = self._current_database_identity(
-                    connection, database_identity
-                )
+                current = self._current_database_identity(connection, database_identity)
                 # Attest an existing exact-six schema before any new marker bytes.
                 # An absent schema is the legal marker-first init crash state.
                 self._require_fresh_database(connection, disaster=True)

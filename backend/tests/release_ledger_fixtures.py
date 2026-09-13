@@ -391,7 +391,14 @@ class ReleaseHarness:
         self.base = payload
 
     def _verify_test_approved_source(
-        self, connection, *, manifest, source_binding, authorization, identity_secret
+        self,
+        connection,
+        *,
+        manifest,
+        source_binding,
+        authorization,
+        identity_secret,
+        barrier_guard=None,
     ):
         """Explicit fake approved source; never installed outside a test call.
 
@@ -577,7 +584,18 @@ class ReleaseHarness:
         return payload, mutations
 
     def append(self, kind, changes, *, approved_case_claim=None, **kwargs):
-        with self.engine.connect() as connection:
+        # Task24-B revalidates the source under append's barrier as well as
+        # during preparation. Keep this existing synthetic-roster fake scoped
+        # across both checks; no test seam is installed in production.
+        verifier_context = (
+            patch(
+                'backend.app.rag.release_review.require_approved_case_source',
+                self.source_verifier,
+            )
+            if self.source_verifier is not None
+            else nullcontext()
+        )
+        with verifier_context, self.engine.connect() as connection:
             payload, mutations = self.prepare(connection, kind, changes, **kwargs)
             self.snapshot = self.ledger.append(
                 connection,
