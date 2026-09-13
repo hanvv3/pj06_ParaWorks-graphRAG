@@ -722,7 +722,7 @@ class RagReleaseAuthority:
         review_envelope_hmac: str,
         review_nonce_hmac: str,
         review_operation: str,
-    ) -> None:
+    ) -> dict[str, object]:
         require_lower_hmac(review_envelope_hmac)
         require_lower_hmac(review_nonce_hmac)
         if review_operation not in {
@@ -746,38 +746,87 @@ class RagReleaseAuthority:
                 'release physical schema is inconsistent'
             ) from exc
         table = release_tables(metadata).ledgers
-        result = connection.execute(
-            insert(table).values(
-                ledger_uuid=str(snapshot.ledger_uuid),
-                ledger_epoch=snapshot.ledger_epoch,
-                generation=snapshot.generation,
-                last_transition_digest=snapshot.last_transition_digest,
-                predecessor_marker_digest=snapshot.predecessor_marker_digest,
-                rebootstrap_reason_hmac=snapshot.rebootstrap_reason_hmac,
-                marker_file_digest=snapshot.marker_file_digest,
-                bootstrap_review_envelope_hmac=review_envelope_hmac,
-                bootstrap_review_nonce_hmac=review_nonce_hmac,
-                bootstrap_operation=review_operation,
-                fingerprint_key_version=snapshot.fingerprint_key_version,
-                fingerprint_key_material_verifier=(
-                    snapshot.fingerprint_key_material_verifier
-                ),
-                designated_environment_id_hmac=(
-                    snapshot.designated_environment_id_hmac
-                ),
-                designated_host_id_hmac=snapshot.designated_host_id_hmac,
-                validation_database_identity_hmac=(
-                    snapshot.validation_database_identity_hmac
-                ),
-                validation_database_locator_hmac=(
-                    snapshot.validation_database_locator_hmac
-                ),
-                validation_database_identity_uuid=str(database_identity_uuid),
-                validation_database_oid=database_identity.database_oid,
-            )
-        )
+        inserted_row = {
+            'ledger_uuid': str(snapshot.ledger_uuid),
+            'ledger_epoch': snapshot.ledger_epoch,
+            'generation': snapshot.generation,
+            'last_transition_digest': snapshot.last_transition_digest,
+            'predecessor_marker_digest': snapshot.predecessor_marker_digest,
+            'rebootstrap_reason_hmac': snapshot.rebootstrap_reason_hmac,
+            'marker_file_digest': snapshot.marker_file_digest,
+            'bootstrap_review_envelope_hmac': review_envelope_hmac,
+            'bootstrap_review_nonce_hmac': review_nonce_hmac,
+            'bootstrap_operation': review_operation,
+            'fingerprint_key_version': snapshot.fingerprint_key_version,
+            'fingerprint_key_material_verifier': (
+                snapshot.fingerprint_key_material_verifier
+            ),
+            'designated_environment_id_hmac': (snapshot.designated_environment_id_hmac),
+            'designated_host_id_hmac': snapshot.designated_host_id_hmac,
+            'validation_database_identity_hmac': (
+                snapshot.validation_database_identity_hmac
+            ),
+            'validation_database_locator_hmac': (
+                snapshot.validation_database_locator_hmac
+            ),
+            'validation_database_identity_uuid': str(database_identity_uuid),
+            'validation_database_oid': database_identity.database_oid,
+        }
+        result = connection.execute(insert(table).values(**inserted_row))
         if result.rowcount != 1:
             raise RagReleaseAuthorityError('release ledger insert failed')
+        return inserted_row
+
+    @staticmethod
+    @contextmanager
+    def _rollback_on_error(connection):
+        try:
+            yield
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def _publication_checkpoint(self, connection, marker, guard):
+        """Pin before callbacks; only owned file/SQL reads after publication starts."""
+        guard.freeze_provider()
+        tables = build_rag_release_metadata().tables
+
+        def image():
+            names = self._table_state(connection)
+            if names and names != set(tables):
+                raise RagReleaseAuthorityError('release schema is inconsistent')
+            return {
+                name: [
+                    dict(row)
+                    for row in connection.execute(
+                        select(tables[name]).order_by(*tables[name].primary_key.columns)
+                    ).mappings()
+                ]
+                for name in sorted(names)
+            }
+
+        before = image()
+        self._assert_barrier_guard(guard, connection)
+
+        def checkpoint(expected_marker, inserted_row=None):
+            self._assert_barrier_guard(guard, connection).revalidate_provider()
+            self._validate_path_set()
+            actual_marker = (
+                marker._read_bytes_unlocked() if self._marker_path.exists() else None
+            )
+            if actual_marker != expected_marker:
+                raise RagReleaseAuthorityError('release publication marker changed')
+            expected = before
+            if inserted_row is not None:
+                expected = {name: list(before.get(name, [])) for name in tables}
+                rows = expected['rag_live_gate_ledgers']
+                rows.append(inserted_row)
+                rows.sort(key=lambda row: (row['ledger_uuid'], row['ledger_epoch']))
+            if image() != expected:
+                raise RagReleaseAuthorityError('release publication database changed')
+            self._assert_barrier_guard(guard, connection).revalidate_provider()
+
+        return checkpoint
 
     def initialize(
         self,
@@ -792,7 +841,11 @@ class RagReleaseAuthority:
             raise RagReleaseAuthorityError('release authority already exists')
         marker = DurableFileAuthority(self._marker_path)
         try:
-            with self._authority_barrier(connection, marker=marker):
+            with (
+                self._authority_barrier(connection, marker=marker) as guard,
+                self._rollback_on_error(connection),
+            ):
+                checkpoint = self._publication_checkpoint(connection, marker, guard)
                 current = self._current_database_identity(connection, database_identity)
                 if self._marker_path.exists():
                     raise RagReleaseAuthorityError('release authority already exists')
@@ -821,11 +874,13 @@ class RagReleaseAuthority:
                     )
                 )
                 _body, snapshot = self._parse(canonical_json_bytes(envelope))
+                checkpoint(None)
                 marker._replace_unlocked(envelope)
                 self._validate_path_set()
                 if self._after_marker_replace is not None:
                     self._after_marker_replace()
-                self._insert_ledger(
+                checkpoint(canonical_json_bytes(envelope))
+                inserted_row = self._insert_ledger(
                     connection,
                     snapshot=snapshot,
                     database_identity_uuid=identity_uuid,
@@ -834,6 +889,9 @@ class RagReleaseAuthority:
                     review_nonce_hmac=review_nonce_hmac,
                     review_operation='release-ledger-init',
                 )
+                checkpoint(canonical_json_bytes(envelope), inserted_row)
+                self._inspect_locked(connection, snapshot, database_identity=current)
+                checkpoint(canonical_json_bytes(envelope), inserted_row)
                 connection.commit()
                 return snapshot
         except DurableFileAuthorityError as exc:
@@ -941,13 +999,20 @@ class RagReleaseAuthority:
         self._validate_path_set()
         marker = DurableFileAuthority.open_runtime(self._marker_path)
         try:
-            with self._authority_barrier(connection, marker=marker):
-                _body, snapshot = self._parse(marker._read_bytes_unlocked())
-                return self._inspect_locked(
+            with (
+                self._authority_barrier(connection, marker=marker) as guard,
+                self._rollback_on_error(connection),
+            ):
+                checkpoint = self._publication_checkpoint(connection, marker, guard)
+                raw_marker = marker._read_bytes_unlocked()
+                _body, snapshot = self._parse(raw_marker)
+                result = self._inspect_locked(
                     connection,
                     snapshot,
                     database_identity=database_identity,
                 )
+                checkpoint(raw_marker)
+                return result
         except DurableFileAuthorityError as exc:
             raise RagReleaseAuthorityError('release marker is unavailable') from exc
 
@@ -1062,7 +1127,11 @@ class RagReleaseAuthority:
         self._validate_path_set()
         marker = DurableFileAuthority.open_runtime(self._marker_path)
         try:
-            with self._authority_barrier(connection, marker=marker):
+            with (
+                self._authority_barrier(connection, marker=marker) as guard,
+                self._rollback_on_error(connection),
+            ):
+                checkpoint = self._publication_checkpoint(connection, marker, guard)
                 current = self._current_database_identity(connection, database_identity)
                 raw_marker = marker._read_bytes_unlocked()
                 _body, prior = self._parse(raw_marker)
@@ -1134,11 +1203,13 @@ class RagReleaseAuthority:
                     )
                 )
                 _new_body, snapshot = self._parse(canonical_json_bytes(envelope))
+                checkpoint(raw_marker)
                 marker._replace_unlocked(envelope)
                 self._validate_path_set()
                 if self._after_marker_replace is not None:
                     self._after_marker_replace()
-                self._insert_ledger(
+                checkpoint(canonical_json_bytes(envelope))
+                inserted_row = self._insert_ledger(
                     connection,
                     snapshot=snapshot,
                     database_identity_uuid=identity_uuid,
@@ -1147,6 +1218,9 @@ class RagReleaseAuthority:
                     review_nonce_hmac=review_nonce_hmac,
                     review_operation='release-ledger-rebootstrap',
                 )
+                checkpoint(canonical_json_bytes(envelope), inserted_row)
+                self._inspect_locked(connection, snapshot, database_identity=current)
+                checkpoint(canonical_json_bytes(envelope), inserted_row)
                 connection.commit()
                 return snapshot
         except DurableFileAuthorityError as exc:
@@ -1166,7 +1240,11 @@ class RagReleaseAuthority:
             else DurableFileAuthority(self._marker_path)
         )
         try:
-            with self._authority_barrier(connection, marker=marker):
+            with (
+                self._authority_barrier(connection, marker=marker) as guard,
+                self._rollback_on_error(connection),
+            ):
+                checkpoint = self._publication_checkpoint(connection, marker, guard)
                 current = self._current_database_identity(connection, database_identity)
                 # Attest an existing exact-six schema before any new marker bytes.
                 # An absent schema is the legal marker-first init crash state.
@@ -1219,11 +1297,13 @@ class RagReleaseAuthority:
                     )
                 )
                 _body, snapshot = self._parse(canonical_json_bytes(envelope))
+                checkpoint(raw_marker)
                 marker._replace_unlocked(envelope)
                 self._validate_path_set()
                 if self._after_marker_replace is not None:
                     self._after_marker_replace()
-                self._insert_ledger(
+                checkpoint(canonical_json_bytes(envelope))
+                inserted_row = self._insert_ledger(
                     connection,
                     snapshot=snapshot,
                     database_identity_uuid=identity_uuid,
@@ -1232,6 +1312,9 @@ class RagReleaseAuthority:
                     review_nonce_hmac=review_nonce_hmac,
                     review_operation='release-ledger-disaster-init',
                 )
+                checkpoint(canonical_json_bytes(envelope), inserted_row)
+                self._inspect_locked(connection, snapshot, database_identity=current)
+                checkpoint(canonical_json_bytes(envelope), inserted_row)
                 connection.commit()
                 return snapshot
         except DurableFileAuthorityError as exc:

@@ -4,15 +4,36 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timezone
 from decimal import Decimal
 from typing import TypeAlias
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import Connection, Table, insert, select, update
+from sqlalchemy import Column, Connection, Table, insert, select, update
+from sqlalchemy.sql import operators
 from sqlalchemy.sql.dml import Insert, Update
-from sqlalchemy.sql.elements import BindParameter
+from sqlalchemy.sql.elements import (
+    BinaryExpression,
+    BindParameter,
+    BooleanClauseList,
+    quoted_name,
+)
+from sqlalchemy.sql.sqltypes import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    Integer,
+    LargeBinary,
+    NullType,
+    Numeric,
+    String,
+    Text,
+)
 
 from backend.app.agent_runtime.durable_file_authority import (
     DurableFileAuthority,
@@ -101,6 +122,65 @@ class _ReleaseMutationPlan:
     row: ReleaseRowPrimaryKey
 
 
+@dataclass(frozen=True, slots=True)
+class _FrozenMutationV1:
+    """Internal literal-image executor v1; never executes a caller SQL object."""
+
+    row: ReleaseRowPrimaryKey
+    statement: object
+    before: dict[str, object] | None
+    after: dict[str, object]
+
+
+_LITERAL_SQL_TYPES = frozenset(
+    {
+        JSON,
+        BigInteger,
+        Boolean,
+        DateTime,
+        Float,
+        Integer,
+        LargeBinary,
+        NullType,
+        Numeric,
+        String,
+        Text,
+    }
+)
+
+
+def _literal_value(value):
+    if value is None or type(value) in {str, int, bool, bytes}:
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    if type(value) is Decimal and value.is_finite():
+        return value
+    # Drivers may use timezone or ZoneInfo even for equivalent UTC instants.
+    # Exact builtin types preserve DB normalization without calling custom tzinfo.
+    if type(value) is datetime and (
+        value.tzinfo is None or type(value.tzinfo) in {timezone, ZoneInfo}
+    ):
+        return value
+    if type(value) is dict and all(type(key) is str for key in value):
+        return {key: _literal_value(item) for key, item in value.items()}
+    if type(value) is list:
+        return [_literal_value(item) for item in value]
+    raise RagReleaseLedgerError('release mutation requires native literal values')
+
+
+def _literal_binding(binding):
+    if (
+        type(binding) is not BindParameter
+        or binding.callable is not None
+        or type(binding.type) not in _LITERAL_SQL_TYPES
+        or binding.expanding
+        or binding.literal_execute
+    ):
+        raise RagReleaseLedgerError('release mutation requires literal bindings')
+    return _literal_value(binding.value)
+
+
 class RagReleaseMutationSet:
     """Plan row mutations, then capture them only under the authority barrier."""
 
@@ -109,6 +189,7 @@ class RagReleaseMutationSet:
         '_before_snapshots',
         '_connection',
         '_executed',
+        '_frozen_plans',
         '_observation_rows',
         '_observation_snapshots',
         '_plans',
@@ -129,6 +210,7 @@ class RagReleaseMutationSet:
         self._observation_snapshots: list[dict[str, object]] = []
         self._transaction = None
         self._executed = False
+        self._frozen_plans = None
         self._seal = seal
 
     @staticmethod
@@ -200,11 +282,15 @@ class RagReleaseMutationSet:
         )
 
     def plan(self, statement: object, row: ReleaseRowPrimaryKey) -> None:
-        if type(row) is not ReleaseRowPrimaryKey:
+        if (
+            type(row) is not ReleaseRowPrimaryKey
+            or type(row.row_kind) is not str
+            or type(row.primary_key) is not dict
+        ):
             raise RagReleaseLedgerError('release row primary key is invalid')
         if self._executed or self._transaction is not None:
             raise RagReleaseLedgerError('release mutation plan was already executed')
-        stored = ReleaseRowPrimaryKey(row.row_kind, dict(row.primary_key))
+        stored = ReleaseRowPrimaryKey(row.row_kind, _literal_value(row.primary_key))
         if any(plan.row == stored for plan in self._plans) or stored in (
             self._observation_rows
         ):
@@ -311,16 +397,22 @@ class RagReleaseMutationSet:
         )
         if not self._plans:
             raise RagReleaseLedgerError('release mutation plan is empty')
+        if self._frozen_plans is None:
+            self._freeze_all_mutations()
+        authority._assert_barrier_guard(barrier_guard, connection)
         transaction = self._transaction
-        for plan in self._plans:
+        for plan in self._frozen_plans:
             before = self._snapshot(connection, plan.row, for_update=True)
-            result = connection.execute(plan.statement)  # type: ignore[call-overload]
+            if before != plan.before:
+                raise RagReleaseLedgerError('release frozen before-image changed')
+            result = connection.execute(plan.statement)  # schema-owned literal SQL
             after = self._snapshot(connection, plan.row)
             ignored = {'updated_at'}
             if (
                 result.rowcount != 1
                 or after is None
                 or after == before
+                or _observation_json_value(after) != _observation_json_value(plan.after)
                 or (
                     plan.row.row_kind == 'agent_run'
                     and before is not None
@@ -344,6 +436,156 @@ class RagReleaseMutationSet:
             raise RagReleaseLedgerError('release mutation transaction changed')
         self._transaction = transaction
         self._executed = True
+
+    def _freeze_all_mutations(self):
+        """Translate all plans before DML, including authorization and release rows.
+
+        The public SQL input is a parsing surface only. Exact native literals and
+        equality predicates are consumed here; SQL expressions, type processors,
+        callable/default bindings and caller execution machinery never cross it.
+        """
+        frozen = []
+        for plan in self._plans:
+            table, aliases = self._table(plan.row.row_kind)
+            if plan.row.row_kind in {'provider_safety_authority', 'provider_readiness'}:
+                raise RagReleaseLedgerError('provider rows require a sealed incident')
+            statement = plan.statement
+            if (
+                type(statement) not in {Insert, Update}
+                or type(statement.table) is not Table
+                or statement.table.name != table.name
+                or statement.table.schema != table.schema
+                or set(statement.table.c.keys()) != set(table.c.keys())
+                or statement._returning
+                or statement._prefixes
+                or statement._execution_options
+                or statement._hints
+                or statement._multi_values
+                or (type(statement) is Insert and statement.select is not None)
+                or (type(statement) is Update and statement._ordered_values is not None)
+            ):
+                raise RagReleaseLedgerError('release mutation statement is not exact')
+            for column in statement.table.c:
+                if (
+                    type(column) is not Column
+                    or type(column.type) not in _LITERAL_SQL_TYPES
+                    or (
+                        statement.table is not table
+                        and column.default is not None
+                        and column.default.is_callable
+                    )
+                ):
+                    raise RagReleaseLedgerError(
+                        'release mutation schema is not literal'
+                    )
+            release_row_identity_hmac(
+                plan.row.row_kind, plan.row.primary_key, identity_secret=b'0' * 32
+            )
+            primary_key = {
+                aliases.get(key, key): _literal_value(value)
+                for key, value in plan.row.primary_key.items()
+            }
+            before = self._snapshot(self._connection, plan.row, for_update=True)
+            if (before is None) != (type(statement) is Insert):
+                raise RagReleaseLedgerError(
+                    'release mutation before-image is not exact'
+                )
+            predicates = {}
+
+            def predicate(expression, statement=statement, predicates=predicates):
+                if (
+                    type(expression) is BooleanClauseList
+                    and expression.operator is operators.and_
+                ):
+                    for item in expression.clauses:
+                        predicate(item)
+                    return
+                if (
+                    type(expression) is not BinaryExpression
+                    or expression.operator is not operators.eq
+                    or type(expression.left) is not Column
+                    or expression.left.table is not statement.table
+                ):
+                    raise RagReleaseLedgerError(
+                        'release mutation predicate is not exact'
+                    )
+                name = str(expression.left.name)
+                if name in predicates:
+                    raise RagReleaseLedgerError(
+                        'release mutation predicate is not exact'
+                    )
+                predicates[name] = _literal_binding(expression.right)
+
+            if type(statement) is Update:
+                for expression in statement._where_criteria:
+                    predicate(expression)
+                if not predicates or any(
+                    before.get(key) != value for key, value in predicates.items()
+                ):
+                    raise RagReleaseLedgerError(
+                        'release mutation predicate is not exact'
+                    )
+            values = {}
+            for field, binding in (statement._values or {}).items():
+                if type(field) in {str, quoted_name}:
+                    name = str(field)
+                elif type(field) is Column and field.table is statement.table:
+                    name = str(field.name)
+                else:
+                    raise RagReleaseLedgerError('release mutation column is not exact')
+                if name not in table.c:
+                    raise RagReleaseLedgerError('release mutation column is not exact')
+                values[name] = _literal_binding(binding)
+            after = {**(before or {}), **values}
+            # Runtime images must be exact before any SQL coercion/default fill.
+            if plan.row.row_kind in {'agent_run', 'cost_component'}:
+                _runtime_projection(plan.row.row_kind, after)
+            for column in table.c:
+                name = str(column.name)
+                if name not in after:
+                    if column.default is not None and column.default.is_scalar:
+                        after[name] = _literal_value(column.default.arg)
+                    elif column.nullable:
+                        after[name] = None
+                    else:
+                        raise RagReleaseLedgerError(
+                            'release mutation requires every column'
+                        )
+                value = after[name]
+                expected = column.type.python_type
+                if expected is Decimal and type(value) in {str, int, Decimal}:
+                    value = Decimal(value)
+                    if not value.is_finite() or value != value.quantize(
+                        Decimal('0.000001')
+                    ):
+                        raise RagReleaseLedgerError('release money literal is invalid')
+                    after[name] = value.quantize(Decimal('0.000001'))
+                elif (value is not None and type(value) is not expected) or (
+                    value is None and not column.nullable
+                ):
+                    raise RagReleaseLedgerError('release literal type is invalid')
+            if any(after[key] != value for key, value in primary_key.items()):
+                raise RagReleaseLedgerError('release mutation primary key differs')
+            owned = (
+                insert(table).values(**after)
+                if before is None
+                else update(table)
+                .where(*(table.c[key] == value for key, value in primary_key.items()))
+                .values(**after)
+            )
+            frozen.append(
+                _FrozenMutationV1(
+                    ReleaseRowPrimaryKey(
+                        plan.row.row_kind, _literal_value(plan.row.primary_key)
+                    ),
+                    owned,
+                    deepcopy(before),
+                    deepcopy(after),
+                )
+            )
+        if self._connection.get_transaction() is not self._transaction:
+            raise RagReleaseLedgerError('release mutation transaction changed')
+        self._frozen_plans = tuple(frozen)
 
     def _preflight_runtime_mutations(
         self,
@@ -2982,6 +3224,7 @@ class RagReleaseLedger:
                 actual_mutations._assert_observation_projection(
                     payload, identity_secret=self._secret
                 )
+                actual_mutations._freeze_all_mutations()
                 actual_mutations._preflight_runtime_mutations(
                     payload,
                     identity_secret=self._secret,

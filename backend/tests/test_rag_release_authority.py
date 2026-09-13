@@ -569,14 +569,15 @@ def test_recovery_review_verifier_runs_inside_authority_barrier(
     from backend.app.rag.release_authority import RagReleaseAuthority
 
     held = False
+    original_barrier = RagReleaseAuthority._authority_barrier
 
     @contextmanager
     def observed_barrier(_self, _connection, *, marker):
         nonlocal held
-        with marker.locked():
+        with original_barrier(_self, _connection, marker=marker) as guard:
             held = True
             try:
-                yield
+                yield guard
             finally:
                 held = False
 

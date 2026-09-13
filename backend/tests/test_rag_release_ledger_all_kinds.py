@@ -405,7 +405,7 @@ def finish(harness, kind, outcome):
     return harness.append(kind, changes, outcome=outcome, payload_overrides=overrides)
 
 
-def incident_harness(tmp_path, monkeypatch):
+def incident_harness(tmp_path, monkeypatch, *, prepare_only=False):
     """Real sealed Task22 service; only PostgreSQL transport/advisory is substituted."""
     from backend.app.admin import rag_provider_safety as admin_module
     from backend.app.rag import release_authority as authority_module
@@ -464,7 +464,658 @@ def incident_harness(tmp_path, monkeypatch):
         database_backup_roots=(),
         provider_safety_release_peer=peer,
     )
+    if prepare_only:
+        return engine, authority
     return ReleaseHarness(engine, authority, _SECRET, _identity())
+
+
+@pytest.mark.parametrize(
+    'operation', ['initialize', 'disaster_initialize', 'rebootstrap', 'inspect']
+)
+def test_nonappend_provider_entry_drift_never_publishes(
+    tmp_path, monkeypatch, operation
+):
+    from sqlalchemy import event, func, update
+
+    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+    from backend.app.models.rag_runtime import RagProviderSafetyAuthority
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    engine, authority = incident_harness(tmp_path, monkeypatch, prepare_only=True)
+    tables = release_tables(build_rag_release_metadata())
+    if operation in {'inspect', 'rebootstrap'}:
+        with engine.connect() as connection:
+            authority.initialize(
+                connection,
+                database_identity=_identity(),
+                review_envelope_hmac='1' * 64,
+                review_nonce_hmac='2' * 64,
+            )
+            if operation == 'rebootstrap':
+                connection.execute(
+                    update(tables.ledgers).values(
+                        generation=9, last_transition_digest='9' * 64
+                    )
+                )
+                connection.commit()
+    old_marker = (
+        authority.marker_path.read_bytes() if authority.marker_path.exists() else None
+    )
+    original = type(authority)._authority_transport
+    callbacks, release_dml = [], []
+
+    @contextmanager
+    def drift_transport(owner, connection, *, marker):
+        with original(owner, connection, marker=marker) as guard:
+            callbacks.append('entry')
+            connection.execute(
+                update(RagProviderSafetyAuthority).values(global_safety_generation=99)
+            )
+            yield guard
+
+    def observe(_conn, _cursor, sql, *_):
+        if (
+            sql.lstrip()
+            .upper()
+            .startswith(('INSERT INTO RAG_LIVE_GATE', 'UPDATE RAG_LIVE_GATE'))
+        ):
+            release_dml.append(sql)
+
+    monkeypatch.setattr(type(authority), '_authority_transport', drift_transport)
+    event.listen(engine, 'before_cursor_execute', observe)
+    refused = False
+    with engine.connect() as connection:
+        try:
+            kwargs = {'database_identity': _identity()}
+            if operation == 'initialize':
+                kwargs.update(review_envelope_hmac='3' * 64, review_nonce_hmac='4' * 64)
+            elif operation != 'inspect':
+                kwargs['review_verifier'] = lambda *_: ('3' * 64, '4' * 64, '5' * 64)
+            getattr(authority, operation)(connection, **kwargs)
+        except (RagReleaseAuthorityError, RagProviderSafetyError):
+            refused = True
+        finally:
+            connection.rollback()
+    with engine.connect() as check:
+        if operation in {'inspect', 'rebootstrap'}:
+            assert check.scalar(select(func.count()).select_from(tables.ledgers)) == 1
+            assert check.scalar(select(tables.ledgers.c.generation)) == (
+                9 if operation == 'rebootstrap' else 0
+            )
+        else:
+            assert (
+                not __import__('sqlalchemy')
+                .inspect(check)
+                .has_table(tables.ledgers.name)
+            )
+    assert callbacks == ['entry']
+    assert release_dml == []
+    assert (
+        authority.marker_path.read_bytes() if authority.marker_path.exists() else None
+    ) == old_marker
+    assert refused
+
+
+def test_all_plans_freeze_before_reordered_authorization_callable_commit(
+    tmp_path, monkeypatch
+):
+    from sqlalchemy import bindparam, event
+
+    harness = incident_harness(tmp_path, monkeypatch)
+    old_auth = harness.records('authorization')
+    old_marker = harness.authority.marker_path.read_bytes()
+    original = RagReleaseLedger.append
+    calls, dml = [], []
+
+    def attack(self, connection, payload, *, actual_mutations, **kwargs):
+        if payload['transition_kind'] == 'case_claim':
+            plan = actual_mutations._plans.pop(0)
+
+            def commit_value():
+                calls.append(len(dml))
+                connection.commit()
+                return 1
+
+            actual_mutations.plan(
+                plan.statement.values(
+                    case_claim_count=bindparam('late_count', callable_=commit_value)
+                ),
+                plan.row,
+            )
+        return original(
+            self, connection, payload, actual_mutations=actual_mutations, **kwargs
+        )
+
+    def observe(_conn, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+
+    monkeypatch.setattr(RagReleaseLedger, 'append', attack)
+    event.listen(harness.engine, 'before_cursor_execute', observe)
+    with pytest.raises(RagReleaseLedgerError):
+        harness.claim()
+    assert harness.records('case') == []
+    assert harness.records('agent_run') == []
+    assert harness.records('cost_component') == []
+    assert harness.records('authorization') == old_auth
+    assert harness.authority.marker_path.read_bytes() == old_marker
+    assert calls == []
+    assert dml == []
+
+
+@pytest.mark.parametrize(
+    'row_kind',
+    [
+        'authorization',
+        'case',
+        'dispatch',
+        'quality_report',
+        'release_ledger',
+        'release_transition',
+        'agent_run',
+        'cost_component',
+    ],
+)
+@pytest.mark.parametrize(
+    'attack_kind', ['callable', 'expression', 'processor', 'default', 'delete']
+)
+def test_all_table_plan_surfaces_refuse_before_first_dml(
+    tmp_path, monkeypatch, row_kind, attack_kind
+):
+    from sqlalchemy import (
+        Integer,
+        MetaData,
+        bindparam,
+        delete,
+        event,
+        insert,
+        literal,
+        update,
+    )
+    from sqlalchemy.types import TypeDecorator
+
+    from backend.app.rag.release_ledger import ReleaseRowPrimaryKey
+
+    harness = incident_harness(tmp_path, monkeypatch)
+    old_marker = harness.authority.marker_path.read_bytes()
+    old = {
+        kind: harness.records(kind)
+        for kind in (
+            'authorization',
+            'case',
+            'dispatch',
+            'quality_report',
+            'agent_run',
+            'cost_component',
+        )
+    }
+    original = RagReleaseLedger.append
+    calls, dml = [], []
+
+    def attack(self, connection, payload, *, actual_mutations, **kwargs):
+        plans = actual_mutations._plans
+        if row_kind in {'release_ledger', 'release_transition'}:
+            tables = release_tables(build_rag_release_metadata())
+            table = (
+                tables.ledgers if row_kind == 'release_ledger' else tables.transitions
+            )
+            key = {
+                'ledger_uuid': payload['ledger_uuid'],
+                'ledger_epoch': payload['ledger_epoch'],
+            }
+            if row_kind == 'release_transition':
+                key['to_generation'] = payload['to_generation']
+            row = ReleaseRowPrimaryKey(row_kind, key)
+            statement = insert(table).values(generation=2)
+        elif row_kind in {'dispatch', 'quality_report'}:
+            table, _ = actual_mutations._table(row_kind)
+            key = {
+                'ledger_uuid': payload['ledger_uuid'],
+                'ledger_epoch': payload['ledger_epoch'],
+                'approval_id_hmac': payload['approval_id_hmac'],
+            }
+            if row_kind == 'dispatch':
+                key.update(
+                    case_id_hmac=payload['case_id_hmac'], component='answer_generation'
+                )
+            row = ReleaseRowPrimaryKey(row_kind, key)
+            statement = insert(table).values(**key)
+        else:
+            plan = next(plan for plan in plans if plan.row.row_kind == row_kind)
+            plans.remove(plan)
+            statement, row = plan.statement, plan.row
+            table = statement.table
+        name = next(iter(statement._values))
+        value = statement._values[name].value
+
+        def callback(*_):
+            calls.append(len(dml))
+            connection.commit()
+            return value
+
+        class Processor(TypeDecorator):
+            impl = Integer
+            cache_ok = False
+
+            def process_bind_param(self, value, dialect):
+                callback()
+                return value
+
+        if attack_kind == 'callable':
+            statement = statement.values(
+                {name: bindparam('attack', callable_=callback)}
+            )
+        elif attack_kind == 'expression':
+            statement = statement.values({name: literal(value) + literal(0)})
+        elif attack_kind == 'processor':
+            statement = statement.values(
+                {name: bindparam('attack', value=value, type_=Processor())}
+            )
+        elif attack_kind == 'default':
+            from sqlalchemy import ColumnDefault
+
+            clone = table.to_metadata(MetaData())
+            clone.c[str(name)].default = ColumnDefault(callback)
+            values = {
+                str(k): v.value for k, v in statement._values.items() if k != name
+            }
+            statement = (
+                insert(clone) if row_kind != 'authorization' else update(clone)
+            ).values(**values)
+        else:
+            statement = delete(table)
+        actual_mutations.plan(statement, row)
+        return original(
+            self, connection, payload, actual_mutations=actual_mutations, **kwargs
+        )
+
+    def observe(_conn, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+
+    monkeypatch.setattr(RagReleaseLedger, 'append', attack)
+    event.listen(harness.engine, 'before_cursor_execute', observe)
+    with pytest.raises(RagReleaseLedgerError):
+        harness.claim()
+    assert {kind: harness.records(kind) for kind in old} == old
+    assert harness.authority.marker_path.read_bytes() == old_marker
+    assert calls == [] and dml == []
+
+
+@pytest.mark.parametrize(
+    'operation', ['initialize', 'disaster_initialize', 'rebootstrap']
+)
+@pytest.mark.parametrize(
+    'attack_kind', ['provider', 'commit', 'rollback', 'close', 'replace_transaction']
+)
+def test_marker_first_hook_never_publishes_release_db_after_callback_drift(
+    tmp_path, monkeypatch, operation, attack_kind
+):
+    from sqlalchemy import event, update
+
+    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+    from backend.app.models.rag_runtime import RagProviderSafetyAuthority
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    engine, authority = incident_harness(tmp_path, monkeypatch, prepare_only=True)
+    tables = release_tables(build_rag_release_metadata())
+    if operation == 'rebootstrap':
+        with engine.connect() as connection:
+            authority.initialize(
+                connection,
+                database_identity=_identity(),
+                review_envelope_hmac='1' * 64,
+                review_nonce_hmac='2' * 64,
+            )
+            connection.execute(
+                update(tables.ledgers).values(
+                    generation=9, last_transition_digest='9' * 64
+                )
+            )
+            connection.commit()
+    old_rows = None
+    if operation == 'rebootstrap':
+        with engine.connect() as connection:
+            old_rows = [
+                dict(row)
+                for row in connection.execute(select(tables.ledgers)).mappings()
+            ]
+    calls, dml = [], []
+    with engine.connect() as connection:
+
+        def hook():
+            calls.append(len(dml))
+            assert authority.marker_path.exists()
+            if attack_kind == 'provider':
+                connection.execute(
+                    update(RagProviderSafetyAuthority).values(
+                        global_safety_generation=99
+                    )
+                )
+            elif attack_kind == 'replace_transaction':
+                connection.rollback()
+                connection.begin()
+            else:
+                getattr(connection, attack_kind)()
+
+        authority._after_marker_replace = hook
+
+        def observe(_conn, _cursor, sql, *_):
+            if (
+                sql.lstrip()
+                .upper()
+                .startswith(('INSERT INTO RAG_LIVE_GATE', 'UPDATE RAG_LIVE_GATE'))
+            ):
+                dml.append(sql)
+
+        event.listen(engine, 'before_cursor_execute', observe)
+        kwargs = {'database_identity': _identity()}
+        if operation == 'initialize':
+            kwargs.update(review_envelope_hmac='3' * 64, review_nonce_hmac='4' * 64)
+        else:
+            kwargs['review_verifier'] = lambda *_: ('3' * 64, '4' * 64, '5' * 64)
+        with pytest.raises((RagReleaseAuthorityError, RagProviderSafetyError)):
+            getattr(authority, operation)(connection, **kwargs)
+    with engine.connect() as check:
+        if old_rows is None:
+            assert (
+                not __import__('sqlalchemy')
+                .inspect(check)
+                .has_table(tables.ledgers.name)
+            )
+        else:
+            assert [
+                dict(row) for row in check.execute(select(tables.ledgers)).mappings()
+            ] == old_rows
+    assert calls == [0] and dml == []
+    assert authority.marker_path.exists()  # deliberate marker-first crash evidence
+
+
+def test_literal_plan_reordering_is_safe_and_executes_no_callback(
+    tmp_path, monkeypatch
+):
+    harness = incident_harness(tmp_path, monkeypatch)
+    original = RagReleaseLedger.append
+
+    def reordered(self, connection, payload, *, actual_mutations, **kwargs):
+        actual_mutations._plans.append(actual_mutations._plans.pop(0))
+        return original(
+            self, connection, payload, actual_mutations=actual_mutations, **kwargs
+        )
+
+    monkeypatch.setattr(RagReleaseLedger, 'append', reordered)
+    harness.claim()
+    assert harness.snapshot.generation == 2
+    assert harness.records('authorization')[0]['case_claim_count'] == 1
+    assert len(harness.records('case')) == len(harness.records('agent_run')) == 1
+    assert len(harness.records('cost_component')) == 2
+
+
+@pytest.mark.parametrize(
+    'operation', ['initialize', 'disaster_initialize', 'rebootstrap', 'inspect']
+)
+def test_nonappend_final_checkpoint_refuses_provider_db_drift(
+    tmp_path, monkeypatch, operation
+):
+    from sqlalchemy import event, update
+
+    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+    from backend.app.models.rag_runtime import RagProviderSafetyAuthority
+
+    engine, authority = incident_harness(tmp_path, monkeypatch, prepare_only=True)
+    tables = release_tables(build_rag_release_metadata())
+    if operation in {'inspect', 'rebootstrap'}:
+        with engine.connect() as connection:
+            authority.initialize(
+                connection,
+                database_identity=_identity(),
+                review_envelope_hmac='1' * 64,
+                review_nonce_hmac='2' * 64,
+            )
+            if operation == 'rebootstrap':
+                connection.execute(
+                    update(tables.ledgers).values(
+                        generation=9, last_transition_digest='9' * 64
+                    )
+                )
+                connection.commit()
+    with engine.connect() as connection:
+        old_provider = dict(
+            connection.execute(select(RagProviderSafetyAuthority)).mappings().one()
+        )
+        old_ledgers = (
+            [dict(row) for row in connection.execute(select(tables.ledgers)).mappings()]
+            if operation in {'inspect', 'rebootstrap'}
+            else []
+        )
+    attacks = []
+    original = type(authority)._inspect_locked
+    if operation == 'inspect':
+
+        def inspect_then_drift(owner, connection, *args, **kwargs):
+            result = original(owner, connection, *args, **kwargs)
+            attacks.append('inspection')
+            connection.execute(
+                update(RagProviderSafetyAuthority).values(global_safety_generation=99)
+            )
+            return result
+
+        monkeypatch.setattr(type(authority), '_inspect_locked', inspect_then_drift)
+    else:
+
+        def after_insert(connection, _cursor, sql, *_):
+            if sql.lstrip().upper().startswith('INSERT INTO RAG_LIVE_GATE_LEDGERS'):
+                attacks.append('ledger_insert')
+                connection.execute(
+                    update(RagProviderSafetyAuthority).values(
+                        global_safety_generation=99
+                    )
+                )
+
+        event.listen(engine, 'after_cursor_execute', after_insert)
+    with engine.connect() as connection:
+        kwargs = {'database_identity': _identity()}
+        if operation == 'initialize':
+            kwargs.update(review_envelope_hmac='3' * 64, review_nonce_hmac='4' * 64)
+        elif operation != 'inspect':
+            kwargs['review_verifier'] = lambda *_: ('3' * 64, '4' * 64, '5' * 64)
+        with pytest.raises(RagProviderSafetyError):
+            getattr(authority, operation)(connection, **kwargs)
+    with engine.connect() as connection:
+        assert [
+            dict(row) for row in connection.execute(select(tables.ledgers)).mappings()
+        ] == old_ledgers
+        assert (
+            dict(
+                connection.execute(select(RagProviderSafetyAuthority)).mappings().one()
+            )
+            == old_provider
+        )
+    assert len(attacks) == 1
+
+
+@pytest.mark.parametrize('operation', ['disaster_initialize', 'rebootstrap'])
+def test_recovery_review_callback_drift_cannot_publish_marker(
+    tmp_path, monkeypatch, operation
+):
+    from sqlalchemy import update
+
+    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+    from backend.app.models.rag_runtime import RagProviderSafetyAuthority
+
+    engine, authority = incident_harness(tmp_path, monkeypatch, prepare_only=True)
+    tables = release_tables(build_rag_release_metadata())
+    if operation == 'rebootstrap':
+        with engine.connect() as connection:
+            authority.initialize(
+                connection,
+                database_identity=_identity(),
+                review_envelope_hmac='1' * 64,
+                review_nonce_hmac='2' * 64,
+            )
+            connection.execute(
+                update(tables.ledgers).values(
+                    generation=9, last_transition_digest='9' * 64
+                )
+            )
+            connection.commit()
+    old_marker = (
+        authority.marker_path.read_bytes() if authority.marker_path.exists() else None
+    )
+    calls = []
+
+    def reviewed(connection, raw):
+        calls.append(raw)
+        connection.execute(
+            update(RagProviderSafetyAuthority).values(global_safety_generation=99)
+        )
+        return '3' * 64, '4' * 64, '5' * 64
+
+    with engine.connect() as connection, pytest.raises(RagProviderSafetyError):
+        getattr(authority, operation)(
+            connection, database_identity=_identity(), review_verifier=reviewed
+        )
+    assert calls == [old_marker]
+    assert (
+        authority.marker_path.read_bytes() if authority.marker_path.exists() else None
+    ) == old_marker
+
+
+@pytest.mark.parametrize(
+    'effect', ['commit', 'rollback', 'close', 'begin', 'replace_transaction']
+)
+def test_plan_materialization_transaction_callbacks_refuse_before_dml(
+    tmp_path, monkeypatch, effect
+):
+    from sqlalchemy import event
+    from sqlalchemy.exc import SQLAlchemyError
+
+    harness = incident_harness(tmp_path, monkeypatch)
+    before = harness.records('authorization')
+    old_marker = harness.authority.marker_path.read_bytes()
+    original = RagReleaseLedger.append
+    calls, dml = [], []
+
+    def callback_plan(self, connection, payload, *, actual_mutations, **kwargs):
+        plan = actual_mutations._plans.pop(0)
+
+        class Values(dict):
+            def items(self):
+                calls.append(len(dml))
+                if effect == 'replace_transaction':
+                    connection.rollback()
+                    connection.begin()
+                else:
+                    getattr(connection, effect)()
+                return super().items()
+
+        statement = plan.statement._clone()
+        statement._values = Values(statement._values)
+        actual_mutations.plan(statement, plan.row)
+        return original(
+            self, connection, payload, actual_mutations=actual_mutations, **kwargs
+        )
+
+    def observe(_conn, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+
+    monkeypatch.setattr(RagReleaseLedger, 'append', callback_plan)
+    event.listen(harness.engine, 'before_cursor_execute', observe)
+    with pytest.raises((RagReleaseLedgerError, SQLAlchemyError)):
+        harness.claim()
+    assert harness.records('authorization') == before
+    assert (
+        harness.records('case')
+        == harness.records('agent_run')
+        == harness.records('cost_component')
+        == []
+    )
+    assert harness.authority.marker_path.read_bytes() == old_marker
+    assert calls == [0] and dml == []
+
+
+@pytest.mark.parametrize('zone', ['driver_zoneinfo', 'fixed_utc', 'custom'])
+def test_native_driver_datetime_plan_preserves_normalization_without_tz_callbacks(
+    tmp_path, monkeypatch, zone
+):
+    from datetime import UTC, timezone, tzinfo
+
+    from psycopg._tz import get_tzinfo
+    from sqlalchemy import event
+
+    harness = incident_harness(tmp_path, monkeypatch)
+    harness.claim()
+    before = {
+        kind: harness.records(kind)
+        for kind in ('authorization', 'case', 'dispatch', 'agent_run', 'cost_component')
+    }
+    old_marker = harness.authority.marker_path.read_bytes()
+    original = RagReleaseLedger.append
+    calls, dml = [], []
+
+    class DriverConnection:
+        def parameter_status(self, name):
+            assert name == b'TimeZone'
+            return b'Etc/UTC'
+
+    class CallbackZone(tzinfo):
+        def utcoffset(self, value):
+            calls.append('utcoffset')
+            return timedelta(0)
+
+        def dst(self, value):
+            calls.append('dst')
+            return timedelta(0)
+
+    selected_zone = (
+        get_tzinfo(DriverConnection())
+        if zone == 'driver_zoneinfo'
+        else timezone(timedelta(0), 'driver UTC')
+        if zone == 'fixed_utc'
+        else CallbackZone()
+    )
+
+    def use_driver_timestamp(self, connection, payload, *, actual_mutations, **kwargs):
+        plan = next(
+            plan
+            for plan in actual_mutations._plans
+            if plan.row.row_kind == 'cost_component'
+        )
+        current = actual_mutations._snapshot(connection, plan.row)
+        timestamp = (
+            current['updated_at']
+            .replace(tzinfo=UTC)
+            .astimezone(UTC)
+            .replace(tzinfo=selected_zone)
+        )
+        index = actual_mutations._plans.index(plan)
+        actual_mutations._plans[index] = type(plan)(
+            plan.statement.values(updated_at=timestamp), plan.row
+        )
+        return original(
+            self, connection, payload, actual_mutations=actual_mutations, **kwargs
+        )
+
+    def observe(_conn, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+
+    monkeypatch.setattr(RagReleaseLedger, 'append', use_driver_timestamp)
+    event.listen(harness.engine, 'before_cursor_execute', observe)
+    if zone == 'custom':
+        with pytest.raises(RagReleaseLedgerError):
+            harness.claim_generation()
+        assert {kind: harness.records(kind) for kind in before} == before
+        assert harness.authority.marker_path.read_bytes() == old_marker
+        assert dml == []
+    else:
+        harness.claim_generation()
+        assert harness.snapshot.generation == 3
+        assert harness.records('authorization')[0]['total_dispatch_count'] == 1
+        assert len(harness.records('dispatch')) == 1
+        assert dml
+    assert calls == []
 
 
 @pytest.mark.parametrize('exceptional_exit', [False, True])
