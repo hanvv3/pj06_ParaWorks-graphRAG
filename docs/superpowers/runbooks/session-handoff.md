@@ -2,6 +2,38 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task24-B round-2 callback isolation (rereview pending)
+
+- Rereview of `5e00331` reproduced committed corpus drift from a reviewer result
+  property and split-brain case/auth rows from a post-SQL reader-exit commit.
+  The round-1 callback-free claim below is superseded by this finding.
+- All reader contexts/teardown, reviewer/user/clock/property calls and oracle
+  acquisition now finish before release DML. Post-SQL projection validation
+  reuses the private same-barrier checkpoint and checks complete frozen images;
+  it never reacquires the source. Plain string-only review registries, exact
+  authorization images, source/Git, target, corpus and provider peers are checked
+  by locally owned code before DML, before marker publication and before commit.
+- Provider publication checks pin the verified review-ledger/latch bytes and
+  complete SQL images before DML. There is no transport revalidation at scope
+  exit. Append rejects publication callback hooks. Owned lock cleanup runs only
+  after append commit or rollback, including exception paths; no injected
+  callback receives an open post-DML transaction. Init/recovery callback hooks
+  are otherwise unchanged; no init/recovery operation was executed.
+- Fresh RED reproduced corpus 99 instead of 7, committed case/auth rows on
+  refusal and 90 callbacks after DML (3 failing tests). An additional real-peer
+  RED exposed open-transaction exception cleanup; commit/rollback now precedes
+  authority cleanup. Implementation: `656a5c3cd72aa92019d4a34016051deda16160d2`.
+  Fresh all-19-file release result: **1070 passed, 14 skipped** across three
+  disjoint shards. Direct impact: **266 passed, 16 skipped** (11 existing Alembic
+  warnings); credential: **3 passed**. All 12 changed Python files pass Ruff,
+  format and compile; working/staged diff checks pass. Code/tests were unchanged
+  after final suite launch. All 30 PostgreSQL skips remain unexecuted. Guard
+  lifetime and exact-six schema are retained.
+- This is an implementation candidate, not independent CLEAN or execution
+  approval. Task25, production readers and PostgreSQL verification remain open.
+  No live/OAuth/provider/network/paid/release/bootstrap/rebootstrap operation,
+  push, merge or deployment ran.
+
 ## 2026-09-14 Task24-B round-1 lifecycle remediation (rereview pending)
 
 - Independent review of `6174cee` found two P1 defects: reader-exit key

@@ -3102,6 +3102,32 @@ Implementation `3f14376` has fresh full release evidence **1041 passed, 14
 skipped**, expanded direct evidence **266 passed, 16 skipped** and credential
 **3 passed**. No schema/public-endpoint change or live execution occurred.
 
+Round-2 rereview reproduced post-SQL reviewer-property and adapter-exit commit
+defects in that candidate, so its callback-free claim is not a CLEAN result.
+The strict publication invariant is now explicit: finish all injected adapter,
+reviewer/user/clock/property and oracle callbacks and context enter/exit before
+the first release DML. Deeply validate and freeze their approved outputs first.
+After that point, only locally owned authority checks, SQL/file/Git reads and
+pure complete-image validation may execute. Never reacquire the source or invoke
+an injected provider revalidation callback after DML. Review-key checks accept
+only a native string-to-string registry, not callback-bearing mapping objects.
+Provider checkpoints pin the verified review-ledger/latch bytes and complete
+DB images. Check the exact transaction, authorization after-image, corpus,
+provider, key, source and target before marker publication and again before
+commit. Commit/rollback must precede trusted authority lock cleanup, including
+exception paths. Append rejects publication callback hooks. Normal lock/unlock
+cleanup is owned lifecycle code, not an adapter callback or approval port.
+Marker-first crash evidence, active guard lifetime, schema and external approval
+semantics remain unchanged. The remediation requires independent rereview;
+Task25/production readers/PostgreSQL remain outstanding and no actual run is
+authorized or performed.
+
+Implementation `656a5c3` has fresh full release evidence **1070 passed, 14
+skipped**, direct-impact evidence **266 passed, 16 skipped**, credential
+**3 passed**, and 12-file Ruff/format/compile plus diff checks. Code/tests were
+frozen before the final runs. These are implementer verification results, not an
+independent CLEAN verdict; the 30 conditional PostgreSQL skips remain unexecuted.
+
 ```text
 fixture_manifest_hmac = keyed_fingerprint(
   schema_version="rag-live-fixture-manifest:v1",

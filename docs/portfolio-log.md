@@ -7271,6 +7271,28 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   This closure changes documentation only; no code/tests, live/provider/release
   operation, OAuth, push, merge or deployment are included.
 
+## 2026-09-14 Task24-B round-2 callback isolation candidate
+
+Independent rereview reproduced two P1 transaction-integrity defects in the
+round-1 candidate: a late reviewer property committed corpus drift, and reader
+teardown committed partial release state before a later refusal. Three permanent
+actual-append reproducers failed before the fix, including a 90-callback post-DML
+counter. All adapter/reviewer/oracle callbacks now finish before DML; later
+checks use frozen complete images and independently owned SQL/file/key/source
+validation. The provider peer is pinned before publication, and success or
+rollback completes before trusted lock cleanup. Append accepts no publication
+callback hook. The earlier round-1 callback-free claim is superseded.
+
+Implementation `656a5c3` passes the complete 19-file release selection: **1070
+passed, 14 skipped** across three disjoint shards. Direct impact: **266 passed,
+16 skipped** (11 existing Alembic warnings); credential: **3 passed**. All 12
+Python files pass Ruff/format/compile and diff checks; code/tests were frozen
+before the final runs. Exact-six schema, guard lifetime, registry identities, provider-free
+CLI refusal and the external execution-approval boundary remain unchanged.
+Independent rereview, PostgreSQL, Task25 and production adapters remain open.
+No actual OAuth/provider/network/paid/release/bootstrap/rebootstrap operation,
+push, merge or deployment occurred. This is not overall Task24 CLEAN.
+
 ## 2026-09-13 Task24-B bounded authorization candidate
 
 Round-1 independent review subsequently identified two P1 authority-lifetime

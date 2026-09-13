@@ -2286,6 +2286,25 @@ shards of all 19 files; expanded direct impact: **266 passed, 16 skipped**
 Python files pass Ruff/format/compile and diff checks. Code/tests were frozen
 before the final shard launch. PostgreSQL and independent rereview remain open.
 
+**Round-2 callback-isolation remediation (independent rereview pending).**
+Actual append reproduced committed corpus drift via reviewer-result properties
+and partial case/auth commits from post-SQL reader teardown. Finish every
+adapter context, oracle, reviewer/user lookup, clock and result-property call
+before mutation DML. Freeze the validated complete source/provider/reviewer and
+approval context, then use only locally owned SQL/file/key/Git checks and pure
+complete-image validation under the same active authority barrier. No source
+reacquisition or injected provider revalidation is permitted after DML. Pin
+complete verified provider file/DB images before publication; refuse append
+publication hooks, and commit or rollback before trusted lock cleanup even on
+exceptions. Preserve guard lifetime and marker-first crash evidence. The exact
+same-connection reader contract applies only to pre-DML acquisition; no production
+reader is composed. Implementation `656a5c3` passes the complete 19-file release
+selection: **1070 passed, 14 skipped** across three disjoint shards; direct impact
+**266 passed, 16 skipped** (11 existing Alembic warnings); credential **3 passed**.
+All 12 Python files pass Ruff/format/compile and diff checks. The report records
+permanent RED oracles and exact final commands/results. No code/tests changed
+after final suite launch, no actual operation ran, and independent rereview is open.
+
 B implementation files additionally include `backend/app/rag/release_authority.py`
 (the two approved registry alignments), `backend/app/rag/release_ledger.py`
 (existing sealed-guard propagation), and test-only
