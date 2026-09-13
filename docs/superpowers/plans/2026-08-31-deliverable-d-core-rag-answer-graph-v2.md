@@ -2217,6 +2217,21 @@ Fresh focused evidence: `327 passed, 14 skipped`; direct impact and credential
 scan: `221 passed, 14 skipped` (11 existing Alembic warnings). PostgreSQL
 evidence remains absent because `PARAWORKS_TEST_POSTGRES_URL` is unset.
 
+**2026-09-13 first-slice rereview round 1 candidate: `402f889`.** Finding T24-P2-A
+reproduced textual child HMACs replaced by decoded bytes reaching four/five DML
+statements before SQLite constraint rollback. The fix requires exact canonical
+manifest, issued-binding, case and complete runtime-image types before
+normalization. Original provider-policy fields are checked before dataclass
+deepcopy; native JSON types cannot alias the observation encoder's float tags.
+Initial clocks must retain the assembly's UTC identity and fold, while actual
+DB datetime normalization is retained. Independent actual-append oracles require
+zero DML, zero sealed incidents and unchanged rows/generation/marker. The narrow
+carryover still needs independent CLEAN rereview; Task24 is not complete.
+Fresh focused evidence: `716 passed, 14 skipped`; direct impact: `221 passed,
+14 skipped`, 11 existing Alembic warnings. Credential checks: `3 passed`;
+changed-file Ruff/format, compileall and diff checks passed. The 28 PostgreSQL
+skips remain unexecuted because the validation DSN is absent.
+
 **Files:**
 
 - Create: `backend/app/rag/release_review.py`

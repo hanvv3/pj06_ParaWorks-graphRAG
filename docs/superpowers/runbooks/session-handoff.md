@@ -5728,3 +5728,42 @@ Current implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   frontend gate was claimed for this backend-only carryover.
 - No live provider/network/API/OAuth, actual release authorization/bootstrap,
   paid model, PostgreSQL execution, rollout, push, merge or deployment occurred.
+
+## 2026-09-13 Task24 carryover round-1 exact-type handoff
+
+- Implementation candidate `402f889`, based on reviewed first-slice docs
+  `a67f76b`; request independent rereview, not preview/authorization continuation.
+- T24-P2-A remediation remains limited to the initial case-claim projection.
+  The new type matrix contributes 389 tests. Both reported bytes/string HMAC
+  aliases use actual append with independent zero-DML/zero-incident counters and
+  unchanged full rows, generation and marker. The same oracle covers every
+  parent/child column, subclass/enum coercions, case identity/reserves, nested
+  JSON, manifest fields/containers, issued binding and projection subclasses.
+- RED: the first 342-case matrix produced `43 failed, 299 passed`; the decisive
+  first ten cases produced `9 failed, 1 passed`. Follow-up clock-zone RED had
+  `10 failed`; all 11 original policy fields needed checks before dataclass
+  deepcopy (`11 failed`); all five initial clocks also needed their issued fold
+  (`5 failed`). Plain equality and canonicalization cannot stand in for exact
+  type/initial-clock validation.
+- Runtime signing now requires exact SQL column types and recursive native JSON
+  types before normalization. Native JSON floats no longer share signed bytes
+  with tag-shaped ordinary JSON objects. Existing stored history is not rewritten.
+  DB schema labels alone are converted from trusted SQLAlchemy `quoted_name` to
+  `str`; scalar and JSON values remain untouched. Retain intentional after-read
+  DB datetime normalization, exact initial UTC/fold and full image comparison.
+- Three prior synthetic attack fixtures now use canonical Decimal/int values
+  so they still test forbidden semantic deltas after the earlier type gate.
+  Do not weaken validation to re-enable coercive test values. No public endpoint,
+  exact-six schema, ORM/Alembic, Option-A or Task22 policy boundary changed.
+- Fresh focused command: `uv run --no-sync --cache-dir .tmp/task24-uv-cache pytest backend/tests/test_rag_release_projection_types.py backend/tests/test_rag_release_case_claim_projection.py backend/tests/test_rag_release_ledger.py backend/tests/test_rag_release_ledger_review_q.py backend/tests/test_rag_release_ledger_round4.py backend/tests/test_rag_release_ledger_round5.py backend/tests/test_rag_release_ledger_all_kinds.py backend/tests/test_rag_release_authority.py backend/tests/test_rag_release_authority_postgres.py backend/tests/test_rag_release_remediation.py backend/tests/test_rag_live_gate_schema.py backend/tests/test_rag_live_gate_cli.py -q --tb=short` -> `716 passed, 14 skipped` in 262.40 seconds.
+- The unchanged full direct-impact command in the first-slice handoff above was
+  rerun on this correction: `221 passed, 14 skipped`, 11 existing Alembic warnings,
+  in 113.31 seconds. Standalone `uv run --no-sync --cache-dir .tmp/task24-uv-cache pytest backend/tests/test_secret_hygiene.py -q` -> `3 passed`.
+- Ruff check `--no-fix`, format check and compileall on the two implementation
+  modules and three changed test modules passed; `git diff --check` passed.
+  `PARAWORKS_TEST_POSTGRES_URL` remains absent: all 28 conditional PostgreSQL
+  proofs remain unexecuted. No live provider/API/network/OAuth, actual release
+  authorization/bootstrap, paid model, push, merge or deployment occurred.
+- Independent CLEAN rereview is still mandatory before preview, authorization
+  or OAuth work. This is not Task24 completion, a release authorization, or a
+  claim of PostgreSQL/full-backend verification.

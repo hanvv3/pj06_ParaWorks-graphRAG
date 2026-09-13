@@ -7138,3 +7138,29 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   schema, endpoint, Option-A affected/observed contract or Task22 boundary changed.
   No live API/provider/OAuth, paid call, actual release operation, push, merge
   or deployment occurred.
+
+## 2026-09-13 Task24 carryover exact-type rereview round 1
+
+- Implementation candidate: `402f889`; independent CLEAN rereview is pending.
+- Independent T24-P2-A found that decoded child HMAC bytes could reach four/five
+  DML statements before SQLite rejected them. Rollback protected rows and marker,
+  but that did not satisfy the required pre-SQL literal validation boundary.
+- The correction validates original manifest/provider fields before copying,
+  exact issued binding and full parent/child scalar types, and recursive native
+  JSON types before signing or normalization. It preserves native JSON number
+  versus object identity and requires assembly UTC/fold on initial clocks.
+  Only trusted SQLAlchemy database column labels are normalized; no caller
+  scalar, metadata value or nested key is coerced into an accepted type.
+- New independent tests retain legitimate signatures while changing SQL literal
+  values, then count DML and sealed incidents and compare all rows, generation
+  and marker. RED evidence: initial type matrix `43 failed, 299 passed`; clock
+  zone aliases `10 failed`; policy deepcopy aliases `11 failed`; clock fold
+  aliases `5 failed`. Equal-value type/clock aliases also reproduced commits;
+  this is separate from the original forged semantic authorization P1.
+- Fresh focused gate: `716 passed, 14 skipped`; direct-impact gate: `221 passed,
+  14 skipped`, 11 existing Alembic warnings. Credential suite: `3 passed`.
+  Changed-file Ruff/format, compileall and diff checks passed. All 28 PostgreSQL
+  skips remain unexecuted because the validation DSN is absent.
+- No schema, endpoint, Option-A observation contract, provider policy or visibility
+  rule changed. Task24 overall and preview/authorization/OAuth remain gated by
+  independent CLEAN rereview of this narrow carryover.
