@@ -2,6 +2,40 @@
 
 Updated: 2026-09-13
 
+## 2026-09-13 Task24-B authorization candidate (review pending)
+
+- Implementation: `da4da6d5ab3e1a1629e4c71cf271100ab94165ab`. Full Task23/24
+  release regression **1025 passed, 14 skipped in 882.03s**; direct impact
+  **259 passed, 13 skipped** (11 existing Alembic warnings); credential **3 passed**.
+  Eight changed Python files pass Ruff/format/compile and diff checks. No code
+  or tests changed after the final selection started. The actual PostgreSQL
+  test URL is absent; all 27 conditional skips remain unexecuted gates.
+- Based on independently CLEAN Task24-A at `7c8d5a5`. Fresh reviewer proof,
+  canonical externally signed approval and opaque approved-source composition
+  are implemented. Task24 overall is not CLEAN or complete. The real CLI still
+  refuses before stdin/authority access because Task25 and production readers
+  are absent; no live operation ran.
+- Two user-approved narrow Task23 corrections are included: designated
+  environment/host identities use the exact named UTF-8 registry payloads, and
+  release fingerprint key-material verification uses the shared provider helper.
+  Legacy digests are not dual-accepted, migrated, repaired or reinterpreted.
+  Existing mismatched markers/snapshots refuse with zero mutation. Separately
+  reviewed rebootstrap is the only migration path and was not executed.
+- Execution approval uses the fixed external review-key and signed actor-HMAC
+  contract, not a reviewer_a-only approver rule. The approval's exact context
+  includes whole-preview HMAC, registry approval preimage and key version/verifier.
+  Planning approval and the prior USD 100 balance are not execution approval.
+- The source capability requires original issued authorization and reviewer
+  objects, clean committed sources, current review-key registry and independently
+  checked locked marker/ledger/provider rows. The future reader must expose
+  `locked_approved(connection, barrier_guard=...)`, reuse an existing append
+  guard when supplied, and retain its separate corpus/scope locks. It must never
+  fabricate a sealed guard or recursively acquire the release sidecar.
+- Task23's synthetic case tests keep their existing explicit fake verifier over
+  both preparation and append. Genuine Task24-B tests use real isolated release
+  authority/SQL state with only fake provider/PG transport. No production bypass,
+  schema change, Task25 evaluator, signer CLI or paid-call path was added.
+
 ## 2026-09-13 Task24-A independent CLEAN closure
 
 - Independent round-2 rereview of `e3efbc9..ba229aa`, including implementation

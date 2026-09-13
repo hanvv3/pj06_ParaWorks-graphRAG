@@ -3063,6 +3063,30 @@ PostgreSQL verification, the Task25 evaluator, production snapshot/oracle/roster
 adapters and Task24-B remain outstanding. Actual CLI preview refuses with
 `evaluator_unavailable`, zero dispatch and no authorization.
 
+**Task24-B implementation candidate and approved identity alignment (2026-09-13).**
+The verifier-only reviewer/approval/source composition is implemented for
+independent review; this does not complete Task24 or authorize an actual run.
+Implementation `da4da6d` has fresh release evidence `1025 passed, 14 skipped`,
+direct-impact evidence `259 passed, 13 skipped` and credential `3 passed`;
+PostgreSQL and independent review are still outstanding.
+The user separately approved aligning Task23's environment and host hashes with
+the exact structured `designated_environment_id_bytes` and
+`designated_host_id_bytes` registry payloads below, and aligning its key-material
+verifier with `auto_review_keys.fingerprint_key_material_verifier(secret)`.
+The existing schema and identity domains below are unchanged. Legacy raw-string
+or release-specific key-verifier digests must fail closed, with no dual accept,
+automatic migration, reinterpretation or repair. Rebootstrap remains a separate
+reviewed operation and was not performed.
+
+The execution approver is the signed actor under the external review-key
+contract, separate from the three quality-reviewer roles. Its canonical stdin
+envelope binds the whole preview HMAC, exact approval preimage, key version and
+key-material verifier. No signer/self-approval CLI exists. The real preview and
+authorization-bootstrap surfaces remain evaluator-first refusing while Task25
+and production readers are absent. Opaque approved-source capabilities require
+current locked release/provider peers; append-time verification reuses the
+existing sealed barrier and retains the reader's separate corpus/scope locks.
+
 ```text
 fixture_manifest_hmac = keyed_fingerprint(
   schema_version="rag-live-fixture-manifest:v1",

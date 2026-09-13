@@ -7270,3 +7270,37 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   still refuses with `evaluator_unavailable`, zero dispatch and no authorization.
   This closure changes documentation only; no code/tests, live/provider/release
   operation, OAuth, push, merge or deployment are included.
+
+## 2026-09-13 Task24-B bounded authorization candidate
+
+- Implementation commit: `da4da6d`. Final provider-free release regression:
+  **1025 passed, 14 skipped**; direct impact: **259 passed, 13 skipped**, with
+  11 existing Alembic warnings. Credential scan: **3 passed**. All eight changed
+  Python files pass Ruff/format/compile and diff checks. PostgreSQL was not run.
+- Three distinct current Google subjects now form the exact reviewer/adjudicator
+  roster only after separate fresh, single-use OAuth2 authorization-code + PKCE
+  challenges. This reuses the signed state/nonce builder and fixed Google
+  token/userinfo endpoints; it is not an ID-token/JWKS flow or session-cookie proof.
+  Completed proof state contains role-bound HMACs, never code/token/state bytes.
+- A separately signed external canonical execution approval binds the complete
+  CLEAN preview and the exact unused ledger, marker, key, environment, host,
+  validation database, fixture, corpus, provider, baseline, reviewer and limit
+  context. Its signed actor is separate from the quality-reviewer roles. Plan
+  approval or the prior USD 100 balance statement cannot authorize execution.
+- The opaque approved-source capability is issued only by that composition;
+  raw DTOs, copies and preview provenance cannot substitute. Preparation and
+  append revalidate source bytes, current reviewers, external review-key registry
+  and locked release/provider peers. Append passes its existing sealed barrier
+  through projection validation, avoiding recursive Windows sidecar acquisition.
+- The user approved two narrow Task23 identity corrections: structured exact
+  UTF-8 environment/host registry payloads and the shared provider fingerprint
+  key-material verifier. Legacy raw-string or release-domain identities refuse
+  without mutation; there is no dual acceptance, repair or automatic migration.
+  Rebootstrap requires separate review and was not performed.
+- Task24-B is an implementation candidate awaiting independent review, not
+  Task24 CLEAN. The real preview and authorization CLI remain evaluator-first
+  refusing; Task25, production snapshot/oracle/roster adapters and PostgreSQL
+  verification remain outstanding. All authority mutations and fake Google
+  exchanges in verification use isolated automated-test fixtures. No actual
+  bootstrap/rebootstrap/authorization/provider/network/paid/release operation,
+  push, merge or deployment occurred.

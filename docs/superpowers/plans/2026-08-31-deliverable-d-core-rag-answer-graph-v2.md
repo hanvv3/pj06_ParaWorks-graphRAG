@@ -2257,6 +2257,34 @@ the declarative 30-case fixture, frozen snapshots, provider-free preview builder
 and read-only CLI readiness surface. Task24-B retains fresh reviewer proof and
 authorization construction; Task24 overall remains incomplete.
 
+**2026-09-13 Task24-B candidate (independent review pending).** Fresh three-role
+OAuth2+userinfo verification, externally signed canonical execution approval and
+opaque approved-source composition are implemented. The user approved two narrow
+Task23 corrections: exact structured UTF-8 environment/host registry payloads and
+the shared provider key-material verifier. There is no dual acceptance, migration
+or repair of legacy digests; they fail closed until separately reviewed
+rebootstrap. No rebootstrap or actual authorization was executed. The signed
+execution actor is separate from quality-reviewer roles. Source revalidation
+threads append's existing sealed barrier through projection validation; exact-six
+schema, complete runtime images/types and Option-A observations remain intact.
+Production CLI remains evaluator-first refusing with no signer or secret args.
+Task25, production readers and PostgreSQL verification remain outstanding.
+
+B implementation files additionally include `backend/app/rag/release_authority.py`
+(the two approved registry alignments), `backend/app/rag/release_ledger.py`
+(existing sealed-guard propagation), and test-only
+`backend/tests/release_ledger_fixtures.py`. New TDD suites are
+`test_rag_release_reviewer.py`, `test_rag_live_gate_authorization.py` and
+`test_rag_release_identity_alignment.py`. The ignored SDD Task24-B report records
+the confirmed RED/GREEN sequence and exact final verification commands.
+
+Implementation commit: `da4da6d5ab3e1a1629e4c71cf271100ab94165ab`.
+Fresh final release selection: **1025 passed, 14 skipped in 882.03s**;
+direct provider/cost/runtime/input/credential impact: **259 passed, 13 skipped**
+(11 existing Alembic warnings); standalone credential: **3 passed**. All eight
+changed Python files passed Ruff/format/compile and diff checks. The 27
+PostgreSQL skips remain unexecuted. Independent review is still required.
+
 Implementation candidate `2460bdf` is pending independent review. Verification:
 release regression `799 passed, 14 skipped`; final limit/source impact `97
 passed`; final CLI `12 passed`; direct provider/cost/runtime/input/credential
@@ -2484,12 +2512,13 @@ class FreshGoogleReviewerVerifier:
 - [x] Add RED manifest tests for exact 30 unique case IDs, fixed surface/backend distribution, positive/hard-negative labels, sanitized fixture references, expected component presence/reserve split, relevant/required serving HMACs, support modes/slot allowlist, and case ceiling sum.
 - [x] Add RED baseline/rubric tests for `rag-live-quality-rubric:v1`, provider-free legacy retrieval definition HMAC, evaluator/source/fixture path bytes and committed SHA, exact Git commit, frozen corpus snapshot, validation DB identity, provider-safety snapshot, release epoch, and implementation-plan reference.
 - [x] Add RED preview tests computing exact 30/10/40 maximum dispatches, USD `0.012000` per case and USD `0.360000` aggregate reserve, with provider transport call count zero and no authorization/case/dispatch mutation.
-- [ ] Add RED reviewer tests for three pairwise-distinct subjects bound to roles `reviewer_a`, `reviewer_b`, `adjudicator_c`. For each role the release CLI starts a fresh one-use Google authorization-code + PKCE challenge using the existing signed state/nonce builder, a release-specific loopback redirect, fixed Google token/userinfo endpoints and configured client ID; `complete` validates exact state/challenge/role/redirect, exchanges the no-echo code once, requires a nonblank immutable Google `sub`, and matches it to the selected current `AuthUser.external_id`. This is deliberately a fresh Google OAuth2+userinfo proof, not an ID-token OIDC flow: signed-state nonce must never be described or tested as an `id_token` nonce/JWKS/issuer claim. Existing ParaWorks session cookies are insufficient because they contain only the internal user ID/expiry. Tests inject a fake Google client and make no network call. Never put code/token/state in CLI args, env, DB, logs, or report; after verification keep only role-bound subject HMACs and reject duplicate/role swap/roster mutation.
-- [ ] Add RED authorization tests binding single-use user confirmation to the whole preview HMAC and exact unused ledger/provider/corpus/fixture/commit/reviewer snapshot. Any change, key rotation, safety transition, or stale epoch is zero-call refusal.
-- [ ] Run `uv run pytest backend/tests/test_rag_live_gate_preview.py backend/tests/test_rag_release_review.py backend/tests/test_rag_live_gate_cli.py -q` and confirm RED.
-- [ ] Implement provider-free preview and authorization construction. `authorization-bootstrap` creates authority only after an exact user-approved preview; tests use a fake approval record and never treat plan approval as execution approval.
-- [ ] Rerun focused tests and `uv run ruff check backend/app/rag/release_review.py backend/app/admin/rag_live_gate.py backend/tests/test_rag_live_gate_preview.py backend/tests/test_rag_release_review.py backend/tests/test_rag_live_gate_cli.py`.
-- [ ] Commit with `git commit -m "feat: authorize bounded rag live gate"`.
+- [x] Add RED reviewer tests for three pairwise-distinct subjects bound to roles `reviewer_a`, `reviewer_b`, `adjudicator_c`. For each role the verifier starts a fresh one-use Google authorization-code + PKCE challenge using the existing signed state/nonce builder, a release-specific loopback redirect, fixed Google token/userinfo endpoints and configured client ID; `complete` validates exact state/challenge/role/redirect, exchanges the no-echo code once, requires a nonblank immutable Google `sub`, and matches it to the selected current `AuthUser.external_id`. This is deliberately a fresh Google OAuth2+userinfo proof, not an ID-token OIDC flow: signed-state nonce must never be described or tested as an `id_token` nonce/JWKS/issuer claim. Existing ParaWorks session cookies are insufficient because they contain only the internal user ID/expiry. Tests inject a fake Google client and make no network call. Never put code/token/state in CLI args, env, DB, logs, or report; after verification keep only role-bound subject HMACs and reject duplicate/role swap/roster mutation. Production CLI composition remains unavailable as recorded above.
+- [x] Add RED authorization tests binding single-use user confirmation to the whole preview HMAC and exact unused ledger/provider/corpus/fixture/commit/reviewer snapshot. Any change, key rotation, safety transition, or stale epoch is zero-call refusal.
+- [x] Confirm RED for reviewer, authorization, source lifecycle, real-authority identity/peer and sealed-barrier integration suites; see the Task24-B report for exact expected failures.
+- [x] Implement provider-free preview and verifier-only authorization construction. The `authorization-bootstrap` command surface fails closed until production readiness; construction tests use externally signed fake approval records and never treat plan approval as execution approval.
+- [x] Rerun all Task23/24 release suites, direct-impact tests and eight changed-file Ruff/format/compile checks; the final counts are recorded above.
+- [x] Commit with `git commit -m "feat: authorize bounded rag live gate"` (`da4da6d`).
+- [ ] Independent Task24-B review, PostgreSQL verification and production reader/Task25 readiness; Task24 overall remains incomplete.
 
 ### Task 25: Add Composite Runner and Provider-Free Quality Adjudication
 
