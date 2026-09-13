@@ -2252,6 +2252,41 @@ any actual release operation. No production or test change is made by closure.
 - Create: `backend/tests/test_rag_live_gate_cli.py`
 - Modify: `backend/app/admin/rag_live_gate.py`
 
+**2026-09-13 approved split and identity clarification.** Task24-A implements
+the declarative 30-case fixture, frozen snapshots, provider-free preview builder
+and read-only CLI readiness surface. Task24-B retains fresh reviewer proof and
+authorization construction; Task24 overall remains incomplete.
+
+Implementation candidate `2460bdf` is pending independent review. Verification:
+release regression `799 passed, 14 skipped`; final limit/source impact `97
+passed`; final CLI `12 passed`; direct provider/cost/runtime/input/credential
+impact `259 passed, 13 skipped` (11 existing Alembic warnings). Final credential
+scan `3 passed`; changed-file Ruff/format, compileall and diff checks passed.
+
+The spec's root alias is authoritative:
+`authorization.manifest_hmac == fixture_manifest_hmac` over exact committed
+fixture path/SHA/version. Supersede the historical carryover's inner-digest
+equality with a verified source binding: the full resolved execution preimage
+retains `source_manifest_hmac`, selects the exact declared ordinal/case, and uses
+the separately locked approved runtime/provider/corpus/baseline inputs. Its own
+digest is integrity evidence, never independent authority. Preserve every
+complete-image/type/pre-mutation/provider check from the CLEAN carryover.
+
+The fixture contains stable sanitized references. Resolve all mappings exactly;
+never commit key-dependent placeholder HMACs. The conservative case envelopes
+sum exactly to USD `0.360000`: keyword embedding/generation split
+`0.000000/0.012000`, pgvector split `0.000160/0.011840`. Token maxima remain the
+existing 8,000 query, 10,000 answer-input and 512 answer-output caps; reserves
+must cover their frozen costs without precision loss. This does not change
+runtime pricing or authorize spend.
+
+The preview-source capability is provenance only. The approved execution-source
+verifier is fail-closed pending B. No real snapshot reader is composed in A;
+successful tests use explicit locked fake snapshot readers and isolated Git
+repositories. Missing committed `backend/app/rag/release_quality.py` (Task25)
+must produce `evaluator_unavailable` with zero mutations/dispatches before any
+real authority construction. Do not add a placeholder evaluator or OAuth flow.
+
 **Interfaces:**
 
 ```text
@@ -2400,9 +2435,9 @@ class FreshGoogleReviewerVerifier:
     ) -> AuthenticatedReviewerSubject: ...
 ```
 
-- [ ] Add RED manifest tests for exact 30 unique case IDs, fixed surface/backend distribution, positive/hard-negative labels, sanitized fixture references, expected component presence/reserve split, relevant/required serving HMACs, support modes/slot allowlist, and case ceiling sum.
-- [ ] Add RED baseline/rubric tests for `rag-live-quality-rubric:v1`, provider-free legacy retrieval definition HMAC, evaluator/source/fixture path bytes and committed SHA, exact Git commit, frozen corpus snapshot, validation DB identity, provider-safety snapshot, release epoch, and implementation-plan reference.
-- [ ] Add RED preview tests computing exact 30/10/40 maximum dispatches, USD `0.012000` per case and USD `0.360000` aggregate reserve, with provider transport call count zero and no authorization/case/dispatch mutation.
+- [x] Add RED manifest tests for exact 30 unique case IDs, fixed surface/backend distribution, positive/hard-negative labels, sanitized fixture references, expected component presence/reserve split, relevant/required serving HMACs, support modes/slot allowlist, and case ceiling sum.
+- [x] Add RED baseline/rubric tests for `rag-live-quality-rubric:v1`, provider-free legacy retrieval definition HMAC, evaluator/source/fixture path bytes and committed SHA, exact Git commit, frozen corpus snapshot, validation DB identity, provider-safety snapshot, release epoch, and implementation-plan reference.
+- [x] Add RED preview tests computing exact 30/10/40 maximum dispatches, USD `0.012000` per case and USD `0.360000` aggregate reserve, with provider transport call count zero and no authorization/case/dispatch mutation.
 - [ ] Add RED reviewer tests for three pairwise-distinct subjects bound to roles `reviewer_a`, `reviewer_b`, `adjudicator_c`. For each role the release CLI starts a fresh one-use Google authorization-code + PKCE challenge using the existing signed state/nonce builder, a release-specific loopback redirect, fixed Google token/userinfo endpoints and configured client ID; `complete` validates exact state/challenge/role/redirect, exchanges the no-echo code once, requires a nonblank immutable Google `sub`, and matches it to the selected current `AuthUser.external_id`. This is deliberately a fresh Google OAuth2+userinfo proof, not an ID-token OIDC flow: signed-state nonce must never be described or tested as an `id_token` nonce/JWKS/issuer claim. Existing ParaWorks session cookies are insufficient because they contain only the internal user ID/expiry. Tests inject a fake Google client and make no network call. Never put code/token/state in CLI args, env, DB, logs, or report; after verification keep only role-bound subject HMACs and reject duplicate/role swap/roster mutation.
 - [ ] Add RED authorization tests binding single-use user confirmation to the whole preview HMAC and exact unused ledger/provider/corpus/fixture/commit/reviewer snapshot. Any change, key rotation, safety transition, or stale epoch is zero-call refusal.
 - [ ] Run `uv run pytest backend/tests/test_rag_live_gate_preview.py backend/tests/test_rag_release_review.py backend/tests/test_rag_live_gate_cli.py -q` and confirm RED.

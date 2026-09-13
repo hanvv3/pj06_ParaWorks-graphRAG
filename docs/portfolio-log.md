@@ -7170,3 +7170,39 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   rule changed. This CLEAN disposition supersedes the carryover's pending-review
   status only. PostgreSQL DSN remains absent and Task24 overall is incomplete;
   no preview, authorization, OAuth or release approval is granted.
+
+## 2026-09-13 Task24-A frozen live-gate manifest and zero-call preview candidate
+
+- Implementation commit: `2460bdf`; independent review remains pending.
+- Added a committed declarative 30-case quality fixture with exact surface,
+  retrieval-backend and Assistant-context distributions. Stable sanitized
+  references resolve against explicit locked inputs; no live fingerprint-key
+  material, raw production question, source evidence or model answer is stored
+  in the fixture or preview output.
+- The user approved retaining the spec's file-based root manifest identity.
+  The full executable case preimage now carries that source identity and has
+  only an integrity digest of its own. All original complete-image, exact-type,
+  pre-mutation and provider-readiness protections remain in the claim boundary.
+- The provider-free builder freezes exact Git/file bytes, a member-complete
+  corpus snapshot, provider safety/key/DB/environment/ledger identities,
+  rubric and legacy retrieval baseline definition. It compares two reads under
+  the snapshot reader's lock before returning an opaque provenance binding.
+  Cost preview preserves 30/10/40 dispatch maxima and the exact USD `0.360000`
+  reserve envelope without truncation or rounding away overage/shortfall.
+- Preview provenance cannot authorize execution. Task24-B's approved-runtime
+  verifier remains fail-closed; its reviewer/OAuth and single-use authorization
+  work is not implemented here. The real CLI reports `evaluator_unavailable`
+  because Task25's committed evaluator is absent, without constructing a
+  release authority or reading approval material.
+- Test-first evidence includes fixture/parser RED `31 failed`, corpus/source
+  RED `11 failed, 31 passed`, provenance/row-count RED `8 failed, 64 passed`,
+  raw self-attestation RED `2 failed`, CLI RED `2 failed`, provider/source
+  cross-identity RED `3 failed`, and immutable limit RED `9 failed`.
+- Verification: release regression `799 passed, 14 skipped`; final limit/source
+  impact `97 passed`; final CLI `12 passed`; provider/cost/runtime/input and
+  credential impact `259 passed, 13 skipped`, with 11 existing Alembic warnings.
+  Final credential scan `3 passed`; Ruff, format, compileall and diff checks
+  passed. The 27 PostgreSQL skips are unexecuted gates, not substitute evidence.
+- No provider/network/OAuth call, actual release operation, push, merge or
+  deployment occurred. Task24-A is an implementation review candidate; Task24
+  overall and PostgreSQL release verification remain incomplete.

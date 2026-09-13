@@ -2,6 +2,53 @@
 
 Updated: 2026-09-13
 
+## 2026-09-13 Task24-A frozen manifest and provider-free preview candidate
+
+- Implementation commit: `2460bdf` (`feat: freeze provider-free rag live gate preview`).
+- Task24-A implements the sanitized `rag-live-quality-30:v1` declarative fixture,
+  exact 10/5/10/5 surface/backend and 5/5 + 3/2 Assistant context distributions,
+  corpus/source/baseline identities, full executable preimages and read-only
+  preview construction. Task24 overall remains incomplete; independent review
+  is required before treating this candidate as CLEAN.
+- Follow the user-approved clarification in spec §13.2 and Task24's plan:
+  `authorization.manifest_hmac == fixture_manifest_hmac` is the only top-level
+  manifest authority. The resolved preimage carries `source_manifest_hmac`;
+  its own digest is integrity evidence only. Do not restore the carryover's
+  former inner-digest equality or accept a self-signed projection.
+- `build_live_gate_preview` consumes an explicit locked snapshot reader, resolves
+  every declared reference exactly, checks committed source/fixture bytes and
+  the clean commit, then re-reads before returning. The caller's reader owns
+  current corpus completeness, provider/DB authority cross-validation, current
+  query/security mappings and shared C.5 lock discipline. A does not compose a
+  production reader or issue permission/execution capabilities.
+- The opaque preview source binds the whole resolved 30-case preimage and
+  snapshot identities. `require_approved_case_source` deliberately refuses until
+  Task24-B supplies the fresh approval + locked runtime-snapshot verifier.
+  Existing Task23 synthetic tests inject only a scoped test verifier; complete
+  SQL image/type/provider checks stay active. Full-fixture tests separately
+  derive all 30 real projection images and reject altered preimages.
+- Exact maximum reservations are 30 generation, 10 query embedding, 40 total;
+  per-case USD `0.012000`, aggregate USD `0.360000`. Existing runtime token and
+  price policies are unchanged. The manifest uses conservative reserve splits
+  `0/0.012000` for keyword and `0.000160/0.011840` for pgvector.
+- `backend/app/rag/release_quality.py` is still absent and belongs to Task25.
+  Real `preview` returns sanitized `evaluator_unavailable`, zero dispatches and
+  `authorization_issued=false` before constructing runtime authority or reading
+  stdin. Success tests use committed fake evaluator/source files in isolated
+  temporary Git repositories. Do not create a placeholder evaluator.
+- Next work is independent Task24-A review, then Task24-B reviewer/authorization
+  implementation. No OAuth, execution approval, paid run, real authority
+  operation, push, merge or deployment has been performed. PostgreSQL DSN is
+  absent; its conditional tests remain unexecuted.
+- Verification: Task23/24 release selection `799 passed, 14 skipped`; final
+  preview/review/CLI impact selection after the limit guard `97 passed`; final
+  CLI selection after invalid-argument hardening `12 passed`. Direct-impact
+  provider/cost/runtime/input and credential selection `259 passed, 13 skipped`
+  with 11 existing Alembic warnings. Final standalone credential scan `3 passed`;
+  changed-file Ruff/format, compileall and diff checks are green. The same
+  existing working interpreter `.venv-task4-r3-review/Scripts/python.exe` was
+  used with external temporary pytest directories and cache writes disabled.
+
 ## 2026-09-13 Task23 round-4 review candidate
 
 - Continue from the user-approved Option A: affected rows are semantic changes

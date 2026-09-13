@@ -2976,6 +2976,41 @@ generation 또는 member/version/content/citation/permission/provenance/vector s
 live approval의 subordinate identity도 outer HMAC의 opaque placeholder로 남기지 않는다. 다음 registry의
 payload/key set과 equality alias가 exact authority다.
 
+**2026-09-13 user-approved Task24-A clarification.** The root identity below
+remains exact: `authorization.manifest_hmac == fixture_manifest_hmac`, derived
+only from committed fixture path, SHA-256 and version. This supersedes the
+Task24 carryover's earlier equality between that column and a separately signed
+execution-preimage digest. There is no second manifest authority or schema
+expansion.
+
+The committed fixture is a sanitized declarative source, containing stable
+question, security-scope, prior-context and serving references rather than
+values tied to an unavailable live fingerprint key. Resolve those references
+deterministically from explicitly supplied, locked snapshots; reject missing,
+duplicate, ambiguous or extra mappings. The complete resolved
+`FrozenCaseClaimManifest` retains `source_manifest_hmac` equal to the root file
+identity. Its own digest is integrity evidence only. A case claim must select
+the exact case/ordinal from the verified source and use the separately locked
+approved query/security/provider/corpus/baseline/limits/runtime snapshots to
+derive the complete AgentRun and exact-two child images. A caller's signature
+over a projection cannot establish that authority. All original literal type,
+complete-image, same-barrier provider and pre-mutation refusal checks remain.
+
+Task24-A produces no execution authorization. Its opaque preview-source binding
+proves the checked source/preimage relationship, and cannot stand in for B's
+fresh reviewer/execution approval. The production approved-case source verifier
+remains unavailable until Task24-B composes that boundary. Legacy release tests
+may inject a scoped fake approved-source verifier for their synthetic rosters;
+no production bypass, test flag, alternate constructor or magic digest is added.
+
+The exact evaluator path below belongs to Task25. While its committed source is
+absent, the real CLI preview returns `evaluator_unavailable`, zero dispatches and
+`authorization_issued=false`, before opening runtime authority or reading approval
+material. Successful preview construction is exercised only in isolated Git
+repositories with committed fake evaluator/source bytes and explicit locked
+snapshot readers. Neither evaluator readiness nor a valid preview authorizes a
+release operation.
+
 ```text
 fixture_manifest_hmac = keyed_fingerprint(
   schema_version="rag-live-fixture-manifest:v1",
