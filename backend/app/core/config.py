@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     )
     agent_runtime_fingerprint_key_version: str = 'v1'
     paraworks_provider_safety_latch_path: str = '.paraworks/provider-safety.json'
+    paraworks_provider_safety_admin_target: Literal[
+        'production', 'live_validation'
+    ] = 'production'
+    paraworks_provider_safety_review_key_path: str | None = None
+    paraworks_provider_safety_review_key_id: str = 'provider-safety-review-v1'
+    paraworks_provider_safety_implementation_plan_reference_hmac: str | None = None
+    paraworks_rag_live_validation_database_url: str | None = None
+    paraworks_rag_live_validation_provider_safety_latch_path: str | None = None
+    paraworks_rag_live_validation_environment_id: str = 'rag-live-validation'
     auto_review_mode: Literal['disabled', 'shadow', 'enforce'] = 'disabled'
     auto_review_enforce_percentage: Annotated[
         Literal[0, 10, 100], BeforeValidator(_coerce_integer_literal)

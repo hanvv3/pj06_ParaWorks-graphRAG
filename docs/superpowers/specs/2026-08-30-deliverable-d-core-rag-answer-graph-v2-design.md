@@ -2579,6 +2579,22 @@ deployment DB + 새 latch path + 새 authority UUID에서 reviewed init을 다�
 더해 새 zero-call preview와 fresh user approval이 필요하다. current environment를 in-place auto-repair하거나
 old approval을 재사용하지 않는다.
 
+Task 22의 provider-free administration은 별도 review authority가 stdin으로 전달한 bounded canonical
+review envelope만 소비한다. init과 bootstrap recovery를 포함한 mutation CLI command는 argv, environment,
+log 또는 output으로 reviewed payload나 review secret을 받지 않는다. admin CLI boundary는 서명을
+검증할 뿐 signing API/command를 제공하지 않는다. 기존 low-level service/test capability는 CLI에서
+노출하지 않는 내부 compatibility surface로 유지한다. envelope는 operation, fresh nonce, actor HMAC,
+historical-block acknowledgement, target kind와 DB/latch identity HMAC, current authority/family CAS context,
+successor snapshot(해당 시), 그리고 외부에서 고정해 공급한 implementation-plan reference HMAC을 모두
+서명한다. CLI가 plan HMAC을 파일 내용에서 유추하거나 파생하지 않는다.
+
+rebind는 서로 다른 reviewed envelope를 요구하는 `ready -> rebind_required`와
+`rebind_required -> ready` 두 transition이다. production/application과 live-validation은 서로 다른
+DB와 latch 설정 및 target identity를 사용하고 어느 한쪽의 authority/review가 다른 쪽을 만족시키지
+못한다. supersession successor는 signed snapshot과 committed-code registry 양쪽에 있어야 하며 임의
+provider/model/config는 거부한다. review-key rotation은 Task 22 범위 밖이며, separately approved design이
+오기 전에는 unknown key id나 configured key drift를 복구/추측하지 않고 fail closed한다.
+
 모든 external read와 read-modify-write는 **절대 교체되지 않는 같은 sidecar file object의 exclusive OS lock
 하나** 아래 수행한다. envelope path/file handle 자체를 coordination lock으로 사용하지 않는다.
 현재 whole-set HMAC을 검증하고 target record만 바꾸며 다른 record를 byte-canonical하게 보존한 뒤

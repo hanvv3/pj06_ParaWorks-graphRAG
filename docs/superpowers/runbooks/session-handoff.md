@@ -5390,3 +5390,27 @@ tests passed with 53 tests; ruff passed.
   deploy occurred. Continue only with **D Core Task 22, provider-free safety
   administration**. Task 22 is the next **actual implementation** step, not a
   planning task and not Deliverable E Neo4j GraphRAG.
+
+## 2026-09-13 Task 22 candidate handoff
+
+- Task 22 adds `backend.app.admin.rag_provider_safety` without changing the
+  existing low-level provider-safety review capability. The admin CLI itself is
+  verifier-only: mutation payloads arrive only as <=32 KiB exact-canonical JSON
+  on stdin, signed by a distinct file-backed review authority. argv/env/output
+  never carries the review payload or review secret.
+- The signed envelope binds operation, nonce, actor HMAC, target kind plus
+  DB/latch/environment identities, exact current context/CAS, historical
+  blocker acknowledgement, successor snapshot, and the externally configured
+  implementation-plan reference HMAC. Mark-rebind and rebind are separate
+  reviewed generations. Default supersession is fail-closed because the
+  committed successor registry is empty; key rotation requires a future design.
+- Production and live-validation use separate settings and overlapping DB,
+  latch, or environment targets are refused. Admin default wiring requires
+  PostgreSQL, a canonical absolute latch path, owner-controlled review key file,
+  registered advisory capability, and a fixed plan-reference HMAC. Status is
+  read-only and neither creates nor repairs latch/sidecar/DB authority state.
+- Fresh direct-impact evidence is `113 passed, 14 skipped`; changed-file Ruff
+  is clean. The new Task 22 PostgreSQL concurrency case is skipped without
+  `PARAWORKS_TEST_POSTGRES_URL`, so actual advisory/concurrency behavior remains
+  a release gate. Await independent review before Task 23. No provider/network,
+  paid model, rollout, push, merge, or deploy occurred.

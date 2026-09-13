@@ -6819,3 +6819,26 @@ Cost/security note:
   rollout activation, push, merge, or deploy occurred. The next planned item is
   **D Core Task 22, provider-free safety administration**. It is an **actual
   implementation** task and is not Deliverable E Neo4j GraphRAG.
+
+## 2026-09-13 Deliverable D Core Task 22 provider-free safety administration
+
+- Added a non-interactive provider-safety admin boundary for status, init,
+  bootstrap recovery, explicit mark-rebind-required, rebind, reset, and
+  supersession. Every mutating CLI command consumes one bounded exact-canonical
+  envelope from stdin and verifies a distinct external review key, operation,
+  target, current CAS context, fixed implementation-plan reference HMAC, and
+  successor snapshot where applicable. The CLI exposes no signer and emits
+  only fixed aggregate JSON/codes.
+- Rebind is now operationally two separately reviewed transitions. Production
+  and live-validation administration have separate PostgreSQL/latch/environment
+  settings and reject overlapping targets. Supersession requires both the
+  signed successor and a committed-code registry entry; the production registry
+  is deliberately empty until a concrete successor is approved. Review-key
+  rotation is outside Task 22 and unknown key ids fail closed.
+- SQLite/provider-free evidence is `32 passed`; the broader direct-impact
+  provider-safety/runtime/cost/assembly/settings regression is `113 passed, 14
+  skipped`. One new PostgreSQL concurrency test and the existing PostgreSQL
+  guards remain skipped because `PARAWORKS_TEST_POSTGRES_URL` is unavailable;
+  actual PostgreSQL serialization is therefore still a release gate. No live
+  provider/network/paid call, rollout, push, merge, or deploy occurred. This
+  candidate remains **DONE_WITH_CONCERNS pending independent review**.

@@ -2010,6 +2010,7 @@ class ShadowComparator:
 uv run python -m backend.app.admin.rag_provider_safety provider-safety-status
 uv run python -m backend.app.admin.rag_provider_safety provider-safety-init
 uv run python -m backend.app.admin.rag_provider_safety provider-safety-bootstrap-recovery
+uv run python -m backend.app.admin.rag_provider_safety provider-safety-mark-rebind-required
 uv run python -m backend.app.admin.rag_provider_safety provider-safety-rebind
 uv run python -m backend.app.admin.rag_provider_safety provider-safety-reset
 uv run python -m backend.app.admin.rag_provider_safety provider-safety-supersede
@@ -2020,6 +2021,10 @@ uv run python -m backend.app.admin.rag_provider_safety provider-safety-supersede
 - [ ] Add RED reset/rebind/supersede tests for authenticated reviewed command input, monotonic global/family generations, append-only history, blocker preservation, no cross-family widening, and zero provider call.
 - [ ] Add RED production/live target tests: production initialization targets the production app DB; live-gate initialization targets the exact validation DB; neither authority can satisfy the other.
 - [ ] Add RED output hygiene tests for aggregate status only, no key/path secret/query/evidence/config plaintext, no credentials in CLI args/env/log/DB, and non-interactive fail-closed behavior.
+- [ ] Require every mutating CLI command, including init and bootstrap recovery, to consume one bounded canonical review envelope from stdin. The envelope is signed by a distinct external review key, binds operation/CAS/context/target and an externally fixed implementation-plan reference HMAC, and is never accepted through argv, environment, logs, or output. The admin CLI boundary verifies only and exposes no signer; existing low-level service/test capabilities remain internal compatibility surfaces.
+- [ ] Make rebind two separately reviewed transitions: `provider-safety-mark-rebind-required` first, then `provider-safety-rebind`; rebind refuses every state except `rebind_required`.
+- [ ] Keep production/application and live-validation DB+latch targets disjoint in settings and target identity. A review for one target must not authorize the other.
+- [ ] Require a supersession successor to match both the signed snapshot and a committed-code allowlist. Keep key rotation out of Task 22 and fail closed until a separately approved design exists.
 - [ ] Run `uv run pytest backend/tests/test_rag_provider_safety_admin.py backend/tests/test_rag_provider_safety_postgres.py -q` and confirm RED.
 - [ ] Implement commands over `RagProviderSafetyService` and durable file authority. Every command is provider-free; none grants a paid permit.
 - [ ] Rerun focused tests and `uv run ruff check backend/app/admin/rag_provider_safety.py backend/app/agent_runtime/rag_provider_safety.py backend/tests/test_rag_provider_safety_admin.py backend/tests/test_rag_provider_safety_postgres.py`.

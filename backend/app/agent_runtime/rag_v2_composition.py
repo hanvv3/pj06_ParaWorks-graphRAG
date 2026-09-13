@@ -222,12 +222,11 @@ def _default_rag_request_services(
         )
 
 
-def _policy_snapshots(policy, settings):
+def build_rag_provider_policy_snapshots(policy, settings):
     from backend.app.admin.auto_review_keys import fingerprint_key_material_verifier
     from backend.app.agent_runtime.rag_runtime_contracts import (
         AuthorizedProviderPolicySnapshot,
     )
-
     return tuple(
         AuthorizedProviderPolicySnapshot(
             component=component,
@@ -261,6 +260,10 @@ def _policy_snapshots(policy, settings):
             ('answer_generation', False),
         )
     )
+
+
+# Compatibility alias for existing request assembly imports/tests.
+_policy_snapshots = build_rag_provider_policy_snapshots
 
 
 @contextmanager
