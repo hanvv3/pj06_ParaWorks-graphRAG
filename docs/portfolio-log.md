@@ -1,5 +1,33 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-14 D Core Task25 provider-incident independent-review round 2
+
+- Implementation `69b4a00` makes release/provider reconciliation
+  transition-aware. Exactly one fully validated, owned
+  `started -> aborted_provider_safety` authorization may consume the provider
+  predecessor/current drift during an allowlisted abort publication; ordinary
+  `inspect()` still refuses the same separately committed mixed state.
+- Provider-incident preparation now deterministically authenticates every
+  blocker incident-reference HMAC and reconciles the signed first-blocker run,
+  category and timestamp. Reverse digest authentication continues through
+  supersession to bootstrap. Legacy v1 rebind history cannot be reconstructed
+  because the predecessor policy snapshot was overwritten, so preparation fails
+  closed with an explicit reviewed-rebootstrap requirement rather than sealing
+  an unauthenticated prefix.
+- RED evidence included the four saved independent probes and permanent
+  regressions for drift abort, historical actor/run attribution, rebind and
+  supersession prefix corruption, and pristine legacy-rebind refusal. The first
+  combined run had eight intended safety failures plus one supersession fixture
+  setup error; after correcting only that fixture, its intended refusal failed
+  RED as well.
+- Final frozen GREEN: focused incident/reviewer probes `182 passed`; broad
+  release/provider `1258 passed, 15 skipped`; direct impact `221 passed,
+  14 skipped` with 11 existing Alembic warnings; credential hygiene `3 passed`.
+  Ruff, format, compile and diff checks pass. PostgreSQL is unavailable, so its
+  gates remain skipped. Independent CLEAN rereview is pending; no runner,
+  evaluator, migration, production reader, live/provider/release operation,
+  push, merge or deployment was performed.
+
 ## 2026-09-14 D Core Task25 provider-incident independent-review round 1
 
 - Implementation `cb6b99f` closes the eight saved review regressions against

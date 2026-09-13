@@ -2679,6 +2679,21 @@ comprehensive release/provider, `221 passed, 14 skipped` direct impact and
 `3 passed` credential hygiene. PostgreSQL and independent CLEAN rereview remain
 open. Do not start the composite runner/evaluator or execute a release.
 
+**Independent-review round 2 correction (2026-09-14).** Implementation
+`69b4a00` closes the saved drift-abort and historical-attribution findings.
+Only the owned append path can carry an exact allowlisted binding from one
+predecessor provider digest to the current digest for a validated
+`started -> aborted_provider_safety` authorization; ordinary inspection remains
+fail-stop for that mixed state. Preparation authenticates historical blocker
+actor/run attribution, signed first-blocker run/category/time, and every
+reconstructible digest through supersession to bootstrap. Because v1 rebind
+overwrote predecessor policy material, incident preparation for those histories
+fails closed pending reviewed migration/rebootstrap; no migration is part of this
+slice. Fresh frozen evidence is `182 passed` focused, `1258 passed, 15 skipped`
+broad release/provider, `221 passed, 14 skipped` direct impact and `3 passed`
+credential hygiene. PostgreSQL and independent CLEAN rereview remain open. Do not
+start the composite runner/evaluator or execute a release.
+
 **Files:**
 
 - Create: `backend/app/rag/release_quality.py`

@@ -3254,6 +3254,23 @@ release/provider `1594 passed, 15 skipped`, direct impact `221 passed, 14 skippe
 and credential `3 passed`. PostgreSQL and independent CLEAN rereview remain open;
 no composite/evaluator or release execution is authorized.
 
+**Task25 prerequisite independent-review round 2 correction (2026-09-14).**
+Implementation `69b4a00` supersedes `cb6b99f`. Release/provider consistency is
+transition-aware only inside the owned abort-publication path: one exact,
+allowlisted `started -> aborted_provider_safety` mutation may bind its immutable
+predecessor digest to the current provider digest. Ordinary inspection receives
+no such binding and continues to reject a separately committed provider incident
+beside the predecessor-bound started authorization. Provider incident capability
+preparation authenticates every historical blocker incident-reference HMAC,
+reconciles signed first-blocker run/category/time, and reverse-authenticates
+supersession history to bootstrap. V1 rebind did not retain the predecessor policy
+snapshot needed for exact reconstruction, so those histories explicitly fail
+closed pending reviewed migration/rebootstrap; this slice adds neither. Frozen
+evidence is focused `182 passed`, broad release/provider `1258 passed, 15 skipped`,
+direct impact `221 passed, 14 skipped`, and credential `3 passed`. PostgreSQL and
+independent CLEAN rereview remain open; no composite/evaluator or release
+execution is authorized.
+
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
 skipped** (11 existing Alembic warnings); focused contracts **38 passed**;

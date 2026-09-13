@@ -2,6 +2,32 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task25 provider-incident independent-review round 2 correction
+
+- Implementation `69b4a00` supersedes `cb6b99f` for fresh independent rereview.
+  The release barrier now permits only the exact owned, allowlisted
+  predecessor-to-current provider drift needed to publish one validated
+  `started -> aborted_provider_safety` authorization. A provider-only incident
+  committed beside a predecessor-bound started authorization remains an explicit
+  mismatch that ordinary `inspect()` refuses; there is no auto-repair.
+- Incident preparation authenticates every historical blocker
+  incident-reference HMAC and reconciles the signed first-blocker run, category
+  and observed time. Reverse envelope authentication continues through
+  supersession to bootstrap. V1 rebind overwrote the predecessor policy snapshot,
+  so any such history fails closed with `provider incident history requires
+  reviewed rebootstrap`; a reviewed schema migration/rebootstrap is required for
+  legitimate legacy histories, and none was introduced here.
+- Strict RED included all four saved R1 probes plus permanent drift,
+  attribution, rebind/supersession-prefix and legacy-rebind regressions. Fresh
+  frozen evidence: focused `182 passed`; exact broad release/provider `1258
+  passed, 15 skipped`; direct impact `221 passed, 14 skipped` with 11 existing
+  Alembic warnings; credential `3 passed`; Ruff/format/compile/diff green.
+  PostgreSQL URL is absent.
+- Independent CLEAN rereview remains pending. Do not begin the Task25 composite
+  runner/evaluator, add a migration or production reader, or authorize/execute a
+  release. No external/provider/paid call, push, merge or deployment ran. Full
+  evidence is in ignored `.tmp/task25-r2-provider-incident-carryover.md`.
+
 ## 2026-09-14 Task25 provider-incident independent-review round 1 correction
 
 - Implementation `cb6b99f` supersedes candidate `e94bd96` for independent
