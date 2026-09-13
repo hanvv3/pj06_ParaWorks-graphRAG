@@ -2,6 +2,28 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task25 mandatory provider-incident prerequisite candidate
+
+- Implementation `e94bd96` replaces sealed incident use of shared ORM metadata
+  with fresh private SQL Tables/Columns/type instances matching the existing
+  physical schema. Both writes and actual post-write reads use that metadata.
+- The incident owner validates the complete provider authority, exact-two
+  readiness roster and gapless/linked history before mutation; validates the
+  complete prospective image before latch publication; and checks the complete
+  native SQL after-image under the same transaction. No caller-overridable
+  callback is entered after DML. Release peer checkpoints include all three
+  provider tables.
+- Existing external-first fail-stop/recovery and one-use semantics remain.
+  Reviewed-reset follow-on incidents preserve the first blocker evidence.
+  Frozen incident evidence is **150 passed**; broader release/provider evidence
+  **1010 passed, 14 skipped**; affected evidence **253 passed, 14 skipped**;
+  credential **3 passed**. Eight Python files pass Ruff/format/compile/diff.
+- PostgreSQL URL is absent, so conditional skips remain open. Independent CLEAN
+  review is pending. Do not begin the Task25 composite/evaluator slice or treat
+  Task24-B/Task24 as release-clean. No real release, provider/network/paid call,
+  push, merge or deployment ran. Detailed RED/retry evidence is in the ignored
+  `.tmp/task25-provider-incident-carryover.md` report.
+
 ## 2026-09-14 Task24-B final breaker closure: IMPLEMENTED / NOT RELEASE-CLEAN
 
 - Final independent review of implementation `3617c0e` / docs `26d8337` reached

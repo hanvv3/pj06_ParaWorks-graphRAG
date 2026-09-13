@@ -1,5 +1,25 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-14 D Core Task25 provider-incident persistence candidate
+
+- Implementation `e94bd96` removes shared ORM Table/Column/Type objects from
+  sealed provider-incident writes and post-write reads. A private exact-schema
+  registry now owns authority, exact-two readiness and provider-history images;
+  before, prospective and actual after-images are checked inside one stable
+  transaction, without caller-overridable callbacks after DML.
+- The external-first fail-stop/recovery contract and one-use incident plans are
+  preserved. Release checkpoints now pin provider history as well as authority
+  and readiness, and repeated reviewed-reset incidents preserve immutable
+  first-blocker evidence.
+- Frozen focused evidence is `150 passed`; broader release/provider evidence is
+  `1010 passed, 14 skipped`; final affected evidence reconciles to `253 passed,
+  14 skipped`; credential hygiene is `3 passed`. PostgreSQL is unavailable, so
+  its skips remain an open gate. Ruff, format, compile and diff checks pass.
+- This is a narrow implementation candidate, not independent CLEAN. Task25
+  composite/evaluator work, production readers and actual release remain
+  blocked pending independent review. No external/live/paid/release operation
+  ran.
+
 ## 2026-09-13 D Core Task21 staged retrieval-shadow candidate
 
 - Added deployment-static rollout execution across Ask, Search, and Assistant.

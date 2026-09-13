@@ -2653,6 +2653,16 @@ This is not a sixth Task24-B fix round and grants no release/authorization autho
 Task24-B and Task24 overall remain NOT RELEASE-CLEAN. Passing this slice alone
 does not satisfy the other open release gates.
 
+**Implementation candidate (2026-09-14).** Commit `e94bd96` implements only this
+mandatory prerequisite. Fresh private SQL metadata owns all provider-incident
+writes and post-write reads; complete before/prospective/after authority,
+exact-two readiness and provider-history images are checked at safe transaction
+boundaries, and no caller-overridable callback runs after DML. Frozen focused
+evidence is `150 passed`; broader release/provider evidence is `1010 passed,
+14 skipped`; final affected evidence is `253 passed, 14 skipped`; credential is
+`3 passed`. PostgreSQL is unavailable and independent CLEAN review is pending.
+Do not proceed to the composite runner/evaluator or authorize a release.
+
 **Files:**
 
 - Create: `backend/app/rag/release_quality.py`

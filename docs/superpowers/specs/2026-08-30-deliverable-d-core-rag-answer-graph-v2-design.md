@@ -3225,6 +3225,18 @@ provider authority + exact readiness peers + provider history + latch + release
 state/marker, and receive independent **CLEAN** review. Cost if wrong: persistent
 provider authority/readiness/history divergence and reviewed recovery requirement.
 
+**Task25 prerequisite implementation candidate (2026-09-14).** Commit `e94bd96`
+uses fresh private exact-schema SQL metadata for every sealed provider-incident
+write and post-write read. It checks the complete authority, exact-two readiness
+roster and linked history before mutation, checks the complete prospective image
+before external-first latch publication, and verifies the actual native SQL
+after-image under the same transaction without caller-overridable post-DML
+callbacks. One-use and fail-stop/recovery semantics are retained. Frozen focused
+evidence is `150 passed`; broader release/provider evidence is `1010 passed,
+14 skipped`; final affected evidence is `253 passed, 14 skipped`; credential is
+`3 passed`. PostgreSQL and independent CLEAN review remain open, so this does not
+make Task24/Task24-B release-clean or authorize Task25 composite/evaluator work.
+
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
 skipped** (11 existing Alembic warnings); focused contracts **38 passed**;
