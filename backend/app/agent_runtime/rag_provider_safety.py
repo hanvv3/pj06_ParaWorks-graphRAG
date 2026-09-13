@@ -27,6 +27,7 @@ from backend.app.agent_runtime.rag_advisory_locks import (
 from backend.app.agent_runtime.rag_postgres_binding import (
     RagPostgresAdvisoryTransport,
 )
+from backend.app.agent_runtime.rag_provider_schema import _provider_tables
 from backend.app.agent_runtime.rag_runtime_contracts import (
     AuthorizedProviderPolicySnapshot,
     RagProviderSafetyBinding,
@@ -280,28 +281,28 @@ class RagProviderSafetyReviewAuthority:
         self,
         context: RagProviderSafetyReviewContext,
         *,
-        operation: Literal[
-            'mark_rebind_required', 'rebind', 'reset', 'supersession'
-        ],
+        operation: Literal['mark_rebind_required', 'rebind', 'reset', 'supersession'],
         successor: AuthorizedProviderPolicySnapshot | None,
         actor_subject_hmac: str,
         reviewed_gate_reference_hmac: str,
         historical_block_acknowledged: bool,
     ) -> ReviewedProviderSafetyCommand:
-        if operation not in {
-            'mark_rebind_required', 'rebind', 'reset', 'supersession'
-        }:
+        if operation not in {'mark_rebind_required', 'rebind', 'reset', 'supersession'}:
             raise RagProviderSafetyError('reviewed command operation is invalid')
         require_lower_hmac(actor_subject_hmac)
         require_lower_hmac(reviewed_gate_reference_hmac)
         if type(historical_block_acknowledged) is not bool:
-            raise RagProviderSafetyError('historical blocker acknowledgement is invalid')
+            raise RagProviderSafetyError(
+                'historical blocker acknowledgement is invalid'
+            )
         if (
             context.has_historical_blocker
             and operation in {'reset', 'supersession'}
             and not historical_block_acknowledged
         ):
-            raise RagProviderSafetyError('historical blocker acknowledgement is required')
+            raise RagProviderSafetyError(
+                'historical blocker acknowledgement is required'
+            )
         if (operation in {'rebind', 'supersession'}) != (successor is not None):
             raise RagProviderSafetyError('reviewed command successor is invalid')
         payload = {
@@ -310,9 +311,7 @@ class RagProviderSafetyReviewAuthority:
             'historical_block_acknowledged': historical_block_acknowledged,
             'operation': operation,
             'reviewed_gate_reference_hmac': reviewed_gate_reference_hmac,
-            'successor': (
-                None if successor is None else self._successor(successor)
-            ),
+            'successor': (None if successor is None else self._successor(successor)),
         }
         return ReviewedProviderSafetyCommand(
             payload=payload,
@@ -980,23 +979,29 @@ class RagProviderSafetyService:
         *,
         for_update: bool = False,
     ) -> tuple[Mapping[str, object], list[Mapping[str, object]]]:
-        authority_query = select(RagProviderSafetyAuthority.__table__).where(
-            RagProviderSafetyAuthority.id == 1
-        )
-        readiness_query = select(RagProviderReadiness.__table__).order_by(
-            RagProviderReadiness.component,
-            RagProviderReadiness.model,
-            RagProviderReadiness.provider,
-            RagProviderReadiness.reasoning_or_config_identity,
+        authority_table, readiness_table, _history = _provider_tables()
+        authority_query = select(authority_table).order_by(authority_table.c.id)
+        readiness_query = select(readiness_table).order_by(
+            readiness_table.c.component,
+            readiness_table.c.model,
+            readiness_table.c.provider,
+            readiness_table.c.reasoning_or_config_identity,
         )
         if for_update:
             authority_query = authority_query.with_for_update()
             readiness_query = readiness_query.with_for_update()
-        authority = connection.execute(authority_query).mappings().one_or_none()
+        authorities = connection.execute(authority_query).mappings().all()
+        authority = authorities[0] if len(authorities) == 1 else None
         rows = connection.execute(readiness_query).mappings().all()
+        self._match_database_rows(body, authority, rows)
+        return authority, rows
+
+    def _match_database_rows(self, body, authority, rows):
+        """Validate both stored and prospective owned images without executing SQL."""
         signed = body['_signed_payload']
         if (
             authority is None
+            or authority['id'] != 1
             or authority['authority_uuid'] != body['authority_uuid']
             or authority['designated_environment_id'] != self._environment
             or authority['global_safety_generation'] != body['global_safety_generation']
@@ -1017,6 +1022,7 @@ class RagProviderSafetyService:
             should_be_active = active[row['component']] == identity
             if (
                 record is None
+                or row['authority_id'] != 1
                 or row['active'] is not should_be_active
                 or row['authorized_policy_snapshot_hmac']
                 != record['authorized_policy_snapshot_hmac']
@@ -1037,7 +1043,6 @@ class RagProviderSafetyService:
                 seen_active.add(row['component'])
         if seen_active != set(_COMPONENTS):
             raise RagProviderSafetyError('provider safety DB/external authority drift')
-        return authority, rows
 
     def _active_record(
         self, body: Mapping[str, object], component: RagPaidComponent
@@ -1396,9 +1401,7 @@ class RagProviderSafetyService:
             record = self._active_record(old, component)
             if record['state'] != 'ready':
                 raise RagProviderSafetyError('provider family is blocked')
-            reviewed_reference = str(
-                record['reviewed_transition_reference_hmac']
-            )
+            reviewed_reference = str(record['reviewed_transition_reference_hmac'])
             require_lower_hmac(reviewed_reference)
             actor_reference = self._incident_reference(
                 component=component,
@@ -1406,16 +1409,16 @@ class RagProviderSafetyService:
                 agent_run_id=agent_run_id,
                 category=category,
             )
-            parsed = json.loads(
-                canonical_json_bytes(old['_envelope']).decode('utf-8')
-            )
+            parsed = json.loads(canonical_json_bytes(old['_envelope']).decode('utf-8'))
             signed = parsed['signed_payload']
             body = signed['body']
             active_identity = body['active_family_by_component'][component]
             target = next(
                 item
                 for item in body['family_records']
-                if all(item[key] == active_identity[key] for key in _FAMILY_IDENTITY_KEYS)
+                if all(
+                    item[key] == active_identity[key] for key in _FAMILY_IDENTITY_KEYS
+                )
             )
             new_generation = body['global_safety_generation'] + 1
             observed_at = datetime.now(UTC)
@@ -1488,6 +1491,19 @@ class RagProviderSafetyService:
             or record['state_version'] != prepared.old_state_version
         ):
             raise RagProviderSafetyError('provider incident plan CAS failed')
+        # Build and validate the complete authority/readiness/history delta while
+        # rollback and an unchanged latch are still possible. The private SQL
+        # schema never aliases ORM or release-plan objects, including defaults.
+        from backend.app.agent_runtime.rag_provider_incident import _incident_write
+
+        prospective = self._validate_envelope(
+            dict(prepared.new_envelope),
+            raw=canonical_json_bytes(dict(prepared.new_envelope)),
+        )
+        write = _incident_write(connection, prepared, old, prospective)
+        self._match_database_rows(
+            prospective, write.authority_after, write.readiness_after
+        )
         # External authority always moves first.  A later DB failure deliberately
         # leaves a detectable external/DB mismatch and therefore fails stopped.
         self._authority._replace_unlocked(dict(prepared.new_envelope))
@@ -1495,33 +1511,10 @@ class RagProviderSafetyService:
         if new['envelope_digest'] != prepared.new_envelope_digest:
             raise RagProviderSafetyError('provider incident envelope differs')
         try:
-            self._commit_transition(
-                connection,
-                old_body=old,
-                new_body=new,
-                new_digest=prepared.new_envelope_digest,
-                component=prepared.component,
-                transition_kind=(
-                    'block_overrun'
-                    if prepared.state == 'blocked_overrun'
-                    else 'block_remediation'
-                ),
-                reviewed_reference=prepared.reviewed_reference,
-                actor_subject_hmac=prepared.actor_subject_hmac,
-                agent_run_id=prepared.agent_run_id,
-                snapshot=None,
-                supersession=False,
-                blocker_values=(
-                    prepared.input_tokens,
-                    prepared.output_tokens,
-                    prepared.cost_usd,
-                    prepared.observed_at,
-                ),
-                commit=False,
-            )
-            authority_after, rows_after = self._match_db_whole_set(
-                connection, new, for_update=True
-            )
+            # Ordinary admin transitions retain their existing path. Sealed
+            # incidents never enter the ORM-backed _commit_transition routine.
+            authority_rows, rows_after, _history_after = write.execute()
+            authority_after = authority_rows[0]
         except Exception:
             connection.rollback()
             raise RagProviderSafetyError(
@@ -1707,9 +1700,7 @@ class RagProviderSafetyService:
                 self._match_db_whole_set(connection, old, for_update=True)
                 record = self._active_record(old, component)
                 if preserve_reviewed_reference:
-                    reviewed_reference = record[
-                        'reviewed_transition_reference_hmac'
-                    ]  # type: ignore[assignment]
+                    reviewed_reference = record['reviewed_transition_reference_hmac']  # type: ignore[assignment]
                 if reviewed_command is not None:
                     if reviewed_operation is None:
                         raise RagProviderSafetyError('reviewed operation is absent')
@@ -1720,14 +1711,14 @@ class RagProviderSafetyService:
                         expected_operation=reviewed_operation,
                         expected_successor=snapshot,
                     )
-                    reviewed_reference = payload[
-                        'reviewed_gate_reference_hmac'
-                    ]  # type: ignore[assignment]
+                    reviewed_reference = payload['reviewed_gate_reference_hmac']  # type: ignore[assignment]
                     actor_subject_hmac = payload['actor_subject_hmac']  # type: ignore[assignment]
                     expected_global_generation = context.global_safety_generation
                     expected_state_version = context.state_version
                 if reviewed_reference is None:
-                    raise RagProviderSafetyError('reviewed transition reference is absent')
+                    raise RagProviderSafetyError(
+                        'reviewed transition reference is absent'
+                    )
                 if (
                     record['state'] not in allowed_prior_states
                     or expected_global_generation is not None

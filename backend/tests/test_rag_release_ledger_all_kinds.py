@@ -457,7 +457,9 @@ def finish(harness, kind, outcome):
     return harness.append(kind, changes, outcome=outcome, payload_overrides=overrides)
 
 
-def incident_harness(tmp_path, monkeypatch, *, prepare_only=False):
+def incident_harness(
+    tmp_path, monkeypatch, *, prepare_only=False, prior_provider_history=False
+):
     """Real sealed Task22 service; only PostgreSQL transport/advisory is substituted."""
     from backend.app.admin import rag_provider_safety as admin_module
     from backend.app.rag import release_authority as authority_module
@@ -470,6 +472,32 @@ def incident_harness(tmp_path, monkeypatch, *, prepare_only=False):
     )
     engine, target, runtime, admin = _service(tmp_path, kind='live_validation')
     admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    if prior_provider_history:
+        from backend.app.agent_runtime.rag_provider_safety import (
+            RagProviderSafetyReviewAuthority,
+        )
+
+        with engine.connect() as connection:
+            runtime.block_overrun(
+                connection,
+                'answer_generation',
+                agent_run_id=17,
+                input_tokens=1,
+                output_tokens=2,
+                cost_usd=Decimal('0.000001'),
+            )
+            context = runtime.review_context(connection, 'answer_generation')
+            reset = RagProviderSafetyReviewAuthority(
+                identity_secret=b'provider-safety-test-secret'
+            ).issue(
+                context,
+                operation='reset',
+                successor=None,
+                actor_subject_hmac='4' * 64,
+                reviewed_gate_reference_hmac='5' * 64,
+                historical_block_acknowledged=True,
+            )
+            runtime.reviewed_reset(connection, reset)
     peer = admin.release_peer()
 
     @contextmanager
@@ -1759,7 +1787,7 @@ def test_real_append_ends_transaction_before_trusted_provider_cleanup(
     assert external_calls == []
 
 
-def incident_abort(harness):
+def incident_abort(harness, *, category='provider_usage_overrun'):
     harness.claim()
     harness.claim_generation()
     auth, case, run = (
@@ -1771,15 +1799,20 @@ def incident_abort(harness):
         harness.records('cost_component')[-1],
         harness.records('dispatch')[-1],
     )
+    charged_cost = (
+        Decimal('0.100000')
+        if category == 'provider_usage_overrun'
+        else Decimal('0.000400')
+    )
     with harness.engine.connect() as connection:
         incident = harness.authority._provider_safety_release_peer.prepare_incident(
             connection,
             component='answer_generation',
-            category='provider_usage_overrun',
+            category=category,
             agent_run_id=run['id'],
             input_tokens=20,
             output_tokens=30,
-            cost_usd=Decimal('0.100000'),
+            cost_usd=charged_cost,
         )
     failed = {**case, 'state': 'failed'}
     with harness.engine.connect() as connection:
@@ -1792,8 +1825,10 @@ def incident_abort(harness):
                     auth,
                     {
                         **auth,
-                        'state': 'aborted_overrun',
-                        'charged_cost_usd': Decimal('0.100000'),
+                        'state': 'aborted_overrun'
+                        if category == 'provider_usage_overrun'
+                        else 'aborted_provider_safety',
+                        'charged_cost_usd': charged_cost,
                     },
                 ),
                 ('case', case, failed),
@@ -1805,7 +1840,7 @@ def incident_abort(harness):
                         'status': 'failed',
                         'run_record_phase': 'final',
                         'completed_at': run['started_at'] + timedelta(seconds=1),
-                        'total_charged_cost_usd': Decimal('0.100000'),
+                        'total_charged_cost_usd': charged_cost,
                     },
                 ),
                 (
@@ -1815,11 +1850,11 @@ def incident_abort(harness):
                         **child,
                         'dispatch_state': 'terminal',
                         'charge_basis': 'actual',
-                        'charged_cost_usd': Decimal('0.100000'),
+                        'charged_cost_usd': charged_cost,
                         'actual_input_tokens': 20,
                         'actual_output_tokens': 30,
-                        'overrun': True,
-                        'terminal_outcome': 'provider_usage_overrun',
+                        'overrun': category == 'provider_usage_overrun',
+                        'terminal_outcome': category,
                     },
                 ),
                 (
@@ -1829,13 +1864,13 @@ def incident_abort(harness):
                         **dispatch,
                         'state': 'terminal',
                         'charge_basis': 'actual',
-                        'charged_cost_usd': Decimal('0.100000'),
+                        'charged_cost_usd': charged_cost,
                     },
                 ),
             ],
             case=failed,
             component='answer_generation',
-            outcome='provider_usage_overrun',
+            outcome=category,
         )
         for kind in ('provider_safety_authority', 'provider_readiness'):
             record = next(
@@ -1872,7 +1907,11 @@ def incident_abort(harness):
         harness.records('provider_safety_authority')[0]['envelope_digest']
         == incident.new_envelope_digest
     )
-    assert harness.records('provider_readiness')[-1]['state'] == 'blocked_overrun'
+    assert harness.records('provider_readiness')[-1]['state'] == (
+        'blocked_overrun'
+        if category == 'provider_usage_overrun'
+        else 'blocked_remediation'
+    )
 
 
 @pytest.mark.parametrize(

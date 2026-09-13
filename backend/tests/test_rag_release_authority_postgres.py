@@ -577,10 +577,10 @@ def test_postgresql_release_barrier_applies_external_first_incident_once(
 def test_postgresql_incident_db_failure_leaves_external_mismatch_fail_stopped(
     postgres_release_db: Engine,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from sqlalchemy import event
+
     from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
-    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
 
     authority = _authority(postgres_release_db, tmp_path)
     with postgres_release_db.connect() as connection:
@@ -599,20 +599,27 @@ def test_postgresql_incident_db_failure_leaves_external_mismatch_fail_stopped(
             output_tokens=0,
             cost_usd=Decimal('0.000000'),
         )
-    monkeypatch.setattr(
-        service,
-        '_commit_transition',
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            RagProviderSafetyError('simulated provider DB failure')
-        ),
-    )
+    provider_dml = []
+
+    def fail_after_authority(_connection, _cursor, statement, *_args):
+        normalized = statement.lstrip().upper()
+        if normalized.startswith('UPDATE RAG_PROVIDER_SAFETY_AUTHORITIES'):
+            provider_dml.append(statement)
+        elif provider_dml and normalized.startswith('UPDATE RAG_PROVIDER_READINESS'):
+            raise RuntimeError('simulated provider DB failure')
+
+    event.listen(postgres_release_db, 'before_cursor_execute', fail_after_authority)
     marker = DurableFileAuthority.open_runtime(authority.marker_path)
-    with (
-        postgres_release_db.connect() as connection,
-        pytest.raises(RagReleaseAuthorityError, match='provider safety authority'),
-        authority._authority_barrier(connection, marker=marker) as guard,
-    ):
-        guard.apply_provider_incident(plan)
+    try:
+        with (
+            postgres_release_db.connect() as connection,
+            pytest.raises(RagReleaseAuthorityError, match='provider safety authority'),
+            authority._authority_barrier(connection, marker=marker) as guard,
+        ):
+            guard.apply_provider_incident(plan)
+    finally:
+        event.remove(postgres_release_db, 'before_cursor_execute', fail_after_authority)
+    assert provider_dml
     assert service._read_unlocked()['envelope_digest'] == plan.new_envelope_digest
     with postgres_release_db.connect() as connection:
         assert (

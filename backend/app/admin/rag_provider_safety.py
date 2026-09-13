@@ -701,10 +701,7 @@ def _freeze_release_peer(owner, guard, connection):
     release owner calls this before its first write, then compares the complete
     pinned file/SQL images while both authority locks and the transaction live.
     """
-    from backend.app.models.rag_runtime import (
-        RagProviderReadiness,
-        RagProviderSafetyAuthority,
-    )
+    from backend.app.agent_runtime.rag_provider_schema import _provider_tables
 
     _require_provider_guard(owner, guard, connection)
     _ProviderSafetyReviewLedger.assert_pin(guard._ledger)
@@ -716,6 +713,7 @@ def _freeze_release_peer(owner, guard, connection):
     )
     pin = DurableFileAuthority.open_runtime(guard._ledger.path)
     latch = DurableFileAuthority.open_runtime(guard._provider_safety._latch_path)
+    tables = _provider_tables()
 
     def database_image():
         return tuple(
@@ -725,10 +723,7 @@ def _freeze_release_peer(owner, guard, connection):
                     select(table).order_by(*table.primary_key.columns)
                 )
             )
-            for table in (
-                RagProviderSafetyAuthority.__table__,
-                RagProviderReadiness.__table__,
-            )
+            for table in tables
         )
 
     pin_bytes = pin._read_bytes_unlocked()

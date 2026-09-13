@@ -1742,20 +1742,33 @@ class RagReleaseMutationSet:
                 or readiness_after['reset_at'] != readiness_before['reset_at']
             ):
                 raise RagReleaseLedgerError('provider incident state differs')
-            run_hmac = rag_identity_hmac(
-                {'agent_run_id': readiness_after['overrun_agent_run_id']},
-                secret=identity_secret,
-                schema_version='rag-runtime-agent-run-id:v1',
-                policy_version='rag-run:v2',
+            blocker_fields = (
+                'overrun_agent_run_id',
+                'overrun_input_tokens',
+                'overrun_output_tokens',
+                'overrun_cost_usd',
+                'overrun_observed_at',
             )
-            if (
-                run_hmac != payload['runtime_agent_run_id_hmac']
-                or Decimal(str(readiness_after['overrun_cost_usd']))
-                != Decimal(str(payload['charged_cost_usd']))
-                or readiness_after['overrun_input_tokens'] is None
-                or readiness_after['overrun_output_tokens'] is None
-                or readiness_after['overrun_observed_at'] is None
-            ):
+            blocker_before = tuple(readiness_before[key] for key in blocker_fields)
+            blocker_after = tuple(readiness_after[key] for key in blocker_fields)
+            if readiness_before['overrun_agent_run_id'] is None:
+                run_hmac = rag_identity_hmac(
+                    {'agent_run_id': readiness_after['overrun_agent_run_id']},
+                    secret=identity_secret,
+                    schema_version='rag-runtime-agent-run-id:v1',
+                    policy_version='rag-run:v2',
+                )
+                if (
+                    blocker_before != (None, None, None, None, None)
+                    or run_hmac != payload['runtime_agent_run_id_hmac']
+                    or Decimal(str(readiness_after['overrun_cost_usd']))
+                    != Decimal(str(payload['charged_cost_usd']))
+                    or readiness_after['overrun_input_tokens'] is None
+                    or readiness_after['overrun_output_tokens'] is None
+                    or readiness_after['overrun_observed_at'] is None
+                ):
+                    raise RagReleaseLedgerError('provider incident evidence differs')
+            elif blocker_after != blocker_before:
                 raise RagReleaseLedgerError('provider incident evidence differs')
         elif any(mutated_by_kind.get('provider_safety_authority', ())) or any(
             mutated_by_kind.get('provider_readiness', ())
