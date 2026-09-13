@@ -2,6 +2,46 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task24-B round-4 frozen input/roster candidate (rereview pending)
+
+- Independent review of `069c034..4a96d36` confirmed four P1s: retained root
+  PathLike callbacks/generator exhaustion, retained caller DB identity, valid
+  extra plans reaching DML before roster refusal, and Numeric coercion. Earlier
+  round-3 evidence is historical, not an independent CLEAN verdict.
+- Construct authority-owned paths once: materialize both root iterables once,
+  convert each path protocol once, and retain exact canonical native strings.
+  All later filesystem/security checks use these images. Never retain original
+  caller PathLike objects or iterators for precommit validation.
+- All public entry points require exact `ValidationDatabaseIdentity` with exact
+  native validated fields, copy before callbacks, compare with the independent
+  DB read, and retain the owned current identity. Original subclass methods,
+  equality, properties and mutable fields cannot run after DML.
+- Freeze the complete literal mutation plan and compare its exact typed roster
+  with the signed affected rows before DML/incident. Run the existing per-kind
+  lifecycle, initial projection and whole-DB roster checks against a prospective
+  overlay of locked rows, then independently verify actual after-images. The
+  sealed Task22 incident contributes a prospective delta without executing it.
+  Preserve semantic child order and allowed authorization-statement reordering.
+- Caller Numeric literals must be exact Decimal, finite, nonnegative, within
+  schema precision/scale, without signed zero or excess scale. Do not coerce
+  strings, ints, floats, bools or subclasses. Schema-owned scalar defaults have
+  their own explicit normalization; existing six-place signed images remain.
+  This concerns typed SQL values; canonical external payload money stays strings.
+- Source acquisition happens once during full-roster preflight. No new callback
+  runs after DML. Preserve native timezone/ZoneInfo support, marker-first recovery
+  hooks before DML, non-append publication checkpoints, active guard lifetimes,
+  exact-six schema, approved Task23 identities and Task24-A/reviewer/root-manifest
+  contracts. Actual CLI remains refusing; Task25 and production readers are open.
+- Implementation: `34b2475b466c48321f1c3525d8340ef5d5385752`. Final frozen-code
+  release evidence across all 19 files: **1318 passed, 14 skipped**; direct impact
+  **266 passed, 16 skipped**, 11 existing Alembic warnings; credential **3 passed**.
+  Six changed Python files pass Ruff/format/compile and diff checks. Final commands,
+  RED evidence and local commit details are in the Task24-B SDD report. No
+  code/test edits occurred after final suite launch. All 30 PostgreSQL skips
+  remain unexecuted because the URL is absent. This candidate requires independent review;
+  no actual release/bootstrap/rebootstrap/disaster-init/authorization/OAuth/
+  provider/network/paid operation, push, merge or deployment ran.
+
 ## 2026-09-14 Task24-B round-3 publication fencing (rereview pending)
 
 - Independent rereview of `069c034` confirmed P1-C: the round-2 removal of

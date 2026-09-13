@@ -3149,6 +3149,37 @@ payloads, reviewer/approval trust policy or Option-A observations. Round-3
 verification and local commits are recorded in the Task24-B report; independent
 rereview is required and Task24 overall remains incomplete.
 
+Round-4 rereview found that the publication invariant also requires detaching
+path protocols and caller DB identity objects. Materialize each root iterable
+once and convert each path once during construction, retaining only canonical
+native path strings. Validate exact `ValidationDatabaseIdentity` and native field
+types at entry; independently read/compare the current DB identity and retain
+only authority-owned images. Later checkpoints may not invoke caller equality,
+attributes, properties, hashing or path methods.
+
+Before any mutation DML or sealed incident, compare the complete frozen plan
+roster against the signed affected-row contract: exact table, operation, typed
+identity, count, semantic order and column deltas. Run the existing whole-roster
+and per-kind lifecycle rules on locked before-images overlaid with strict native
+literal after-images; verify actual SQL images independently afterward. A sealed
+incident contributes its prospective delta without executing it during preflight.
+Approved-source acquisition happens once. Caller Numeric literals require exact
+Decimal types and canonical finite, nonnegative values within schema precision
+and scale; signed zero and excess scale refuse. Strings, bools, ints, floats and
+subclasses cannot be coerced into admitted values. Trusted schema defaults have
+separate explicit normalization; valid six-place signed images are unchanged.
+This rule applies to typed SQL values, not the external canonical payload's
+existing six-place money strings.
+Preserve allowed statement reordering, initial runtime child order, marker-first
+recovery hooks, non-append publication checkpoints and guard lifetime. Round 4
+remains independent-review pending, with no schema, trust-policy or execution
+authorization change. Its RED/GREEN evidence is in the Task24-B report.
+Implementation `34b2475` has final frozen-code evidence: all 19 release files
+**1318 passed, 14 skipped**; direct impact **266 passed, 16 skipped** with 11
+existing Alembic warnings; credential **3 passed**. Six Python files pass
+Ruff/format/compile and diff checks. PostgreSQL remains unexecuted and independent
+rereview is required; this is not overall Task24 CLEAN.
+
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
 skipped** (11 existing Alembic warnings); focused contracts **38 passed**;

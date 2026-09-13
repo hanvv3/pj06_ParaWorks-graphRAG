@@ -7271,6 +7271,35 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   This closure changes documentation only; no code/tests, live/provider/release
   operation, OAuth, push, merge or deployment are included.
 
+## 2026-09-14 Task24-B round-4 authority input and mutation roster candidate
+
+Independent review found four remaining input-boundary failures in round 3:
+caller path protocols could commit during final checks, generators lost root
+exclusions, a retained DB identity could run callbacks after DML, extra valid
+plans ran before roster refusal, and Numeric fields accepted coercible values.
+Permanent RED tests reproduced these failures through actual isolated operations.
+
+Authority construction now retains canonical native paths from one-time iterator
+and protocol consumption. Every operation detaches an exact native DB identity
+before callbacks and uses the independently read current identity thereafter.
+The complete frozen mutation roster and prospective locked database state are
+validated before the first DML or sealed incident, with actual after-images
+checked independently afterward. Caller money literals require exact canonical
+Decimal types and schema bounds; trusted defaults normalize separately. Existing
+six-place signing, initial child order, allowed statement reordering and one-time
+case-source acquisition are preserved.
+
+The scope retains Task23 marker-first crash evidence, active guard lifetimes,
+Task24-A/reviewer/authorization/root-manifest boundaries, exact-six schema and
+the real CLI refusal. Implementation `34b2475` has final frozen-code release
+evidence **1318 passed, 14 skipped** across all 19 files, direct-impact evidence
+**266 passed, 16 skipped** with 11 existing Alembic warnings, and credential
+**3 passed**. All six changed Python files pass Ruff/format/compile and diff
+checks; the SDD report records RED evidence and exact commands. No code/tests
+changed after final launch. Independent review, PostgreSQL, Task25 and production readers
+remain outstanding. No actual release/bootstrap/rebootstrap/disaster-init,
+OAuth/provider/network/paid call, push, merge or deployment occurred.
+
 ## 2026-09-14 Task24-B round-3 publication fencing candidate
 
 Independent rereview found that round-2's global provider exit-check removal

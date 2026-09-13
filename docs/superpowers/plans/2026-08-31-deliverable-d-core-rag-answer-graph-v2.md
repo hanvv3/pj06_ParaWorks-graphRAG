@@ -2330,6 +2330,30 @@ code/tests frozen before final runs. Existing Task24 source/reviewer/guard seman
 exact-six schema and Option-A remain unchanged. No actual operation ran and no
 new execution authority, migration, evaluator or production reader is supplied.
 
+**Round-4 frozen-input/roster remediation (independent rereview pending).**
+Review of `069c034..4a96d36` confirmed retained caller path/identity callbacks,
+root-generator exhaustion, extra valid mutation plans executing before roster
+refusal, and Numeric coercion. Materialize root iterables once and detach each
+path protocol into canonical native strings during construction. At every public
+entry require exact native DB identity fields, copy before callbacks, compare
+with the independently read current identity, and retain only owned images.
+Before DML/incident validate the complete frozen plan roster, typed identities,
+operations, semantic order/deltas, affected rows and prospective full DB roster.
+Use the existing transition checks on locked before-images plus literal deltas,
+including the prospective sealed incident; independently verify SQL afterward.
+Acquire the approved source once. Caller Numeric fields require exact finite
+nonnegative Decimal within schema precision/scale, without signed zero or excess
+scale; schema-owned defaults normalize separately. Preserve existing six-place
+signed images, child order, safe statement reordering, marker-first hooks,
+non-append checkpoints, callback-free post-DML validation and active guards.
+The report records permanent RED and final regression/commit evidence. This is
+an implementation candidate, not independent CLEAN or execution approval.
+Implementation `34b2475` passes all 19 release files (**1318 passed, 14 skipped**)
+and direct impact (**266 passed, 16 skipped**, 11 existing Alembic warnings).
+Credential **3 passed**; six-file Ruff/format/compile and diff checks pass.
+Code/tests were frozen before final launch. All 30 conditional PostgreSQL skips
+remain unexecuted; independent rereview, Task25 and production readers are open.
+
 B implementation files additionally include `backend/app/rag/release_authority.py`
 (the two approved registry alignments), `backend/app/rag/release_ledger.py`
 (existing sealed-guard propagation), and test-only
