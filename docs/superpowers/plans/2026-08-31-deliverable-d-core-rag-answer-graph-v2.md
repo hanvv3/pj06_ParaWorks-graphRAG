@@ -2354,6 +2354,30 @@ Credential **3 passed**; six-file Ruff/format/compile and diff checks pass.
 Code/tests were frozen before final launch. All 30 conditional PostgreSQL skips
 remain unexecuted; independent rereview, Task25 and production readers are open.
 
+**Round-5 complete ownership remediation (final independent review pending).**
+Before any append callback, validate/materialize the whole exact native transition
+tree and detach all mutation plans, primary keys and observations. Retain private
+scalars/containers only; custom types, protocols and shared/cyclic containers refuse
+without invoking hooks. Keep SQL metadata private too: an append-local native
+Table/Column/type registry supplies execution, snapshots, runtime projections and
+final roster queries. Submitted MutationSets remain input-only. Detach/authenticate
+sealed incident descriptors/envelopes; preserve retry after preflight refusal by
+checking/consuming only the original exact one-use slot immediately before DML,
+then discard that handle. Numeric WHERE bindings require exact finite unsigned
+Decimal at column-owned precision and exact fixed scale before comparing the locked
+before-image. Existing SET semantics and all 17 transition kinds remain in scope.
+Permanent REDs cover payload and SQL-processor partial commits, incident envelope
+publication and noncanonical predicates; generic identity/field and callback matrices
+verify the owned boundary. Final verification/commits are recorded in the Task24-B
+report. No Task25, real execution approval, migration or production reader is added;
+PostgreSQL and independent final review remain open.
+Implementation `3617c0e` has final green per-file release evidence **1379 passed,
+14 skipped**, direct impact **266 passed, 16 skipped** (11 existing warnings),
+credential **3 passed**, and independent adapted probes **5 passed**. Ruff/format/
+compile/diff checks pass on four Python files. Production remained frozen; six
+obsolete test expectations were updated and their complete files/shard rerun,
+as distinguished in the report. No final independent CLEAN ruling is implied.
+
 B implementation files additionally include `backend/app/rag/release_authority.py`
 (the two approved registry alignments), `backend/app/rag/release_ledger.py`
 (existing sealed-guard propagation), and test-only

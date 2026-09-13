@@ -3180,6 +3180,34 @@ existing Alembic warnings; credential **3 passed**. Six Python files pass
 Ruff/format/compile and diff checks. PostgreSQL remains unexecuted and independent
 rereview is required; this is not overall Task24 CLEAN.
 
+Round-5 ownership clarification: append must consume the complete exact native
+transition payload before any injected/context callback. Its private tree contains
+only the existing schema's exact string/null/int scalars and list/dict rows; reject
+subclasses, custom protocols and shared/cyclic containers without conversion,
+equality/hash/copy/serialization hooks. Never reread or expose the caller payload
+afterward. All canonical bytes/HMACs, roster and publication comparisons use the
+private image. Detach the complete submitted MutationSet and create private native
+SQL Tables/Columns/type instances before acquisition; execution and final SQL
+reads must not reuse caller-visible expressions or ORM metadata. An original
+submitted mutation set is input-only, not a publication/result channel.
+
+Sealed incident descriptors/envelopes are separately materialized and authenticated
+before callbacks. Preserve existing preflight-refusal retry semantics: the only
+remaining original capability access is a hook-free exact one-use slot check/set
+immediately before incident DML, after which that handle is discarded. A changed
+consumption slot must refuse before any mutation/publication. Numeric UPDATE
+predicate bindings require exact finite unsigned Decimal within column precision
+and with exponent exactly equal to negative column scale; compare these canonical
+native values to the locked trusted before-image. SET validation and external
+six-place money strings are unchanged. Final independent review and PostgreSQL
+verification remain required; no actual release operation is authorized.
+Implementation `3617c0e` passes final per-file release verification **1379 passed,
+14 skipped**, direct impact **266 passed, 16 skipped** with 11 existing warnings,
+credential **3 passed** and independent adapted probes **5 passed**. The report
+records the six superseded test-expectation failures and complete replacement
+runs; production code remained unchanged throughout final verification. This is
+a local candidate awaiting final independent review, not overall Task24 CLEAN.
+
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
 skipped** (11 existing Alembic warnings); focused contracts **38 passed**;

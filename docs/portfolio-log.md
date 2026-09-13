@@ -7271,6 +7271,35 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   This closure changes documentation only; no code/tests, live/provider/release
   operation, OAuth, push, merge or deployment are included.
 
+## 2026-09-14 Task24-B round-5 transition and SQL ownership candidate
+
+The final scoped fix round closes a reproduced partial-commit path: a source
+callback could replace caller payload scalars, then run comparison code after
+mutation DML. Append now owns the complete exact native payload, literal plans,
+observation identities and subsequent before/after images before acquisition.
+An identity audit covers every payload field/container, and actual callback tests
+cover reader, oracle, reviewer, clock, property and provider acquisition paths.
+
+The same audit found shared ORM Column/type objects could run late SQL bind and
+result processors. An append-local native schema registry now isolates execution,
+snapshots, runtime projections and final roster queries. Sealed incident envelopes
+are separately detached/authenticated while preserving preflight-refusal retry and
+one-use consumption. Numeric WHERE bindings enforce exact finite Decimal and
+column-owned precision/fixed scale, including equivalent-alias rejection.
+
+The exact-six physical schema, runtime evidence/cost semantics, marker-first
+failure evidence, provider barriers, reviewer/manifest authority and refusing real
+CLI are retained. Implementation `3617c0e` has final green per-file evidence:
+**1379 passed, 14 skipped** across all 19 release files; direct impact **266 passed,
+16 skipped**, 11 existing warnings; credential **3 passed**; independent probes
+**5 passed**. Four Python files pass Ruff/format/compile and diff checks. Production
+code stayed frozen; six obsolete callback-count/error-text test expectations were
+updated and their files/shard rerun. The SDD report preserves initial failures and
+the final disjoint green selections. Independent final
+review, PostgreSQL, Task25 and production readers remain open. No actual release,
+bootstrap/rebootstrap/authorization/OAuth/provider/network/paid operation, push,
+merge or deployment occurred.
+
 ## 2026-09-14 Task24-B round-4 authority input and mutation roster candidate
 
 Independent review found four remaining input-boundary failures in round 3:

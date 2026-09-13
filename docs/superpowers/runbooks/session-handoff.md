@@ -2,6 +2,42 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task24-B round-5 complete input ownership (final review pending)
+
+- Round-4 review was NOT CLEAN: caller payload replacement ran a comparison
+  callback after DML and committed case/runtime/cost rows without advancing
+  history/marker. Numeric WHERE aliases were also accepted. Earlier candidate
+  verification is historical and does not imply independent CLEAN.
+- Append now consumes the exact native transition tree once before callbacks,
+  retaining private containers/scalars only. Reject subclass/protocol-bearing
+  values and shared/cyclic containers without calling their hooks. The wire
+  schema remains string/null/int plus the two row lists; SQL types do not expand it.
+- Detach the submitted MutationSet's complete literal plans/keys/observations.
+  The private successor owns all captured/projected/executed images. The original
+  set remains input-only; independent tests derive actual changes from SQL.
+- Materialize an append-local native SQL schema registry. Original ORM Column
+  and type objects must not enter execution, snapshot or final runtime roster
+  queries: bind and result processors reproduced the same partial-commit class.
+  Context scope is removed on every exit; nested append refuses.
+- Sealed incident descriptors/envelopes are detached and authenticated before
+  callbacks. Preserve retry after preflight refusal: only the original exact
+  one-use slot survives until a hook-free consume check immediately before DML;
+  discard that handle afterward. A changed consumed slot refuses with no writes.
+- Numeric WHERE values must be exact finite unsigned Decimal at the column's
+  fixed scale and within its precision. Equivalent int/float/string/negative-zero/
+  noncanonical-exponent aliases refuse before DML. Existing SET checks remain.
+- Implementation `3617c0e547a7e0485c4bda2217426f892be7ee01`. Final green
+  per-file release evidence: **1379 passed, 14 skipped** across all 19 files;
+  direct impact **266 passed, 16 skipped**, 11 existing warnings; credential
+  **3 passed**; independent adapted probes **5 passed**. Four Python files pass
+  Ruff/format/compile and diff checks. Production code stayed frozen; six obsolete
+  callback-count/error-text expectations were corrected in two tests and their
+  complete files/shard rerun. The SDD report distinguishes those initial failures
+  from the final green selections. Final independent review, PostgreSQL (URL
+  absent; all 30 conditional skips unexecuted), Task25 and production readers remain open.
+  No actual release/bootstrap/rebootstrap/authorization/OAuth/provider/network/
+  paid operation, push, merge or deployment ran.
+
 ## 2026-09-14 Task24-B round-4 frozen input/roster candidate (rereview pending)
 
 - Independent review of `069c034..4a96d36` confirmed four P1s: retained root
