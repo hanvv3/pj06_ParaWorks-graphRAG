@@ -674,3 +674,356 @@ def test_release_inspection_rejects_committed_provider_only_incident(
     assert image[PROVIDER[0]][0]['global_safety_generation'] == 1
     assert image['rag_live_gate_authorizations'][0]['state'] == 'started'
     assert h.authority.marker_path.read_bytes() == marker_before
+
+
+def test_reviewed_snapshot_abort_accepts_exact_provider_drift_and_preserves_terminal_rows(
+    tmp_path, monkeypatch
+):
+    from decimal import Decimal
+
+    h = incident_harness(tmp_path, monkeypatch)
+    h.claim()
+    h.fail_case(outcome='model_unavailable')
+    runtime = h.authority._provider_safety_release_peer._provider_safety
+    with h.engine.connect() as connection:
+        runtime.block_overrun(
+            connection,
+            'answer_generation',
+            agent_run_id=h.records('agent_run')[-1]['id'],
+            input_tokens=1,
+            output_tokens=2,
+            cost_usd=Decimal('0.000001'),
+        )
+        before = database_image(connection)
+    authorization = h.records('authorization')[0]
+    marker_before = h.authority.marker_path.read_bytes()
+    latch_before = runtime._latch_path.read_bytes()
+    dml = []
+
+    def observe(_connection, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+
+    event.listen(h.engine, 'before_cursor_execute', observe)
+    h.append(
+        'authorization_abort_snapshot',
+        [
+            (
+                'authorization',
+                authorization,
+                {**authorization, 'state': 'aborted_provider_safety'},
+            )
+        ],
+        outcome='provider_safety_unavailable',
+    )
+    with h.engine.connect() as connection:
+        after = database_image(connection)
+
+    assert len(dml) == 3
+    assert all(after[name] == before[name] for name in PROVIDER)
+    assert runtime._latch_path.read_bytes() == latch_before
+    assert h.authority.marker_path.read_bytes() != marker_before
+    assert after['rag_live_gate_authorizations'][0] == {
+        **before['rag_live_gate_authorizations'][0],
+        'state': 'aborted_provider_safety',
+    }
+    for name in (
+        'rag_live_gate_cases',
+        'rag_live_gate_dispatches',
+        'agent_runs',
+        'agent_run_cost_components',
+        'rag_live_gate_quality_reports',
+    ):
+        assert after[name] == before[name]
+
+
+@pytest.mark.parametrize(
+    'damage', ['actor_subject_hmac', 'agent_run_id', 'overrun_observed_at']
+)
+def test_incident_preparation_authenticates_historical_blocker_attribution(
+    tmp_path, monkeypatch, damage
+):
+    from decimal import Decimal
+
+    h = incident_harness(tmp_path, monkeypatch, prior_provider_history=True)
+    runtime = h.authority._provider_safety_release_peer._provider_safety
+    with h.engine.connect() as connection:
+        from datetime import UTC, datetime
+
+        value = (
+            'f' * 64
+            if damage == 'actor_subject_hmac'
+            else 999
+            if damage == 'agent_run_id'
+            else datetime(2000, 1, 1, tzinfo=UTC)
+        )
+        table = (
+            'rag_provider_safety_transitions'
+            if damage != 'overrun_observed_at'
+            else 'rag_provider_readiness'
+        )
+        predicate = (
+            'global_safety_generation = 1'
+            if damage != 'overrun_observed_at'
+            else "component = 'answer_generation'"
+        )
+        connection.execute(
+            text(f'UPDATE {table} SET {damage} = :value WHERE {predicate}'),
+            {'value': value},
+        )
+        connection.commit()
+        before = database_image(connection)
+    marker_before = h.authority.marker_path.read_bytes()
+    latch_before = runtime._latch_path.read_bytes()
+    dml = []
+
+    def observe(_connection, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+
+    event.listen(h.engine, 'before_cursor_execute', observe)
+    with h.engine.connect() as connection, pytest.raises(RagProviderSafetyError):
+        h.authority._provider_safety_release_peer.prepare_incident(
+            connection,
+            component='answer_generation',
+            category='provider_usage_overrun',
+            agent_run_id=99,
+            input_tokens=20,
+            output_tokens=30,
+            cost_usd=Decimal('0.100000'),
+        )
+    with h.engine.connect() as connection:
+        assert database_image(connection) == before
+    assert dml == []
+    assert h.authority.marker_path.read_bytes() == marker_before
+    assert runtime._latch_path.read_bytes() == latch_before
+
+
+@pytest.mark.parametrize('boundary', ['rebind', 'supersession'])
+def test_incident_preparation_refuses_unauthenticated_history_prefix(
+    tmp_path, monkeypatch, boundary
+):
+    from dataclasses import replace
+    from decimal import Decimal
+
+    from backend.tests.test_rag_v2_costs import _snapshot
+    from backend.tests.test_rag_v2_provider_safety import _reviewed_command
+
+    h = incident_harness(tmp_path, monkeypatch, prior_provider_history=True)
+    runtime = h.authority._provider_safety_release_peer._provider_safety
+    with h.engine.connect() as connection:
+        if boundary == 'rebind':
+            command = _reviewed_command(
+                runtime,
+                connection,
+                'answer_generation',
+                'mark_rebind_required',
+            )
+            runtime.mark_rebind_required(connection, command)
+            successor = _snapshot('answer_generation')
+            command = _reviewed_command(
+                runtime,
+                connection,
+                'answer_generation',
+                'rebind',
+                successor=successor,
+            )
+            runtime.reviewed_rebind(connection, command, successor)
+        else:
+            successor = replace(
+                _snapshot('answer_generation'),
+                model='gpt-5.6-luna',
+                reasoning_or_config_identity='reasoning:low',
+                authorized_policy_snapshot_hmac='e' * 64,
+            )
+            command = _reviewed_command(
+                runtime,
+                connection,
+                'answer_generation',
+                'supersession',
+                successor=successor,
+                historical_block_acknowledged=True,
+            )
+            runtime.reviewed_supersession(connection, command, successor)
+        connection.execute(
+            text(
+                'UPDATE rag_provider_safety_transitions '
+                'SET envelope_digest = :value WHERE global_safety_generation = 1'
+            ),
+            {'value': 'f' * 64},
+        )
+        connection.commit()
+        before = database_image(connection)
+    marker_before = h.authority.marker_path.read_bytes()
+    latch_before = runtime._latch_path.read_bytes()
+    dml = []
+
+    def observe(_connection, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+
+    event.listen(h.engine, 'before_cursor_execute', observe)
+    with h.engine.connect() as connection, pytest.raises(RagProviderSafetyError):
+        h.authority._provider_safety_release_peer.prepare_incident(
+            connection,
+            component='answer_generation',
+            category='provider_usage_overrun',
+            agent_run_id=99,
+            input_tokens=20,
+            output_tokens=30,
+            cost_usd=Decimal('0.100000'),
+        )
+    with h.engine.connect() as connection:
+        assert database_image(connection) == before
+    assert dml == []
+    assert h.authority.marker_path.read_bytes() == marker_before
+    assert runtime._latch_path.read_bytes() == latch_before
+
+
+def test_incident_preparation_requires_rebootstrap_after_legacy_rebind(
+    tmp_path, monkeypatch
+):
+    from decimal import Decimal
+
+    from backend.tests.test_rag_v2_costs import _snapshot
+    from backend.tests.test_rag_v2_provider_safety import _reviewed_command
+
+    h = incident_harness(tmp_path, monkeypatch, prior_provider_history=True)
+    runtime = h.authority._provider_safety_release_peer._provider_safety
+    with h.engine.connect() as connection:
+        command = _reviewed_command(
+            runtime,
+            connection,
+            'answer_generation',
+            'mark_rebind_required',
+        )
+        runtime.mark_rebind_required(connection, command)
+        successor = _snapshot('answer_generation')
+        command = _reviewed_command(
+            runtime,
+            connection,
+            'answer_generation',
+            'rebind',
+            successor=successor,
+        )
+        runtime.reviewed_rebind(connection, command, successor)
+        before = database_image(connection)
+    latch_before = runtime._latch_path.read_bytes()
+    with (
+        h.engine.connect() as connection,
+        pytest.raises(RagProviderSafetyError, match='rebootstrap'),
+    ):
+        h.authority._provider_safety_release_peer.prepare_incident(
+            connection,
+            component='answer_generation',
+            category='provider_usage_overrun',
+            agent_run_id=99,
+            input_tokens=20,
+            output_tokens=30,
+            cost_usd=Decimal('0.100000'),
+        )
+    with h.engine.connect() as connection:
+        assert database_image(connection) == before
+    assert runtime._latch_path.read_bytes() == latch_before
+
+
+def test_incident_preparation_authenticates_signed_remediation_category(
+    tmp_path, monkeypatch
+):
+    from decimal import Decimal
+
+    from backend.tests.test_rag_v2_provider_safety import _reviewed_command
+
+    h = incident_harness(tmp_path, monkeypatch)
+    runtime = h.authority._provider_safety_release_peer._provider_safety
+    with h.engine.connect() as connection:
+        runtime.block_remediation(
+            connection,
+            'answer_generation',
+            category='provider_response_identity_invalid',
+            agent_run_id=17,
+            input_tokens=1,
+            output_tokens=2,
+            cost_usd=Decimal('0.000001'),
+        )
+        reset = _reviewed_command(
+            runtime,
+            connection,
+            'answer_generation',
+            'reset',
+            historical_block_acknowledged=True,
+        )
+        runtime.reviewed_reset(connection, reset)
+        wrong_reference = runtime._incident_reference(
+            component='answer_generation',
+            state='blocked_remediation',
+            agent_run_id=17,
+            category='provider_safety_unavailable',
+        )
+        connection.execute(
+            text(
+                'UPDATE rag_provider_safety_transitions '
+                'SET actor_subject_hmac = :value '
+                'WHERE global_safety_generation = 1'
+            ),
+            {'value': wrong_reference},
+        )
+        connection.commit()
+        before = database_image(connection)
+    latch_before = runtime._latch_path.read_bytes()
+    with h.engine.connect() as connection, pytest.raises(RagProviderSafetyError):
+        h.authority._provider_safety_release_peer.prepare_incident(
+            connection,
+            component='answer_generation',
+            category='provider_usage_overrun',
+            agent_run_id=99,
+            input_tokens=20,
+            output_tokens=30,
+            cost_usd=Decimal('0.100000'),
+        )
+    with h.engine.connect() as connection:
+        assert database_image(connection) == before
+    assert runtime._latch_path.read_bytes() == latch_before
+
+
+def test_incident_preparation_authenticates_history_through_supersession(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+    from decimal import Decimal
+
+    from backend.tests.test_rag_v2_costs import _snapshot
+    from backend.tests.test_rag_v2_provider_safety import _reviewed_command
+
+    h = incident_harness(tmp_path, monkeypatch, prior_provider_history=True)
+    runtime = h.authority._provider_safety_release_peer._provider_safety
+    with h.engine.connect() as connection:
+        successor = replace(
+            _snapshot('answer_generation'),
+            model='gpt-5.6-luna',
+            reasoning_or_config_identity='reasoning:low',
+            authorized_policy_snapshot_hmac='e' * 64,
+        )
+        command = _reviewed_command(
+            runtime,
+            connection,
+            'answer_generation',
+            'supersession',
+            successor=successor,
+            historical_block_acknowledged=True,
+        )
+        runtime.reviewed_supersession(connection, command, successor)
+        before = database_image(connection)
+        plan = h.authority._provider_safety_release_peer.prepare_incident(
+            connection,
+            component='answer_generation',
+            category='provider_usage_overrun',
+            agent_run_id=99,
+            input_tokens=20,
+            output_tokens=30,
+            cost_usd=Decimal('0.100000'),
+        )
+    with h.engine.connect() as connection:
+        assert database_image(connection) == before
+    assert plan.component == 'answer_generation'
+    assert plan.category == 'provider_usage_overrun'

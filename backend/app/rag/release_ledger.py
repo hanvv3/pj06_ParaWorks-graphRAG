@@ -53,6 +53,7 @@ from backend.app.rag.release_authority import (
     RagReleaseAuthorityError,
     RagReleaseSnapshot,
     ValidationDatabaseIdentity,
+    _ProviderDriftAbort,
 )
 from backend.app.rag.release_schema import build_rag_release_metadata, release_tables
 
@@ -1053,6 +1054,60 @@ class RagReleaseMutationSet:
             approved_case_claim=approved_case_claim,
             identity_secret=identity_secret,
             barrier_guard=barrier_guard,
+        )
+
+    def _provider_drift_abort_binding(self, payload) -> _ProviderDriftAbort | None:
+        """Own the one exact started predecessor allowed during drift abort."""
+        if (
+            payload['transition_kind']
+            not in {
+                'authorization_abort_control',
+                'authorization_abort_component_snapshot',
+                'authorization_abort_final',
+                'authorization_abort_snapshot',
+            }
+            or payload['authorization_state_before'] != 'started'
+        ):
+            return None
+        authorizations = [
+            (row, before, after)
+            for row, before, after in zip(
+                self._rows,
+                self._before_snapshots,
+                self._after_snapshots,
+                strict=True,
+            )
+            if row.row_kind == 'authorization'
+        ]
+        if len(authorizations) != 1:
+            raise RagReleaseLedgerError('provider drift abort authorization differs')
+        row, before, after = authorizations[0]
+        expected_key = {
+            'ledger_uuid': payload['ledger_uuid'],
+            'ledger_epoch': payload['ledger_epoch'],
+            'approval_id_hmac': payload['approval_id_hmac'],
+        }
+        if (
+            before is None
+            or row.primary_key != expected_key
+            or before['state'] != 'started'
+            or after['state'] != 'aborted_provider_safety'
+            or before['provider_safety_envelope_digest']
+            != after['provider_safety_envelope_digest']
+        ):
+            raise RagReleaseLedgerError('provider drift abort authorization differs')
+        if (
+            before['provider_safety_envelope_digest']
+            == payload['provider_safety_envelope_digest']
+        ):
+            return None
+        return _ProviderDriftAbort(
+            transition_kind=payload['transition_kind'],
+            ledger_uuid=payload['ledger_uuid'],
+            ledger_epoch=payload['ledger_epoch'],
+            approval_id_hmac=payload['approval_id_hmac'],
+            predecessor_digest=before['provider_safety_envelope_digest'],
+            current_digest=payload['provider_safety_envelope_digest'],
         )
 
     def _assert_approved_case_claim(
@@ -3704,6 +3759,9 @@ class RagReleaseLedger:
                 self._assert_database_roster(
                     connection, payload, projected_mutations, before_execution=True
                 )
+                provider_drift_abort = (
+                    projected_mutations._provider_drift_abort_binding(payload)
+                )
 
                 # Complete all adapter acquisition and envelope construction before
                 # any DML. Publication has no reader/reviewer/transport callback port.
@@ -3729,7 +3787,7 @@ class RagReleaseLedger:
                 def revalidate_authorities(expected_release):
                     self._authority._assert_barrier_guard(
                         barrier_guard, connection
-                    ).revalidate_provider()
+                    ).revalidate_provider(provider_drift_abort)
                     _body, snapshot = self._authority._parse(
                         marker._read_bytes_unlocked()
                     )

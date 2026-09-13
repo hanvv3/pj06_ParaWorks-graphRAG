@@ -217,6 +217,11 @@ def _validate_history(images) -> None:
         )
         blocker = kind in {'block_overrun', 'block_remediation'}
         reviewed = kind in {'rebind_required', 'rebind', 'reset', 'supersession'}
+        prior_reference = (
+            bootstrap['reviewed_transition_reference_hmac']
+            if previous is None
+            else previous['reviewed_transition_reference_hmac']
+        )
         prior_version = row['prior_state_version']
         expected_version = (
             1
@@ -236,7 +241,12 @@ def _validate_history(images) -> None:
             or row['new_state_version'] != expected_version
             or not valid_matrix
             or blocker
-            and (row['actor_subject_hmac'] is None or row['agent_run_id'] is None)
+            and (
+                row['actor_subject_hmac'] is None
+                or type(row['agent_run_id']) is not int
+                or row['agent_run_id'] <= 0
+                or row['reviewed_transition_reference_hmac'] != prior_reference
+            )
             or reviewed
             and (row['actor_subject_hmac'] is None or row['agent_run_id'] is not None)
             or current_clock is None
@@ -268,9 +278,120 @@ def _validate_history(images) -> None:
             raise RagProviderSafetyError('provider incident history is inconsistent')
 
 
+def _validate_history_attribution(images, body, service) -> None:
+    """Authenticate every reconstructible incident attribution and first blocker."""
+    from backend.app.agent_runtime.rag_provider_safety import (
+        RagProviderSafetyError,
+        RagProviderSafetyService,
+    )
+
+    _authorities, readiness, history = images
+    signed_body = body['_envelope']['signed_payload']['body']
+    family_records = signed_body['family_records']
+    identity_keys = (
+        'component',
+        'model',
+        'provider',
+        'reasoning_or_config_identity',
+    )
+    readiness_by_id = {row['id']: row for row in readiness}
+    inferred_categories: dict[int, str] = {}
+    for row in history[1:]:
+        kind = row['transition_kind']
+        if kind not in {'block_overrun', 'block_remediation'}:
+            continue
+        stored = readiness_by_id[row['readiness_id']]
+        categories = (
+            ('provider_usage_overrun',)
+            if kind == 'block_overrun'
+            else (
+                'provider_response_identity_invalid',
+                'provider_embedding_payload_invalid',
+                'provider_safety_unavailable',
+            )
+        )
+        matches = [
+            category
+            for category in categories
+            if hmac.compare_digest(
+                row['actor_subject_hmac'],
+                RagProviderSafetyService._incident_reference(
+                    service,
+                    component=stored['component'],
+                    state=row['new_state'],
+                    agent_run_id=row['agent_run_id'],
+                    category=category,
+                ),
+            )
+        ]
+        if len(matches) != 1:
+            raise RagProviderSafetyError('provider incident attribution differs')
+        inferred_categories[row['id']] = matches[0]
+
+    for stored in readiness:
+        matches = [
+            record
+            for record in family_records
+            if all(record[key] == stored[key] for key in identity_keys)
+        ]
+        blockers = [
+            row
+            for row in history[1:]
+            if row['readiness_id'] == stored['id']
+            and row['transition_kind'] in {'block_overrun', 'block_remediation'}
+        ]
+        if len(matches) != 1:
+            raise RagProviderSafetyError('provider incident attribution differs')
+        record = matches[0]
+        blocker_fields = (
+            record['first_blocker_agent_run_hmac'],
+            record['first_blocker_category'],
+            record['first_blocker_observed_at'],
+        )
+        observed_fields = (
+            stored['overrun_agent_run_id'],
+            stored['overrun_input_tokens'],
+            stored['overrun_output_tokens'],
+            stored['overrun_cost_usd'],
+            stored['overrun_observed_at'],
+        )
+        if not blockers:
+            if any(value is not None for value in (*blocker_fields, *observed_fields)):
+                raise RagProviderSafetyError('provider first blocker differs')
+            continue
+        first = blockers[0]
+        observed_at = _clock(stored['overrun_observed_at'])
+        expected_time = (
+            None
+            if observed_at is None
+            else observed_at.astimezone(UTC).isoformat().replace('+00:00', 'Z')
+        )
+        cost = stored['overrun_cost_usd']
+        if (
+            stored['overrun_agent_run_id'] != first['agent_run_id']
+            or type(stored['overrun_input_tokens']) is not int
+            or stored['overrun_input_tokens'] < 0
+            or type(stored['overrun_output_tokens']) is not int
+            or stored['overrun_output_tokens'] < 0
+            or type(cost) is not Decimal
+            or not cost.is_finite()
+            or cost < 0
+            or record['first_blocker_agent_run_hmac']
+            != RagProviderSafetyService._blocker_agent_run_hmac(
+                service, first['agent_run_id']
+            )
+            or record['first_blocker_category'] != inferred_categories[first['id']]
+            or record['first_blocker_observed_at'] != expected_time
+        ):
+            raise RagProviderSafetyError('provider first blocker differs')
+
+
 def _validate_digest_chain(images, body, service) -> None:
     """Reverse every reconstructible signed envelope and authenticate its digest."""
-    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+    from backend.app.agent_runtime.rag_provider_safety import (
+        RagProviderSafetyError,
+        RagProviderSafetyService,
+    )
 
     _authorities, readiness, history = images
     envelope = json.loads(canonical_json_bytes(dict(body['_envelope'])).decode('utf-8'))
@@ -278,6 +399,10 @@ def _validate_digest_chain(images, body, service) -> None:
     for row in history[1:]:
         rows_by_readiness.setdefault(row['readiness_id'], []).append(row)
     readiness_by_id = {row['id']: row for row in readiness}
+    activation_generation = {row['id']: 0 for row in readiness}
+    for row in history[1:]:
+        if row['transition_kind'] == 'supersession':
+            activation_generation[row['readiness_id']] = row['global_safety_generation']
     bootstrap_reference = history[0]['reviewed_transition_reference_hmac']
     for row in reversed(history[1:]):
         raw = canonical_json_bytes(envelope)
@@ -286,14 +411,79 @@ def _validate_digest_chain(images, body, service) -> None:
         ).hexdigest()
         if digest != row['envelope_digest']:
             raise RagProviderSafetyError('provider incident history digest differs')
-        # Rebind overwrites policy material that the physical v1 history does not
-        # retain; supersession changes the roster. Their current-side digest is
-        # authenticated above and their semantic chain remains fully checked.
-        if row['transition_kind'] in {'rebind', 'supersession'}:
-            break
         stored = readiness_by_id[row['readiness_id']]
         signed = envelope['signed_payload']
         envelope_body = signed['body']
+        if row['transition_kind'] == 'rebind':
+            # V1 does not retain the predecessor policy snapshot overwritten by
+            # rebind, so no authority-owned reconstruction can authenticate the
+            # older prefix. Refuse capability issuance pending reviewed recovery.
+            raise RagProviderSafetyError(
+                'provider incident history requires reviewed rebootstrap'
+            )
+        if row['transition_kind'] == 'supersession':
+            identity = {
+                key: stored[key]
+                for key in (
+                    'component',
+                    'model',
+                    'provider',
+                    'reasoning_or_config_identity',
+                )
+            }
+            candidates = [
+                item
+                for item in readiness
+                if item['component'] == stored['component']
+                and item['id'] != stored['id']
+                and activation_generation[item['id']] < row['global_safety_generation']
+            ]
+            if not candidates:
+                raise RagProviderSafetyError('provider incident history digest differs')
+            predecessor = max(
+                candidates, key=lambda item: activation_generation[item['id']]
+            )
+            predecessor_identity = {
+                key: predecessor[key]
+                for key in (
+                    'component',
+                    'model',
+                    'provider',
+                    'reasoning_or_config_identity',
+                )
+            }
+            records = envelope_body['family_records']
+            targets = [
+                record
+                for record in records
+                if all(record[key] == identity[key] for key in identity)
+            ]
+            predecessor_records = [
+                record
+                for record in records
+                if all(
+                    record[key] == predecessor_identity[key]
+                    for key in predecessor_identity
+                )
+            ]
+            if (
+                len(targets) != 1
+                or len(predecessor_records) != 1
+                or envelope_body['active_family_by_component'][stored['component']]
+                != identity
+            ):
+                raise RagProviderSafetyError('provider incident history digest differs')
+            records.remove(targets[0])
+            envelope_body['active_family_by_component'][stored['component']] = (
+                predecessor_identity
+            )
+            envelope_body['global_safety_generation'] = (
+                row['global_safety_generation'] - 1
+            )
+            envelope['hmac_sha256'] = RagProviderSafetyService._signature(
+                service, signed
+            )
+            continue
         target = next(
             record
             for record in envelope_body['family_records']
@@ -328,7 +518,7 @@ def _validate_digest_chain(images, body, service) -> None:
             target['first_blocker_category'] = None
             target['first_blocker_observed_at'] = None
         envelope_body['global_safety_generation'] = row['global_safety_generation'] - 1
-        envelope['hmac_sha256'] = service._signature(signed)
+        envelope['hmac_sha256'] = RagProviderSafetyService._signature(service, signed)
     else:
         raw = canonical_json_bytes(envelope)
         digest = hashlib.sha256(
@@ -342,6 +532,7 @@ def _capture_prepared_image(connection, body, service) -> tuple[bytes, str]:
     """Bind the complete private SQL image when the incident capability is made."""
     images = _image(connection, _provider_tables())
     _validate_history(images)
+    _validate_history_attribution(images, body, service)
     _validate_digest_chain(images, body, service)
     image = _image_bytes(images)
     return image, _prepared_image_hmac(image, service._secret)
@@ -424,6 +615,7 @@ def _prepare_incident_operation(connection, prepared) -> _ProviderIncidentOperat
     authority_table, readiness_table, history_table = tables
     before = _image(connection, tables)
     _validate_history(before)
+    _validate_history_attribution(before, old, service)
     _validate_digest_chain(before, old, service)
     before_image = _image_bytes(before)
     if (
@@ -518,6 +710,7 @@ def _prepare_incident_operation(connection, prepared) -> _ProviderIncidentOperat
         [*before[2], transition],
     )
     _validate_history(after)
+    _validate_history_attribution(after, prospective, service)
     _validate_digest_chain(after, prospective, service)
     service._match_database_rows(prospective, after[0][0], after[1])
     latch_before = canonical_json_bytes(dict(old['_envelope']))

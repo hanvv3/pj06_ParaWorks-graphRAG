@@ -71,6 +71,16 @@ class RagReleaseAuthorityError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class _ProviderDriftAbort:
+    transition_kind: str
+    ledger_uuid: str
+    ledger_epoch: int
+    approval_id_hmac: str
+    predecessor_digest: str
+    current_digest: str
+
+
 def _release_barrier_boundary():
     from threading import get_ident
     from weakref import WeakKeyDictionary
@@ -155,7 +165,7 @@ def _release_barrier_boundary():
                 ).authorizations
             provider_checkpoints[self] = (checkpoint, authorization_table)
 
-        def revalidate_provider(self):
+        def revalidate_provider(self, drift_abort=None):
             _owner, connection, provider, _thread = state(self)
             if self in provider_checkpoints:
                 from backend.app.admin.rag_provider_safety import (
@@ -172,12 +182,45 @@ def _release_barrier_boundary():
                     checkpoint()
                     provider_digest = None
                 if authorization_table is not None and provider_digest is not None:
-                    started_digests = connection.execute(
-                        select(
-                            authorization_table.c.provider_safety_envelope_digest
-                        ).where(authorization_table.c.state == 'started')
-                    ).scalars()
-                    if any(digest != provider_digest for digest in started_digests):
+                    started = [
+                        dict(row)
+                        for row in connection.execute(
+                            select(
+                                authorization_table.c.ledger_uuid,
+                                authorization_table.c.ledger_epoch,
+                                authorization_table.c.approval_id_hmac,
+                                authorization_table.c.provider_safety_envelope_digest,
+                            ).where(authorization_table.c.state == 'started')
+                        ).mappings()
+                    ]
+                    mismatches = [
+                        row
+                        for row in started
+                        if row['provider_safety_envelope_digest'] != provider_digest
+                    ]
+                    allowed = (
+                        type(drift_abort) is _ProviderDriftAbort
+                        and drift_abort.transition_kind
+                        in {
+                            'authorization_abort_control',
+                            'authorization_abort_component_snapshot',
+                            'authorization_abort_final',
+                            'authorization_abort_snapshot',
+                        }
+                        and drift_abort.predecessor_digest != drift_abort.current_digest
+                        and drift_abort.current_digest == provider_digest
+                        and len(mismatches) == 1
+                        and mismatches[0]
+                        == {
+                            'ledger_uuid': drift_abort.ledger_uuid,
+                            'ledger_epoch': drift_abort.ledger_epoch,
+                            'approval_id_hmac': drift_abort.approval_id_hmac,
+                            'provider_safety_envelope_digest': (
+                                drift_abort.predecessor_digest
+                            ),
+                        }
+                    )
+                    if mismatches and not allowed:
                         raise RagReleaseAuthorityError(
                             'release/provider incident authority differs'
                         )
