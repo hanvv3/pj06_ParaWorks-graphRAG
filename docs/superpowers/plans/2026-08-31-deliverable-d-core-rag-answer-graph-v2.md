@@ -2198,6 +2198,25 @@ candidate remains `a9c7291`, **IMPLEMENTED / NOT RELEASE-CLEAN / 1 load-bearing
 P1 carried** until that gate is closed. No production or test change is part
 of this documentation-only breaker closure.
 
+**2026-09-13 first-slice implementation candidate:** `da79bf0` implements only
+the carryover above; independent CLEAN rereview is still required. Task24 is
+not complete and preview/authorization/OAuth work has not begun.
+`release_review.py` freezes the versioned case-claim manifest preimage and
+requires its HMAC to equal the locked, immutable authorization `manifest_hmac`.
+It derives all 25 parent and both 27-column child images from reviewed case,
+provider-policy and reserve inputs plus the existing `rag-run:v2` admission
+defaults. Assembly v1 allocates positive unused IDs and one UTC clock sample;
+the opaque projection binds the existing transition generation/process/runner
+fences. It does not issue a new process identity or paid permit.
+The complete literal images, exact child order, case ordinal and fresh provider
+readiness are checked before SQL/incident and after SQL. Subprecision money
+cannot hide behind six-place HMAC normalization. The full quality manifest
+producer must integrate this complete executable preimage into its canonical
+review contract; a separately self-signed projection is insufficient.
+Fresh focused evidence: `327 passed, 14 skipped`; direct impact and credential
+scan: `221 passed, 14 skipped` (11 existing Alembic warnings). PostgreSQL
+evidence remains absent because `PARAWORKS_TEST_POSTGRES_URL` is unset.
+
 **Files:**
 
 - Create: `backend/app/rag/release_review.py`

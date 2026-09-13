@@ -5686,3 +5686,45 @@ Current implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   remains gated until independent CLEAN. No further Task23 production/test
   modifications are part of breaker closure. Preserve `a9c7291`; do not mark
   Task23 COMPLETE/CLEAN or run live/provider/network/paid/push/merge/deploy.
+
+## 2026-09-13 Task24 case-claim carryover implementation handoff
+
+- Candidate `da79bf0`, based on docs closure `9d80962`, implements only the
+  mandatory first RED slice. Await independent CLEAN rereview before any
+  preview/authorization/OAuth work. Task24 overall remains incomplete.
+- `backend/app/rag/release_review.py` owns `FrozenCaseClaimManifest` and opaque
+  issued `ApprovedCaseClaimProjection`. The manifest digest must equal the
+  immutable authorization row under the append barrier. This is authority from
+  an already-reviewed preimage, not acceptance of a self-consistent row HMAC.
+  The remaining full quality-manifest producer must integrate the complete
+  executable preimage into its canonical reviewed manifest; do not add a
+  fallback accepting unbound caller projections or silently reinterpret hashes.
+- Derivation: `RagCostLedger.create_admission` supplies parent admission defaults,
+  canonical admission/runtime-cost identities and zero/null lifecycle fields.
+  Reviewed case inputs supply surface/backend/query/security HMACs; reviewed
+  `AuthorizedProviderPolicySnapshot` and exact reserves supply the two children.
+  Existing route-inapplicable embedding policy supplies terminal-zero shape.
+  Assembly `rag-live-case-claim-assembly:v1` samples one UTC timestamp and chooses
+  next positive unused parent/child IDs; it freezes these with the existing
+  Task23 process/runner fences, approval identity and generation. It does not
+  authenticate a new runner process; that future boundary remains Task25.
+- `RagReleaseLedger.append(..., approved_case_claim=...)` requires the issued
+  projection for case claims and refuses it on other transition kinds. Complete
+  literal images, child order, case ordinal, exact money precision and fresh
+  active readiness/policy/config fields are checked before any SQL or incident.
+  Actual after-images are checked again before advancing the marker. Existing
+  Option-A observations, release schema and runtime UPDATE rules are retained.
+- RED: initial matrix `80 failed, 4 passed`; decisive forged-acceptance rerun
+  `7 failed, 1 passed, 76 deselected`. Added precision/ordinal RED: `4 failed`.
+  The new projection module now contributes 112 cases, including absent/unissued
+  authority, manifest re-signing/version/roster changes, readiness drift, replay,
+  post-SQL tampering and valid keyword/pgvector projections.
+- Fresh focused command: `uv run --no-sync pytest backend/tests/test_rag_release_case_claim_projection.py backend/tests/test_rag_release_ledger.py backend/tests/test_rag_release_ledger_review_q.py backend/tests/test_rag_release_ledger_round4.py backend/tests/test_rag_release_ledger_round5.py backend/tests/test_rag_release_ledger_all_kinds.py backend/tests/test_rag_release_authority.py backend/tests/test_rag_release_authority_postgres.py backend/tests/test_rag_release_remediation.py backend/tests/test_rag_live_gate_schema.py backend/tests/test_rag_live_gate_cli.py -q --tb=short` -> `327 passed, 14 skipped`.
+- Direct-impact command: `uv run --no-sync --cache-dir .tmp/task24-uv-cache pytest backend/tests/test_rag_v2_provider_safety.py backend/tests/test_rag_provider_safety_admin.py backend/tests/test_rag_provider_safety_postgres.py backend/tests/test_rag_v2_runtime_models.py backend/tests/test_rag_v2_runtime_migration.py backend/tests/test_rag_v2_costs.py backend/tests/test_rag_v2_costs_postgres.py backend/tests/test_rag_v2_cost_policy.py backend/tests/test_rag_answer_model_router.py backend/tests/test_secret_hygiene.py -q --tb=short` -> `221 passed, 14 skipped`, 11 existing Alembic warnings.
+- Changed-file Ruff `--no-fix`, compileall and `git diff --check` passed; credential
+  scanner found no secret. A default UV cache access failure was bypassed using
+  the workspace cache path above. `PARAWORKS_TEST_POSTGRES_URL` is absent, so all
+  28 PostgreSQL skips remain mandatory unexecuted evidence. No full-backend or
+  frontend gate was claimed for this backend-only carryover.
+- No live provider/network/API/OAuth, actual release authorization/bootstrap,
+  paid model, PostgreSQL execution, rollout, push, merge or deployment occurred.

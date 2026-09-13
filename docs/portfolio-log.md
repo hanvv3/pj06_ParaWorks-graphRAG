@@ -7105,3 +7105,36 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   Cost if wrong: forged runtime/provider/cost metadata could enter release ledger.
   This docs-only closure preserves `a9c7291` as the implementation candidate;
   green regression counts do not make Task23 COMPLETE or CLEAN.
+
+## 2026-09-13 Task24 first-slice approved case-claim projection candidate
+
+- Implementation `da79bf0` carries only the Task23 INSERT P1 into Task24.
+  Independent CLEAN rereview is pending; neither Task24 completion nor release
+  cleanliness is claimed. Preview, authorization and OAuth remain gated.
+- The release review boundary binds the complete case-claim manifest preimage
+  to the immutable authorization `manifest_hmac`. Caller-signed SQL images are
+  compared with assembly-owned initial images before any SQL or sealed incident,
+  then rechecked against actual SQL results. Every parent/child column, exact
+  child order, case ordinal, provider policy/config identity, reserve and clock
+  is covered; six-place normalization cannot conceal subprecision money.
+- Parent defaults come from the existing `rag-run:v2` admission contract:
+  restricted visibility until final evidence projection, zero usage, unset
+  generation/ownership/completion fields and canonical admission/cost HMACs.
+  Child provider policies and exact token/cost reserves are reviewed manifest
+  inputs, revalidated against current provider readiness under the same barrier.
+  No provider-specific package or new security-policy choice was introduced.
+- RED before production edits: `80 failed, 4 passed`; the decisive rerun was
+  `7 failed, 1 passed, 76 deselected`, with forged permission/model, both child
+  config/policy HMACs and reordered children actually accepted. Additional RED
+  cases caught hidden subprecision costs and case ordinal validation after SQL.
+- Final provider-free focused gate: `327 passed, 14 skipped`; direct-impact
+  provider/runtime/cost/model and credential suite: `221 passed, 14 skipped`,
+  with 11 existing Alembic configuration warnings. Changed-file Ruff,
+  compileall and diff checks passed. The 28 PostgreSQL skips are unexecuted
+  gates, not substituted evidence. Credential scanner reported no finding.
+- This is the narrow executable manifest contract only. The full reviewed
+  30-case quality fixture/distribution, preview, authorization, process issuer
+  and runner remain future work. No application metadata, migration, exact-six
+  schema, endpoint, Option-A affected/observed contract or Task22 boundary changed.
+  No live API/provider/OAuth, paid call, actual release operation, push, merge
+  or deployment occurred.
