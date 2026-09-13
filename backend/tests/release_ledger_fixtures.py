@@ -1,7 +1,10 @@
 """Deterministic row fixtures; never establish production provider authority."""
 
+from contextlib import nullcontext
+from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest.mock import patch
 
 from sqlalchemy import insert, select, update
 
@@ -271,6 +274,7 @@ def claim_manifest_fixture(*, provider_records=None, query_reserves=()):
             )
         )
     return FrozenCaseClaimManifest(
+        source_manifest_hmac='9' * 64,
         cases=tuple(
             FrozenCaseClaimCase(
                 ordinal=ordinal,
@@ -291,7 +295,7 @@ def claim_manifest_fixture(*, provider_records=None, query_reserves=()):
                 if ordinal < len(query_reserves)
                 else Decimal('0.000000')
             ]
-        )
+        ),
     )
 
 
@@ -361,8 +365,6 @@ class ReleaseHarness:
                 ),
                 mutations._plans[0].row,
             )
-            from backend.app.rag.release_review import case_claim_manifest_hmac
-
             self.manifest = claim_manifest_fixture(
                 provider_records=[
                     dict(row)
@@ -372,11 +374,11 @@ class ReleaseHarness:
                 ],
                 query_reserves=query_reserves,
             )
+            self.approved_manifest = deepcopy(self.manifest)
+            self.source_verifier = self._verify_test_approved_source
             mutations._plans[0] = type(mutations._plans[0])(
                 mutations._plans[0].statement.values(
-                    manifest_hmac=case_claim_manifest_hmac(
-                        self.manifest, identity_secret=secret
-                    )
+                    manifest_hmac=self.manifest.source_manifest_hmac
                 ),
                 mutations._plans[0].row,
             )
@@ -387,6 +389,26 @@ class ReleaseHarness:
                 database_identity=database_identity,
             )
         self.base = payload
+
+    def _verify_test_approved_source(
+        self, connection, *, manifest, source_binding, authorization, identity_secret
+    ):
+        """Explicit fake approved source; never installed outside a test call.
+
+        Task23's synthetic case distributions intentionally differ from the live
+        fixture. Full source issuance/authority refusal uses separate Task24
+        tests; all existing literal SQL/image checks continue to run unchanged.
+        """
+        from backend.app.rag.release_review import _manifest_payload, _refuse
+
+        if (
+            connection.engine is not self.engine
+            or identity_secret != self.secret
+            or _manifest_payload(manifest) != _manifest_payload(self.approved_manifest)
+            or authorization['manifest_hmac']
+            != self.approved_manifest.source_manifest_hmac
+        ):
+            _refuse()
 
     def records(self, kind):
         from backend.app.rag.release_ledger import RagReleaseMutationSet
@@ -590,7 +612,15 @@ class ReleaseHarness:
             'execution_process_instance_hmac': auth['execution_process_instance_hmac'],
             'execution_runner_fence_hmac': auth['execution_runner_fence_hmac'],
         }
-        with self.engine.connect() as connection:
+        verifier_context = (
+            patch(
+                'backend.app.rag.release_review.require_approved_case_source',
+                self.source_verifier,
+            )
+            if self.source_verifier is not None
+            else nullcontext()
+        )
+        with verifier_context, self.engine.connect() as connection:
             projection = prepare_case_claim_projection(
                 connection,
                 manifest=self.manifest,

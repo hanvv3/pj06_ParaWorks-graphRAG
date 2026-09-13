@@ -45,9 +45,7 @@ from backend.app.rag.release_schema import (
 MAX_REVIEW_ENVELOPE_BYTES = 32_768
 _REVIEW_DOMAIN = b'paraworks:rag-release-admin-review:v1\x00'
 _REVIEW_SCHEMA = 'rag-release-admin-review:v1'
-_REVIEW_KEY_VERIFIER_DOMAIN = (
-    b'paraworks:rag-release-admin-review-key-verifier:v1\x00'
-)
+_REVIEW_KEY_VERIFIER_DOMAIN = b'paraworks:rag-release-admin-review-key-verifier:v1\x00'
 _NONCE_DOMAIN = b'paraworks:rag-release-admin-review-nonce:v1\x00'
 _OPERATIONS = frozenset(
     {
@@ -56,7 +54,7 @@ _OPERATIONS = frozenset(
         'release-ledger-disaster-init',
     }
 )
-_CLI_COMMANDS = (*sorted(_OPERATIONS), 'status')
+_CLI_COMMANDS = (*sorted(_OPERATIONS), 'status', 'preview')
 _SIGNED_KEYS = frozenset(
     {
         'actor_subject_hmac',
@@ -113,7 +111,9 @@ def release_review_key_material_verifier(review_secret: bytes) -> str:
 
 
 def _review_hmac(value: object, *, secret: bytes, domain: bytes) -> str:
-    return hmac.new(secret, domain + canonical_json_bytes(value), hashlib.sha256).hexdigest()
+    return hmac.new(
+        secret, domain + canonical_json_bytes(value), hashlib.sha256
+    ).hexdigest()
 
 
 def _require_review_hmac(value: object, field: str) -> str:
@@ -247,11 +247,7 @@ def verify_release_review_envelope(
     implementation_plan_reference_hmac: str,
     review_key_registry: Mapping[str, str],
 ) -> VerifiedRagReleaseReview:
-    if (
-        type(raw) is not bytes
-        or not raw
-        or len(raw) > MAX_REVIEW_ENVELOPE_BYTES
-    ):
+    if type(raw) is not bytes or not raw or len(raw) > MAX_REVIEW_ENVELOPE_BYTES:
         raise RagReleaseReviewError('release review envelope is invalid')
     if expected_operation not in _OPERATIONS:
         raise RagReleaseReviewError('release review operation is invalid')
@@ -297,9 +293,8 @@ def verify_release_review_envelope(
     expected_signature = _review_hmac(
         signed, secret=review_secret, domain=_REVIEW_DOMAIN
     )
-    if (
-        type(signature) is not str
-        or not hmac.compare_digest(signature, expected_signature)
+    if type(signature) is not str or not hmac.compare_digest(
+        signature, expected_signature
     ):
         raise RagReleaseReviewError('release review signature is invalid')
     actor = signed['actor_subject_hmac']
@@ -396,9 +391,7 @@ class RagLiveGateAdminService:
     def _release_table_state(connection: Connection) -> set[str]:
         from sqlalchemy import inspect
 
-        return set(inspect(connection).get_table_names()) & set(
-            RAG_RELEASE_TABLE_NAMES
-        )
+        return set(inspect(connection).get_table_names()) & set(RAG_RELEASE_TABLE_NAMES)
 
     def _nonce_exists(self, connection: Connection, nonce_hmac: str) -> bool:
         if self._release_table_state(connection) != set(RAG_RELEASE_TABLE_NAMES):
@@ -406,9 +399,9 @@ class RagLiveGateAdminService:
         table = release_tables(build_rag_release_metadata()).ledgers
         return bool(
             connection.scalar(
-                select(func.count()).select_from(table).where(
-                    table.c.bootstrap_review_nonce_hmac == nonce_hmac
-                )
+                select(func.count())
+                .select_from(table)
+                .where(table.c.bootstrap_review_nonce_hmac == nonce_hmac)
             )
         )
 
@@ -492,16 +485,13 @@ class RagLiveGateAdminService:
 
     def rebootstrap(self, raw: bytes) -> RagReleaseAdminResult:
         with self.connection_factory() as connection:
+
             def verify_locked(
                 locked_connection: Connection,
                 raw_marker: bytes | None,
             ) -> tuple[str, str, str]:
-                context = self._recovery_context_locked(
-                    locked_connection, raw_marker
-                )
-                reviewed = self._verify(
-                    raw, 'release-ledger-rebootstrap', context
-                )
+                context = self._recovery_context_locked(locked_connection, raw_marker)
+                reviewed = self._verify(raw, 'release-ledger-rebootstrap', context)
                 return (
                     reviewed.envelope_hmac,
                     reviewed.nonce_hmac,
@@ -517,16 +507,13 @@ class RagLiveGateAdminService:
 
     def disaster_initialize(self, raw: bytes) -> RagReleaseAdminResult:
         with self.connection_factory() as connection:
+
             def verify_locked(
                 locked_connection: Connection,
                 raw_marker: bytes | None,
             ) -> tuple[str, str, str]:
-                context = self._recovery_context_locked(
-                    locked_connection, raw_marker
-                )
-                reviewed = self._verify(
-                    raw, 'release-ledger-disaster-init', context
-                )
+                context = self._recovery_context_locked(locked_connection, raw_marker)
+                reviewed = self._verify(raw, 'release-ledger-disaster-init', context)
                 return (
                     reviewed.envelope_hmac,
                     reviewed.nonce_hmac,
@@ -586,6 +573,8 @@ def _run_cli(
 ) -> CliOutcome:
     if len(argv) != 1 or argv[0] not in _CLI_COMMANDS:
         return CliOutcome(2, {'code': 'command_refused', 'ok': False})
+    if argv[0] == 'preview':
+        return _preview_cli()
     try:
         service = service_factory()
         command = argv[0]
@@ -623,6 +612,31 @@ def _run_cli(
         return CliOutcome(3, {'code': 'authority_refused', 'ok': False})
 
 
+def _preview_cli() -> CliOutcome:
+    from backend.app.rag.release_review import (
+        LiveGatePreviewError,
+        require_live_preview_sources,
+    )
+
+    try:
+        require_live_preview_sources(Path(__file__).resolve().parents[3])
+        # A's library builder accepts an explicitly locked snapshot reader.
+        # The real reader/reviewer composition belongs to B and the evaluator
+        # to Task25. Readiness cannot substitute for either authority.
+        code = 'preview_snapshot_reader_unavailable'
+    except LiveGatePreviewError as exc:
+        code = exc.code
+    return CliOutcome(
+        2,
+        {
+            'ok': False,
+            'code': code,
+            'provider_dispatch_count': 0,
+            'authorization_issued': False,
+        },
+    )
+
+
 def _load_review_secret(path_value: str | None) -> bytes:
     if not path_value:
         raise RagReleaseReviewError('release review key file is unavailable')
@@ -632,7 +646,11 @@ def _load_review_secret(path_value: str | None) -> bytes:
     try:
         DurableFileAuthority.open_runtime(path)._validate_existing_regular(path)
         before = path.lstat()
-        if not stat.S_ISREG(before.st_mode) or path.is_symlink() or before.st_nlink != 1:
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or path.is_symlink()
+            or before.st_nlink != 1
+        ):
             raise RagReleaseReviewError('release review key file is untrusted')
         descriptor = os.open(
             path,
@@ -720,9 +738,7 @@ def _build_default_resources(settings: Settings) -> _DefaultResources:
             or provider_admin.target.designated_environment_id
             != settings.paraworks_rag_live_validation_environment_id
         ):
-            raise RagReleaseReviewError(
-                'release provider safety peer target differs'
-            )
+            raise RagReleaseReviewError('release provider safety peer target differs')
         with engine.connect() as connection:
             advisory = load_registered_advisory_capability(
                 connection,
@@ -765,11 +781,20 @@ def _build_default_resources(settings: Settings) -> _DefaultResources:
 
 
 def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == 'preview':
+        outcome = (
+            _preview_cli()
+            if arguments == ['preview']
+            else CliOutcome(2, {'code': 'command_refused', 'ok': False})
+        )
+        sys.stdout.buffer.write(canonical_json_bytes(outcome.payload) + b'\n')
+        return outcome.exit_code
     resources: _DefaultResources | None = None
     try:
         resources = _build_default_resources(get_settings())
         outcome = _run_cli(
-            list(sys.argv[1:] if argv is None else argv),
+            arguments,
             stdin=sys.stdin.buffer,
             service_factory=lambda: resources.service,  # type: ignore[union-attr]
         )

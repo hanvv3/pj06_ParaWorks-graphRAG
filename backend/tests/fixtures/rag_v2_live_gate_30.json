@@ -1,0 +1,959 @@
+{
+  "fixture_manifest_version": "rag-live-quality-30:v1",
+  "cases": [
+    {
+      "ordinal": 0,
+      "case_id": "live-01",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-01",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 1,
+      "case_id": "live-02",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-02",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 2,
+      "case_id": "live-03",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-03",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 3,
+      "case_id": "live-04",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-04",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 4,
+      "case_id": "live-05",
+      "case_kind": "hard_negative",
+      "surface": "ask",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-05",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": true,
+      "allowed_support_modes": [],
+      "allowed_slot_ids": [],
+      "relevant_serving_fixture_ids": [],
+      "required_serving_fixture_ids": [],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 5,
+      "case_id": "live-06",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-06",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 6,
+      "case_id": "live-07",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-07",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 7,
+      "case_id": "live-08",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-08",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 8,
+      "case_id": "live-09",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-09",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 9,
+      "case_id": "live-10",
+      "case_kind": "hard_negative",
+      "surface": "ask",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-10",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": true,
+      "allowed_support_modes": [],
+      "allowed_slot_ids": [],
+      "relevant_serving_fixture_ids": [],
+      "required_serving_fixture_ids": [],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 10,
+      "case_id": "live-11",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "pgvector",
+      "question_fixture_id": "question-11",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": true,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 8000,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000160",
+      "answer_generation_reserved_cost_usd": "0.011840",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 11,
+      "case_id": "live-12",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "pgvector",
+      "question_fixture_id": "question-12",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": true,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 8000,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000160",
+      "answer_generation_reserved_cost_usd": "0.011840",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 12,
+      "case_id": "live-13",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "pgvector",
+      "question_fixture_id": "question-13",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": true,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 8000,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000160",
+      "answer_generation_reserved_cost_usd": "0.011840",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 13,
+      "case_id": "live-14",
+      "case_kind": "positive",
+      "surface": "ask",
+      "configured_backend": "pgvector",
+      "question_fixture_id": "question-14",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": true,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 8000,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000160",
+      "answer_generation_reserved_cost_usd": "0.011840",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 14,
+      "case_id": "live-15",
+      "case_kind": "hard_negative",
+      "surface": "ask",
+      "configured_backend": "pgvector",
+      "question_fixture_id": "question-15",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": true,
+      "allowed_support_modes": [],
+      "allowed_slot_ids": [],
+      "relevant_serving_fixture_ids": [],
+      "required_serving_fixture_ids": [],
+      "query_embedding_required": true,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 8000,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000160",
+      "answer_generation_reserved_cost_usd": "0.011840",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 15,
+      "case_id": "live-16",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-16",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": "context-16",
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 16,
+      "case_id": "live-17",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-17",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": "context-17",
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 17,
+      "case_id": "live-18",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-18",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": "context-18",
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 18,
+      "case_id": "live-19",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-19",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": "context-19",
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 19,
+      "case_id": "live-20",
+      "case_kind": "hard_negative",
+      "surface": "assistant",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-20",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": "context-20",
+      "expected_no_answer": true,
+      "allowed_support_modes": [],
+      "allowed_slot_ids": [],
+      "relevant_serving_fixture_ids": [],
+      "required_serving_fixture_ids": [],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 20,
+      "case_id": "live-21",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-21",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 21,
+      "case_id": "live-22",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-22",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 22,
+      "case_id": "live-23",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-23",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 23,
+      "case_id": "live-24",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-24",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 24,
+      "case_id": "live-25",
+      "case_kind": "hard_negative",
+      "surface": "assistant",
+      "configured_backend": "keyword",
+      "question_fixture_id": "question-25",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": true,
+      "allowed_support_modes": [],
+      "allowed_slot_ids": [],
+      "relevant_serving_fixture_ids": [],
+      "required_serving_fixture_ids": [],
+      "query_embedding_required": false,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 0,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000000",
+      "answer_generation_reserved_cost_usd": "0.012000",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 25,
+      "case_id": "live-26",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "pgvector",
+      "question_fixture_id": "question-26",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": "context-26",
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": true,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 8000,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000160",
+      "answer_generation_reserved_cost_usd": "0.011840",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 26,
+      "case_id": "live-27",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "pgvector",
+      "question_fixture_id": "question-27",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": "context-27",
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": true,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 8000,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000160",
+      "answer_generation_reserved_cost_usd": "0.011840",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 27,
+      "case_id": "live-28",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "pgvector",
+      "question_fixture_id": "question-28",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": "context-28",
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": true,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 8000,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000160",
+      "answer_generation_reserved_cost_usd": "0.011840",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 28,
+      "case_id": "live-29",
+      "case_kind": "positive",
+      "surface": "assistant",
+      "configured_backend": "pgvector",
+      "question_fixture_id": "question-29",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": false,
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
+      "relevant_serving_fixture_ids": [
+        "serving-01",
+        "serving-02"
+      ],
+      "required_serving_fixture_ids": [
+        "serving-01"
+      ],
+      "query_embedding_required": true,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 8000,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000160",
+      "answer_generation_reserved_cost_usd": "0.011840",
+      "case_total_reserved_cost_usd": "0.012000"
+    },
+    {
+      "ordinal": 29,
+      "case_id": "live-30",
+      "case_kind": "hard_negative",
+      "surface": "assistant",
+      "configured_backend": "pgvector",
+      "question_fixture_id": "question-30",
+      "security_scope_fixture_id": "scope-internal",
+      "prior_context_fixture_id": null,
+      "expected_no_answer": true,
+      "allowed_support_modes": [],
+      "allowed_slot_ids": [],
+      "relevant_serving_fixture_ids": [],
+      "required_serving_fixture_ids": [],
+      "query_embedding_required": true,
+      "answer_generation_required": true,
+      "query_embedding_reserved_input_tokens": 8000,
+      "answer_generation_reserved_input_tokens": 10000,
+      "answer_generation_reserved_output_tokens": 512,
+      "query_embedding_reserved_cost_usd": "0.000160",
+      "answer_generation_reserved_cost_usd": "0.011840",
+      "case_total_reserved_cost_usd": "0.012000"
+    }
+  ]
+}

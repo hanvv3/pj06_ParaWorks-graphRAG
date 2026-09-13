@@ -24,6 +24,66 @@ _PLAN_HMAC = '1' * 64
 _KEY_ID = 'rag-release-review-v1'
 
 
+def test_preview_cli_refuses_missing_evaluator_without_loading_authority_or_stdin(
+    monkeypatch,
+):
+    from backend.app.admin import rag_live_gate
+
+    calls = []
+
+    def forbidden():
+        calls.append(True)
+        raise AssertionError('preview must not construct release authority')
+
+    class Unreadable:
+        def read(self, *_args):
+            raise AssertionError('preview must not read approval material')
+
+    result = rag_live_gate._run_cli(
+        ['preview'], stdin=Unreadable(), service_factory=forbidden
+    )
+    assert result.exit_code == 2
+    assert result.payload == {
+        'ok': False,
+        'code': 'evaluator_unavailable',
+        'provider_dispatch_count': 0,
+        'authorization_issued': False,
+    }
+    assert calls == []
+
+
+def test_preview_main_never_builds_default_runtime_resources(monkeypatch, capsys):
+    from backend.app.admin import rag_live_gate
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('read-only preview must not initialize runtime')
+
+    monkeypatch.setattr(rag_live_gate, '_build_default_resources', forbidden)
+    assert rag_live_gate.main(['preview']) == 2
+    value = json.loads(capsys.readouterr().out)
+    assert value['code'] == 'evaluator_unavailable'
+    assert value['provider_dispatch_count'] == 0
+
+
+@pytest.mark.parametrize(
+    'arguments', [['preview', '--authorize'], ['preview', 'unreviewed-reference']]
+)
+def test_invalid_preview_arguments_refuse_before_runtime_construction(
+    monkeypatch, capsys, arguments
+):
+    from backend.app.admin import rag_live_gate
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('invalid preview must not initialize runtime')
+
+    monkeypatch.setattr(rag_live_gate, '_build_default_resources', forbidden)
+    assert rag_live_gate.main(arguments) == 2
+    assert json.loads(capsys.readouterr().out) == {
+        'ok': False,
+        'code': 'command_refused',
+    }
+
+
 class _TestProviderPeer:
     pass
 
@@ -49,7 +109,9 @@ def _deterministic_non_product_database_seam(monkeypatch) -> None:
                 _connection, seal=release_authority._RELEASE_BARRIER_SEAL
             )
 
-    monkeypatch.setattr(release_authority.RagReleaseAuthority, '_authority_barrier', barrier)
+    monkeypatch.setattr(
+        release_authority.RagReleaseAuthority, '_authority_barrier', barrier
+    )
     monkeypatch.setattr(
         release_authority.RagReleaseAuthority,
         '_current_database_identity',
@@ -147,7 +209,11 @@ def _admin(tmp_path: Path):
 
 
 def _recovery_context(admin, connection) -> dict[str, object]:
-    raw = admin.target.marker_path.read_bytes() if admin.target.marker_path.exists() else None
+    raw = (
+        admin.target.marker_path.read_bytes()
+        if admin.target.marker_path.exists()
+        else None
+    )
     return admin._recovery_context_locked(connection, raw)
 
 
@@ -349,9 +415,12 @@ def test_cli_exposes_only_four_commands_and_sanitized_aggregate_output(
         b'222222222222',
     ):
         assert forbidden not in rendered
-    assert _run_cli(
-        ['preview'], stdin=io.BytesIO(), service_factory=lambda: admin
-    ).exit_code == 2
+    assert (
+        _run_cli(
+            ['preview'], stdin=io.BytesIO(), service_factory=lambda: admin
+        ).exit_code
+        == 2
+    )
 
     invalid = json.loads(_review_bytes(target, 'release-ledger-rebootstrap'))
     invalid['signed_payload']['actor_subject_hmac'] = 'not-a-hmac'
@@ -428,7 +497,9 @@ def test_admin_commands_are_provider_and_network_free(
     admin.status()
 
 
-def test_release_settings_are_explicit_and_host_identity_is_frozen(tmp_path: Path) -> None:
+def test_release_settings_are_explicit_and_host_identity_is_frozen(
+    tmp_path: Path,
+) -> None:
     values = {
         'paraworks_release_ledger_authority_path': str(
             (tmp_path / 'release.json').absolute()
@@ -444,7 +515,9 @@ def test_release_settings_are_explicit_and_host_identity_is_frozen(tmp_path: Pat
         settings.paraworks_rag_live_validation_host_id = 'host-two'
 
 
-def test_database_locator_identity_ignores_credentials_and_normalizes_loopback() -> None:
+def test_database_locator_identity_ignores_credentials_and_normalizes_loopback() -> (
+    None
+):
     from backend.app.admin.rag_live_gate import _database_locator_identity
 
     first = _database_locator_identity(

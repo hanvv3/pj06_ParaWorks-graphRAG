@@ -290,6 +290,7 @@ MANIFEST_FIELDS = (
             'fixture_manifest_version',
             'runtime_contract_version',
             'assembly_version',
+            'source_manifest_hmac',
         )
     ]
     + [
