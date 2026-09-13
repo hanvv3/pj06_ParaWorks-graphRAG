@@ -7006,3 +7006,6 @@ Cost/security note:
 - Fresh focused evidence is `66 passed, 6 skipped`; direct impact is `115 passed,
   9 skipped`; Ruff and compile are clean. Status remains
   **DONE_WITH_CONCERNS pending independent rereview**.
+- R1-R4 implementation is committed locally as `6e08051`. Independent review
+  should inspect `e20ccd5..6e08051` for round 2 or `0771405..6e08051`
+  cumulatively.

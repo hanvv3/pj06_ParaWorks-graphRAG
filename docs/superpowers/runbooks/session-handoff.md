@@ -5556,7 +5556,8 @@ tests passed with 53 tests; ruff passed.
 
 ## 2026-09-13 Task 23 rereview round-2 handoff
 
-- R1-R4 round-2 changes are implemented but not yet independently accepted.
+- R1-R4 round-2 changes are committed at `6e08051` but not yet independently
+  accepted.
   Never restore the old `mutation_set.execute(...)` sequence: callers prepare
   only `plan(statement, typed_pk)`, and SQL is executed after the sealed full
   provider/release barrier guard is issued.
@@ -5575,3 +5576,5 @@ tests passed with 53 tests; ruff passed.
   skipped`; Ruff/compile clean. Six Task23 PG cases remain DSN-gated. Finish
   diff/credential/status checks, commit locally and request another independent
   rereview. No real release/provider/network/push/merge/deploy is authorized.
+- Use `e20ccd5..6e08051` for round-2 rereview and `0771405..6e08051` for the
+  cumulative Task23 review.
