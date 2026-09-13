@@ -4,15 +4,17 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timezone
 from decimal import Decimal, InvalidOperation
+from functools import wraps
 from typing import TypeAlias
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Column, Connection, Table, insert, select, update
+from sqlalchemy import Column, Connection, MetaData, Table, insert, select, update
 from sqlalchemy.sql import operators
 from sqlalchemy.sql.dml import Insert, Update
 from sqlalchemy.sql.elements import (
@@ -34,6 +36,7 @@ from sqlalchemy.sql.sqltypes import (
     String,
     Text,
 )
+from sqlalchemy.util import immutabledict
 
 from backend.app.agent_runtime.durable_file_authority import (
     DurableFileAuthority,
@@ -147,6 +150,101 @@ _LITERAL_SQL_TYPES = frozenset(
         Text,
     }
 )
+_APPEND_TABLES = ContextVar('rag_release_append_tables', default=None)
+_APPEND_DECLARED_TABLE_IDS = ContextVar(
+    'rag_release_append_declared_tables', default=()
+)
+
+
+def _native_table(table):
+    """Materialize SQL metadata without retaining Column/type/default callbacks."""
+    columns = []
+    for column in table.c:
+        kind = type(column.type)
+        if type(column) is not Column or kind not in _LITERAL_SQL_TYPES:
+            raise RagReleaseLedgerError('release schema type is not native')
+        options = {}
+        fields = (
+            ('precision', 'scale', 'decimal_return_scale', 'asdecimal')
+            if kind is Numeric
+            else ('precision', 'asdecimal')
+            if kind is Float
+            else ('length', 'collation')
+            if kind in {String, Text}
+            else ('length',)
+            if kind is LargeBinary
+            else ('timezone',)
+            if kind is DateTime
+            else ('none_as_null',)
+            if kind is JSON
+            else ()
+        )
+        for name in fields:
+            value = getattr(column.type, name)
+            expected = (
+                bool
+                if name in {'asdecimal', 'timezone', 'none_as_null'}
+                else str
+                if name == 'collation'
+                else int
+            )
+            if value is not None and type(value) is not expected:
+                raise RagReleaseLedgerError('release schema type option is not native')
+            options[name] = value
+        if (
+            type(column.name) not in {str, quoted_name}
+            or type(column.nullable) is not bool
+            or type(column.primary_key) is not bool
+        ):
+            raise RagReleaseLedgerError('release schema column is not native')
+        default = None
+        if column.default is not None and column.default.is_scalar:
+            default = _literal_value(column.default.arg)
+        columns.append(
+            Column(
+                str(column.name),
+                kind(**options),
+                nullable=column.nullable,
+                primary_key=column.primary_key,
+                default=default,
+            )
+        )
+    if type(table.name) not in {str, quoted_name} or (
+        table.schema is not None and type(table.schema) not in {str, quoted_name}
+    ):
+        raise RagReleaseLedgerError('release schema table is not native')
+    return Table(
+        str(table.name),
+        MetaData(),
+        *columns,
+        schema=None if table.schema is None else str(table.schema),
+    )
+
+
+def _owned_append_schema(method):
+    @wraps(method)
+    def append(self, connection, payload, **kwargs):
+        # The caller tree is read before schema work, contexts or callbacks.
+        payload = _owned_transition_payload(payload)
+        if _APPEND_TABLES.get() is not None:
+            raise RagReleaseLedgerError('nested release append is invalid')
+        tables = {}
+        declared_ids = []
+        for row_kind in _ROW_IDENTITY_REGISTRY:
+            if row_kind in {'release_ledger', 'release_transition'}:
+                continue
+            table, aliases = RagReleaseMutationSet._declared_table(row_kind)
+            declared_ids.append(id(table))
+            tables[row_kind] = (_native_table(table), dict(aliases))
+        token = _APPEND_TABLES.set(tables)
+        ids_token = _APPEND_DECLARED_TABLE_IDS.set(tuple(declared_ids))
+        try:
+            return method(self, connection, payload, **kwargs)
+        finally:
+            _APPEND_TABLES.reset(token)
+            _APPEND_DECLARED_TABLE_IDS.reset(ids_token)
+
+    return append
 
 
 def _literal_value(value):
@@ -199,6 +297,197 @@ def _decimal_literal(value, column):
     return value
 
 
+def _statement_literals(statement, table):
+    """Consume the public SQL parsing surface once; retain no caller SQL object."""
+    if (
+        type(statement) not in {Insert, Update}
+        or type(statement.table) is not Table
+        or type(statement.table.name) not in {str, quoted_name}
+        or (
+            statement.table.schema is not None
+            and type(statement.table.schema) not in {str, quoted_name}
+        )
+        or statement.table.name != table.name
+        or statement.table.schema != table.schema
+        or set(statement.table.c.keys()) != set(table.c.keys())
+        or statement._returning
+        or statement._prefixes
+        or statement._execution_options
+        or statement._hints
+        or statement._multi_values
+        or (type(statement) is Insert and statement.select is not None)
+        or (type(statement) is Update and statement._ordered_values is not None)
+        or type(statement._where_criteria if type(statement) is Update else ())
+        is not tuple
+        or (
+            statement._values is not None
+            and type(statement._values) is not immutabledict
+        )
+    ):
+        raise RagReleaseLedgerError('release mutation statement is not exact')
+    for column in statement.table.c:
+        if (
+            type(column) is not Column
+            or type(column.name) not in {str, quoted_name}
+            or type(column.type) not in _LITERAL_SQL_TYPES
+            or (
+                statement.table is not table
+                and id(statement.table) not in _APPEND_DECLARED_TABLE_IDS.get()
+                and column.default is not None
+                and column.default.is_callable
+            )
+        ):
+            raise RagReleaseLedgerError('release mutation schema is not literal')
+    predicates = {}
+
+    def predicate(expression):
+        if (
+            type(expression) is BooleanClauseList
+            and expression.operator is operators.and_
+        ):
+            if type(expression.clauses) is not tuple:
+                raise RagReleaseLedgerError('release mutation predicate is not exact')
+            for item in expression.clauses:
+                predicate(item)
+            return
+        if (
+            type(expression) is not BinaryExpression
+            or expression.operator is not operators.eq
+            or type(expression.left) is not Column
+            or expression.left.table is not statement.table
+            or type(expression.left.name) not in {str, quoted_name}
+        ):
+            raise RagReleaseLedgerError('release mutation predicate is not exact')
+        name = str(expression.left.name)
+        if name not in table.c or name in predicates:
+            raise RagReleaseLedgerError('release mutation predicate is not exact')
+        value = _literal_binding(expression.right)
+        if type(table.c[name].type) is Numeric:
+            _decimal_literal(value, table.c[name])
+            if value.as_tuple().exponent != -table.c[name].type.scale:
+                raise RagReleaseLedgerError('release money predicate scale is invalid')
+        predicates[name] = value
+
+    if type(statement) is Update:
+        for expression in statement._where_criteria:
+            predicate(expression)
+        if not predicates:
+            raise RagReleaseLedgerError('release mutation predicate is not exact')
+    values = {}
+    for field, binding in (statement._values or {}).items():
+        if type(field) in {str, quoted_name}:
+            name = str(field)
+        elif (
+            type(field) is Column
+            and field.table is statement.table
+            and type(field.name) in {str, quoted_name}
+        ):
+            name = str(field.name)
+        else:
+            raise RagReleaseLedgerError('release mutation column is not exact')
+        if name not in table.c or name in values:
+            raise RagReleaseLedgerError('release mutation column is not exact')
+        values[name] = _literal_binding(binding)
+        if table.c[name].type.python_type is Decimal:
+            _decimal_literal(values[name], table.c[name])
+    return predicates, values
+
+
+def _owned_provider_incident(plan):
+    """Keep only an inert descriptor and an exact one-use slot until pre-DML.
+
+    Preflight refusal must not consume Task22's capability. Its original data
+    never crosses acquisition; the last operation on the original object is a
+    hook-free consumed-slot CAS before any incident/release mutation.
+    """
+    from backend.app.admin.rag_provider_safety import (
+        _RELEASE_PEER_SEAL,
+        RagProviderSafetyIncidentPlan,
+        _ProviderSafetyReviewLedger,
+    )
+    from backend.app.agent_runtime.rag_provider_safety import (
+        _RELEASE_INCIDENT_PLAN_SEAL,
+        RagProviderSafetyService,
+        _PreparedReleaseProviderIncident,
+    )
+
+    if (
+        type(plan) is not RagProviderSafetyIncidentPlan
+        or plan._seal is not _RELEASE_PEER_SEAL
+        or plan._consumed is not False
+        or type(plan._prepared) is not _PreparedReleaseProviderIncident
+        or type(plan._ledger) is not _ProviderSafetyReviewLedger
+    ):
+        raise RagReleaseLedgerError('provider incident capability is invalid')
+    prepared = plan._prepared
+    if (
+        type(prepared.service) is not RagProviderSafetyService
+        or prepared._seal is not _RELEASE_INCIDENT_PLAN_SEAL
+    ):
+        raise RagReleaseLedgerError('provider incident descriptor is invalid')
+    fields = {}
+    for name in _PreparedReleaseProviderIncident.__dataclass_fields__:
+        value = getattr(prepared, name)
+        if name in {'service', '_seal'}:
+            fields[name] = value
+            continue
+        expected = (
+            dict
+            if name == 'new_envelope'
+            else datetime
+            if name == 'observed_at'
+            else Decimal
+            if name == 'cost_usd'
+            else int
+            if name
+            in {
+                'agent_run_id',
+                'input_tokens',
+                'output_tokens',
+                'old_global_generation',
+                'old_state_version',
+            }
+            else str
+        )
+        if type(value) is not expected:
+            raise RagReleaseLedgerError('provider incident descriptor type is invalid')
+        fields[name] = _literal_value(value)
+    descriptor = _PreparedReleaseProviderIncident(**fields)
+    next_body = RagProviderSafetyService._validate_envelope(
+        descriptor.service, descriptor.new_envelope
+    )
+    if (
+        next_body['envelope_digest'] != descriptor.new_envelope_digest
+        or next_body['global_safety_generation'] != descriptor.old_global_generation + 1
+    ):
+        raise RagReleaseLedgerError('provider incident envelope differs')
+    values = {}
+    for name in (
+        'component',
+        'category',
+        'agent_run_id',
+        'input_tokens',
+        'output_tokens',
+        'cost_usd',
+    ):
+        value = getattr(plan, name)
+        if type(value) is not type(fields[name]) or value != fields[name]:
+            raise RagReleaseLedgerError('provider incident descriptor differs')
+        values[name] = fields[name]
+    owned = RagProviderSafetyIncidentPlan(
+        **values, prepared=descriptor, ledger=plan._ledger, seal=_RELEASE_PEER_SEAL
+    )
+
+    def consume():
+        nonlocal plan
+        if plan._consumed is not False:
+            raise RagReleaseLedgerError('provider incident capability was consumed')
+        plan._consumed = True
+        plan = None
+
+    return owned, consume
+
+
 class RagReleaseMutationSet:
     """Plan row mutations, then capture them only under the authority barrier."""
 
@@ -233,6 +522,15 @@ class RagReleaseMutationSet:
 
     @staticmethod
     def _table(row_kind: str) -> tuple[Table, Mapping[str, str]]:
+        tables = _APPEND_TABLES.get()
+        if tables is not None:
+            if row_kind not in tables:
+                raise RagReleaseLedgerError('release mutation row kind is invalid')
+            return tables[row_kind]
+        return RagReleaseMutationSet._declared_table(row_kind)
+
+    @staticmethod
+    def _declared_table(row_kind: str) -> tuple[Table, Mapping[str, str]]:
         if row_kind in {'authorization', 'case', 'dispatch', 'quality_report'}:
             release = release_tables(build_rag_release_metadata())
         if row_kind == 'authorization':
@@ -455,6 +753,69 @@ class RagReleaseMutationSet:
         self._transaction = transaction
         self._executed = True
 
+    def _owned_inputs(self):
+        """Detach every public plan/identity before acquiring callback contexts.
+
+        The returned set alone receives locked before/after images and execution
+        state. The submitted set remains only an input, never a publication port.
+        """
+        if (
+            self._executed is not False
+            or self._transaction is not None
+            or self._frozen_plans is not None
+            or type(self._plans) is not list
+            or type(self._observation_rows) is not list
+            or any(
+                type(value) is not list
+                for value in (
+                    self._rows,
+                    self._before_snapshots,
+                    self._after_snapshots,
+                    self._observation_snapshots,
+                )
+            )
+            or self._rows
+            or self._before_snapshots
+            or self._after_snapshots
+            or self._observation_snapshots
+        ):
+            raise RagReleaseLedgerError('release mutation input was already captured')
+        owned = RagReleaseMutationSet(self._connection, seal=_MUTATION_SET_SEAL)
+
+        def own_row(row):
+            if (
+                type(row) is not ReleaseRowPrimaryKey
+                or type(row.row_kind) is not str
+                or type(row.primary_key) is not dict
+            ):
+                raise RagReleaseLedgerError('release row primary key is invalid')
+            result = ReleaseRowPrimaryKey(row.row_kind, _literal_value(row.primary_key))
+            release_row_identity_hmac(
+                result.row_kind, result.primary_key, identity_secret=b'0' * 32
+            )
+            return result
+
+        for plan in self._plans:
+            if type(plan) is not _ReleaseMutationPlan:
+                raise RagReleaseLedgerError('release mutation plan is invalid')
+            row = own_row(plan.row)
+            table, _aliases = self._table(row.row_kind)
+            if row.row_kind in {'provider_safety_authority', 'provider_readiness'}:
+                raise RagReleaseLedgerError('provider rows require a sealed incident')
+            predicates, values = _statement_literals(plan.statement, table)
+            statement = (
+                insert(table).values(**values)
+                if type(plan.statement) is Insert
+                else update(table)
+                .where(*(table.c[key] == value for key, value in predicates.items()))
+                .values(**values)
+            )
+            # Keep duplicates for the complete-roster validator to reject, rather
+            # than silently deduplicating submitted operations.
+            owned._plans.append(_ReleaseMutationPlan(statement, row))
+        owned._observation_rows = [own_row(row) for row in self._observation_rows]
+        return owned
+
     def _freeze_all_mutations(self):
         """Translate all plans before DML, including authorization and release rows.
 
@@ -468,34 +829,7 @@ class RagReleaseMutationSet:
             if plan.row.row_kind in {'provider_safety_authority', 'provider_readiness'}:
                 raise RagReleaseLedgerError('provider rows require a sealed incident')
             statement = plan.statement
-            if (
-                type(statement) not in {Insert, Update}
-                or type(statement.table) is not Table
-                or statement.table.name != table.name
-                or statement.table.schema != table.schema
-                or set(statement.table.c.keys()) != set(table.c.keys())
-                or statement._returning
-                or statement._prefixes
-                or statement._execution_options
-                or statement._hints
-                or statement._multi_values
-                or (type(statement) is Insert and statement.select is not None)
-                or (type(statement) is Update and statement._ordered_values is not None)
-            ):
-                raise RagReleaseLedgerError('release mutation statement is not exact')
-            for column in statement.table.c:
-                if (
-                    type(column) is not Column
-                    or type(column.type) not in _LITERAL_SQL_TYPES
-                    or (
-                        statement.table is not table
-                        and column.default is not None
-                        and column.default.is_callable
-                    )
-                ):
-                    raise RagReleaseLedgerError(
-                        'release mutation schema is not literal'
-                    )
+            predicates, values = _statement_literals(statement, table)
             release_row_identity_hmac(
                 plan.row.row_kind, plan.row.primary_key, identity_secret=b'0' * 32
             )
@@ -508,54 +842,11 @@ class RagReleaseMutationSet:
                 raise RagReleaseLedgerError(
                     'release mutation before-image is not exact'
                 )
-            predicates = {}
-
-            def predicate(expression, statement=statement, predicates=predicates):
-                if (
-                    type(expression) is BooleanClauseList
-                    and expression.operator is operators.and_
-                ):
-                    for item in expression.clauses:
-                        predicate(item)
-                    return
-                if (
-                    type(expression) is not BinaryExpression
-                    or expression.operator is not operators.eq
-                    or type(expression.left) is not Column
-                    or expression.left.table is not statement.table
-                ):
-                    raise RagReleaseLedgerError(
-                        'release mutation predicate is not exact'
-                    )
-                name = str(expression.left.name)
-                if name in predicates:
-                    raise RagReleaseLedgerError(
-                        'release mutation predicate is not exact'
-                    )
-                predicates[name] = _literal_binding(expression.right)
-
-            if type(statement) is Update:
-                for expression in statement._where_criteria:
-                    predicate(expression)
-                if not predicates or any(
-                    before.get(key) != value for key, value in predicates.items()
-                ):
-                    raise RagReleaseLedgerError(
-                        'release mutation predicate is not exact'
-                    )
-            values = {}
-            for field, binding in (statement._values or {}).items():
-                if type(field) in {str, quoted_name}:
-                    name = str(field)
-                elif type(field) is Column and field.table is statement.table:
-                    name = str(field.name)
-                else:
-                    raise RagReleaseLedgerError('release mutation column is not exact')
-                if name not in table.c:
-                    raise RagReleaseLedgerError('release mutation column is not exact')
-                values[name] = _literal_binding(binding)
-                if table.c[name].type.python_type is Decimal:
-                    _decimal_literal(values[name], table.c[name])
+            if type(statement) is Update and (
+                not predicates
+                or any(before.get(key) != value for key, value in predicates.items())
+            ):
+                raise RagReleaseLedgerError('release mutation predicate is not exact')
             after = {**(before or {}), **values}
             # Runtime images must be exact before any SQL coercion/default fill.
             if plan.row.row_kind in {'agent_run', 'cost_component'}:
@@ -2812,13 +3103,64 @@ def _validate_transition_matrix(
         raise RagReleaseLedgerError('release peer matrix is invalid')
 
 
+def _owned_transition_payload(payload):
+    """Read the exact transition schema once without invoking caller protocols.
+
+    This wire schema permits only string/null scalars, integer counters, and two
+    lists of string dictionaries. Decimal/UUID/datetime/bytes are SQL types, not
+    transition wire values. Even equivalent subclasses and shared containers are
+    rejected before any hashing, equality, serialization or callback acquisition.
+    """
+    if type(payload) is not dict:
+        raise RagReleaseLedgerError('transition payload keys are invalid')
+    integers = {
+        'ledger_epoch',
+        'from_generation',
+        'to_generation',
+        'case_claim_count',
+        'embedding_dispatch_count',
+        'generation_dispatch_count',
+        'total_dispatch_count',
+        'dispatch_count_before',
+        'dispatch_count_after',
+    }
+    seen = {id(payload)}
+    owned = {}
+    for key, value in payload.items():
+        if type(key) is not str or key not in _TRANSITION_KEYS:
+            raise RagReleaseLedgerError('transition payload keys are invalid')
+        if key in {'affected_rows', 'observation_set'}:
+            if type(value) is not list or id(value) in seen:
+                raise RagReleaseLedgerError('transition row containers are invalid')
+            seen.add(id(value))
+            rows = []
+            for item in value:
+                if type(item) is not dict or id(item) in seen:
+                    raise RagReleaseLedgerError('transition row containers are invalid')
+                seen.add(id(item))
+                row = {}
+                for name, scalar in item.items():
+                    if type(name) is not str or type(scalar) is not str:
+                        raise RagReleaseLedgerError('transition row literal is invalid')
+                    row[name] = scalar
+                rows.append(row)
+            owned[key] = rows
+        else:
+            expected = int if key in integers else str
+            if value is not None and type(value) is not expected:
+                raise RagReleaseLedgerError('transition scalar type is invalid')
+            owned[key] = value
+    if set(owned) != _TRANSITION_KEYS:
+        raise RagReleaseLedgerError('transition payload keys are invalid')
+    return owned
+
+
 def validate_transition_payload(
     payload: Mapping[str, object],
     *,
     identity_secret: bytes,
 ) -> ValidatedReleaseTransition:
-    if type(payload) is not dict or set(payload) != _TRANSITION_KEYS:
-        raise RagReleaseLedgerError('transition payload keys are invalid')
+    payload = _owned_transition_payload(payload)
     if type(identity_secret) is not bytes or len(identity_secret) < 32:
         raise RagReleaseLedgerError('transition signer is unavailable')
     kind = payload['transition_kind']
@@ -3071,11 +3413,10 @@ class RagReleaseLedger:
             actual_mutations._assert_roster_rows('agent_run', [])
             actual_mutations._assert_roster_rows('cost_component', [])
             return
-        from backend.app.models.agent_runs import AgentRun
-        from backend.app.models.rag_runtime import AgentRunCostComponent
-
-        run_statement = select(AgentRun.__table__).where(
-            AgentRun.__table__.c.id.in_(
+        run_table, _ = actual_mutations._table('agent_run')
+        cost_table, _ = actual_mutations._table('cost_component')
+        run_statement = select(run_table).where(
+            run_table.c.id.in_(
                 [row['id'] for row in actual_mutations._captured_rows('agent_run')]
             )
         )
@@ -3098,8 +3439,8 @@ class RagReleaseLedger:
         if len(required_hmacs) != len(cases) or required_hmacs != set(runs_by_hmac):
             raise RagReleaseLedgerError('terminal roster runtime parent is missing')
         run_ids = [runs_by_hmac[item]['id'] for item in required_hmacs]
-        cost_statement = select(AgentRunCostComponent.__table__).where(
-            AgentRunCostComponent.__table__.c.agent_run_id.in_(run_ids)
+        cost_statement = select(cost_table).where(
+            cost_table.c.agent_run_id.in_(run_ids)
         )
         if connection.dialect.name == 'postgresql':
             cost_statement = cost_statement.with_for_update()
@@ -3239,6 +3580,7 @@ class RagReleaseLedger:
         ):
             raise RagReleaseLedgerError('terminal roster runtime is nonterminal')
 
+    @_owned_append_schema
     def append(
         self,
         connection: Connection,
@@ -3251,19 +3593,16 @@ class RagReleaseLedger:
     ) -> RagReleaseSnapshot:
         from backend.app.rag.release_authority import _native_database_identity
 
+        payload = _owned_transition_payload(payload)
         database_identity = _native_database_identity(database_identity)
         validated = validate_transition_payload(payload, identity_secret=self._secret)
         if self._authority._after_marker_replace is not None:
             raise RagReleaseLedgerError('append refuses publication callbacks')
-        from backend.app.admin.rag_provider_safety import (
-            RagProviderSafetyIncidentPlan,
-        )
-
-        if provider_incident is not None and (
-            type(provider_incident) is not RagProviderSafetyIncidentPlan
-            or provider_incident._seal is None
-        ):
-            raise RagReleaseLedgerError('provider incident capability is invalid')
+        consume_incident = None
+        if provider_incident is not None:
+            provider_incident, consume_incident = _owned_provider_incident(
+                provider_incident
+            )
         if (payload['transition_kind'] == 'authorization_abort_component') != (
             provider_incident is not None
         ):
@@ -3293,6 +3632,7 @@ class RagReleaseLedger:
             raise RagReleaseLedgerError(
                 'same-transaction release mutation set is required'
             )
+        actual_mutations = actual_mutations._owned_inputs()
         marker = DurableFileAuthority.open_runtime(self._authority.marker_path)
         try:
             with (
@@ -3412,6 +3752,8 @@ class RagReleaseLedger:
                         raise RagReleaseLedgerError(
                             'provider incident approved before-image differs'
                         )
+                    consume_incident()
+                    consume_incident = None
                     incident_evidence = barrier_guard.apply_provider_incident(
                         provider_incident
                     )

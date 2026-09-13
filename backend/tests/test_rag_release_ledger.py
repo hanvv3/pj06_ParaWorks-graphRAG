@@ -16,6 +16,184 @@ _SECRET = b'task23-release-runtime-key-material-32-bytes'
 _REVIEW = {'review_envelope_hmac': '1' * 64, 'review_nonce_hmac': '2' * 64}
 
 
+@pytest.mark.parametrize(
+    'field',
+    ['authorization_state_after', 'ledger_uuid', 'outcome', 'dispatch_count_before'],
+)
+def test_transition_schema_rejects_subclasses_without_running_hooks(field):
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from backend.app.rag.release_ledger import (
+        RagReleaseLedgerError,
+        validate_transition_payload,
+    )
+
+    calls = []
+
+    class CallbackString(str):
+        def __hash__(self):
+            calls.append('hash')
+            return str.__hash__(self)
+
+        def __eq__(self, other):
+            calls.append('eq')
+            return str.__eq__(self, other)
+
+        def __ne__(self, other):
+            calls.append('ne')
+            return str.__ne__(self, other)
+
+        def __str__(self):
+            calls.append('str')
+            return str.__str__(self)
+
+    payload = _bootstrap_payload(
+        SimpleNamespace(
+            ledger_uuid=UUID('77777777-7777-4777-8777-777777777777'),
+            ledger_epoch=1,
+            generation=0,
+            validation_database_identity_hmac='a' * 64,
+        )
+    )
+    payload[field] = CallbackString(payload[field] or '0')
+    with pytest.raises(RagReleaseLedgerError):
+        validate_transition_payload(payload, identity_secret=_SECRET)
+    assert calls == []
+
+
+def test_complete_transition_tree_is_detached_with_no_shared_mutable_identity():
+    import json
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from backend.app.rag.release_ledger import _owned_transition_payload
+
+    payload = _bootstrap_payload(
+        SimpleNamespace(
+            ledger_uuid=UUID('77777777-7777-4777-8777-777777777777'),
+            ledger_epoch=1,
+            generation=0,
+            validation_database_identity_hmac='a' * 64,
+        )
+    )
+    expected = json.dumps(payload, sort_keys=True)
+    owned = _owned_transition_payload(payload)
+
+    def containers(value):
+        if type(value) is dict:
+            return {id(value)} | set().union(
+                *(containers(item) for item in value.values())
+            )
+        if type(value) is list:
+            return {id(value)} | set().union(*(containers(item) for item in value))
+        assert value is None or type(value) in {str, int}
+        return set()
+
+    assert containers(payload).isdisjoint(containers(owned))
+
+    def mutate_every_field(value):
+        if type(value) is dict:
+            for key, item in tuple(value.items()):
+                mutate_every_field(item)
+                value[key] = object()
+                assert json.dumps(owned, sort_keys=True) == expected
+                value[key] = item  # restored values must not restore an alias
+            value.clear()
+        elif type(value) is list:
+            for item in value:
+                mutate_every_field(item)
+            value.append(object())
+            value.clear()
+
+    mutate_every_field(payload)
+    assert json.dumps(owned, sort_keys=True) == expected
+
+
+@pytest.mark.parametrize(
+    'surface',
+    [
+        'root',
+        'key',
+        'list',
+        'row',
+        'row_key',
+        'row_value',
+        'scalar',
+        'integer',
+        'alias',
+        'cycle',
+    ],
+)
+def test_transition_native_boundary_never_calls_container_or_scalar_protocols(surface):
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from backend.app.rag.release_ledger import (
+        RagReleaseLedgerError,
+        validate_transition_payload,
+    )
+
+    calls = []
+
+    class Hooks:
+        def hook(self, *args, **kwargs):
+            calls.append('hook')
+            raise AssertionError('caller protocol executed')
+
+        __iter__ = __getitem__ = __copy__ = __deepcopy__ = __reduce__ = (
+            __reduce_ex__
+        ) = hook
+        __eq__ = __ne__ = __str__ = hook
+
+    class BadDict(Hooks, dict):
+        items = keys = values = get = Hooks.hook
+
+    class BadList(Hooks, list):
+        pass
+
+    class BadString(Hooks, str):
+        __hash__ = str.__hash__
+
+    class BadInt(Hooks, int):
+        __hash__ = int.__hash__
+
+    payload = _bootstrap_payload(
+        SimpleNamespace(
+            ledger_uuid=UUID('77777777-7777-4777-8777-777777777777'),
+            ledger_epoch=1,
+            generation=0,
+            validation_database_identity_hmac='a' * 64,
+        )
+    )
+    if surface == 'root':
+        payload = BadDict(payload)
+    elif surface == 'key':
+        value = payload.pop('outcome')
+        payload[BadString('outcome')] = value
+    elif surface == 'list':
+        payload['affected_rows'] = BadList(payload['affected_rows'])
+    elif surface == 'row':
+        payload['affected_rows'][0] = BadDict(payload['affected_rows'][0])
+    elif surface == 'row_key':
+        row = payload['affected_rows'][0]
+        value = row.pop('row_kind')
+        row[BadString('row_kind')] = value
+    elif surface == 'row_value':
+        payload['affected_rows'][0]['row_kind'] = BadString('authorization')
+    elif surface == 'scalar':
+        payload['authorization_state_after'] = BadString('unused')
+    elif surface == 'integer':
+        payload['ledger_epoch'] = BadInt(1)
+    elif surface == 'alias':
+        payload['observation_set'] = payload['affected_rows']
+    else:
+        payload['affected_rows'].append(payload)
+    with pytest.raises(RagReleaseLedgerError):
+        validate_transition_payload(payload, identity_secret=_SECRET)
+    assert calls == []
+
+
 class _TestProviderPeer:
     def _assert_active_guard(self, guard, connection):
         assert guard is self
@@ -238,7 +416,7 @@ def test_transition_validator_accepts_exact_bootstrap_and_is_deterministic(
     [
         (lambda value: value.update(extra='forbidden'), 'keys'),
         (lambda value: value.update(to_generation=2), 'generation'),
-        (lambda value: value.update(case_claim_count=True), 'count'),
+        (lambda value: value.update(case_claim_count=True), 'scalar type'),
         (
             lambda value: value.update(authorization_reserved_cost_usd='0E-6'),
             'six-place',

@@ -758,6 +758,269 @@ def runtime_source_harness(tmp_path):
     return h
 
 
+@pytest.mark.parametrize(
+    'stage',
+    [
+        'reader_exit',
+        'reader_enter',
+        'read',
+        'read_hard_negative_oracle',
+        'read_pgvector_baseline_members',
+        'auth_user_reader',
+        'clock',
+        'property',
+        'provider',
+        'transport',
+    ],
+)
+@pytest.mark.parametrize(
+    'attack', ['payload_scalar', 'payload_tree', 'mutation_images']
+)
+def test_append_owns_inputs_before_reader_teardown(
+    tmp_path, monkeypatch, attack, stage
+):
+    """A retained input may not inject comparisons that commit unaudited rows."""
+    from contextlib import contextmanager
+
+    from backend.app.models.agent_runs import AgentRun
+    from backend.app.models.rag_runtime import AgentRunCostComponent
+    from backend.app.rag.release_ledger import RagReleaseLedger
+
+    phase = {
+        'payload': None,
+        'mutations': None,
+        'dml': [],
+        'calls': [],
+        'attacked': 0,
+        'late_callbacks': [],
+    }
+    kept = []
+    original_harness = runtime_source_harness
+    original_append = RagReleaseLedger.append
+
+    class LateString(str):
+        __hash__ = str.__hash__
+
+        def fire(self):
+            if phase['dml'] and not phase['calls']:
+                phase['calls'].append('commit')
+                phase['connection'].commit()
+
+        def __eq__(self, other):
+            self.fire()
+            return str.__eq__(self, other)
+
+        def __ne__(self, other):
+            self.fire()
+            return str.__ne__(self, other)
+
+    def poison_tree(value):
+        if type(value) is dict:
+            for key, item in tuple(value.items()):
+                poison_tree(item)
+                value[key] = LateString(item) if type(item) is str else None
+        elif type(value) is list:
+            for item in value:
+                poison_tree(item)
+            value.clear()
+
+    def callback(kind):
+        if phase['dml']:
+            phase['late_callbacks'].append(kind)
+        if phase['payload'] is not None and kind == stage:
+            phase['attacked'] += 1
+            if phase['attacked'] == 1:
+                if attack == 'payload_scalar':
+                    phase['payload']['authorization_state_after'] = LateString(
+                        'started'
+                    )
+                elif attack == 'payload_tree':
+                    poison_tree(phase['payload'])
+                elif attack in {'schema_processor', 'schema_result_processor'}:
+                    from sqlalchemy import Numeric, TypeDecorator
+
+                    class CallbackNumeric(TypeDecorator):
+                        impl = Numeric(18, 6)
+                        cache_ok = False
+
+                        @property
+                        def python_type(self):
+                            from decimal import Decimal
+
+                            return Decimal
+
+                        def process_bind_param(self, value, dialect):
+                            if (
+                                attack == 'schema_processor'
+                                and phase['dml']
+                                and not phase['calls']
+                            ):
+                                phase['calls'].append('commit')
+                                phase['connection'].commit()
+                            return value
+
+                        def process_result_value(self, value, dialect):
+                            if (
+                                attack == 'schema_result_processor'
+                                and phase['dml']
+                                and phase['connection'].in_transaction()
+                                and not phase['calls']
+                            ):
+                                phase['calls'].append('commit')
+                                phase['connection'].commit()
+                            return value
+
+                    plan = next(
+                        plan
+                        for plan in phase['mutations']._plans
+                        if plan.row.row_kind == 'agent_run'
+                    )
+                    monkeypatch.setattr(
+                        plan.statement.table.c.total_charged_cost_usd,
+                        'type',
+                        CallbackNumeric(),
+                    )
+                else:
+                    for plan in phase['mutations']._frozen_plans or ():
+                        if plan.row.row_kind == 'authorization':
+                            plan.after['state'] = LateString('started')
+                    for plan in phase['mutations']._plans:
+                        poison_tree(plan.row.primary_key)
+                        for binding in (plan.statement._values or {}).values():
+                            binding.value = LateString('started')
+                    for row in phase['mutations']._observation_rows:
+                        poison_tree(row.primary_key)
+                    for field in (
+                        '_plans',
+                        '_rows',
+                        '_observation_rows',
+                        '_before_snapshots',
+                        '_after_snapshots',
+                        '_observation_snapshots',
+                    ):
+                        getattr(phase['mutations'], field).clear()
+                    phase['mutations']._frozen_plans = ()
+
+    def harness(path):
+        h = original_harness(path)
+        kept.append(h)
+        original_locked = h.reader.locked
+
+        @contextmanager
+        def locked():
+            callback('reader_enter')
+            with original_locked() as value:
+                yield value
+            callback('reader_exit')
+
+        h.reader.locked = locked
+        h.rh.callback = callback
+        for method in (
+            'read',
+            'read_hard_negative_oracle',
+            'read_pgvector_baseline_members',
+        ):
+            original_method = getattr(h.reader, method)
+
+            def method_callback(
+                *args, _original=original_method, _method=method, **kwargs
+            ):
+                callback(_method)
+                return _original(*args, **kwargs)
+
+            setattr(h.reader, method, method_callback)
+
+        class CurrentUser:
+            def __init__(self, user):
+                self.values = vars(user).copy()
+
+            def __getattr__(self, key):
+                callback('property')
+                return self.values[key]
+
+        for role, user in tuple(h.rh.users.items()):
+            h.rh.users[role] = CurrentUser(user)
+        peer = h.reader.authority._provider_safety_release_peer
+        original_peer = peer.revalidate_database_peer
+
+        def peer_callback(*args, **kwargs):
+            callback('provider')
+            return original_peer(*args, **kwargs)
+
+        peer.revalidate_database_peer = peer_callback
+        original_transport = h.reader.authority._authority_transport
+
+        @contextmanager
+        def transport(*args, **kwargs):
+            callback('transport')
+            with original_transport(*args, **kwargs) as value:
+                yield value
+
+        h.reader.authority._authority_transport = transport
+
+        def count(connection, _cursor, sql, *_):
+            if phase['payload'] is not None and sql.lstrip().upper().startswith(
+                ('INSERT', 'UPDATE', 'DELETE')
+            ):
+                phase['dml'].append(sql)
+                phase['connection'] = connection
+
+        event.listen(h.engine, 'before_cursor_execute', count)
+        return h
+
+    def append(self, connection, payload, **kwargs):
+        if payload['transition_kind'] == 'case_claim':
+            phase['payload'] = payload
+            phase['mutations'] = kwargs['actual_mutations']
+            phase['canonical'] = encoded(payload)
+            phase['marker'] = self._authority.marker_path.read_bytes()
+        return original_append(self, connection, payload, **kwargs)
+
+    monkeypatch.setattr(
+        __import__(__name__, fromlist=['runtime_source_harness']),
+        'runtime_source_harness',
+        harness,
+    )
+    monkeypatch.setattr(RagReleaseLedger, 'append', append)
+    outcome = None
+    try:
+        test_genuine_source_case_projection_reuses_append_barrier(
+            tmp_path, monkeypatch, False
+        )
+    except Exception as exc:
+        outcome = exc
+    h = kept[0]
+    with h.engine.connect() as connection:
+        auth = dict(
+            connection.execute(select(h.tables.authorizations)).mappings().one()
+        )
+        cases = connection.execute(select(h.tables.cases)).all()
+        runs = connection.execute(select(AgentRun.__table__)).all()
+        costs = connection.execute(select(AgentRunCostComponent.__table__)).all()
+        generations = connection.scalars(select(h.tables.ledgers.c.generation)).all()
+        history = connection.execute(select(h.tables.transitions)).mappings().all()
+    assert phase['calls'] == [], 'caller comparison committed after mutation DML'
+    assert phase['attacked'] and phase['late_callbacks'] == []
+    assert outcome is None
+    assert auth['state'] == 'started' and auth['case_claim_count'] == 1
+    assert len(cases) == len(runs) == 1 and len(costs) == 2
+    assert generations == [2] and len(history) == 2
+    assert history[-1]['payload_canonical_bytes'] == phase['canonical']
+    assert h.target.marker_path.read_bytes() != phase['marker']
+
+
+def test_append_owns_sql_schema_before_reader_teardown(tmp_path, monkeypatch):
+    test_append_owns_inputs_before_reader_teardown(
+        tmp_path, monkeypatch, 'schema_processor', 'reader_exit'
+    )
+
+
+def test_append_owns_sql_roster_schema_before_reader_teardown(tmp_path, monkeypatch):
+    test_append_owns_inputs_before_reader_teardown(
+        tmp_path, monkeypatch, 'schema_result_processor', 'reader_exit'
+    )
+
+
 def require_source(h, **overrides):
     args = {
         'manifest': h.authorization.manifest.executable,

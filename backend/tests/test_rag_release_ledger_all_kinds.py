@@ -63,8 +63,8 @@ def append_audit(monkeypatch):
     # statement, row lock, mutation and SQL verification still executes normally.
     monkeypatch.setattr(
         RagReleaseMutationSet,
-        '_table',
-        staticmethod(cache(RagReleaseMutationSet._table)),
+        '_declared_table',
+        staticmethod(cache(RagReleaseMutationSet._declared_table)),
     )
     recorded = []
     roster_probed = set()
@@ -85,6 +85,12 @@ def append_audit(monkeypatch):
             actual_mutations._snapshot(connection, row)
             for row in actual_mutations.observation_rows
         ]
+        provider_before = {}
+        for kind in ('provider_safety_authority', 'provider_readiness'):
+            table, _ = actual_mutations._table(kind)
+            provider_before[kind] = [
+                dict(row) for row in connection.execute(select(table)).mappings()
+            ]
         invalid = deepcopy(payload)
         invalid['authorization_state_after'] = 'invalid'
         with pytest.raises(RagReleaseLedgerError):
@@ -193,6 +199,13 @@ def append_audit(monkeypatch):
                 == old_ledger['generation'] + 1
             )
             assert ledger['last_transition_digest'] == digest
+        changed_rows = [plan.row for plan in actual_mutations._plans]
+        with connection.engine.connect() as verification:
+            for kind, old_rows in provider_before.items():
+                table, _ = actual_mutations._table(kind)
+                for current in verification.execute(select(table)).mappings():
+                    if dict(current) not in old_rows:
+                        changed_rows.append(row_key(kind, dict(current)))
         expected = {
             (
                 row.row_kind,
@@ -200,7 +213,7 @@ def append_audit(monkeypatch):
                     row.row_kind, row.primary_key, identity_secret=self._secret
                 ),
             )
-            for row in actual_mutations.rows
+            for row in changed_rows
         }
         signed = {
             (row['row_kind'], row['row_identity_hmac'])
@@ -1253,6 +1266,99 @@ def test_every_numeric_caller_literal_refuses_laundering_before_dml(
 
 
 @pytest.mark.parametrize(
+    'row_kind,column',
+    [
+        ('authorization', 'reserved_cost_usd'),
+        ('authorization', 'charged_cost_usd'),
+        ('case', 'embedding_reserved_cost_usd'),
+        ('case', 'generation_reserved_cost_usd'),
+        ('case', 'total_reserved_cost_usd'),
+        ('dispatch', 'reserved_cost_usd'),
+        ('dispatch', 'charged_cost_usd'),
+        ('agent_run', 'total_charged_cost_usd'),
+        ('cost_component', 'reserved_cost_usd'),
+        ('cost_component', 'charged_cost_usd'),
+    ],
+)
+def test_numeric_update_predicate_refuses_noncanonical_literals(
+    tmp_path, monkeypatch, row_kind, column
+):
+    from sqlalchemy import event
+
+    h = incident_harness(tmp_path, monkeypatch)
+    if row_kind != 'authorization':
+        h.claim()
+    if row_kind in {'dispatch', 'agent_run', 'cost_component'}:
+        h.claim_generation()
+    before = {
+        kind: h.records(kind)
+        for kind in ('authorization', 'case', 'dispatch', 'agent_run', 'cost_component')
+    }
+    marker_before = h.authority.marker_path.read_bytes()
+    original = RagReleaseLedger.append
+    dml = []
+    candidate = []
+
+    class DecimalSubclass(Decimal):
+        pass
+
+    def append(self, connection, payload, *, actual_mutations, **kwargs):
+        plan = next(
+            plan for plan in actual_mutations._plans if plan.row.row_kind == row_kind
+        )
+        table = plan.statement.table
+        actual_mutations._plans[actual_mutations._plans.index(plan)] = type(plan)(
+            plan.statement.where(table.c[column] == candidate[0]), plan.row
+        )
+        return original(
+            self, connection, payload, actual_mutations=actual_mutations, **kwargs
+        )
+
+    monkeypatch.setattr(RagReleaseLedger, 'append', append)
+    event.listen(
+        h.engine,
+        'before_cursor_execute',
+        lambda _c, _u, sql, *_: (
+            dml.append(sql)
+            if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))
+            else None
+        ),
+    )
+    value = before[row_kind][-1][column]
+    invalid = [
+        False,
+        int(value),
+        float(value),
+        str(value),
+        DecimalSubclass(value),
+        Decimal('NaN'),
+        Decimal('Infinity'),
+        Decimal('-0.000000'),
+        value.quantize(Decimal('0.0000000')),
+        value.normalize(),
+        Decimal('1e30'),
+        value + Decimal('0.0000001'),
+    ]
+    action = (
+        h.claim
+        if row_kind == 'authorization'
+        else h.fail_case
+        if row_kind == 'case'
+        else h.generation_outcome
+    )
+    for item in invalid:
+        candidate[:] = [item]
+        with pytest.raises(RagReleaseLedgerError):
+            action()
+        assert not dml
+        assert {kind: h.records(kind) for kind in before} == before
+        assert h.authority.marker_path.read_bytes() == marker_before
+    candidate[:] = [value.quantize(Decimal('0.000001'))]
+    action()
+    assert dml and h.authority.marker_path.read_bytes() != marker_before
+
+
+@pytest.mark.parametrize(
     'operation', ['initialize', 'disaster_initialize', 'rebootstrap', 'inspect']
 )
 def test_nonappend_final_checkpoint_refuses_provider_db_drift(
@@ -1433,7 +1539,9 @@ def test_plan_materialization_transaction_callbacks_refuse_before_dml(
         == []
     )
     assert harness.authority.marker_path.read_bytes() == old_marker
-    assert calls == [0] and dml == []
+    # Reject custom mappings before items(): even a pre-DML callback is forbidden.
+    # The independent database/marker oracles above remain unchanged.
+    assert calls == [] and dml == []
 
 
 @pytest.mark.parametrize('zone', ['driver_zoneinfo', 'fixed_utc', 'custom'])
@@ -1765,6 +1873,76 @@ def incident_abort(harness):
         == incident.new_envelope_digest
     )
     assert harness.records('provider_readiness')[-1]['state'] == 'blocked_overrun'
+
+
+@pytest.mark.parametrize(
+    'attack', ['envelope', 'descriptor', 'consumed', 'invalid_entry_envelope']
+)
+def test_incident_descriptor_is_owned_before_transport_callbacks(
+    tmp_path, monkeypatch, attack
+):
+    from sqlalchemy import event
+
+    h = incident_harness(tmp_path, monkeypatch)
+    original = RagReleaseLedger.append
+    original_transport = h.authority._authority_transport
+    state = {'incident': None, 'dml': []}
+
+    @contextmanager
+    def transport(connection, **kwargs):
+        with original_transport(connection, **kwargs) as guard:
+            if state['incident'] is not None:
+                incident = state['incident']
+                if attack == 'envelope':
+                    incident._prepared.new_envelope.clear()
+                elif attack == 'descriptor':
+                    object.__setattr__(
+                        incident._prepared, 'cost_usd', Decimal('999.000000')
+                    )
+                elif attack == 'consumed':
+                    incident._consumed = True
+            yield guard
+
+    def append(self, connection, payload, **kwargs):
+        if kwargs.get('provider_incident') is not None:
+            state['incident'] = kwargs['provider_incident']
+            state['marker'] = self._authority.marker_path.read_bytes()
+            state['latch'] = (
+                h.authority._provider_safety_release_peer._provider_safety._latch_path.read_bytes()
+            )
+            if attack == 'invalid_entry_envelope':
+                state['incident']._prepared.new_envelope.clear()
+        return original(self, connection, payload, **kwargs)
+
+    monkeypatch.setattr(h.authority, '_authority_transport', transport)
+    monkeypatch.setattr(RagReleaseLedger, 'append', append)
+    event.listen(
+        h.engine,
+        'before_cursor_execute',
+        lambda _c, _u, sql, *_: (
+            state['dml'].append(sql)
+            if state['incident'] is not None
+            and sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))
+            else None
+        ),
+    )
+    if attack in {'consumed', 'invalid_entry_envelope'}:
+        from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+
+        with pytest.raises((RagReleaseLedgerError, RagProviderSafetyError)):
+            incident_abort(h)
+        assert not state['dml']
+        assert h.authority.marker_path.read_bytes() == state['marker']
+        assert (
+            h.authority._provider_safety_release_peer._provider_safety._latch_path.read_bytes()
+            == state['latch']
+        )
+    else:
+        incident_abort(h)
+        assert h.records('authorization')[0]['charged_cost_usd'] == Decimal('0.100000')
+        assert h.records('agent_run')[0]['total_charged_cost_usd'] == Decimal(
+            '0.100000'
+        )
 
 
 MATRIX = [(kind, outcome) for kind, outcome in _KIND_OUTCOME.items()] + [
