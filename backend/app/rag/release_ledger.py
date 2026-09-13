@@ -2970,6 +2970,35 @@ class RagReleaseLedger:
                     approved_case_claim=approved_case_claim,
                     barrier_guard=barrier_guard,
                 )
+
+                def revalidate_authorities(expected_release):
+                    self._authority._assert_barrier_guard(
+                        barrier_guard, connection
+                    ).revalidate_provider()
+                    _body, snapshot = self._authority._parse(
+                        marker._read_bytes_unlocked()
+                    )
+                    if snapshot != expected_release:
+                        raise RagReleaseLedgerError(
+                            'release marker changed before publication'
+                        )
+                    self._authority._inspect_locked(
+                        connection, snapshot, database_identity=database_identity
+                    )
+                    if approved_case_claim is not None:
+                        from backend.app.rag.release_review import (
+                            revalidate_case_claim_source,
+                        )
+
+                        revalidate_case_claim_source(
+                            approved_case_claim,
+                            connection=connection,
+                            payload=payload,
+                            barrier_guard=barrier_guard,
+                            expected_release=expected_release,
+                        )
+
+                revalidate_authorities(current)
                 if provider_incident is not None:
                     authorization_before = actual_mutations._snapshot(
                         connection,
@@ -3059,6 +3088,10 @@ class RagReleaseLedger:
                     canonical_json_bytes(next_envelope)
                 )
                 tables = release_tables(build_rag_release_metadata())
+                # All reader callbacks and post-SQL projections have completed.
+                # These independent checks run while rollback remains possible,
+                # before the marker-first crash-detection protocol publishes.
+                revalidate_authorities(current)
                 marker._replace_unlocked(next_envelope)
                 if self._authority._after_marker_replace is not None:
                     self._authority._after_marker_replace()
@@ -3095,6 +3128,7 @@ class RagReleaseLedger:
                 )
                 if transition_result.rowcount != 1:
                     raise RagReleaseLedgerError('release transition insert failed')
+                revalidate_authorities(next_snapshot)
                 connection.commit()
                 return next_snapshot
         except DurableFileAuthorityError as exc:

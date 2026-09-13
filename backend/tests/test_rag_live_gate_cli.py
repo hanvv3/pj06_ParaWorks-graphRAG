@@ -85,7 +85,11 @@ def test_invalid_preview_arguments_refuse_before_runtime_construction(
 
 
 class _TestProviderPeer:
-    pass
+    def _assert_active_guard(self, guard, connection):
+        assert guard is self
+
+    def revalidate_database_peer(self, connection):
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -105,12 +109,10 @@ def _deterministic_non_product_database_seam(monkeypatch) -> None:
     @contextmanager
     def barrier(_self, _connection, *, marker):
         with marker.locked():
-            yield release_authority._RagReleaseBarrierGuard(
-                _connection, seal=release_authority._RELEASE_BARRIER_SEAL
-            )
+            yield _self._provider_safety_release_peer
 
     monkeypatch.setattr(
-        release_authority.RagReleaseAuthority, '_authority_barrier', barrier
+        release_authority.RagReleaseAuthority, '_authority_transport', barrier
     )
     monkeypatch.setattr(
         release_authority.RagReleaseAuthority,

@@ -411,25 +411,37 @@ def incident_harness(tmp_path, monkeypatch):
     peer = admin.release_peer()
 
     @contextmanager
-    def barrier(_self, connection, *, marker):
-        with runtime._authority.locked(), marker.locked():
+    def provider_transport(_self, connection, **options):
+        with runtime._authority.locked():
             peer._ledger.assert_pin()
             body = runtime._read_unlocked()
             runtime._match_db_whole_set(connection, body, for_update=False)
-            provider_guard = admin_module.RagProviderSafetyReleasePeerGuard(
-                provider_safety=runtime, ledger=peer._ledger, body=body, seal=peer._seal
-            )
-            yield authority_module._RagReleaseBarrierGuard(
-                connection,
-                seal=authority_module._RELEASE_BARRIER_SEAL,
-                provider_guard=provider_guard,
-            )
-            runtime._match_db_whole_set(
-                connection, runtime._read_unlocked(), for_update=False
-            )
+            guard = object.__new__(admin_module.RagProviderSafetyReleasePeerGuard)
+            guard._provider_safety, guard._ledger = runtime, peer._ledger
+            guard._body, guard._owner = body, peer
+            yield guard
+
+    def provider_revalidate(guard, connection):
+        peer._assert_active_guard(guard, connection)
+        peer._ledger.assert_pin()
+        body = runtime._read_unlocked()
+        assert body['envelope_digest'] == guard._body['envelope_digest']
+        runtime._match_db_whole_set(connection, body, for_update=False)
+
+    monkeypatch.setattr(RealPeer, '_locked_transport', provider_transport)
+    monkeypatch.setattr(
+        admin_module.RagProviderSafetyReleasePeerGuard,
+        'revalidate_database_peer',
+        provider_revalidate,
+    )
+
+    @contextmanager
+    def barrier(_self, connection, *, marker):
+        with peer.locked(connection) as provider_guard, marker.locked():
+            yield provider_guard
 
     monkeypatch.setattr(
-        authority_module.RagReleaseAuthority, '_authority_barrier', barrier
+        authority_module.RagReleaseAuthority, '_authority_transport', barrier
     )
     authority = authority_module.RagReleaseAuthority(
         marker_path=tmp_path / 'release' / 'marker.json',
@@ -443,6 +455,79 @@ def incident_harness(tmp_path, monkeypatch):
         provider_safety_release_peer=peer,
     )
     return ReleaseHarness(engine, authority, _SECRET, _identity())
+
+
+@pytest.mark.parametrize('exceptional_exit', [False, True])
+def test_real_provider_and_release_guard_lifetimes(
+    tmp_path, monkeypatch, exceptional_exit
+):
+    from backend.app.admin.rag_provider_safety import RagProviderSafetyReleasePeerGuard
+    from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
+    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+
+    harness = incident_harness(tmp_path, monkeypatch)
+    peer = harness.authority._provider_safety_release_peer
+    other = RealPeer(
+        provider_safety=peer._provider_safety, ledger=peer._ledger, seal=peer._seal
+    )
+    with harness.engine.connect() as connection, harness.engine.connect() as another:
+        with pytest.raises(TypeError):
+            RagProviderSafetyReleasePeerGuard(
+                provider_safety=peer._provider_safety,
+                ledger=peer._ledger,
+                body={},
+                seal=peer._seal,
+            )
+        with pytest.raises(RagProviderSafetyError):
+            peer._assert_active_guard(
+                object.__new__(RagProviderSafetyReleasePeerGuard), connection
+            )
+        try:
+            with peer.locked(connection) as saved:
+                peer._assert_active_guard(saved, connection)
+                for owner, target in ((other, connection), (peer, another)):
+                    with pytest.raises(RagProviderSafetyError):
+                        owner._assert_active_guard(saved, target)
+                with pytest.raises(RagProviderSafetyError), peer.locked(connection):
+                    pytest.fail('nested provider lock transport was entered')
+                with monkeypatch.context() as nested_patch:
+
+                    def forbidden_transport(*args, **options):
+                        pytest.fail('nested provider barrier attempted a sidecar lock')
+
+                    nested_patch.setattr(
+                        RealPeer, '_locked_transport', forbidden_transport
+                    )
+                    with pytest.raises(RagProviderSafetyError), peer.locked(another):
+                        pytest.fail(
+                            'cross-connection nested provider barrier was accepted'
+                        )
+                if exceptional_exit:
+                    raise RuntimeError('test-only unwind')
+        except RuntimeError:
+            assert exceptional_exit
+        with pytest.raises(RagProviderSafetyError):
+            saved.revalidate_database_peer(connection)
+        with peer.locked(connection) as current:
+            peer._assert_active_guard(current, connection)
+            with pytest.raises(RagProviderSafetyError):
+                peer._assert_active_guard(saved, connection)
+
+        @contextmanager
+        def expired_provider_transport(_self, _connection, *, marker):
+            yield saved
+
+        monkeypatch.setattr(
+            type(harness.authority), '_authority_transport', expired_provider_transport
+        )
+        with (
+            pytest.raises(RagProviderSafetyError),
+            harness.authority._authority_barrier(
+                connection,
+                marker=DurableFileAuthority.open_runtime(harness.authority.marker_path),
+            ),
+        ):
+            pytest.fail('release accepted an expired underlying provider guard')
 
 
 def incident_abort(harness):

@@ -15,7 +15,11 @@ _SECRET = b'task23-release-runtime-key-material-32-bytes'
 
 
 class _TestProviderPeer:
-    pass
+    def _assert_active_guard(self, guard, connection):
+        assert guard is self
+
+    def revalidate_database_peer(self, connection):
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -36,11 +40,11 @@ def _deterministic_non_product_database_seam(monkeypatch) -> None:
     @contextmanager
     def barrier(_self, _connection, *, marker):
         with marker.locked():
-            yield release_authority._RagReleaseBarrierGuard(
-                _connection, seal=release_authority._RELEASE_BARRIER_SEAL
-            )
+            yield _self._provider_safety_release_peer
 
-    monkeypatch.setattr(release_authority.RagReleaseAuthority, '_authority_barrier', barrier)
+    monkeypatch.setattr(
+        release_authority.RagReleaseAuthority, '_authority_transport', barrier
+    )
     monkeypatch.setattr(
         release_authority.RagReleaseAuthority,
         '_current_database_identity',
@@ -96,6 +100,130 @@ def _recovery_review(seed: str, reason: str):
     )
 
 
+@pytest.mark.parametrize('exceptional_exit', [False, True])
+def test_release_barrier_guard_expires_irreversibly(tmp_path, exceptional_exit):
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    authority, marker_path, _ = _service(tmp_path)
+    engine = create_engine('sqlite://')
+    with engine.connect() as connection:
+        try:
+            with authority._authority_barrier(
+                connection, marker=DurableFileAuthority(marker_path)
+            ) as saved:
+                assert authority._assert_barrier_guard(saved, connection) is saved
+                if exceptional_exit:
+                    raise RuntimeError('test-only unwind')
+        except RuntimeError:
+            assert exceptional_exit
+        with pytest.raises(RagReleaseAuthorityError):
+            authority._assert_barrier_guard(saved, connection)
+        with authority._authority_barrier(
+            connection, marker=DurableFileAuthority(marker_path)
+        ) as current:
+            assert authority._assert_barrier_guard(current, connection) is current
+            with pytest.raises(RagReleaseAuthorityError):
+                authority._assert_barrier_guard(saved, connection)
+
+
+def test_release_barrier_guard_cannot_cross_owner_or_connection(tmp_path):
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    authority, marker_path, _ = _service(tmp_path)
+    other, _, _ = _service(tmp_path)
+    engine = create_engine('sqlite://')
+    with (
+        engine.connect() as connection,
+        engine.connect() as another,
+        authority._authority_barrier(
+            connection, marker=DurableFileAuthority(marker_path)
+        ) as guard,
+    ):
+        with pytest.raises(RagReleaseAuthorityError):
+            other._assert_barrier_guard(guard, connection)
+        with pytest.raises(RagReleaseAuthorityError):
+            authority._assert_barrier_guard(guard, another)
+
+
+def test_release_guard_nested_raw_and_copied_capabilities_refuse(tmp_path):
+    from copy import copy, deepcopy
+
+    from backend.app.rag.release_authority import (
+        RagReleaseAuthorityError,
+        _RagReleaseBarrierGuard,
+    )
+
+    authority, marker_path, _ = _service(tmp_path)
+    engine = create_engine('sqlite://')
+    with engine.connect() as connection:
+        with pytest.raises(TypeError):
+            _RagReleaseBarrierGuard(connection)
+        with pytest.raises(RagReleaseAuthorityError):
+            authority._assert_barrier_guard(
+                object.__new__(_RagReleaseBarrierGuard), connection
+            )
+        with authority._authority_barrier(
+            connection, marker=DurableFileAuthority(marker_path)
+        ) as guard:
+            for copier in (copy, deepcopy):
+                with pytest.raises(TypeError):
+                    copier(guard)
+            with (
+                pytest.raises(RagReleaseAuthorityError),
+                authority._authority_barrier(
+                    connection, marker=DurableFileAuthority(marker_path)
+                ),
+            ):
+                pytest.fail('nested scope reached a transport lock')
+            assert authority._assert_barrier_guard(guard, connection) is guard
+
+
+def test_release_guard_cannot_survive_transaction_replacement(tmp_path):
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    authority, marker_path, _ = _service(tmp_path)
+    engine = create_engine('sqlite://')
+    with (
+        engine.connect() as connection,
+        authority._authority_barrier(
+            connection, marker=DurableFileAuthority(marker_path)
+        ) as guard,
+    ):
+        connection.execute(select(1))
+        authority._assert_barrier_guard(guard, connection)
+        connection.commit()
+        connection.execute(select(1))
+        with pytest.raises(RagReleaseAuthorityError):
+            authority._assert_barrier_guard(guard, connection)
+
+
+def test_release_barrier_cannot_nest_on_another_connection(tmp_path, monkeypatch):
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    authority, marker_path, _ = _service(tmp_path)
+    engine = create_engine('sqlite://')
+    with (
+        engine.connect() as connection,
+        engine.connect() as another,
+        authority._authority_barrier(
+            connection, marker=DurableFileAuthority(marker_path)
+        ) as guard,
+    ):
+
+        def forbidden_transport(*args, **options):
+            pytest.fail('nested barrier attempted to reacquire Windows sidecars')
+
+        monkeypatch.setattr(authority, '_authority_transport', forbidden_transport)
+        with (
+            pytest.raises(RagReleaseAuthorityError),
+            authority._authority_barrier(
+                another, marker=DurableFileAuthority(marker_path)
+            ),
+        ):
+            pytest.fail('nested release barrier was accepted')
+        assert authority._assert_barrier_guard(guard, connection) is guard
+
+
 def test_initialize_writes_canonical_hmac_marker_and_generation_zero_db_peer(
     tmp_path: Path,
 ) -> None:
@@ -129,7 +257,10 @@ def test_initialize_writes_canonical_hmac_marker_and_generation_zero_db_peer(
         assert row['ledger_epoch'] == 1
         assert row['generation'] == 0
         assert row['designated_host_id_hmac'] == snapshot.designated_host_id_hmac
-        assert connection.scalar(select(func.count()).select_from(tables.authorizations)) == 0
+        assert (
+            connection.scalar(select(func.count()).select_from(tables.authorizations))
+            == 0
+        )
 
 
 def test_initialize_refuses_second_init_and_marker_first_crash_is_fail_stop(
@@ -140,9 +271,16 @@ def test_initialize_refuses_second_init_and_marker_first_crash_is_fail_stop(
     authority, marker_path, _provider_path = _service(tmp_path)
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
-        authority.initialize(connection, database_identity=_identity(), **_review_args())
-    with engine.begin() as connection, pytest.raises(RagReleaseAuthorityError, match='already'):
-        authority.initialize(connection, database_identity=_identity(), **_review_args())
+        authority.initialize(
+            connection, database_identity=_identity(), **_review_args()
+        )
+    with (
+        engine.begin() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='already'),
+    ):
+        authority.initialize(
+            connection, database_identity=_identity(), **_review_args()
+        )
 
     other, other_marker, _provider_path = _service(
         tmp_path / 'crash',
@@ -177,9 +315,13 @@ def test_inspection_rejects_marker_tamper_database_identity_and_host_drift(
     authority, marker_path, provider_path = _service(tmp_path)
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
-        authority.initialize(connection, database_identity=_identity(), **_review_args())
+        authority.initialize(
+            connection, database_identity=_identity(), **_review_args()
+        )
     with engine.connect() as connection:
-        assert authority.inspect(connection, database_identity=_identity()).generation == 0
+        assert (
+            authority.inspect(connection, database_identity=_identity()).generation == 0
+        )
         with pytest.raises(RagReleaseAuthorityError, match='database'):
             authority.inspect(connection, database_identity=_identity('restored', 42))
 
@@ -188,13 +330,19 @@ def test_inspection_rejects_marker_tamper_database_identity_and_host_drift(
         provider_safety_latch_path=provider_path,
         designated_host_id='different-host',
     )
-    with engine.connect() as connection, pytest.raises(RagReleaseAuthorityError, match='marker'):
+    with (
+        engine.connect() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='marker'),
+    ):
         drifted.inspect(connection, database_identity=_identity())
 
     parsed = json.loads(marker_path.read_text(encoding='utf-8'))
     parsed['signed_payload']['body']['generation'] = 8
     marker_path.write_bytes(canonical_json_bytes(parsed))
-    with engine.connect() as connection, pytest.raises(RagReleaseAuthorityError, match='marker'):
+    with (
+        engine.connect() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='marker'),
+    ):
         authority.inspect(connection, database_identity=_identity())
 
 
@@ -204,11 +352,14 @@ def test_inspection_rejects_noncanonical_marker_bytes(tmp_path: Path) -> None:
     authority, marker_path, _provider_path = _service(tmp_path)
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
-        authority.initialize(connection, database_identity=_identity(), **_review_args())
+        authority.initialize(
+            connection, database_identity=_identity(), **_review_args()
+        )
     parsed = json.loads(marker_path.read_text(encoding='utf-8'))
     marker_path.write_text(json.dumps(parsed, indent=2), encoding='utf-8')
-    with engine.connect() as connection, pytest.raises(
-        RagReleaseAuthorityError, match='noncanonical'
+    with (
+        engine.connect() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='noncanonical'),
     ):
         authority.inspect(connection, database_identity=_identity())
 
@@ -275,11 +426,15 @@ def test_rebootstrap_preserves_old_epoch_and_same_db_disaster_is_refused(
             connection, database_identity=_identity(), **_review_args()
         )
     reason = 'a' * 64
-    with engine.begin() as connection, pytest.raises(
-        __import__(
-            'backend.app.rag.release_authority', fromlist=['RagReleaseAuthorityError']
-        ).RagReleaseAuthorityError,
-        match='healthy',
+    with (
+        engine.begin() as connection,
+        pytest.raises(
+            __import__(
+                'backend.app.rag.release_authority',
+                fromlist=['RagReleaseAuthorityError'],
+            ).RagReleaseAuthorityError,
+            match='healthy',
+        ),
     ):
         authority.rebootstrap(
             connection,
@@ -314,11 +469,15 @@ def test_rebootstrap_preserves_old_epoch_and_same_db_disaster_is_refused(
         tmp_path,
         provider_safety_latch_path=provider_path,
     )
-    with engine.begin() as connection, pytest.raises(
-        __import__(
-            'backend.app.rag.release_authority', fromlist=['RagReleaseAuthorityError']
-        ).RagReleaseAuthorityError,
-        match='existing validation database identity',
+    with (
+        engine.begin() as connection,
+        pytest.raises(
+            __import__(
+                'backend.app.rag.release_authority',
+                fromlist=['RagReleaseAuthorityError'],
+            ).RagReleaseAuthorityError,
+            match='existing validation database identity',
+        ),
     ):
         disaster.disaster_initialize(
             connection,
@@ -356,7 +515,10 @@ def test_marker_first_rebootstrap_failure_advances_fresh_same_ledger_epoch(
             .values(generation=1, last_transition_digest='c' * 64)
         )
     crash_enabled = True
-    with engine.begin() as connection, pytest.raises(RuntimeError, match='marker-first'):
+    with (
+        engine.begin() as connection,
+        pytest.raises(RuntimeError, match='marker-first'),
+    ):
         authority.rebootstrap(
             connection,
             database_identity=_identity(),
@@ -366,8 +528,9 @@ def test_marker_first_rebootstrap_failure_advances_fresh_same_ledger_epoch(
     retry, _marker, _provider = _service(
         tmp_path, provider_safety_latch_path=provider_path
     )
-    with engine.begin() as connection, pytest.raises(
-        RagReleaseAuthorityError, match='nonce'
+    with (
+        engine.begin() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='nonce'),
     ):
         retry.rebootstrap(
             connection,
@@ -463,8 +626,9 @@ def test_failed_initial_marker_requires_fresh_reviewed_disaster_recovery(
     recovered, _path, _provider = _service(
         tmp_path, provider_safety_latch_path=provider_path
     )
-    with engine.begin() as connection, pytest.raises(
-        RagReleaseAuthorityError, match='nonce'
+    with (
+        engine.begin() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='nonce'),
     ):
         recovered.disaster_initialize(
             connection,
@@ -517,8 +681,9 @@ def test_disaster_schema_refusal_preserves_existing_marker_bytes(
         'assert_rag_release_physical_contract',
         lambda _connection: (_ for _ in ()).throw(ValueError('drift')),
     )
-    with engine.begin() as connection, pytest.raises(
-        RagReleaseAuthorityError, match='physical schema'
+    with (
+        engine.begin() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='physical schema'),
     ):
         recovered.disaster_initialize(
             connection,

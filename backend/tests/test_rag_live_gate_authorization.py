@@ -161,10 +161,25 @@ def authorization_harness(tmp_path):
         RagProviderReadiness,
         RagProviderSafetyAuthority,
     )
+    from backend.app.models.rag_serving import RagServingCorpusGeneration
     from backend.tests.release_ledger_fixtures import provider_rows
 
     body = json.loads(inputs.provider_snapshot_bytes)
     with engine.begin() as connection:
+        RagServingCorpusGeneration.__table__.create(connection)
+        connection.execute(
+            insert(RagServingCorpusGeneration).values(
+                id=1,
+                corpus_generation=inputs.corpus.corpus_generation,
+                vector_index_generation=inputs.corpus.vector_index_generation,
+                embedding_model='text-embedding-3-small',
+                embedding_dimensions=1536,
+                index_policy_version='rag-v2-serving-index:v1',
+                pgvector_cosine_policy_version='pgvector-cosine-indexable:v1',
+                fingerprint_key_version='v1',
+                fingerprint_key_material_verifier=initial.fingerprint_key_material_verifier,
+            )
+        )
         for model in (RagProviderSafetyAuthority, RagProviderReadiness):
             model.__table__.create(connection, checkfirst=True)
         for key, row in provider_rows():
@@ -199,15 +214,12 @@ def authorization_harness(tmp_path):
     reader.runtime_lock_count = 0
 
     @contextmanager
-    def locked_approved(connection):
+    def locked_approved(connection, *, barrier_guard):
         assert connection.engine is engine
         reader.runtime_lock_count += 1
-        marker = DurableFileAuthority.open_runtime(authority.marker_path)
-        with (
-            reader.locked(),
-            authority._authority_barrier(connection, marker=marker) as guard,
-        ):
-            reader.barrier_guard = guard
+        authority._assert_barrier_guard(barrier_guard, connection)
+        with reader.locked():
+            reader.barrier_guard = barrier_guard
             try:
                 yield reader
             finally:
@@ -768,7 +780,21 @@ def test_genuine_approved_source_validates_locked_runtime_snapshots(tmp_path):
         deepcopy(h.source)
 
 
-@pytest.mark.parametrize('drift', [False, True])
+@pytest.mark.parametrize(
+    'drift',
+    [
+        False,
+        True,
+        'preflight_exit',
+        'post_sql_exit',
+        'corpus_exit',
+        'provider_exit',
+        'source_exit',
+        'after_preflight',
+        'before_publication',
+        'before_commit',
+    ],
+)
 def test_genuine_source_case_projection_reuses_append_barrier(
     tmp_path, monkeypatch, drift
 ):
@@ -777,7 +803,11 @@ def test_genuine_source_case_projection_reuses_append_barrier(
     from backend.app.agent_runtime.rag_safety_identity import rag_identity_hmac
     from backend.app.models.agent_runs import AgentRun
     from backend.app.models.rag_runtime import AgentRunCostComponent
-    from backend.app.rag.release_ledger import RagReleaseLedgerError
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+    from backend.app.rag.release_ledger import (
+        RagReleaseLedgerError,
+        RagReleaseMutationSet,
+    )
     from backend.tests.release_ledger_fixtures import ReleaseHarness
 
     h = runtime_source_harness(tmp_path)
@@ -843,6 +873,7 @@ def test_genuine_source_case_projection_reuses_append_barrier(
 
     monkeypatch.setattr(h.reader.authority, '_authority_barrier', barrier)
     original_reader_lock = h.reader.locked_approved
+    reader_exits = []
 
     @contextmanager
     def reader_lock(connection, *, barrier_guard=None):
@@ -857,9 +888,59 @@ def test_genuine_source_case_projection_reuses_append_barrier(
                     yield h.reader
                 finally:
                     h.reader.barrier_guard = None
+            reader_exits.append(len(reader_exits) + 1)
+            if (drift == 'preflight_exit' and len(reader_exits) == 1) or (
+                drift == 'post_sql_exit' and len(reader_exits) == 2
+            ):
+                h.options['review_key_registry'].clear()
+            if drift == 'corpus_exit' and len(reader_exits) == 2:
+                from sqlalchemy import update
+
+                from backend.app.models.rag_serving import RagServingCorpusGeneration
+
+                connection.execute(
+                    update(RagServingCorpusGeneration).values(corpus_generation=99)
+                )
+            if drift == 'provider_exit' and len(reader_exits) == 2:
+                from sqlalchemy import update
+
+                from backend.app.models.rag_runtime import RagProviderSafetyAuthority
+
+                connection.execute(
+                    update(RagProviderSafetyAuthority).values(envelope_digest='f' * 64)
+                )
+            if drift == 'source_exit' and len(reader_exits) == 2:
+                (h.repo / 'unapproved-reader-exit').write_text('test-only drift')
 
     h.reader.locked_approved = reader_lock
-    if drift:
+    if drift == 'after_preflight':
+        original_preflight = RagReleaseMutationSet._preflight_runtime_mutations
+
+        def preflight(*args, **options):
+            result = original_preflight(*args, **options)
+            h.options['review_key_registry'].clear()
+            return result
+
+        monkeypatch.setattr(
+            RagReleaseMutationSet, '_preflight_runtime_mutations', preflight
+        )
+    if drift == 'before_publication':
+        original_wrap = h.reader.authority._wrap
+
+        def wrap(*args, **options):
+            result = original_wrap(*args, **options)
+            h.options['review_key_registry'].clear()
+            return result
+
+        monkeypatch.setattr(h.reader.authority, '_wrap', wrap)
+    if drift == 'before_commit':
+
+        def before_commit(_c, _cu, sql, *_):
+            if sql.lstrip().upper().startswith('INSERT INTO RAG_LIVE_GATE_TRANSITIONS'):
+                h.options['review_key_registry'].clear()
+
+        event.listen(h.engine, 'after_cursor_execute', before_commit)
+    if drift is True:
         h.options['review_key_registry'].clear()
     marker_before = h.target.marker_path.read_bytes()
     writes = []
@@ -879,16 +960,8 @@ def test_genuine_source_case_projection_reuses_append_barrier(
             ],
             case=case,
         )
-        if drift:
-            with pytest.raises(RagReleaseLedgerError):
-                h.ledger.append(
-                    connection,
-                    payload,
-                    actual_mutations=mutations,
-                    database_identity=h.reader.database_identity,
-                    approved_case_claim=projection,
-                )
-        else:
+        refusal = None
+        try:
             snapshot = h.ledger.append(
                 connection,
                 payload,
@@ -896,13 +969,60 @@ def test_genuine_source_case_projection_reuses_append_barrier(
                 database_identity=h.reader.database_identity,
                 approved_case_claim=projection,
             )
+        except RagReleaseLedgerError as exc:
+            refusal = exc
+        if not drift:
+            assert refusal is None
             assert snapshot.generation == builder.snapshot.generation + 1
     if drift:
-        assert h.target.marker_path.read_bytes() == marker_before
-        assert not any(
-            sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))
-            for sql in writes
+        if drift not in ('corpus_exit', 'provider_exit', 'source_exit'):
+            assert h.options['review_key_registry'] == {}
+        assert (
+            reader_exits
+            == {
+                True: [],
+                'preflight_exit': [1],
+                'post_sql_exit': [1, 2],
+                'corpus_exit': [1, 2],
+                'provider_exit': [1, 2],
+                'source_exit': [1, 2],
+                'after_preflight': [1],
+                'before_publication': [1, 2],
+                'before_commit': [1, 2],
+            }[drift]
         )
+        if drift == 'before_commit':
+            # Preserve Task23 marker-first crash evidence; never silently repair it.
+            assert h.target.marker_path.read_bytes() != marker_before
+            with (
+                h.engine.connect() as connection,
+                pytest.raises(RagReleaseAuthorityError),
+            ):
+                h.reader.authority.inspect(
+                    connection, database_identity=h.reader.database_identity
+                )
+        else:
+            assert h.target.marker_path.read_bytes() == marker_before
+        assert builder.records('authorization') == [before]
+        assert builder.records('case') == []
+        assert builder.records('agent_run') == []
+        assert builder.records('cost_component') == []
+        assert builder.records('dispatch') == []
+        with h.engine.connect() as connection:
+            assert connection.scalar(select(h.tables.ledgers.c.generation)) == 1
+            assert len(connection.execute(select(h.tables.transitions)).all()) == 1
+            from backend.app.models.rag_serving import RagServingCorpusGeneration
+
+            assert (
+                connection.scalar(select(RagServingCorpusGeneration.corpus_generation))
+                == 7
+            )
+        if drift in (True, 'preflight_exit', 'after_preflight'):
+            assert not any(
+                sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))
+                for sql in writes
+            )
+        assert refusal is not None
     else:
         assert len(builder.records('case')) == 1
         assert len(builder.records('cost_component')) == 2

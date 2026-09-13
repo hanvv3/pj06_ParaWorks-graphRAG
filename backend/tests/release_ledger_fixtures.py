@@ -417,6 +417,19 @@ class ReleaseHarness:
         ):
             _refuse()
 
+        def revalidate(_expected_release):
+            self.authority._assert_barrier_guard(barrier_guard, connection)
+            self._verify_test_approved_source(
+                connection,
+                manifest=manifest,
+                source_binding=source_binding,
+                authorization=authorization,
+                identity_secret=identity_secret,
+                barrier_guard=barrier_guard,
+            )
+
+        return revalidate
+
     def records(self, kind):
         from backend.app.rag.release_ledger import RagReleaseMutationSet
 

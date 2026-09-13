@@ -71,27 +71,105 @@ class RagReleaseAuthorityError(RuntimeError):
     pass
 
 
-_RELEASE_BARRIER_SEAL = object()
+def _release_barrier_boundary():
+    from threading import get_ident
+    from weakref import WeakKeyDictionary
 
+    active = WeakKeyDictionary()
+    held = set()
+    held_threads = set()
 
-class _RagReleaseBarrierGuard:
-    __slots__ = ('connection', '_provider_guard', '_seal')
-
-    def __init__(
-        self, connection: Connection, *, seal: object, provider_guard: object = None
-    ) -> None:
-        if seal is not _RELEASE_BARRIER_SEAL:
+    def state(guard):
+        if type(guard) is not Guard or guard not in active:
             raise RagReleaseAuthorityError('release barrier guard is invalid')
-        self.connection = connection
-        self._provider_guard = provider_guard
-        self._seal = seal
-
-    def apply_provider_incident(self, plan: object) -> object:
-        if self._provider_guard is None:
-            raise RagReleaseAuthorityError(
-                'provider incident capability requires production barrier'
+        owner, connection, provider, thread, transaction = active[guard]
+        if (
+            connection.closed
+            or thread != get_ident()
+            or (
+                transaction is not None
+                and connection.get_transaction() is not transaction
             )
-        return self._provider_guard.apply_incident(self.connection, plan)
+        ):
+            raise RagReleaseAuthorityError('release barrier guard is invalid')
+        if transaction is None and connection.get_transaction() is not None:
+            active[guard] = (
+                owner,
+                connection,
+                provider,
+                thread,
+                connection.get_transaction(),
+            )
+        owner._provider_safety_release_peer._assert_active_guard(provider, connection)
+        return owner, connection, provider, thread
+
+    class Guard:
+        __slots__ = ('__weakref__',)
+
+        def __init__(self, *args, **kwargs):
+            raise TypeError('release guards require an active authority context')
+
+        @property
+        def connection(self):
+            return state(self)[1]
+
+        def apply_provider_incident(self, plan):
+            _owner, connection, provider, _thread = state(self)
+            return provider.apply_incident(connection, plan)
+
+        def revalidate_provider(self):
+            _owner, connection, provider, _thread = state(self)
+            provider.revalidate_database_peer(connection)
+
+        def __copy__(self):
+            raise TypeError('release guards cannot be copied')
+
+        def __deepcopy__(self, memo):
+            raise TypeError('release guards cannot be copied')
+
+        def __reduce_ex__(self, protocol):
+            raise TypeError('release guards cannot be serialized')
+
+    @contextmanager
+    def scope(self, connection, *, marker):
+        # Refuse recursion before acquiring Windows non-reentrant sidecars.
+        thread = get_ident()
+        if connection in held or thread in held_threads:
+            raise RagReleaseAuthorityError('release barrier is already active')
+        held.add(connection)
+        held_threads.add(thread)
+        try:
+            with self._authority_transport(connection, marker=marker) as provider:
+                guard = object.__new__(Guard)
+                active[guard] = (
+                    self,
+                    connection,
+                    provider,
+                    get_ident(),
+                    connection.get_transaction(),
+                )
+                try:
+                    self._assert_barrier_guard(guard, connection)
+                    yield guard
+                finally:
+                    # Expiration precedes transport teardown, even on exceptions.
+                    del active[guard]
+        finally:
+            held.remove(connection)
+            held_threads.remove(thread)
+
+    def require(self, guard, connection):
+        owner, actual, _provider, _thread = state(guard)
+        if owner is not self or actual is not connection:
+            raise RagReleaseAuthorityError('release barrier guard is invalid')
+        return guard
+
+    return Guard, scope, require
+
+
+_RagReleaseBarrierGuard, _release_scope, _require_release_guard = (
+    _release_barrier_boundary()
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,7 +589,7 @@ class RagReleaseAuthority:
             release_advisory_lock(connection, self._advisory_capability, shared=False)
 
     @contextmanager
-    def _authority_barrier(
+    def _authority_transport(
         self,
         connection: Connection,
         *,
@@ -537,11 +615,7 @@ class RagReleaseAuthority:
                         safety_capability=provider_rows,
                     )
                     order.acquire('release_rows')
-                    yield _RagReleaseBarrierGuard(
-                        connection,
-                        seal=_RELEASE_BARRIER_SEAL,
-                        provider_guard=provider_guard,
-                    )
+                    yield provider_guard
         except RagReleaseAuthorityError:
             raise
         except Exception as exc:
@@ -555,17 +629,8 @@ class RagReleaseAuthority:
                 ) from exc
             raise
 
-    @staticmethod
-    def _assert_barrier_guard(
-        guard: object, connection: Connection
-    ) -> _RagReleaseBarrierGuard:
-        if (
-            type(guard) is not _RagReleaseBarrierGuard
-            or guard._seal is not _RELEASE_BARRIER_SEAL
-            or guard.connection is not connection
-        ):
-            raise RagReleaseAuthorityError('release barrier guard is invalid')
-        return guard
+    _authority_barrier = _release_scope
+    _assert_barrier_guard = _require_release_guard
 
     @staticmethod
     def _table_state(connection: Connection) -> set[str]:

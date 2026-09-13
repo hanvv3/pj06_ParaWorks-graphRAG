@@ -118,9 +118,7 @@ _SUCCESSOR_KEYS = frozenset(
 
 # Adding a successor is a reviewed code change. Empty means supersession is
 # intentionally unavailable until a concrete provider snapshot is committed.
-COMMITTED_PROVIDER_SAFETY_SUCCESSORS: tuple[
-    AuthorizedProviderPolicySnapshot, ...
-] = ()
+COMMITTED_PROVIDER_SAFETY_SUCCESSORS: tuple[AuthorizedProviderPolicySnapshot, ...] = ()
 
 # A production key is enabled only by committing its opaque verifier. The key
 # bytes remain in the owner-controlled external file and are never committed.
@@ -141,9 +139,7 @@ _LEDGER_SIGNED_KEYS = frozenset(
         'target',
     }
 )
-_LEDGER_EVENT_KEYS = frozenset(
-    {'envelope_digest', 'event', 'nonce', 'sequence'}
-)
+_LEDGER_EVENT_KEYS = frozenset({'envelope_digest', 'event', 'nonce', 'sequence'})
 
 
 class ProviderSafetyReviewError(RagProviderSafetyError):
@@ -159,7 +155,9 @@ def review_key_material_verifier(review_secret: bytes) -> str:
 
 
 def _identity_hmac(value: object, *, secret: bytes, domain: bytes) -> str:
-    return hmac.new(secret, domain + canonical_json_bytes(value), hashlib.sha256).hexdigest()
+    return hmac.new(
+        secret, domain + canonical_json_bytes(value), hashlib.sha256
+    ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +183,9 @@ class ProviderSafetyAdminTarget:
         if type(review_secret) is not bytes or len(review_secret) < 32:
             raise ProviderSafetyReviewError('provider safety review key is invalid')
         if type(database_url) is not str or not database_url.strip():
-            raise ProviderSafetyReviewError('provider safety database target is invalid')
+            raise ProviderSafetyReviewError(
+                'provider safety database target is invalid'
+            )
         path = DurableFileAuthority.validate_configured_path(latch_path)
         if (
             type(designated_environment_id) is not str
@@ -314,9 +314,7 @@ class _ProviderSafetyReviewLedger:
                 if nonce_text in reservations:
                     raise ProviderSafetyReviewError('review ledger is inconsistent')
                 reservations[nonce_text] = digest
-            elif (
-                reservations.get(nonce_text) != digest or nonce_text in consumed
-            ):
+            elif reservations.get(nonce_text) != digest or nonce_text in consumed:
                 raise ProviderSafetyReviewError('review ledger is inconsistent')
             else:
                 consumed.add(nonce_text)
@@ -364,16 +362,13 @@ class _ProviderSafetyReviewLedger:
             events = list(payload['events'])
             matching = [event for event in events if event['nonce'] == reviewed.nonce]
             if matching:
-                if (
-                    matching[0]['envelope_digest'] != reviewed.envelope_digest
-                    or any(event['event'] == 'consumed' for event in matching)
+                if matching[0]['envelope_digest'] != reviewed.envelope_digest or any(
+                    event['event'] == 'consumed' for event in matching
                 ):
                     raise ProviderSafetyReviewError('review nonce was already used')
                 return value
             events.append(
-                self._event(
-                    sequence=len(events), event='reserved', reviewed=reviewed
-                )
+                self._event(sequence=len(events), event='reserved', reviewed=reviewed)
             )
             return self._wrap({**payload, 'events': events})
 
@@ -390,15 +385,15 @@ class _ProviderSafetyReviewLedger:
         try:
             if not self.path.exists():
                 raise ProviderSafetyReviewError('review authority pin is unavailable')
-            payload = self._validate(DurableFileAuthority.open_runtime(self.path).read())
+            payload = self._validate(
+                DurableFileAuthority.open_runtime(self.path).read()
+            )
         except ProviderSafetyReviewError:
             raise
         except DurableFileAuthorityError as exc:
             raise ProviderSafetyReviewError('review ledger is unavailable') from exc
         matching = [
-            event
-            for event in payload['events']
-            if event['nonce'] == reviewed.nonce
+            event for event in payload['events'] if event['nonce'] == reviewed.nonce
         ]
         if (
             len(matching) != 1
@@ -419,9 +414,7 @@ class _ProviderSafetyReviewLedger:
             ):
                 raise ProviderSafetyReviewError('review nonce was already used')
             events.append(
-                self._event(
-                    sequence=len(events), event='consumed', reviewed=reviewed
-                )
+                self._event(sequence=len(events), event='consumed', reviewed=reviewed)
             )
             return self._wrap({**payload, 'events': events})
 
@@ -538,7 +531,9 @@ def verify_review_envelope(
     if (expected_operation in successor_operations) != (successor is not None):
         raise ProviderSafetyReviewError('review envelope successor is invalid')
     context = payload['expected_context']
-    expected_context_value = None if expected_context is None else dict(expected_context)
+    expected_context_value = (
+        None if expected_context is None else dict(expected_context)
+    )
     if context != expected_context_value:
         raise ProviderSafetyReviewError('review envelope context differs')
     if expected_operation == 'provider-safety-init':
@@ -565,14 +560,17 @@ def verify_review_envelope(
         if successor is None:
             raise ProviderSafetyReviewError('provider successor is required')
         registry_snapshot = successor_registry.get(_successor_registry_key(successor))
-        if registry_snapshot is None or _snapshot_payload(registry_snapshot) != successor:
-            raise ProviderSafetyReviewError('provider successor is absent from registry')
+        if (
+            registry_snapshot is None
+            or _snapshot_payload(registry_snapshot) != successor
+        ):
+            raise ProviderSafetyReviewError(
+                'provider successor is absent from registry'
+            )
     return VerifiedProviderSafetyReview(
         operation=expected_operation,
         actor_subject_hmac=payload['actor_subject_hmac'],  # type: ignore[arg-type]
-        reviewed_gate_reference_hmac=payload[
-            'implementation_plan_reference_hmac'
-        ],  # type: ignore[arg-type]
+        reviewed_gate_reference_hmac=payload['implementation_plan_reference_hmac'],  # type: ignore[arg-type]
         expected_context=context,
         successor=successor,
         historical_block_acknowledged=payload['historical_block_acknowledged'],
@@ -655,10 +653,52 @@ class RagProviderSafetyIncidentPlan:
         return self._prepared.new_envelope_digest
 
 
+def _provider_peer_lifetime():
+    from threading import get_ident
+    from weakref import WeakKeyDictionary
+
+    active = WeakKeyDictionary()
+    held = set()
+    held_threads = set()
+
+    def require(self, guard, connection):
+        if (
+            type(guard) is not RagProviderSafetyReleasePeerGuard
+            or active.get(guard) != (self, connection, get_ident())
+            or guard._owner is not self
+            or connection.closed
+        ):
+            raise RagProviderSafetyError('provider release guard is inactive')
+
+    @contextmanager
+    def scope(self, connection, **options):
+        thread = get_ident()
+        if connection in held or thread in held_threads:
+            raise RagProviderSafetyError('provider release barrier is already active')
+        held.add(connection)
+        held_threads.add(thread)
+        try:
+            with self._locked_transport(connection, **options) as guard:
+                active[guard] = (self, connection, get_ident())
+                try:
+                    yield guard
+                    guard.revalidate_database_peer(connection)
+                finally:
+                    del active[guard]
+        finally:
+            held.remove(connection)
+            held_threads.remove(thread)
+
+    return scope, require
+
+
+_provider_scope, _require_provider_guard = _provider_peer_lifetime()
+
+
 class RagProviderSafetyReleasePeerGuard:
     """Pinned provider authority held stable for one live-release operation."""
 
-    __slots__ = ('_body', '_ledger', '_provider_safety', '_seal')
+    __slots__ = ('_body', '_ledger', '_provider_safety', '_owner', '__weakref__')
 
     def __init__(
         self,
@@ -668,12 +708,7 @@ class RagProviderSafetyReleasePeerGuard:
         body: Mapping[str, object],
         seal: object,
     ) -> None:
-        if seal is not _RELEASE_PEER_SEAL:
-            raise ProviderSafetyReviewError('provider release peer is invalid')
-        self._provider_safety = provider_safety
-        self._ledger = ledger
-        self._body = body
-        self._seal = seal
+        raise TypeError('provider guards require an active authority context')
 
     def validate_database_peer(
         self,
@@ -682,6 +717,7 @@ class RagProviderSafetyReleasePeerGuard:
         order: object,
         safety_capability: object,
     ) -> None:
+        self._owner._assert_active_guard(self, connection)
         from backend.app.agent_runtime.rag_advisory_locks import (
             RagLockOrderCoordinator,
         )
@@ -700,6 +736,7 @@ class RagProviderSafetyReleasePeerGuard:
         )
 
     def revalidate_database_peer(self, connection: Connection) -> None:
+        self._owner._assert_active_guard(self, connection)
         if connection.dialect.name != 'postgresql':
             raise RagProviderSafetyError(
                 'provider release peer requires PostgreSQL lock authority'
@@ -708,15 +745,14 @@ class RagProviderSafetyReleasePeerGuard:
         current = self._provider_safety._read_unlocked()
         if current['envelope_digest'] != self._body['envelope_digest']:
             raise RagProviderSafetyError('provider safety binding changed')
-        self._provider_safety._match_db_whole_set(
-            connection, current, for_update=True
-        )
+        self._provider_safety._match_db_whole_set(connection, current, for_update=True)
 
     def apply_incident(
         self,
         connection: Connection,
         plan: RagProviderSafetyIncidentPlan,
     ) -> _AppliedReleaseProviderIncident:
+        self._owner._assert_active_guard(self, connection)
         if (
             type(plan) is not RagProviderSafetyIncidentPlan
             or plan._seal is not _RELEASE_PEER_SEAL
@@ -789,8 +825,11 @@ class RagProviderSafetyReleasePeer:
             ledger=self._ledger,
         )
 
+    locked = _provider_scope
+    _assert_active_guard = _require_provider_guard
+
     @contextmanager
-    def locked(
+    def _locked_transport(
         self,
         connection: Connection,
         *,
@@ -816,20 +855,12 @@ class RagProviderSafetyReleasePeer:
             self._provider_safety._registered_advisory(connection),
         ):
             body = self._provider_safety._read_unlocked()
-            guard = RagProviderSafetyReleasePeerGuard(
-                provider_safety=self._provider_safety,
-                ledger=self._ledger,
-                body=body,
-                seal=self._seal,
-            )
+            guard = object.__new__(RagProviderSafetyReleasePeerGuard)
+            guard._provider_safety = self._provider_safety
+            guard._ledger = self._ledger
+            guard._body = body
+            guard._owner = self
             yield guard
-            self._ledger.assert_pin()
-            current = self._provider_safety._read_unlocked()
-            if current['envelope_digest'] != guard._body['envelope_digest']:
-                raise RagProviderSafetyError('provider safety binding changed')
-            self._provider_safety._match_db_whole_set(
-                connection, current, for_update=True
-            )
 
 
 class RagProviderSafetyAdminService:
@@ -981,6 +1012,7 @@ class RagProviderSafetyAdminService:
         reviewed = self._verify(
             raw, operation='provider-safety-init', context=None, successor=None
         )
+
         def prepare_review_ledger() -> None:
             if self._ledger.path.exists():
                 self._ledger.assert_pending_retry(reviewed)
@@ -1210,7 +1242,11 @@ def _load_review_secret(path_value: str | None) -> bytes:
     try:
         DurableFileAuthority.open_runtime(path)._validate_existing_regular(path)
         before = path.lstat()
-        if not stat.S_ISREG(before.st_mode) or path.is_symlink() or before.st_nlink != 1:
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or path.is_symlink()
+            or before.st_nlink != 1
+        ):
             raise ProviderSafetyReviewError('review authority key file is untrusted')
         flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
         descriptor = os.open(path, flags)
@@ -1329,7 +1365,9 @@ class _BoundedArgumentParser(argparse.ArgumentParser):
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
-    parser = _BoundedArgumentParser(prog='python -m backend.app.admin.rag_provider_safety')
+    parser = _BoundedArgumentParser(
+        prog='python -m backend.app.admin.rag_provider_safety'
+    )
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('provider-safety-status')
     for operation in sorted(_OPERATIONS):

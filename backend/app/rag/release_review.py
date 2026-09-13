@@ -1784,7 +1784,7 @@ def _authorization_boundary():
     consumed = set()
     lock = RLock()
 
-    def locked_release(s, connection, reader):
+    def locked_release(s, connection, guard):
         from backend.app.admin.rag_live_gate import (
             RagReleaseAdminTarget,
             _database_locator_identity,
@@ -1825,7 +1825,7 @@ def _authorization_boundary():
             ),
             'target_changed',
         )
-        authority._assert_barrier_guard(reader.barrier_guard, connection)
+        authority._assert_barrier_guard(guard, connection).revalidate_provider()
         authority._validate_path_set()
         marker = DurableFileAuthority.open_runtime(authority.marker_path)
         _body, snapshot = authority._parse(marker._read_bytes_unlocked())
@@ -1833,11 +1833,12 @@ def _authorization_boundary():
             connection, snapshot, database_identity=s['database_identity']
         )
 
-    def locked_inputs(s, connection, reader, inputs, snapshot, *, unused):
+    def locked_inputs(s, connection, guard, inputs, snapshot, *, unused):
         from backend.app.models.rag_runtime import (
             RagProviderReadiness,
             RagProviderSafetyAuthority,
         )
+        from backend.app.models.rag_serving import RagServingCorpusGeneration
         from backend.app.rag.release_schema import (
             build_rag_release_metadata,
             release_tables,
@@ -1846,10 +1847,41 @@ def _authorization_boundary():
         _live_require(
             type(inputs) is LiveGatePreviewInputs
             and _exact_frozen_equal(inputs.release, snapshot)
-            and _exact_frozen_equal(locked_release(s, connection, reader), snapshot),
+            and _exact_frozen_equal(locked_release(s, connection, guard), snapshot),
             'release_marker_changed',
         )
         provider, _policies = _provider_snapshot(inputs, s['secret'])
+        # The adapter's complete corpus image is generation-fenced by the
+        # independently read SQL singleton. A reader exit cannot hide a corpus,
+        # vector policy or fingerprint-key change behind its previous snapshot.
+        corpus_rows = (
+            connection.execute(
+                select(RagServingCorpusGeneration.__table__).with_for_update()
+            )
+            .mappings()
+            .all()
+        )
+        expected_corpus = {
+            'id': 1,
+            'corpus_generation': inputs.corpus.corpus_generation,
+            'vector_index_generation': inputs.corpus.vector_index_generation,
+            'embedding_model': inputs.corpus.embedding_model_bytes.decode('utf-8'),
+            'embedding_dimensions': 1536,
+            'index_policy_version': inputs.corpus.index_policy_version_bytes.decode(
+                'utf-8'
+            ),
+            'pgvector_cosine_policy_version': inputs.corpus.pgvector_cosine_policy_version,
+            'fingerprint_key_version': snapshot.fingerprint_key_version,
+            'fingerprint_key_material_verifier': snapshot.fingerprint_key_material_verifier,
+        }
+        _live_require(
+            len(corpus_rows) == 1
+            and all(
+                _exact_frozen_equal(corpus_rows[0][key], value)
+                for key, value in expected_corpus.items()
+            ),
+            'corpus_snapshot_changed',
+        )
         singleton = (
             connection.execute(
                 select(RagProviderSafetyAuthority.__table__).with_for_update()
@@ -1921,29 +1953,38 @@ def _authorization_boundary():
 
         @contextmanager
         def locked(self):
+            from backend.app.agent_runtime.durable_file_authority import (
+                DurableFileAuthority,
+            )
+
             s = self.s
+            marker = DurableFileAuthority.open_runtime(s['authority'].marker_path)
             with (
                 s['engine'].connect() as connection,
-                s['reader'].locked_approved(connection) as reader,
+                s['authority']._authority_barrier(connection, marker=marker) as guard,
             ):
-                snapshot = locked_release(s, connection, reader)
-                self.connection, self.reader, self.snapshot = (
-                    connection,
-                    reader,
-                    snapshot,
-                )
-                self.last_inputs = None
-                yield self
-                # Oracle/source callbacks also run after read(). Recheck the
-                # independent authorities before releasing the sealed barrier.
+                with s['reader'].locked_approved(
+                    connection, barrier_guard=guard
+                ) as reader:
+                    _live_require(reader.barrier_guard is guard, 'barrier_changed')
+                    snapshot = locked_release(s, connection, guard)
+                    self.connection, self.reader, self.snapshot, self.guard = (
+                        connection,
+                        reader,
+                        snapshot,
+                        guard,
+                    )
+                    self.last_inputs = None
+                    yield self
+                # Adapter teardown completes before independent authority checks.
                 locked_inputs(
-                    s, connection, reader, self.last_inputs, snapshot, unused=True
+                    s, connection, guard, self.last_inputs, snapshot, unused=True
                 )
 
         def read(self):
             value = self.reader.read()
             locked_inputs(
-                self.s, self.connection, self.reader, value, self.snapshot, unused=True
+                self.s, self.connection, self.guard, value, self.snapshot, unused=True
             )
             self.last_inputs = value
             return value
@@ -2267,6 +2308,25 @@ def _authorization_boundary():
                     type(s['authority']) is RagReleaseAuthority,
                     'approved_authority_unavailable',
                 )
+                if barrier_guard is None:
+                    from backend.app.agent_runtime.durable_file_authority import (
+                        DurableFileAuthority,
+                    )
+
+                    marker = DurableFileAuthority.open_runtime(
+                        s['authority'].marker_path
+                    )
+                    with s['authority']._authority_barrier(
+                        connection, marker=marker
+                    ) as guard:
+                        return require_source(
+                            connection,
+                            manifest=manifest,
+                            source_binding=source_binding,
+                            authorization=authorization,
+                            identity_secret=identity_secret,
+                            barrier_guard=guard,
+                        )
                 value = json.loads(record['value'])
                 require_verified_preview_source(
                     record['preview_source'],
@@ -2331,16 +2391,14 @@ def _authorization_boundary():
                 # The adapter must reuse/hold the actual Task22 -> Task23 barrier
                 # on this connection, plus its corpus/scope snapshot locks. It has
                 # no production implementation until the remaining reader work.
-                guard_options = {}
-                if barrier_guard is not None:
-                    RagReleaseAuthority._assert_barrier_guard(barrier_guard, connection)
-                    guard_options['barrier_guard'] = barrier_guard
-                with s['reader'].locked_approved(connection, **guard_options) as reader:
-                    if barrier_guard is not None:
-                        _live_require(
-                            reader.barrier_guard is barrier_guard, 'barrier_changed'
-                        )
-                    marker_snapshot = locked_release(s, connection, reader)
+                s['authority']._assert_barrier_guard(barrier_guard, connection)
+                with s['reader'].locked_approved(
+                    connection, barrier_guard=barrier_guard
+                ) as reader:
+                    _live_require(
+                        reader.barrier_guard is barrier_guard, 'barrier_changed'
+                    )
+                    marker_snapshot = locked_release(s, connection, barrier_guard)
                     locked_auth = RagReleaseMutationSet._snapshot(
                         connection, key, for_update=True
                     )
@@ -2352,7 +2410,12 @@ def _authorization_boundary():
                     for _ in range(2):
                         inputs = reader.read()
                         locked_inputs(
-                            s, connection, reader, inputs, marker_snapshot, unused=False
+                            s,
+                            connection,
+                            barrier_guard,
+                            inputs,
+                            marker_snapshot,
+                            unused=False,
                         )
                         _live_require(
                             type(inputs) is LiveGatePreviewInputs
@@ -2418,6 +2481,23 @@ def _authorization_boundary():
                             and fresh.preview_hmac == record['preview_hmac'],
                             'approved_snapshot_changed',
                         )
+                    frozen_inputs = deepcopy(inputs)
+
+                def final_check(expected_release):
+                    # No adapter read/context/oracle callback runs in this check.
+                    # Its owner must retain this exact active release/provider scope.
+                    _live_require(
+                        s['authorization'] is saved
+                        and _exact_frozen_equal(saved[0], saved[1])
+                        and _exact_frozen_equal(manifest, approved.manifest.executable)
+                        and _exact_frozen_equal(inputs, frozen_inputs),
+                        'approved_snapshot_changed',
+                    )
+                    actual_release = locked_release(s, connection, barrier_guard)
+                    _live_require(
+                        _exact_frozen_equal(actual_release, expected_release),
+                        'release_marker_changed',
+                    )
                     _live_require(
                         _exact_frozen_equal(
                             RagReleaseMutationSet._snapshot(
@@ -2432,7 +2512,12 @@ def _authorization_boundary():
                         'committed_source_changed',
                     )
                     locked_inputs(
-                        s, connection, reader, inputs, marker_snapshot, unused=False
+                        s,
+                        connection,
+                        barrier_guard,
+                        replace(frozen_inputs, release=actual_release),
+                        actual_release,
+                        unused=False,
                     )
                     _live_require(
                         s['reviewer'].reviewer_roster_hmac(record['reviewers'])
@@ -2449,7 +2534,9 @@ def _authorization_boundary():
                         implementation_plan_reference_hmac=s['plan'],
                         review_key_registry=s['registry'],
                     )
-                _source_snapshot(s['repository'], s['commit'])
+
+                final_check(marker_snapshot)
+                return final_check
             except Exception:
                 _refuse()
 
@@ -2997,6 +3084,7 @@ def _projection_boundary():
     # The caller cannot forge an issued projection with a valid HMAC or by
     # mutating dataclass fields: the authority state is private to this closure.
     issued = WeakKeyDictionary()
+    checkpoints = WeakKeyDictionary()
 
     class ApprovedCaseClaimProjection:
         __slots__ = ('__weakref__',)
@@ -3181,7 +3269,7 @@ def _projection_boundary():
             )
         ):
             _refuse()
-        require_approved_case_source(
+        checkpoint = require_approved_case_source(
             connection,
             manifest=state['manifest'],
             source_binding=state['source_binding'],
@@ -3311,11 +3399,34 @@ def _projection_boundary():
         ):
             _refuse()
 
-    return ApprovedCaseClaimProjection, prepare, validate
+        checkpoints[projection] = (connection, barrier_guard, binding, checkpoint)
+
+    def revalidate_source(
+        projection, *, connection, payload, barrier_guard, expected_release
+    ):
+        try:
+            if (
+                type(projection) is not ApprovedCaseClaimProjection
+                or projection not in issued
+            ):
+                _refuse()
+            saved = checkpoints[projection]
+            if (
+                saved[0] is not connection
+                or saved[1] is not barrier_guard
+                or saved[2] != _claim_binding(payload)
+            ):
+                _refuse()
+            saved[3](expected_release)
+        except Exception:
+            _refuse()
+
+    return ApprovedCaseClaimProjection, prepare, validate, revalidate_source
 
 
 (
     ApprovedCaseClaimProjection,
     prepare_case_claim_projection,
     validate_case_claim_projection,
+    revalidate_case_claim_source,
 ) = _projection_boundary()

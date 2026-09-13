@@ -44,12 +44,10 @@ def _release_test_seam(
     @contextmanager
     def barrier(_self, connection, *, marker):
         with marker.locked():
-            yield release_authority._RagReleaseBarrierGuard(
-                connection, seal=release_authority._RELEASE_BARRIER_SEAL
-            )
+            yield _self._provider_safety_release_peer
 
     monkeypatch.setattr(
-        release_authority.RagReleaseAuthority, '_authority_barrier', barrier
+        release_authority.RagReleaseAuthority, '_authority_transport', barrier
     )
     monkeypatch.setattr(
         release_authority.RagReleaseAuthority,
