@@ -82,10 +82,6 @@ def build_rag_release_metadata() -> MetaData:
             'validation_database_oid > 0',
             name='ck_rag_release_ledger_database_oid',
         ),
-        UniqueConstraint(
-            'validation_database_identity_uuid',
-            name='uq_rag_release_database_identity_uuid',
-        ),
     )
     Table(
         'rag_live_gate_authorizations',
