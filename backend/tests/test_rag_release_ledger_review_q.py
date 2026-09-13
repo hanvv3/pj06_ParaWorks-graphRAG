@@ -126,10 +126,12 @@ def test_bootstrap_rejects_authorization_identity_different_from_payload(
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
         snapshot = authority.initialize(
-            connection, database_identity=_identity(), **{
+            connection,
+            database_identity=_identity(),
+            **{
                 'review_envelope_hmac': '1' * 64,
                 'review_nonce_hmac': '2' * 64,
-            }
+            },
         )
     payload = _bootstrap_payload(snapshot)
     tables = release_tables(build_rag_release_metadata())
@@ -164,6 +166,9 @@ def test_bootstrap_rejects_authorization_identity_different_from_payload(
             ),
             ReleaseRowPrimaryKey('authorization', key),
         )
+        from backend.tests.release_ledger_fixtures import observe_provider_fixture
+
+        observe_provider_fixture(connection, mutations)
         with pytest.raises(RagReleaseLedgerError, match='authorization.*identity'):
             ledger.append(
                 connection,
@@ -280,6 +285,14 @@ def _case_claim_projection(mutations, payload: dict[str, object]) -> None:
     ]
     mutations._before_snapshots = [authorization_before, None, None, None, None]
     mutations._after_snapshots = [authorization, case, run, *components]
+    from backend.tests.release_ledger_fixtures import (
+        provider_observations,
+        provider_rows,
+    )
+
+    mutations._observation_rows = [row for row, _snapshot in provider_rows()]
+    mutations._observation_snapshots = [snapshot for _row, snapshot in provider_rows()]
+    payload['observation_set'] = provider_observations(_SECRET)
 
 
 def test_case_claim_rejects_two_terminal_zero_children(tmp_path: Path) -> None:
@@ -292,10 +305,12 @@ def test_case_claim_rejects_two_terminal_zero_children(tmp_path: Path) -> None:
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
         snapshot = authority.initialize(
-            connection, database_identity=_identity(), **{
+            connection,
+            database_identity=_identity(),
+            **{
                 'review_envelope_hmac': '1' * 64,
                 'review_nonce_hmac': '2' * 64,
-            }
+            },
         )
         mutations = ledger.mutation_set(connection)
     payload = _bootstrap_payload(snapshot)
@@ -345,13 +360,9 @@ def _not_attempted_component(run_id: int, component: str) -> dict[str, object]:
         'charge_basis': 'zero',
         'overrun': False,
         'provider': 'openai',
-        'model': (
-            'text-embedding-3-small' if query else 'gpt-5.4-mini-2026-03-17'
-        ),
+        'model': ('text-embedding-3-small' if query else 'gpt-5.4-mini-2026-03-17'),
         'authorized_model_config_version': (
-            'rag-query-embedding-config:v1'
-            if query
-            else 'rag-answer-model-config:v1'
+            'rag-query-embedding-config:v1' if query else 'rag-answer-model-config:v1'
         ),
         'authorized_model_config_snapshot_hmac': '1' * 64,
         'authorized_cost_policy_version': (
@@ -417,8 +428,7 @@ def test_case_claim_appends_with_logical_run_identity_and_exact_runtime_roster(
             .where(
                 tables.authorizations.c.ledger_uuid == payload['ledger_uuid'],
                 tables.authorizations.c.ledger_epoch == payload['ledger_epoch'],
-                tables.authorizations.c.approval_id_hmac
-                == payload['approval_id_hmac'],
+                tables.authorizations.c.approval_id_hmac == payload['approval_id_hmac'],
             )
             .values(
                 state='started',
@@ -458,6 +468,9 @@ def test_case_claim_appends_with_logical_run_identity_and_exact_runtime_roster(
                     {'agent_run_id': 41, 'component': component},
                 ),
             )
+        from backend.tests.release_ledger_fixtures import observe_provider_fixture
+
+        observe_provider_fixture(connection, mutations)
         advanced = ledger.append(
             connection,
             payload,
@@ -466,13 +479,18 @@ def test_case_claim_appends_with_logical_run_identity_and_exact_runtime_roster(
         )
     assert advanced.generation == 2
     with engine.connect() as connection:
-        assert connection.scalar(
-            tables.cases.select()
-            .with_only_columns(tables.cases.c.manifest_ordinal)
-        ) == 0
-        assert connection.scalar(
-            AgentRun.__table__.select().with_only_columns(AgentRun.id)
-        ) == 41
+        assert (
+            connection.scalar(
+                tables.cases.select().with_only_columns(tables.cases.c.manifest_ordinal)
+            )
+            == 0
+        )
+        assert (
+            connection.scalar(
+                AgentRun.__table__.select().with_only_columns(AgentRun.id)
+            )
+            == 41
+        )
 
 
 def test_task22_release_peer_issues_sealed_incident_plan(tmp_path: Path) -> None:
@@ -732,9 +750,7 @@ def _valid_payload_for_kind(snapshot, kind: str) -> dict[str, object]:
         'authorization_abort_component_snapshot': 1,
     }.get(kind, 0)
     for component in ('query_embedding', 'answer_generation')[:cost_count]:
-        keys.append(
-            ('cost_component', {'agent_run_id': 41, 'component': component})
-        )
+        keys.append(('cost_component', {'agent_run_id': 41, 'component': component}))
     if kind == 'authorization_abort_component':
         keys.extend(
             [
@@ -835,6 +851,9 @@ def _valid_payload_for_kind(snapshot, kind: str) -> dict[str, object]:
             item['row_projection_hmac'],
         ),
     )
+    from backend.tests.release_ledger_fixtures import complete_payload_roster
+
+    complete_payload_roster(payload, _SECRET)
     return payload
 
 
@@ -912,11 +931,14 @@ def test_observation_projection_hmac_is_typed_and_changes_with_projection() -> N
     assert first_hmac != release_observation_projection_hmac(
         'case', first, identity_secret=_SECRET
     )
-    assert len(
-        release_observation_projection_hmac(
-            'agent_run', _agent_run_values(), identity_secret=_SECRET
+    assert (
+        len(
+            release_observation_projection_hmac(
+                'agent_run', _agent_run_values(), identity_secret=_SECRET
+            )
         )
-    ) == 64
+        == 64
+    )
 
 
 def test_case_outcome_observes_unchanged_authorization_and_binds_digest(
@@ -967,7 +989,13 @@ def test_component_transition_observes_unchanged_case_and_parent(
         )
     payload = _valid_payload_for_kind(snapshot, kind)
     validated = validate_transition_payload(payload, identity_secret=_SECRET)
-    expected = {'case', 'agent_run'}
+    expected = {
+        'case',
+        'agent_run',
+        'cost_component',
+        'provider_safety_authority',
+        'provider_readiness',
+    }
     if kind == 'component_outcome':
         expected.add('authorization')
     assert {item[0] for item in validated.observation_set} == expected
@@ -1040,15 +1068,11 @@ def test_observed_peer_is_locked_under_barrier_and_never_counted_as_affected(
             assert [row.row_kind for row in mutations.observation_rows] == [
                 'authorization'
             ]
-            with pytest.raises(
-                RagReleaseLedgerError, match='observation set differs'
-            ):
+            with pytest.raises(RagReleaseLedgerError, match='observation set differs'):
                 mutations.assert_payload_projection(
                     {'observation_set': []}, identity_secret=_SECRET
                 )
-            with pytest.raises(
-                RagReleaseLedgerError, match='observation set differs'
-            ):
+            with pytest.raises(RagReleaseLedgerError, match='observation set differs'):
                 mutations.assert_payload_projection(
                     {
                         'observation_set': [
@@ -1111,9 +1135,10 @@ def test_affected_agent_run_rejects_started_at_only_update(tmp_path: Path) -> No
             ReleaseRowPrimaryKey('agent_run', {'agent_run_id': 41}),
         )
         marker = DurableFileAuthority.open_runtime(authority.marker_path)
-        with pytest.raises(
-            RagReleaseLedgerError, match='not exact'
-        ), authority._authority_barrier(connection, marker=marker) as guard:
+        with (
+            pytest.raises(RagReleaseLedgerError, match='not exact'),
+            authority._authority_barrier(connection, marker=marker) as guard,
+        ):
             mutations._execute_under_barrier(
                 connection, authority=authority, barrier_guard=guard
             )

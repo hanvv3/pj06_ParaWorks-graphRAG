@@ -3637,6 +3637,46 @@ process/fence + supervisor attestation을 검증해 case-bound 또는 case-null 
 
 transition별 exact semantic matrix는 다음과 같다.
 
+**Task23 round-4 clarification (2026-09-13, approved Option A):** every matrix row,
+including authorization bootstrap, requires the current locked provider authority
+and its complete readiness roster as canonical evidence. Exactly two readiness
+rows are active, one per component; retained inactive families are also observed.
+The payload `provider_safety_envelope_digest` denotes the current provider
+after-image. The authorization column with that name is the immutable approved
+envelope. Ordinary transitions require equality and both active families ready;
+control/component-snapshot/final/snapshot aborts require inequality or a non-ready
+active family. Crash and corpus-drift abort accept any internally valid current
+provider state, including concurrent corpus/provider drift.
+A component incident requires the sealed Task22 before-envelope to equal the
+approved envelope and its different after-envelope to prove the exact blocked
+family/generation delta. It never rewrites the approved authorization snapshot.
+Observation identity/projection checks precede mutation SQL and provider incident
+application, under the same provider-before-release authority barrier.
+
+The table's per-kind rows are in addition to the complete scoped validation
+roster: every case and dispatch for the authorization, each case's one AgentRun,
+and its exact-two cost children. Rows that do not change are observations, even
+on case-null terminal transitions (up to 30 cases, 30 parents, 60 children and
+40 dispatches). Scope membership, complete row projection, aggregate counts and
+costs must agree with those captured peers. Do not discover unrelated AgentRuns
+by scanning all application runs. Missing, extra, changed, duplicate or substituted
+roster evidence rejects the transition; any projection change alters its HMAC.
+
+Generation component success mutates the parent from admission to pending and
+binds the authorization's projection fence; query success observes its unchanged
+admission parent. Once children are terminal, pending-to-failed persistence,
+control/corpus safety, or reviewed crash finalization observes both immutable
+children and retains their actual charge and projection fence. A reviewed crash
+from admission still uses `failed/admission_only`; one from pending uses
+`failed/final`. Admission finalization cannot invent a projection fence. Cost
+owner/fence is bound only by its first component claim and cannot rotate. A
+cancelled unattempted child becomes exact terminal-zero; the case's approved
+reservation ceiling remains frozen. Parent totals are authoritative at pending
+and final phases; component rows and release dispatches account for admission
+charges. Thirty terminal ordinary failures may finish with zero dispatch and zero
+charge, but the same-barrier roster must contain an actual failed case; live
+attempts cannot be relabeled as a zero-dispatch roster.
+
 | Kind | Authorization | Case | Dispatch/component | Safety/runtime binding | Exact affected rows; required observations |
 |---|---|---|---|---|---|
 | `authorization_bootstrap` | `null -> unused`; approved provider snapshot immutable; all aggregate counts/cost `0`; execution process/fence null | all case fields null | all dispatch fields null; outcome null | user-preview snapshot = current exact; provider digest non-null | release_ledger, authorization, release_transition |

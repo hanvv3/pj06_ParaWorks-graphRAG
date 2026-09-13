@@ -2046,6 +2046,29 @@ out-of-barrier observations fail closed, and the observation set is part of the
 canonical transition HMAC. No no-op, `updated_at`-only, or clock-only write may
 be introduced to satisfy an affected-set matrix.
 
+**Round 4 implementation clarification (2026-09-13):** current provider proof is
+mandatory for bootstrap and every later transition. Its digest represents the
+current after-image, while the authorization's approved envelope remains
+immutable. Bind the complete provider readiness set and scoped case/dispatch/
+parent/exact-two-child roster through observations; validate those observations
+before SQL or sealed incident application. Ordinary transitions require approved
+equality and ready active families. Snapshot aborts prove drift/non-ready, sealed
+component incidents prove approved-before/blocked-after, and crash/corpus aborts retain
+an internally valid current snapshot. Enforce once-bound execution/cost fences,
+generation admission-to-pending parent mutation, pending-to-failed terminal-cost
+observations, and 30-case ordinary zero-dispatch terminal failure. Pending crash
+recovery retains its projection fence and paid cost in failed/final; admission
+crash remains failed/admission_only. Retain exact-six schema, no application
+metadata/Alembic/public endpoint changes, and release-review separation.
+
+Permanent round-4 tests include actual SQL append lifecycle/charge preservation,
+query-parent observations, case projection, full 30/30/60 terminal roster,
+provider drift/control/component-snapshot/case-null aborts, roster tampering and
+digest changes, once-bound owner/fence, and pre-SQL observation rejection.
+Conditional PostgreSQL tests exercise the real pinned barrier and both sealed
+component incidents and later snapshot abort. Independent rereview remains the
+next gate; Task24 and actual release/provider operations have not started.
+
 **Files:**
 
 - Create: `backend/app/rag/release_schema.py`

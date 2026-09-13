@@ -43,6 +43,216 @@ _PROVIDER_REVIEW_KEY = b'task23-provider-review-key-material-32-bytes'
 _SAFE_DATABASE = re.compile(r'^rag_task23_[0-9a-f]{20}$', re.ASCII)
 
 
+def test_postgresql_release_generation_and_pending_failure_keep_sealed_cost_roster(
+    postgres_release_db: Engine,
+    tmp_path: Path,
+) -> None:
+    from backend.tests.release_ledger_fixtures import ReleaseHarness
+
+    harness = ReleaseHarness(
+        postgres_release_db,
+        _authority(postgres_release_db, tmp_path),
+        _RUNTIME_KEY,
+        None,
+    )
+    harness.claim()
+    harness.claim_generation()
+    harness.generation_outcome()
+    costs = harness.records('cost_component')
+    payload = harness.fail_case()
+    assert harness.records('cost_component') == costs
+    assert harness.records('agent_run')[0]['total_charged_cost_usd'] == Decimal(
+        '0.000400'
+    )
+    assert (
+        sum(row['row_kind'] == 'cost_component' for row in payload['observation_set'])
+        == 2
+    )
+    assert not any(
+        row['row_kind'] == 'cost_component' for row in payload['affected_rows']
+    )
+
+
+def test_postgresql_current_provider_incident_allows_observed_snapshot_abort(
+    postgres_release_db: Engine,
+    tmp_path: Path,
+) -> None:
+    from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
+    from backend.tests.release_ledger_fixtures import ReleaseHarness
+
+    authority = _authority(postgres_release_db, tmp_path)
+    harness = ReleaseHarness(postgres_release_db, authority, _RUNTIME_KEY, None)
+    harness.claim()
+    harness.claim_generation()
+    harness.generation_outcome()
+    approved = harness.records('authorization')[0]['provider_safety_envelope_digest']
+    costs = harness.records('cost_component')
+    peer = authority._provider_safety_release_peer
+    with postgres_release_db.connect() as connection:
+        incident = peer.prepare_incident(
+            connection,
+            component='answer_generation',
+            category='provider_response_identity_invalid',
+            agent_run_id=41,
+            input_tokens=1,
+            output_tokens=2,
+            cost_usd=Decimal('0.000400'),
+        )
+    marker = DurableFileAuthority.open_runtime(authority.marker_path)
+    with (
+        postgres_release_db.begin() as connection,
+        authority._authority_barrier(connection, marker=marker) as guard,
+    ):
+        guard.apply_provider_incident(incident)
+    payload = harness.fail_case(
+        'authorization_abort_control', 'provider_safety_unavailable'
+    )
+    assert payload['provider_safety_envelope_digest'] != approved
+    assert (
+        harness.records('authorization')[0]['provider_safety_envelope_digest']
+        == approved
+    )
+    assert harness.records('cost_component') == costs
+
+
+def test_postgresql_release_component_incident_binds_approved_before_and_blocked_after(
+    postgres_release_db: Engine,
+    tmp_path: Path,
+) -> None:
+    from datetime import UTC, datetime
+
+    from backend.app.rag.release_ledger import release_row_identity_hmac
+    from backend.tests.release_ledger_fixtures import ReleaseHarness, row_key
+
+    authority = _authority(postgres_release_db, tmp_path)
+    harness = ReleaseHarness(postgres_release_db, authority, _RUNTIME_KEY, None)
+    harness.claim()
+    harness.claim_generation()
+    auth, case, run = (
+        harness.records('authorization')[0],
+        harness.records('case')[0],
+        harness.records('agent_run')[0],
+    )
+    child, dispatch = (
+        harness.records('cost_component')[-1],
+        harness.records('dispatch')[0],
+    )
+    peer = authority._provider_safety_release_peer
+    with postgres_release_db.connect() as connection:
+        incident = peer.prepare_incident(
+            connection,
+            component='answer_generation',
+            category='provider_usage_overrun',
+            agent_run_id=41,
+            input_tokens=20,
+            output_tokens=30,
+            cost_usd=Decimal('0.100000'),
+        )
+    failed = {**case, 'state': 'failed'}
+    with postgres_release_db.begin() as connection:
+        payload, mutations = harness.prepare(
+            connection,
+            'authorization_abort_component',
+            [
+                (
+                    'authorization',
+                    auth,
+                    {
+                        **auth,
+                        'state': 'aborted_overrun',
+                        'charged_cost_usd': Decimal('0.100000'),
+                    },
+                ),
+                ('case', case, failed),
+                (
+                    'agent_run',
+                    run,
+                    {
+                        **run,
+                        'status': 'failed',
+                        'run_record_phase': 'final',
+                        'completed_at': datetime.now(UTC),
+                        'total_charged_cost_usd': Decimal('0.100000'),
+                    },
+                ),
+                (
+                    'cost_component',
+                    child,
+                    {
+                        **child,
+                        'dispatch_state': 'terminal',
+                        'charge_basis': 'actual',
+                        'charged_cost_usd': Decimal('0.100000'),
+                        'actual_input_tokens': 20,
+                        'actual_output_tokens': 30,
+                        'overrun': True,
+                        'terminal_outcome': 'provider_usage_overrun',
+                    },
+                ),
+                (
+                    'dispatch',
+                    dispatch,
+                    {
+                        **dispatch,
+                        'state': 'terminal',
+                        'charge_basis': 'actual',
+                        'charged_cost_usd': Decimal('0.100000'),
+                    },
+                ),
+            ],
+            case=failed,
+            component='answer_generation',
+            outcome='provider_usage_overrun',
+        )
+        provider_keys = [
+            row_key(
+                'provider_safety_authority',
+                harness.records('provider_safety_authority')[0],
+            ),
+            row_key(
+                'provider_readiness',
+                next(
+                    row
+                    for row in harness.records('provider_readiness')
+                    if row['component'] == 'answer_generation' and row['active']
+                ),
+            ),
+        ]
+        for key in provider_keys:
+            identity = release_row_identity_hmac(
+                key.row_kind, key.primary_key, identity_secret=_RUNTIME_KEY
+            )
+            mutations._observation_rows.remove(key)
+            payload['observation_set'] = [
+                row
+                for row in payload['observation_set']
+                if (row['row_kind'], row['row_identity_hmac'])
+                != (key.row_kind, identity)
+            ]
+            payload['affected_rows'].append(
+                {'row_kind': key.row_kind, 'row_identity_hmac': identity}
+            )
+        payload['affected_rows'].sort(
+            key=lambda item: (item['row_kind'], item['row_identity_hmac'])
+        )
+        payload['provider_safety_envelope_digest'] = incident.new_envelope_digest
+        advanced = harness.ledger.append(
+            connection, payload, actual_mutations=mutations, provider_incident=incident
+        )
+    assert advanced.generation == 4
+    assert (
+        harness.records('authorization')[0]['provider_safety_envelope_digest']
+        == auth['provider_safety_envelope_digest']
+    )
+    assert (
+        harness.records('provider_safety_authority')[0]['envelope_digest']
+        == incident.new_envelope_digest
+    )
+    assert harness.records('cost_component')[-1]['charged_cost_usd'] == Decimal(
+        '0.100000'
+    )
+
+
 @pytest.fixture
 def postgres_release_db() -> Iterator[Engine]:
     base_url = os.getenv('PARAWORKS_TEST_POSTGRES_URL')
@@ -174,9 +384,7 @@ def _authority(engine: Engine, tmp_path: Path, *, callback=None):
             hashlib.sha256,
         ).hexdigest()
         provider_admin.initialize(
-            canonical_json_bytes(
-                {'hmac_sha256': signature, 'signed_payload': signed}
-            )
+            canonical_json_bytes({'hmac_sha256': signature, 'signed_payload': signed})
         )
     return RagReleaseAuthority(
         marker_path=marker,
@@ -291,15 +499,21 @@ def test_postgresql_release_barrier_applies_external_first_incident_once(
             guard.apply_provider_incident(plan)
     assert observed_generation == [0]
     with postgres_release_db.connect() as connection:
-        authority_row = connection.execute(
-            select(RagProviderSafetyAuthority.__table__)
-        ).mappings().one()
-        readiness = connection.execute(
-            select(RagProviderReadiness.__table__).where(
-                RagProviderReadiness.component == 'query_embedding',
-                RagProviderReadiness.active.is_(True),
+        authority_row = (
+            connection.execute(select(RagProviderSafetyAuthority.__table__))
+            .mappings()
+            .one()
+        )
+        readiness = (
+            connection.execute(
+                select(RagProviderReadiness.__table__).where(
+                    RagProviderReadiness.component == 'query_embedding',
+                    RagProviderReadiness.active.is_(True),
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         assert authority_row['global_safety_generation'] == 1
         assert authority_row['envelope_digest'] == plan.new_envelope_digest
         assert readiness['state'] == 'blocked_overrun'
@@ -340,15 +554,20 @@ def test_postgresql_incident_db_failure_leaves_external_mismatch_fail_stopped(
         ),
     )
     marker = DurableFileAuthority.open_runtime(authority.marker_path)
-    with postgres_release_db.connect() as connection, pytest.raises(
-        RagReleaseAuthorityError, match='provider safety authority'
-    ), authority._authority_barrier(connection, marker=marker) as guard:
+    with (
+        postgres_release_db.connect() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='provider safety authority'),
+        authority._authority_barrier(connection, marker=marker) as guard,
+    ):
         guard.apply_provider_incident(plan)
     assert service._read_unlocked()['envelope_digest'] == plan.new_envelope_digest
     with postgres_release_db.connect() as connection:
-        assert connection.scalar(
-            select(RagProviderSafetyAuthority.global_safety_generation)
-        ) == 0
+        assert (
+            connection.scalar(
+                select(RagProviderSafetyAuthority.global_safety_generation)
+            )
+            == 0
+        )
         with pytest.raises(RagReleaseAuthorityError, match='provider safety authority'):
             authority.inspect(connection)
 
@@ -371,9 +590,13 @@ def test_postgresql_creates_exact_six_in_default_schema_and_binds_oid(
             table.schema is None
             for table in build_rag_release_metadata().tables.values()
         )
-        row = connection.execute(
-            select(release_tables(build_rag_release_metadata()).ledgers)
-        ).mappings().one()
+        row = (
+            connection.execute(
+                select(release_tables(build_rag_release_metadata()).ledgers)
+            )
+            .mappings()
+            .one()
+        )
         assert row['validation_database_oid'] == current_oid
         assert row['generation'] == snapshot.generation == 0
 
@@ -396,9 +619,7 @@ def test_postgresql_creates_exact_six_in_default_schema_and_binds_oid(
 
     with pytest.raises(DBAPIError), postgres_release_db.begin() as connection:
         table = release_tables(build_rag_release_metadata()).ledgers
-        connection.execute(
-            table.update().values(designated_host_id_hmac='f' * 64)
-        )
+        connection.execute(table.update().values(designated_host_id_hmac='f' * 64))
 
 
 def test_postgresql_advisory_serializes_concurrent_initialization(
@@ -438,9 +659,10 @@ def test_postgresql_marker_first_fault_is_not_repaired_by_init(
         raise RuntimeError('simulated marker-first crash')
 
     authority = _authority(postgres_release_db, tmp_path, callback=crash)
-    with pytest.raises(
-        RuntimeError, match='marker-first'
-    ), postgres_release_db.connect() as connection:
+    with (
+        pytest.raises(RuntimeError, match='marker-first'),
+        postgres_release_db.connect() as connection,
+    ):
         authority.initialize(connection, **_review('1'))
     assert authority.marker_path.exists()
     failed_snapshot = authority._parse(authority.marker_path.read_bytes())[1]
@@ -449,12 +671,14 @@ def test_postgresql_marker_first_fault_is_not_repaired_by_init(
             set(inspect(connection).get_table_names()) & set(RAG_RELEASE_TABLE_NAMES)
         )
     retry = _authority(postgres_release_db, tmp_path)
-    with postgres_release_db.connect() as connection, pytest.raises(
-        RagReleaseAuthorityError
+    with (
+        postgres_release_db.connect() as connection,
+        pytest.raises(RagReleaseAuthorityError),
     ):
         retry.initialize(connection, **_review('3'))
-    with postgres_release_db.connect() as connection, pytest.raises(
-        RagReleaseAuthorityError, match='nonce'
+    with (
+        postgres_release_db.connect() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='nonce'),
     ):
         retry.disaster_initialize(
             connection,
@@ -492,7 +716,9 @@ def test_postgresql_rebootstrap_preserves_and_same_db_disaster_refuses(
                     tables.ledgers.c.ledger_uuid == str(first.ledger_uuid),
                     tables.ledgers.c.ledger_epoch == 1,
                 )
-            ).mappings().one()
+            )
+            .mappings()
+            .one()
         )
     with postgres_release_db.connect() as connection:
         second = authority.rebootstrap(
@@ -503,8 +729,9 @@ def test_postgresql_rebootstrap_preserves_and_same_db_disaster_refuses(
     assert second.ledger_epoch == 2
     authority.marker_path.write_bytes(b'corrupt')
     disaster = _authority(postgres_release_db, tmp_path)
-    with postgres_release_db.connect() as connection, pytest.raises(
-        RagReleaseAuthorityError, match='existing validation'
+    with (
+        postgres_release_db.connect() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='existing validation'),
     ):
         disaster.disaster_initialize(
             connection,
@@ -517,7 +744,9 @@ def test_postgresql_rebootstrap_preserves_and_same_db_disaster_refuses(
                     tables.ledgers.c.ledger_uuid == str(first.ledger_uuid),
                     tables.ledgers.c.ledger_epoch == 1,
                 )
-            ).mappings().one()
+            )
+            .mappings()
+            .one()
         )
         rows = connection.execute(
             select(
@@ -609,26 +838,27 @@ def test_postgresql_missing_release_trigger_fails_status_without_repair(
         authority.initialize(connection, **_review('1'))
     with postgres_release_db.begin() as connection:
         connection.exec_driver_sql(
-            'DROP TRIGGER rag_release_guard_transition '
-            'ON rag_live_gate_transitions'
+            'DROP TRIGGER rag_release_guard_transition ON rag_live_gate_transitions'
         )
     marker_before = authority.marker_path.read_bytes()
-    with postgres_release_db.connect() as connection, pytest.raises(
-        RagReleaseAuthorityError, match='physical schema'
+    with (
+        postgres_release_db.connect() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='physical schema'),
     ):
         authority.disaster_initialize(
             connection,
             review_verifier=_recovery_review('3', 'b' * 64),
         )
     assert authority.marker_path.read_bytes() == marker_before
-    with postgres_release_db.connect() as connection, pytest.raises(
-        RagReleaseAuthorityError, match='physical schema'
+    with (
+        postgres_release_db.connect() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='physical schema'),
     ):
         authority.inspect(connection)
     with postgres_release_db.connect() as connection:
         triggers = connection.scalar(
             text(
-                "SELECT count(*) FROM pg_trigger WHERE tgname="
+                'SELECT count(*) FROM pg_trigger WHERE tgname='
                 "'rag_release_guard_transition'"
             )
         )

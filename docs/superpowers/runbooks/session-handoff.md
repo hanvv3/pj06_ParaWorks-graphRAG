@@ -2,6 +2,41 @@
 
 Updated: 2026-09-13
 
+## 2026-09-13 Task23 round-4 review candidate
+
+- Continue from the user-approved Option A: affected rows are semantic changes
+  only; all unchanged peers used for validation belong in the signed observation
+  set. Callers must supply the complete provider readiness set and scoped case,
+  dispatch, runtime parent and exact-two cost roster, including case-null
+  terminal transitions. Observations are captured and checked before mutation
+  SQL/provider incident application, then rechecked in the same transaction.
+- Payload provider digest means current after-image; the authorization stores
+  the immutable approved digest. Ordinary work requires ready equality;
+  snapshot aborts require drift/non-ready; component incidents require a sealed
+  approved-before/blocked-after plan. Crash/corpus aborts accept an internally
+  valid current provider state, including concurrent corpus/provider drift.
+- First claim binds authorization process/fence once. Each component claim
+  similarly binds child process/dispatch fence once. Generation success sets
+  the pending parent and projection fence; query success observes its parent.
+  Pending failure observes terminal costs and preserves actual charge. Pending
+  crash uses failed/final with its fence retained; admission crash keeps the
+  existing failed/admission_only path. No admission failure invents a fence.
+- Thirty ordinary zero-dispatch failures can finish with a complete terminal
+  roster and zero charge. They cannot fabricate a failed case or erase live
+  dispatch evidence. Exact-six schema, ORM/Alembic and public endpoints remain
+  unchanged. The registered transition inventory is 17 kinds including bootstrap.
+- Verification is focused `171 passed, 12 skipped`, direct impact `133 passed,
+  5 skipped`, with 21 existing Alembic deprecation warnings. Eleven Task23 PG
+  tests (including three added full-append/barrier cases), one Task22 PG test,
+  and five migration guards need `PARAWORKS_TEST_POSTGRES_URL`. The earlier
+  full-backend non-green run remains unclassified and was not rerun.
+- The existing `.venv` launcher is broken; `.venv-task4-r3-review/Scripts/python.exe`
+  works. Use a fresh external temporary pytest basetemp and disable pytest cache
+  writes. Never place release authority test files inside the repository root.
+- Next gate is scoped independent rereview from `9a08628`; do not start Task24
+  or perform real release/admin/provider/network/paid/push/merge/deploy work.
+  Round-4 report/progress under ignored `.superpowers/sdd/` retain RED details.
+
 ## 2026-09-13 Task21 staged retrieval-shadow candidate
 
 - Task21 actual implementation is complete as a review candidate, not CLEAN.

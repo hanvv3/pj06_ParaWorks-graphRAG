@@ -7031,3 +7031,35 @@ Cost/security note:
   impact. Conditional PostgreSQL cases remain skipped without the controlled
   test DSN; no live release, provider, network, paid-model, rollout, push, merge,
   or deploy operation occurred.
+
+## 2026-09-13 Deliverable D Core Task 23 round-4 lifecycle proof
+
+- The approved Option A contract now covers the complete validation roster.
+  Every unchanged authorization/case/dispatch/runtime/cost/provider row used
+  to validate a transition is captured under the provider/release barrier and
+  bound by typed identity/projection HMACs. The payload contains no raw row
+  identities or model/source content, and no no-op or clock-only writes.
+- Current provider evidence is mandatory for bootstrap and every transition.
+  The authorization retains its approved envelope; ordinary transitions require
+  exact ready equality, snapshot aborts prove drift/non-ready, and sealed
+  component incidents prove the approved-before/blocked-after delta. Crash and
+  corpus aborts retain internally valid current evidence. Observation mismatch
+  rejects before mutation SQL or sealed provider incident application.
+- Generation completion now mutates the pending parent with the exact owner
+  fence. Query success observes its unchanged parent. Pending persistence and
+  safety failure retain actual charge while observing both immutable terminal
+  children; execution/cost owners cannot rotate. A pending crash finalizes with
+  its fence retained, while an admission crash remains admission-only.
+- Real SQL append tests execute 30 sequential zero-dispatch failures and finish
+  with a 30-case/30-parent/60-child observed roster and zero charged cost.
+  Additional negatives cover owner/fence rebind, invented projection owner,
+  hidden overrun, missing/extra/changed roster proof, and current provider drift.
+- Focused release/provider/reviewer/adversarial evidence is `171 passed, 12
+  skipped`; direct runtime/cost/model/migration evidence is `133 passed, 5
+  skipped` with 21 existing Alembic deprecation warnings. The 17 skips require
+  `PARAWORKS_TEST_POSTGRES_URL`: 11 Task23, one Task22, and five migration guards.
+  No physical PostgreSQL or full-backend-green claim is made.
+- Exact-six release schema, application metadata, Alembic revisions, public
+  endpoints, and separate review authority are unchanged. Status remains
+  **DONE_WITH_CONCERNS pending scoped independent rereview**. No live
+  release/admin/provider/network/paid, push, merge or deploy operation occurred.

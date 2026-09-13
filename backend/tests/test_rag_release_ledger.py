@@ -40,7 +40,9 @@ def _deterministic_non_product_database_seam(monkeypatch) -> None:
                 _connection, seal=release_authority._RELEASE_BARRIER_SEAL
             )
 
-    monkeypatch.setattr(release_authority.RagReleaseAuthority, '_authority_barrier', barrier)
+    monkeypatch.setattr(
+        release_authority.RagReleaseAuthority, '_authority_barrier', barrier
+    )
     monkeypatch.setattr(
         release_authority.RagReleaseAuthority,
         '_current_database_identity',
@@ -85,6 +87,9 @@ def _capture_bootstrap_authorization(connection, ledger, payload):
         },
     )
     mutations = ledger.mutation_set(connection)
+    from backend.tests.release_ledger_fixtures import observe_provider_fixture
+
+    observe_provider_fixture(connection, mutations)
     mutations.plan(
         insert(tables.authorizations).values(
             ledger_uuid=payload['ledger_uuid'],
@@ -188,15 +193,18 @@ def _bootstrap_payload(snapshot) -> dict[str, object]:
     payload['affected_rows'] = sorted(
         (
             {
-            'row_identity_hmac': release_row_identity_hmac(
-                kind, primary_key, identity_secret=_SECRET
-            ),
-            'row_kind': kind,
+                'row_identity_hmac': release_row_identity_hmac(
+                    kind, primary_key, identity_secret=_SECRET
+                ),
+                'row_kind': kind,
             }
             for kind, primary_key in row_keys.items()
         ),
         key=lambda item: (item['row_kind'], item['row_identity_hmac']),
     )
+    from backend.tests.release_ledger_fixtures import provider_observations
+
+    payload['observation_set'] = provider_observations(_SECRET)
     return payload
 
 
@@ -225,7 +233,10 @@ def test_transition_validator_accepts_exact_bootstrap_and_is_deterministic(
         (lambda value: value.update(extra='forbidden'), 'keys'),
         (lambda value: value.update(to_generation=2), 'generation'),
         (lambda value: value.update(case_claim_count=True), 'count'),
-        (lambda value: value.update(authorization_reserved_cost_usd='0E-6'), 'six-place'),
+        (
+            lambda value: value.update(authorization_reserved_cost_usd='0E-6'),
+            'six-place',
+        ),
         (lambda value: value.update(outcome='quality_gate_green'), 'outcome'),
         (lambda value: value.update(case_id_hmac='9' * 64), 'affected'),
         (
@@ -314,13 +325,16 @@ def test_append_transition_is_gapless_cas_and_exact_affected_set(
     assert advanced.last_transition_digest is not None
     tables = release_tables(build_rag_release_metadata())
     with engine.connect() as connection:
-        assert connection.scalar(select(func.count()).select_from(tables.transitions)) == 1
+        assert (
+            connection.scalar(select(func.count()).select_from(tables.transitions)) == 1
+        )
         row = connection.execute(select(tables.transitions)).mappings().one()
         assert row['generation'] == 1
         assert bytes(row['payload_canonical_bytes'])
 
-    with engine.begin() as connection, pytest.raises(
-        RagReleaseLedgerError, match='generation'
+    with (
+        engine.begin() as connection,
+        pytest.raises(RagReleaseLedgerError, match='generation'),
     ):
         ledger.append(
             connection,
@@ -332,10 +346,13 @@ def test_append_transition_is_gapless_cas_and_exact_affected_set(
     next_payload['from_generation'] = 1
     next_payload['to_generation'] = 2
     next_payload['affected_rows'][-1]['row_identity_hmac'] = 'f' * 64
-    with engine.begin() as connection, pytest.raises(
-        RagReleaseLedgerError, match='identity'
+    with (
+        engine.begin() as connection,
+        pytest.raises(RagReleaseLedgerError, match='identity'),
     ):
-        ledger.append(connection, next_payload, actual_mutations=ledger.mutation_set(connection))
+        ledger.append(
+            connection, next_payload, actual_mutations=ledger.mutation_set(connection)
+        )
 
 
 def test_runtime_links_are_hmac_only_and_not_foreign_keys() -> None:
@@ -382,8 +399,9 @@ def test_inspection_reconstructs_transition_history_and_rejects_tamper(
         connection.execute(
             tables.transitions.update().values(payload_canonical_bytes=b'{}')
         )
-    with engine.connect() as connection, pytest.raises(
-        RagReleaseAuthorityError, match='transition'
+    with (
+        engine.connect() as connection,
+        pytest.raises(RagReleaseAuthorityError, match='transition'),
     ):
         authority.inspect(connection, database_identity=_identity())
 
@@ -424,7 +442,7 @@ def test_reviewer_repro_arbitrary_row_hmac_and_impossible_terminal_are_refused(
     extra['affected_rows'].sort(
         key=lambda item: (item['row_kind'], item['row_identity_hmac'])
     )
-    with pytest.raises(RagReleaseLedgerError, match='matrix'):
+    with pytest.raises(RagReleaseLedgerError, match='matrix|overlap'):
         validate_transition_payload(extra, identity_secret=_SECRET)
 
     impossible = deepcopy(payload)
@@ -442,7 +460,9 @@ def test_reviewer_repro_arbitrary_row_hmac_and_impossible_terminal_are_refused(
         validate_transition_payload(impossible, identity_secret=_SECRET)
 
 
-def test_release_mutation_set_rejects_noop_and_wrong_transaction(tmp_path: Path) -> None:
+def test_release_mutation_set_rejects_noop_and_wrong_transaction(
+    tmp_path: Path,
+) -> None:
     from backend.app.rag.release_ledger import (
         RagReleaseLedger,
         RagReleaseLedgerError,
@@ -482,16 +502,16 @@ def test_release_mutation_set_rejects_noop_and_wrong_transaction(tmp_path: Path)
         mutations.plan(
             update(authorization_table)
             .where(
-                authorization_table.c.approval_id_hmac
-                == payload['approval_id_hmac']
+                authorization_table.c.approval_id_hmac == payload['approval_id_hmac']
             )
             .values(state='unused'),
             row,
         )
         marker = DurableFileAuthority.open_runtime(authority.marker_path)
-        with pytest.raises(
-            RagReleaseLedgerError, match='not exact'
-        ), authority._authority_barrier(connection, marker=marker) as guard:
+        with (
+            pytest.raises(RagReleaseLedgerError, match='not exact'),
+            authority._authority_barrier(connection, marker=marker) as guard,
+        ):
             mutations._execute_under_barrier(
                 connection,
                 authority=authority,
@@ -520,9 +540,10 @@ def test_mutation_plan_executes_only_inside_authority_barrier(
     @contextmanager
     def observed(self, connection, *, marker):
         nonlocal entered
-        assert connection.scalar(
-            select(func.count()).select_from(tables.authorizations)
-        ) == 0
+        assert (
+            connection.scalar(select(func.count()).select_from(tables.authorizations))
+            == 0
+        )
         entered = True
         with original(self, connection, marker=marker) as guard:
             yield guard
@@ -532,9 +553,10 @@ def test_mutation_plan_executes_only_inside_authority_barrier(
     )
     with engine.begin() as connection:
         mutations = _capture_bootstrap_authorization(connection, ledger, payload)
-        assert connection.scalar(
-            select(func.count()).select_from(tables.authorizations)
-        ) == 0
+        assert (
+            connection.scalar(select(func.count()).select_from(tables.authorizations))
+            == 0
+        )
         ledger.append(
             connection,
             payload,
@@ -623,8 +645,7 @@ def test_terminal_payload_counts_require_actual_complete_child_roster(
             .where(
                 authorization.c.ledger_uuid == terminal['ledger_uuid'],
                 authorization.c.ledger_epoch == terminal['ledger_epoch'],
-                authorization.c.approval_id_hmac
-                == terminal['approval_id_hmac'],
+                authorization.c.approval_id_hmac == terminal['approval_id_hmac'],
             )
             .values(
                 state='started',
@@ -640,8 +661,7 @@ def test_terminal_payload_counts_require_actual_complete_child_roster(
             .where(
                 authorization.c.ledger_uuid == terminal['ledger_uuid'],
                 authorization.c.ledger_epoch == terminal['ledger_epoch'],
-                authorization.c.approval_id_hmac
-                == terminal['approval_id_hmac'],
+                authorization.c.approval_id_hmac == terminal['approval_id_hmac'],
             )
             .values(
                 state='complete',
@@ -710,8 +730,9 @@ def test_every_terminal_kind_rejects_self_reported_missing_case_roster(
     payload = _bootstrap_payload(snapshot)
     payload['transition_kind'] = kind
     payload['case_claim_count'] = 1
-    with engine.connect() as connection, pytest.raises(
-        RagReleaseLedgerError, match='terminal roster'
+    with (
+        engine.connect() as connection,
+        pytest.raises(RagReleaseLedgerError, match='terminal roster'),
     ):
         ledger._assert_database_roster(connection, payload)
 
@@ -737,9 +758,10 @@ def test_mutation_plan_refuses_unsealed_barrier_without_executing(
             mutations._execute_under_barrier(
                 connection, authority=authority, barrier_guard=object()
             )
-        assert connection.scalar(
-            select(func.count()).select_from(tables.authorizations)
-        ) == 0
+        assert (
+            connection.scalar(select(func.count()).select_from(tables.authorizations))
+            == 0
+        )
 
 
 def test_authorization_owner_abort_and_single_claim_are_database_enforced() -> None:
@@ -763,9 +785,7 @@ def test_authorization_owner_abort_and_single_claim_are_database_enforced() -> N
         'designated_host_id_hmac': '6' * 64,
         'validation_database_identity_hmac': '7' * 64,
         'validation_database_locator_hmac': '8' * 64,
-        'validation_database_identity_uuid': (
-            '22222222-2222-2222-2222-222222222222'
-        ),
+        'validation_database_identity_uuid': ('22222222-2222-2222-2222-222222222222'),
         'validation_database_oid': 1,
     }
     authorization_values = {
@@ -793,9 +813,7 @@ def test_authorization_owner_abort_and_single_claim_are_database_enforced() -> N
     }
     with engine.begin() as connection:
         connection.execute(insert(tables.ledgers).values(**ledger_values))
-        connection.execute(
-            insert(tables.authorizations).values(**authorization_values)
-        )
+        connection.execute(insert(tables.authorizations).values(**authorization_values))
         connection.execute(
             update(tables.authorizations).values(state='aborted_corpus_drift')
         )
