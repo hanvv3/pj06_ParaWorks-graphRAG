@@ -2036,6 +2036,23 @@ uv run python -m backend.app.admin.rag_provider_safety provider-safety-supersede
 
 ### Task 23: Isolate the Exact-Six Live Release Authority
 
+**Current status: IMPLEMENTED / NOT RELEASE-CLEAN / 1 load-bearing P1 carried.**
+The implementation candidate remains `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
+The final reviewer accepted R4-B, but `case_claim` INSERTs with `before=None`
+still bypass approved initial-value semantics. A complete caller-supplied HMAC
+can bind forged parent permission/provider/route/tokens/metadata or child
+config/policy HMACs without proving that the reviewed manifest authorized them.
+Task23 cannot derive the approved initial projections because the frozen
+reviewed 30-case manifest contract is introduced in Task24.
+
+Ruling: Task23 breaker 5/5; P1 is real and release-blocking; carry into Task24
+mandatory first RED slice. Task24 must define canonical approved
+manifest→case_claim AgentRun/exact-two cost-child projection, validate it before
+SQL/incident, re-review this carryover CLEAN before preview/authorization work.
+Cost if wrong: forged runtime/provider/cost metadata could enter release ledger.
+This ruling supersedes earlier pending-rereview/next-task statements below;
+it does not mark Task23 COMPLETE or CLEAN or authorize release operations.
+
 **Ruling (2026-09-13, user-approved):** the canonical `affected_rows` contract
 contains only rows with a semantic before/after mutation. Same-barrier locked,
 read-only peers required to validate authorization, case, runtime, or provider
@@ -2167,6 +2184,19 @@ uv run python -m backend.app.admin.rag_live_gate status
 - [ ] Commit with `git commit -m "feat: add isolated rag release authority"`.
 
 ### Task 24: Freeze the 30-Case Manifest and Zero-Call Authorization Preview
+
+**Mandatory first RED slice — carried Task23 P1 (breaker 5/5).** Before any
+preview/authorization implementation, define the canonical projection from the
+approved frozen manifest to each `case_claim` AgentRun and exact-two cost
+children. Reproduce acceptance of forged initial permission/provider/route,
+token/cost/metadata and child config/policy identities through actual append.
+Implement authoritative comparison with the approved projection before any SQL
+or provider incident; a HMAC over submitted values alone is insufficient.
+Obtain independent CLEAN rereview of this carryover before beginning the
+remaining preview/authorization work in this task. The Task23 implementation
+candidate remains `a9c7291`, **IMPLEMENTED / NOT RELEASE-CLEAN / 1 load-bearing
+P1 carried** until that gate is closed. No production or test change is part
+of this documentation-only breaker closure.
 
 **Files:**
 

@@ -3684,6 +3684,25 @@ contract failure have their own 30-case runs. SQLite and the in-process sealed
 Task22 incident are deterministic evidence; PostgreSQL lock/physical checks
 remain separate conditional release gates.
 
+**Controller breaker ruling (2026-09-13, after final round-5 review): Task23 is
+IMPLEMENTED / NOT RELEASE-CLEAN / 1 load-bearing P1 carried.** The implementation
+candidate remains `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`; R4-B is addressed.
+The remaining P1 is `case_claim` INSERT admission: when `before=None`, the signed
+complete submitted image does not prove that its permission/provider/route,
+initial accounting/metadata or child config/policy identities are authorized.
+Task23 has no approved initial projection to compare because Task24 introduces
+the frozen reviewed 30-case manifest contract. Existing-row delta immutability
+and mutation HMACs do not close this insertion trust boundary.
+
+Ruling: Task23 breaker 5/5; P1 is real and release-blocking; carry into Task24
+mandatory first RED slice. Task24 must define canonical approved
+manifest→case_claim AgentRun/exact-two cost-child projection, validate it before
+SQL/incident, re-review this carryover CLEAN before preview/authorization work.
+Cost if wrong: forged runtime/provider/cost metadata could enter release ledger.
+This is a mandatory ordering gate for Task24 and a release blocker, not a
+COMPLETE/CLEAN disposition or acceptance of the vulnerable INSERT behavior.
+The current closure changes documentation only; candidate code/tests stay frozen.
+
 **Task23 round-4 clarification (2026-09-13, approved Option A):** every matrix row,
 including authorization bootstrap, requires the current locked provider authority
 and its complete readiness roster as canonical evidence. Exactly two readiness

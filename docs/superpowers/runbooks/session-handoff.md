@@ -5640,6 +5640,9 @@ tests passed with 53 tests; ruff passed.
 
 ## 2026-09-13 Task 23 final round-5 handoff
 
+**Current status: IMPLEMENTED / NOT RELEASE-CLEAN / 1 load-bearing P1 carried.**
+Current implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
+
 - Base `8c6f21de0b84dce355089c0cef94e4207828cd4e`; scope is only R4-A affected
   runtime audit immutability and R4-B actual append coverage. Q1/Q4 and Q3-A-F
   remain retained gates. No Task24, release operation, provider/network/paid,
@@ -5667,4 +5670,19 @@ tests passed with 53 tests; ruff passed.
   diff checks pass, credential signature matches zero. All 30 PostgreSQL skips
   remain unexecuted gates. The ignored Task23 report/progress records the local
   commit and exact review ranges. Full backend green remains unclaimed;
-  status is **DONE_WITH_CONCERNS pending final scoped independent rereview**.
+  these regression passes do not establish release cleanliness.
+- Final review accepted R4-B; the remaining real P1 is `case_claim` INSERT
+  `before=None` skipping approved initial-value validation. Forged parent
+  permission/provider/route/tokens/metadata and child config/policy HMACs can
+  be signed and admitted. Task23 cannot derive the authoritative values because
+  the frozen reviewed 30-case manifest contract arrives in Task24.
+- Ruling: Task23 breaker 5/5; P1 is real and release-blocking; carry into Task24
+  mandatory first RED slice. Task24 must define canonical approved
+  manifest→case_claim AgentRun/exact-two cost-child projection, validate it before
+  SQL/incident, re-review this carryover CLEAN before preview/authorization work.
+  Cost if wrong: forged runtime/provider/cost metadata could enter release ledger.
+- This ruling supersedes earlier blanket Task24/pending-review directions:
+  Task24 must start with the carried P1, and its preview/authorization work
+  remains gated until independent CLEAN. No further Task23 production/test
+  modifications are part of breaker closure. Preserve `a9c7291`; do not mark
+  Task23 COMPLETE/CLEAN or run live/provider/network/paid/push/merge/deploy.

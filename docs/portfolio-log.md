@@ -7066,10 +7066,13 @@ Cost/security note:
 
 ## 2026-09-13 Deliverable D Core Task 23 final scoped runtime audit proof
 
+**Current status: IMPLEMENTED / NOT RELEASE-CLEAN / 1 load-bearing P1 carried.**
+Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
+
 - Round-4 review found that an otherwise legal parent finalization could also
   rewrite permission, provider/route, legacy accounting, metadata and start time.
   Round-5 tests first reproduced 23 failures; the final implementation reconstructs
-  each permitted parent/child after-image from its immutable before-image and
+  each permitted existing-parent/child after-image from its immutable before-image and
   exact lifecycle values. Every unlisted column, including timestamps, is frozen.
 - Affected runtime rows now carry a domain-separated HMAC over every typed
   before/after column. Only HMACs enter transition bytes. Locked preflight rejects
@@ -7090,4 +7093,15 @@ Cost/security note:
   runtime transition payloads without complete mutation proofs fail closed.
   Conditional PostgreSQL evidence is not replaced by SQLite evidence. No live
   provider/release/admin operation, network/paid call, push, merge or deployment
-  occurred; Task24 still awaits independent CLEAN review.
+  occurred. The final reviewer accepted R4-B, but found a real insertion P1:
+  `case_claim` with `before=None` can sign forged permission/provider/route,
+  initial tokens/cost/metadata and child config/policy HMACs without proving
+  authorization. Task23 lacks the approved initial projection; Task24 introduces
+  the frozen reviewed 30-case manifest needed to define it.
+- Ruling: Task23 breaker 5/5; P1 is real and release-blocking; carry into Task24
+  mandatory first RED slice. Task24 must define canonical approved
+  manifest→case_claim AgentRun/exact-two cost-child projection, validate it before
+  SQL/incident, re-review this carryover CLEAN before preview/authorization work.
+  Cost if wrong: forged runtime/provider/cost metadata could enter release ledger.
+  This docs-only closure preserves `a9c7291` as the implementation candidate;
+  green regression counts do not make Task23 COMPLETE or CLEAN.
