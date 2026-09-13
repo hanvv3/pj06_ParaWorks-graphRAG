@@ -5,13 +5,14 @@ import hmac
 import io
 import json
 import socket
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
 import httpx
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select
 
 from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
@@ -21,6 +22,37 @@ _REVIEW_KEY = b'task23-distinct-external-review-key-32-bytes'
 _RUNTIME_KEY = b'task23-release-runtime-key-material-32-bytes'
 _PLAN_HMAC = '1' * 64
 _KEY_ID = 'rag-release-review-v1'
+
+
+class _TestProviderPeer:
+    pass
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_non_product_database_seam(monkeypatch) -> None:
+    from backend.app.admin import rag_provider_safety
+    from backend.app.rag import release_authority
+
+    monkeypatch.setattr(
+        rag_provider_safety, 'RagProviderSafetyReleasePeer', _TestProviderPeer
+    )
+    monkeypatch.setattr(
+        release_authority,
+        'assert_rag_release_physical_contract',
+        lambda _connection: None,
+    )
+
+    @contextmanager
+    def barrier(_self, _connection, *, marker):
+        with marker.locked():
+            yield
+
+    monkeypatch.setattr(release_authority.RagReleaseAuthority, '_authority_barrier', barrier)
+    monkeypatch.setattr(
+        release_authority.RagReleaseAuthority,
+        '_current_database_identity',
+        staticmethod(lambda _connection, supplied: supplied),
+    )
 
 
 def _review_verifier() -> str:
@@ -93,6 +125,7 @@ def _admin(tmp_path: Path):
         designated_host_id=target.designated_host_id,
         repository_roots=(),
         database_backup_roots=(),
+        provider_safety_release_peer=_TestProviderPeer(),
     )
     engine = create_engine('sqlite+pysqlite:///:memory:')
     admin = RagLiveGateAdminService(
@@ -109,6 +142,11 @@ def _admin(tmp_path: Path):
         ).ValidationDatabaseIdentity('validation', 61),
     )
     return engine, target, admin
+
+
+def _recovery_context(admin, connection) -> dict[str, object]:
+    raw = admin.target.marker_path.read_bytes() if admin.target.marker_path.exists() else None
+    return admin._recovery_context_locked(connection, raw)
 
 
 def test_release_review_domain_registry_operation_target_and_context_are_exact(
@@ -233,6 +271,7 @@ def test_reviewed_rebootstrap_and_disaster_require_fresh_exact_context(
     tmp_path: Path,
 ) -> None:
     from backend.app.admin.rag_live_gate import RagReleaseReviewError
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
     from backend.app.rag.release_schema import (
         build_rag_release_metadata,
         release_tables,
@@ -247,7 +286,7 @@ def test_reviewed_rebootstrap_and_disaster_require_fresh_exact_context(
             .where(tables.ledgers.c.ledger_epoch == 1)
             .values(generation=1, last_transition_digest='a' * 64)
         )
-        context = admin._recovery_context(connection)
+        context = _recovery_context(admin, connection)
     reviewed = _review_bytes(
         target,
         'release-ledger-rebootstrap',
@@ -260,17 +299,17 @@ def test_reviewed_rebootstrap_and_disaster_require_fresh_exact_context(
 
     target.marker_path.write_bytes(b'corrupt-release-marker')
     with engine.connect() as connection:
-        disaster_context = admin._recovery_context(connection)
+        disaster_context = _recovery_context(admin, connection)
     disaster_review = _review_bytes(
         target,
         'release-ledger-disaster-init',
         expected_context=disaster_context,
         reason_hmac='c' * 64,
     )
-    result = admin.disaster_initialize(disaster_review)
-    assert (result.ledger_epoch, result.generation) == (1, 0)
-    with pytest.raises(RagReleaseReviewError, match='context'):
+    with pytest.raises(RagReleaseAuthorityError, match='existing validation'):
         admin.disaster_initialize(disaster_review)
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(tables.ledgers)) == 2
 
 
 def test_cli_exposes_only_four_commands_and_sanitized_aggregate_output(
@@ -361,7 +400,7 @@ def test_admin_commands_are_provider_and_network_free(
             .where(tables.ledgers.c.ledger_epoch == 1)
             .values(generation=1, last_transition_digest='a' * 64)
         )
-        context = admin._recovery_context(connection)
+        context = _recovery_context(admin, connection)
     admin.rebootstrap(
         _review_bytes(
             target,
@@ -372,15 +411,18 @@ def test_admin_commands_are_provider_and_network_free(
     )
     target.marker_path.write_bytes(b'corrupt-release-marker')
     with engine.connect() as connection:
-        context = admin._recovery_context(connection)
-    admin.disaster_initialize(
-        _review_bytes(
-            target,
-            'release-ledger-disaster-init',
-            expected_context=context,
-            reason_hmac='c' * 64,
+        context = _recovery_context(admin, connection)
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    with pytest.raises(RagReleaseAuthorityError, match='existing validation'):
+        admin.disaster_initialize(
+            _review_bytes(
+                target,
+                'release-ledger-disaster-init',
+                expected_context=context,
+                reason_hmac='c' * 64,
+            )
         )
-    )
     admin.status()
 
 

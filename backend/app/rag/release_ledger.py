@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import TypeAlias
 from uuid import UUID
 
-from sqlalchemy import Connection, insert, update
+from sqlalchemy import Connection, Table, insert, select, update
 
 from backend.app.agent_runtime.durable_file_authority import (
     DurableFileAuthority,
@@ -27,6 +27,297 @@ from backend.app.rag.release_authority import (
 from backend.app.rag.release_schema import build_rag_release_metadata, release_tables
 
 AffectedRow: TypeAlias = tuple[str, str]
+
+_ROW_IDENTITY_REGISTRY: Mapping[str, tuple[str, tuple[str, ...]]] = {
+    'authorization': (
+        'rag-release-row-identity:authorization:v1',
+        ('ledger_uuid', 'ledger_epoch', 'approval_id_hmac'),
+    ),
+    'case': (
+        'rag-release-row-identity:case:v1',
+        ('ledger_uuid', 'ledger_epoch', 'approval_id_hmac', 'case_id_hmac'),
+    ),
+    'dispatch': (
+        'rag-release-row-identity:dispatch:v1',
+        (
+            'ledger_uuid',
+            'ledger_epoch',
+            'approval_id_hmac',
+            'case_id_hmac',
+            'component',
+        ),
+    ),
+    'agent_run': ('rag-release-row-identity:agent-run:v1', ('agent_run_id',)),
+    'cost_component': (
+        'rag-release-row-identity:cost-component:v1',
+        ('agent_run_id', 'component'),
+    ),
+    'provider_safety_authority': (
+        'rag-release-row-identity:provider-safety-authority:v1',
+        ('authority_uuid',),
+    ),
+    'provider_readiness': (
+        'rag-release-row-identity:provider-readiness:v1',
+        (
+            'component',
+            'provider_bytes',
+            'model_bytes',
+            'reasoning_or_config_identity_bytes',
+        ),
+    ),
+    'quality_report': (
+        'rag-release-row-identity:quality-report:v1',
+        ('ledger_uuid', 'ledger_epoch', 'approval_id_hmac'),
+    ),
+    'release_ledger': (
+        'rag-release-row-identity:release-ledger:v1',
+        ('ledger_uuid', 'ledger_epoch'),
+    ),
+    'release_transition': (
+        'rag-release-row-identity:release-transition:v1',
+        ('ledger_uuid', 'ledger_epoch', 'to_generation'),
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseRowPrimaryKey:
+    row_kind: str
+    primary_key: Mapping[str, object]
+
+
+_MUTATION_SET_SEAL = object()
+
+
+class RagReleaseMutationSet:
+    """Captures successful non-no-op row mutations on one exact transaction."""
+
+    __slots__ = ('_connection', '_rows', '_seal', '_snapshots', '_transaction')
+
+    def __init__(self, connection: Connection, *, seal: object) -> None:
+        if seal is not _MUTATION_SET_SEAL:
+            raise RagReleaseLedgerError('release mutation set is invalid')
+        self._connection = connection
+        self._rows: list[ReleaseRowPrimaryKey] = []
+        self._snapshots: list[dict[str, object]] = []
+        self._transaction = None
+        self._seal = seal
+
+    @staticmethod
+    def _table(row_kind: str) -> tuple[Table, Mapping[str, str]]:
+        release = release_tables(build_rag_release_metadata())
+        if row_kind == 'authorization':
+            return release.authorizations, {}
+        if row_kind == 'case':
+            return release.cases, {}
+        if row_kind == 'dispatch':
+            return release.dispatches, {}
+        if row_kind == 'quality_report':
+            return release.quality_reports, {}
+        if row_kind == 'agent_run':
+            from backend.app.models.agent_runs import AgentRun
+
+            return AgentRun.__table__, {}
+        if row_kind == 'cost_component':
+            from backend.app.models.rag_runtime import AgentRunCostComponent
+
+            return AgentRunCostComponent.__table__, {}
+        if row_kind == 'provider_safety_authority':
+            from backend.app.models.rag_runtime import RagProviderSafetyAuthority
+
+            return RagProviderSafetyAuthority.__table__, {}
+        if row_kind == 'provider_readiness':
+            from backend.app.models.rag_runtime import RagProviderReadiness
+
+            return RagProviderReadiness.__table__, {
+                'provider_bytes': 'provider',
+                'model_bytes': 'model',
+                'reasoning_or_config_identity_bytes': (
+                    'reasoning_or_config_identity'
+                ),
+            }
+        raise RagReleaseLedgerError('release mutation row kind is invalid')
+
+    @classmethod
+    def _snapshot(
+        cls, connection: Connection, row: ReleaseRowPrimaryKey
+    ) -> dict[str, object] | None:
+        table, aliases = cls._table(row.row_kind)
+        predicates = []
+        for key, value in row.primary_key.items():
+            column_name = aliases.get(key, key)
+            if column_name not in table.c:
+                raise RagReleaseLedgerError('release row primary key is invalid')
+            predicates.append(table.c[column_name] == value)
+        result = connection.execute(select(table).where(*predicates)).mappings().all()
+        if len(result) > 1:
+            raise RagReleaseLedgerError('release row identity is not unique')
+        return None if not result else dict(result[0])
+
+    def execute(self, statement: object, row: ReleaseRowPrimaryKey) -> object:
+        if type(row) is not ReleaseRowPrimaryKey:
+            raise RagReleaseLedgerError('release row primary key is invalid')
+        before = self._snapshot(self._connection, row)
+        result = self._connection.execute(statement)  # type: ignore[call-overload]
+        after = self._snapshot(self._connection, row)
+        if result.rowcount != 1 or after is None or after == before:
+            raise RagReleaseLedgerError('release row mutation was not exact')
+        stored = ReleaseRowPrimaryKey(row.row_kind, dict(row.primary_key))
+        if stored in self._rows:
+            raise RagReleaseLedgerError('release row mutated more than once')
+        transaction = self._connection.get_transaction()
+        if transaction is None or (
+            self._transaction is not None and transaction is not self._transaction
+        ):
+            raise RagReleaseLedgerError('release mutation transaction changed')
+        self._transaction = transaction
+        self._rows.append(stored)
+        self._snapshots.append(after)
+        return result
+
+    @property
+    def rows(self) -> tuple[ReleaseRowPrimaryKey, ...]:
+        return tuple(self._rows)
+
+    def assert_current(self, connection: Connection) -> None:
+        if (
+            connection is not self._connection
+            or self._transaction is None
+            or connection.get_transaction() is not self._transaction
+        ):
+            raise RagReleaseLedgerError(
+                'same-transaction release mutation set is required'
+            )
+        for row, expected in zip(self._rows, self._snapshots, strict=True):
+            if self._snapshot(connection, row) != expected:
+                raise RagReleaseLedgerError('release mutation row changed after capture')
+
+    def assert_payload_projection(self, payload: Mapping[str, object]) -> None:
+        by_kind: dict[str, list[dict[str, object]]] = {}
+        for row, snapshot in zip(self._rows, self._snapshots, strict=True):
+            by_kind.setdefault(row.row_kind, []).append(snapshot)
+        authorizations = by_kind.get('authorization', [])
+        if len(authorizations) != 1:
+            raise RagReleaseLedgerError('authorization mutation is required')
+        authorization = authorizations[0]
+        exact_authorization = {
+            'state': payload['authorization_state_after'],
+            'case_claim_count': payload['case_claim_count'],
+            'embedding_dispatch_count': payload['embedding_dispatch_count'],
+            'generation_dispatch_count': payload['generation_dispatch_count'],
+            'total_dispatch_count': payload['total_dispatch_count'],
+            'execution_process_instance_hmac': (
+                payload['execution_process_instance_hmac']
+            ),
+            'execution_runner_fence_hmac': payload['execution_runner_fence_hmac'],
+        }
+        if any(authorization[key] != value for key, value in exact_authorization.items()):
+            raise RagReleaseLedgerError('authorization payload differs from mutation')
+        if any(
+            Decimal(str(authorization[column])) != Decimal(str(payload[key]))
+            for column, key in (
+                ('reserved_cost_usd', 'authorization_reserved_cost_usd'),
+                ('charged_cost_usd', 'authorization_charged_cost_usd'),
+            )
+        ):
+            raise RagReleaseLedgerError('authorization cost differs from mutation')
+        cases = by_kind.get('case', [])
+        if cases:
+            if len(cases) != 1:
+                raise RagReleaseLedgerError('case mutation count is invalid')
+            case = cases[0]
+            if (
+                case['state'] != payload['case_state_after']
+                or case['case_projection_hmac'] != payload['case_projection_hmac']
+                or case['runtime_agent_run_id_hmac']
+                != payload['runtime_agent_run_id_hmac']
+                or any(
+                    Decimal(str(case[column])) != Decimal(str(payload[key]))
+                    for column, key in (
+                        (
+                            'embedding_reserved_cost_usd',
+                            'case_embedding_reserved_cost_usd',
+                        ),
+                        (
+                            'generation_reserved_cost_usd',
+                            'case_generation_reserved_cost_usd',
+                        ),
+                        ('total_reserved_cost_usd', 'case_total_reserved_cost_usd'),
+                    )
+                )
+            ):
+                raise RagReleaseLedgerError('case payload differs from mutation')
+        dispatches = by_kind.get('dispatch', [])
+        if dispatches:
+            if len(dispatches) != 1:
+                raise RagReleaseLedgerError('dispatch mutation count is invalid')
+            dispatch = dispatches[0]
+            if (
+                dispatch['component'] != payload['component']
+                or dispatch['state'] != payload['dispatch_state_after']
+                or dispatch['dispatch_count'] != payload['dispatch_count_after']
+                or dispatch['dispatch_fence_hmac'] != payload['dispatch_fence_hmac']
+                or dispatch['charge_basis'] != payload['charge_basis_after']
+                or any(
+                    Decimal(str(dispatch[column])) != Decimal(str(payload[key]))
+                    for column, key in (
+                        ('reserved_cost_usd', 'reserved_cost_usd'),
+                        ('charged_cost_usd', 'charged_cost_usd'),
+                    )
+                )
+            ):
+                raise RagReleaseLedgerError('dispatch payload differs from mutation')
+        reports = by_kind.get('quality_report', [])
+        if reports and (
+            len(reports) != 1
+            or reports[0]['quality_report_hmac'] != payload['quality_report_hmac']
+        ):
+            raise RagReleaseLedgerError('quality report differs from mutation')
+        provider = by_kind.get('provider_safety_authority', [])
+        if provider and (
+            len(provider) != 1
+            or provider[0]['envelope_digest']
+            != payload['provider_safety_envelope_digest']
+        ):
+            raise RagReleaseLedgerError('provider safety payload differs from mutation')
+
+
+def release_row_identity_hmac(
+    row_kind: str,
+    primary_key: Mapping[str, object],
+    *,
+    identity_secret: bytes,
+) -> str:
+    registry = _ROW_IDENTITY_REGISTRY.get(row_kind)
+    if registry is None or type(primary_key) is not dict:
+        raise RagReleaseLedgerError('release row identity registry is invalid')
+    schema_version, keys = registry
+    if tuple(primary_key) != keys:
+        raise RagReleaseLedgerError('release row primary key is invalid')
+    value = dict(primary_key)
+    for key, item in value.items():
+        if key in {'ledger_uuid', 'authority_uuid'}:
+            try:
+                parsed = UUID(str(item))
+            except (TypeError, ValueError) as exc:
+                raise RagReleaseLedgerError(
+                    'release row primary key is invalid'
+                ) from exc
+            if str(parsed) != item:
+                raise RagReleaseLedgerError('release row primary key is invalid')
+        elif key in {'ledger_epoch', 'to_generation', 'agent_run_id'}:
+            if type(item) is not int or item <= 0:
+                raise RagReleaseLedgerError('release row primary key is invalid')
+        elif key.endswith('_hmac'):
+            require_lower_hmac(item)
+        elif type(item) is not str or not item:
+            raise RagReleaseLedgerError('release row primary key is invalid')
+    return rag_identity_hmac(
+        value,
+        secret=identity_secret,
+        schema_version=schema_version,
+        policy_version='rag-live-gate:v1',
+    )
 
 _TRANSITION_KEYS = frozenset(
     {
@@ -148,7 +439,7 @@ _AUTHORIZATION_STATES = frozenset(
         'aborted_provider_safety',
     }
 )
-_MONEY = re.compile(r'^(?:0|[1-9][0-9]*)\.[0-9]{6}$', re.ASCII)
+_MONEY = re.compile(r'^(?:0|[1-9][0-9]{0,11})\.[0-9]{6}$', re.ASCII)
 _MONEY_KEYS = (
     'authorization_charged_cost_usd',
     'authorization_reserved_cost_usd',
@@ -242,6 +533,69 @@ def _validate_affected_rows(value: object) -> tuple[AffectedRow, ...]:
     return tuple(rows)
 
 
+def _derived_payload_rows(
+    payload: Mapping[str, object], *, identity_secret: bytes
+) -> tuple[AffectedRow, ...]:
+    common = {
+        'ledger_uuid': payload['ledger_uuid'],
+        'ledger_epoch': payload['ledger_epoch'],
+    }
+    keys: list[ReleaseRowPrimaryKey] = [
+        ReleaseRowPrimaryKey(
+            'authorization',
+            {**common, 'approval_id_hmac': payload['approval_id_hmac']},
+        ),
+        ReleaseRowPrimaryKey('release_ledger', dict(common)),
+        ReleaseRowPrimaryKey(
+            'release_transition',
+            {**common, 'to_generation': payload['to_generation']},
+        ),
+    ]
+    if payload['case_id_hmac'] is not None:
+        keys.append(
+            ReleaseRowPrimaryKey(
+                'case',
+                {
+                    **common,
+                    'approval_id_hmac': payload['approval_id_hmac'],
+                    'case_id_hmac': payload['case_id_hmac'],
+                },
+            )
+        )
+    if payload['component'] is not None:
+        keys.append(
+            ReleaseRowPrimaryKey(
+                'dispatch',
+                {
+                    **common,
+                    'approval_id_hmac': payload['approval_id_hmac'],
+                    'case_id_hmac': payload['case_id_hmac'],
+                    'component': payload['component'],
+                },
+            )
+        )
+    if payload['quality_report_hmac'] is not None:
+        keys.append(
+            ReleaseRowPrimaryKey(
+                'quality_report',
+                {**common, 'approval_id_hmac': payload['approval_id_hmac']},
+            )
+        )
+    return tuple(
+        sorted(
+            (
+                item.row_kind,
+                release_row_identity_hmac(
+                    item.row_kind,
+                    item.primary_key,
+                    identity_secret=identity_secret,
+                ),
+            )
+            for item in keys
+        )
+    )
+
+
 def _validate_bootstrap(payload: Mapping[str, object]) -> None:
     null_keys = (
         'case_embedding_reserved_cost_usd',
@@ -319,6 +673,27 @@ def _validate_transition_matrix(
         ('authorization_charged_cost_usd', 'authorization_reserved_cost_usd'),
         'authorization cost',
     )
+    authorization_reserved = Decimal(
+        str(payload['authorization_reserved_cost_usd'])
+    )
+    authorization_charged = Decimal(
+        str(payload['authorization_charged_cost_usd'])
+    )
+    if (
+        authorization_reserved < 0
+        or authorization_charged < 0
+        or (
+            authorization_charged > authorization_reserved
+            and not (
+                kind == 'authorization_abort_component'
+                and payload['outcome'] == 'provider_usage_overrun'
+            )
+        )
+    ):
+        raise RagReleaseLedgerError('authorization cost matrix is invalid')
+    for key in _MONEY_KEYS:
+        if payload[key] is not None and Decimal(str(payload[key])) < 0:
+            raise RagReleaseLedgerError(f'{key} cost is invalid')
 
     state_pair = (
         payload['authorization_state_before'],
@@ -504,29 +879,91 @@ def _validate_transition_matrix(
         payload['total_dispatch_count'],
     ) != (30, 10, 30, 40):
         raise RagReleaseLedgerError('terminal aggregate matrix is invalid')
+    if kind == 'authorization_finish_failed':
+        counts = (
+            payload['case_claim_count'],
+            payload['embedding_dispatch_count'],
+            payload['generation_dispatch_count'],
+            payload['total_dispatch_count'],
+        )
+        if counts[0] != 30:
+            raise RagReleaseLedgerError('terminal aggregate matrix is invalid')
+        if payload['outcome'] == 'execution_contract_failed' and counts == (
+            30,
+            10,
+            30,
+            40,
+        ):
+            raise RagReleaseLedgerError('terminal aggregate matrix is invalid')
+        if payload['outcome'] == 'ordinary_execution_failed' and counts[3] == 0:
+            raise RagReleaseLedgerError('terminal aggregate matrix is invalid')
+    if has_case and payload['case_claim_count'] == 0:
+        raise RagReleaseLedgerError('case aggregate matrix is invalid')
 
     row_kinds = [row_kind for row_kind, _identity in rows]
+    base = {'authorization', 'release_ledger', 'release_transition'}
+    exact: set[str] | None = None
+    allowed: set[str] = set(base)
+    cost_range = (0, 0)
     if kind == 'authorization_bootstrap':
-        if sorted(row_kinds) != [
-            'authorization',
-            'release_ledger',
-            'release_transition',
-        ]:
+        exact = base
+    elif kind == 'case_claim':
+        allowed |= {'case', 'agent_run', 'cost_component'}
+        cost_range = (2, 2)
+    elif kind in {'component_claim', 'component_outcome'}:
+        allowed |= {'case', 'dispatch', 'agent_run', 'cost_component'}
+        cost_range = (1, 1)
+    elif kind in {'case_failure', 'case_safe_outcome', 'authorization_abort_control'}:
+        allowed |= {'case', 'agent_run', 'cost_component'}
+        if has_component:
+            allowed.add('dispatch')
+        cost_range = (1, 2)
+    elif kind == 'case_outcome':
+        exact = base | {'case', 'agent_run'}
+    elif kind == 'authorization_abort_component':
+        allowed |= {
+            'case',
+            'dispatch',
+            'agent_run',
+            'cost_component',
+            'provider_safety_authority',
+            'provider_readiness',
+        }
+        cost_range = (1, 2)
+    elif kind == 'authorization_abort_component_snapshot':
+        allowed |= {'case', 'dispatch', 'agent_run', 'cost_component'}
+        cost_range = (1, 2)
+    elif kind in {
+        'authorization_abort_corpus_drift',
+        'authorization_abort_execution_crash',
+    }:
+        if has_case:
+            allowed |= {'case', 'agent_run', 'cost_component'}
+            if has_component:
+                allowed.add('dispatch')
+            cost_range = (0, 2)
+        else:
+            exact = base
+    elif kind in {
+        'authorization_complete',
+        'authorization_finish_quality_failed',
+    }:
+        exact = base | {'quality_report'}
+    elif kind == 'authorization_finish_failed':
+        exact = base | ({'quality_report'} if payload['quality_report_hmac'] else set())
+    else:
+        exact = base
+    row_set = set(row_kinds)
+    if exact is not None:
+        if row_set != exact or len(row_kinds) != len(exact):
             raise RagReleaseLedgerError('affected row matrix is invalid')
-    elif not {
-        'authorization',
-        'release_ledger',
-        'release_transition',
-    } <= set(row_kinds):
-        raise RagReleaseLedgerError('affected row matrix is invalid')
-    if has_case and not {'case', 'agent_run'} <= set(row_kinds):
-        raise RagReleaseLedgerError('affected row matrix is invalid')
-    if component_required and not {'dispatch', 'cost_component'} <= set(row_kinds):
-        raise RagReleaseLedgerError('affected row matrix is invalid')
-    if kind == 'case_claim' and row_kinds.count('cost_component') != 2:
-        raise RagReleaseLedgerError('affected row matrix is invalid')
-    if kind in {'authorization_complete', 'authorization_finish_quality_failed'} and (
-        'quality_report' not in row_kinds
+    elif (
+        row_set
+        != (allowed if row_kinds.count('cost_component') else allowed - {'cost_component'})
+        or not cost_range[0]
+        <= row_kinds.count('cost_component')
+        <= cost_range[1]
+        or any(row_kinds.count(item) != 1 for item in allowed - {'cost_component'})
     ):
         raise RagReleaseLedgerError('affected row matrix is invalid')
 
@@ -604,6 +1041,10 @@ def validate_transition_payload(
     elif approved != current:
         raise RagReleaseLedgerError('current corpus snapshot differs from approval')
     rows = _validate_affected_rows(payload['affected_rows'])
+    derived = _derived_payload_rows(payload, identity_secret=identity_secret)
+    rows_by_kind = dict(rows)
+    if any(rows_by_kind.get(kind) != identity for kind, identity in derived):
+        raise RagReleaseLedgerError('affected row identity is invalid')
     if kind == 'authorization_bootstrap':
         _validate_bootstrap(payload)
     _validate_transition_matrix(payload, rows)
@@ -638,20 +1079,56 @@ class RagReleaseLedger:
         self._authority = authority
         self._secret = identity_secret
 
+    @staticmethod
+    def mutation_set(connection: Connection) -> RagReleaseMutationSet:
+        return RagReleaseMutationSet(connection, seal=_MUTATION_SET_SEAL)
+
     def append(
         self,
         connection: Connection,
         payload: Mapping[str, object],
         *,
-        actual_affected_rows: Sequence[AffectedRow],
+        actual_mutations: RagReleaseMutationSet,
         database_identity: ValidationDatabaseIdentity | None = None,
     ) -> RagReleaseSnapshot:
         validated = validate_transition_payload(payload, identity_secret=self._secret)
-        if tuple(actual_affected_rows) != validated.affected_rows:
+        if (
+            type(actual_mutations) is not RagReleaseMutationSet
+            or actual_mutations._seal is not _MUTATION_SET_SEAL
+            or actual_mutations._connection is not connection
+        ):
+            raise RagReleaseLedgerError(
+                'same-transaction release mutation set is required'
+            )
+        actual_mutations.assert_current(connection)
+        actual_mutations.assert_payload_projection(payload)
+        derived_actual = tuple(
+            sorted(
+                (
+                    row.row_kind,
+                    release_row_identity_hmac(
+                        row.row_kind,
+                        row.primary_key,
+                        identity_secret=self._secret,
+                    ),
+                )
+                for row in actual_mutations.rows
+            )
+        )
+        internal = tuple(
+            row
+            for row in validated.affected_rows
+            if row[0] in {'release_ledger', 'release_transition'}
+        )
+        derived_actual = tuple(sorted((*derived_actual, *internal)))
+        if (
+            len(derived_actual) != len(actual_mutations.rows) + len(internal)
+            or derived_actual != validated.affected_rows
+        ):
             raise RagReleaseLedgerError('actual affected rows differ from payload')
         marker = DurableFileAuthority.open_runtime(self._authority.marker_path)
         try:
-            with marker.locked(), self._authority._registered_advisory(connection):
+            with self._authority._authority_barrier(connection, marker=marker):
                 _body, current = self._authority._parse(
                     marker._read_bytes_unlocked()
                 )
@@ -680,6 +1157,14 @@ class RagReleaseLedger:
                     database_identity_hmac=(
                         current.validation_database_identity_hmac
                     ),
+                    database_locator_hmac=(
+                        current.validation_database_locator_hmac
+                    ),
+                    review_envelope_hmac=(
+                        current.bootstrap_review_envelope_hmac
+                    ),
+                    review_nonce_hmac=current.bootstrap_review_nonce_hmac,
+                    review_operation=current.bootstrap_operation,
                 )
                 next_envelope = self._authority._wrap(next_body)
                 _next_body, next_snapshot = self._authority._parse(

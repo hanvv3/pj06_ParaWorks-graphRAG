@@ -154,6 +154,23 @@ def _service(tmp_path: Path, *, kind: str = 'production'):
     return engine, target, runtime, admin
 
 
+def test_release_peer_requires_consumed_pinned_task22_review_ledger(
+    tmp_path: Path,
+) -> None:
+    from backend.app.admin.rag_provider_safety import (
+        ProviderSafetyReviewError,
+        RagProviderSafetyReleasePeer,
+    )
+
+    _engine, target, _runtime, admin = _service(
+        tmp_path, kind='live_validation'
+    )
+    with pytest.raises(ProviderSafetyReviewError):
+        admin.release_peer()
+    admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    assert type(admin.release_peer()) is RagProviderSafetyReleasePeer
+
+
 def _create_file_first_partial_through_admin(
     *, engine, runtime, admin, reviewed_init: bytes, monkeypatch
 ) -> None:

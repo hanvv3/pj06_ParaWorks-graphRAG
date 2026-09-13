@@ -5521,3 +5521,34 @@ tests passed with 53 tests; ruff passed.
 - Never run a real release init/rebootstrap/disaster/provider/paid/rollout in
   review. Task 24 is the next **actual implementation** task, not planning and
   not Deliverable E Neo4j GraphRAG.
+
+## 2026-09-13 Task 23 F1-F9 remediation handoff
+
+- The first Task 23 independent review was NOT CLEAN. The current uncommitted
+  remediation requires a sealed pinned Task 22 provider-safety peer on the same
+  PostgreSQL connection, then acquires provider stable/advisory locks before
+  release stable/advisory locks and holds them through release commit. Never
+  replace this peer with a path-only or owner-only check.
+- Release public mutation and inspection are PostgreSQL-only. The exact-six
+  default-schema metadata remains isolated from application ORM/Alembic. Its
+  frozen physical contract now includes columns/types/nullability, PK/FK/checks,
+  indexes/comments/triggers and trigger bodies; any drift is read-only status
+  failure and mutation fail-stop, never repair.
+- Disaster init is valid only against a fresh isolated validation database with
+  zero release rows. It never creates a second identity in the same database.
+  Rebootstrap after marker-first/DB failure keeps the same UUID and moves to the
+  next marker epoch, leaving the failed epoch absent. Recovery signing context
+  and nonce collision checks occur under both locks.
+- Transition callers must use the sealed mutation collector bound to the exact
+  connection/transaction. It derives affected-row HMACs from registered typed
+  primary keys and validates observed before/after snapshots against exact
+  operation payloads and the complete transition-kind matrix.
+- Current fresh gates: focused/reviewer-provider probe `52 passed, 6 skipped`;
+  direct impact `100 passed, 9 skipped`; Ruff clean. Six skips are Task23's
+  actual PostgreSQL physical/concurrency tests and three are existing
+  Task22/advisory PostgreSQL gates. `PARAWORKS_TEST_POSTGRES_URL` is unavailable.
+  Do not claim SQLite as physical PostgreSQL evidence.
+- Before requesting rereview, finish compile/import/diff/credential checks,
+  commit locally, and record the exact SHA/range. Do not run a real release
+  command, provider/network/paid call, rollout, push, merge or deploy. Task 24
+  remains blocked until independent CLEAN and is an actual implementation task.

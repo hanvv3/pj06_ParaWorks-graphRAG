@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,38 @@ from backend.app.agent_runtime.fingerprints import canonical_json_bytes
 from backend.app.rag.release_schema import build_rag_release_metadata, release_tables
 
 _SECRET = b'task23-release-runtime-key-material-32-bytes'
+
+
+class _TestProviderPeer:
+    pass
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_non_product_database_seam(monkeypatch) -> None:
+    """Exercise deterministic state logic without weakening product PG entrypoints."""
+    from backend.app.admin import rag_provider_safety
+    from backend.app.rag import release_authority
+
+    monkeypatch.setattr(
+        rag_provider_safety, 'RagProviderSafetyReleasePeer', _TestProviderPeer
+    )
+    monkeypatch.setattr(
+        release_authority,
+        'assert_rag_release_physical_contract',
+        lambda _connection: None,
+    )
+
+    @contextmanager
+    def barrier(_self, _connection, *, marker):
+        with marker.locked():
+            yield
+
+    monkeypatch.setattr(release_authority.RagReleaseAuthority, '_authority_barrier', barrier)
+    monkeypatch.setattr(
+        release_authority.RagReleaseAuthority,
+        '_current_database_identity',
+        staticmethod(lambda _connection, supplied: supplied),
+    )
 
 
 def _provider_authority(path: Path) -> None:
@@ -33,6 +66,7 @@ def _service(tmp_path: Path, **overrides):
         'designated_host_id': 'immutable-host-01',
         'repository_roots': (Path.cwd(),),
         'database_backup_roots': (tmp_path / 'db-backups',),
+        'provider_safety_release_peer': _TestProviderPeer(),
     }
     values.update(overrides)
     return RagReleaseAuthority(**values), release_path, provider_path
@@ -49,6 +83,15 @@ def _review_args(seed: str = '1') -> dict[str, str]:
         'review_envelope_hmac': seed * 64,
         'review_nonce_hmac': str((int(seed, 16) + 1) % 16)[-1] * 64,
     }
+
+
+def _recovery_review(seed: str, reason: str):
+    values = _review_args(seed)
+    return lambda _connection, _raw: (
+        values['review_envelope_hmac'],
+        values['review_nonce_hmac'],
+        reason,
+    )
 
 
 def test_initialize_writes_canonical_hmac_marker_and_generation_zero_db_peer(
@@ -220,7 +263,7 @@ def test_release_marker_must_be_outside_repository_and_backup_roots(
         )
 
 
-def test_rebootstrap_preserves_old_epoch_and_disaster_uses_fresh_ledger(
+def test_rebootstrap_preserves_old_epoch_and_same_db_disaster_is_refused(
     tmp_path: Path,
 ) -> None:
     authority, marker_path, provider_path = _service(tmp_path)
@@ -239,8 +282,7 @@ def test_rebootstrap_preserves_old_epoch_and_disaster_uses_fresh_ledger(
         authority.rebootstrap(
             connection,
             database_identity=_identity(),
-            rebootstrap_reason_hmac=reason,
-            **_review_args('3'),
+            review_verifier=_recovery_review('3', reason),
         )
     tables = release_tables(build_rag_release_metadata())
     with engine.begin() as connection:
@@ -256,8 +298,7 @@ def test_rebootstrap_preserves_old_epoch_and_disaster_uses_fresh_ledger(
         second = authority.rebootstrap(
             connection,
             database_identity=_identity(),
-            rebootstrap_reason_hmac=reason,
-            **_review_args('3'),
+            review_verifier=_recovery_review('3', reason),
         )
     assert second.ledger_uuid == first.ledger_uuid
     assert second.ledger_epoch == 2
@@ -266,21 +307,128 @@ def test_rebootstrap_preserves_old_epoch_and_disaster_uses_fresh_ledger(
     assert second.rebootstrap_reason_hmac == reason
     with engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(tables.ledgers)) == 2
-
     marker_path.write_bytes(b'corrupt')
     disaster, _path, _provider = _service(
         tmp_path,
         provider_safety_latch_path=provider_path,
     )
-    with engine.begin() as connection:
-        third = disaster.disaster_initialize(
+    with engine.begin() as connection, pytest.raises(
+        __import__(
+            'backend.app.rag.release_authority', fromlist=['RagReleaseAuthorityError']
+        ).RagReleaseAuthorityError,
+        match='existing validation database identity',
+    ):
+        disaster.disaster_initialize(
             connection,
             database_identity=_identity(),
-            rebootstrap_reason_hmac='b' * 64,
-            **_review_args('5'),
+            review_verifier=_recovery_review('5', 'b' * 64),
         )
-    assert third.ledger_uuid not in {first.ledger_uuid, second.ledger_uuid}
-    assert third.ledger_epoch == 1
-    assert third.predecessor_marker_digest is None
     with engine.connect() as connection:
-        assert connection.scalar(select(func.count()).select_from(tables.ledgers)) == 3
+        assert connection.scalar(select(func.count()).select_from(tables.ledgers)) == 2
+
+
+def test_marker_first_rebootstrap_failure_advances_fresh_same_ledger_epoch(
+    tmp_path: Path,
+) -> None:
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    crash_enabled = False
+
+    def fail_after_marker() -> None:
+        if crash_enabled:
+            raise RuntimeError('marker-first rebootstrap crash')
+
+    authority, _marker_path, provider_path = _service(
+        tmp_path, after_marker_replace=fail_after_marker
+    )
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    with engine.begin() as connection:
+        first = authority.initialize(
+            connection, database_identity=_identity(), **_review_args()
+        )
+    tables = release_tables(build_rag_release_metadata())
+    with engine.begin() as connection:
+        connection.execute(
+            tables.ledgers.update()
+            .where(tables.ledgers.c.ledger_uuid == str(first.ledger_uuid))
+            .values(generation=1, last_transition_digest='c' * 64)
+        )
+    crash_enabled = True
+    with engine.begin() as connection, pytest.raises(RuntimeError, match='marker-first'):
+        authority.rebootstrap(
+            connection,
+            database_identity=_identity(),
+            review_verifier=_recovery_review('3', 'a' * 64),
+        )
+    crash_enabled = False
+    retry, _marker, _provider = _service(
+        tmp_path, provider_safety_latch_path=provider_path
+    )
+    with engine.begin() as connection, pytest.raises(
+        RagReleaseAuthorityError, match='nonce'
+    ):
+        retry.rebootstrap(
+            connection,
+            database_identity=_identity(),
+            review_verifier=_recovery_review('3', 'a' * 64),
+        )
+    with engine.begin() as connection:
+        recovered = retry.rebootstrap(
+            connection,
+            database_identity=_identity(),
+            review_verifier=_recovery_review('5', 'b' * 64),
+        )
+    assert recovered.ledger_uuid == first.ledger_uuid
+    assert recovered.ledger_epoch == 3
+    with engine.connect() as connection:
+        epochs = connection.scalars(
+            select(tables.ledgers.c.ledger_epoch).order_by(
+                tables.ledgers.c.ledger_epoch
+            )
+        ).all()
+    assert epochs == [1, 3]
+
+
+def test_recovery_review_verifier_runs_inside_authority_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.app.rag.release_authority import RagReleaseAuthority
+
+    held = False
+
+    @contextmanager
+    def observed_barrier(_self, _connection, *, marker):
+        nonlocal held
+        with marker.locked():
+            held = True
+            try:
+                yield
+            finally:
+                held = False
+
+    monkeypatch.setattr(RagReleaseAuthority, '_authority_barrier', observed_barrier)
+    authority, _marker, _provider = _service(tmp_path)
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    with engine.begin() as connection:
+        first = authority.initialize(
+            connection, database_identity=_identity(), **_review_args()
+        )
+    tables = release_tables(build_rag_release_metadata())
+    with engine.begin() as connection:
+        connection.execute(
+            tables.ledgers.update()
+            .where(tables.ledgers.c.ledger_uuid == str(first.ledger_uuid))
+            .values(generation=1, last_transition_digest='d' * 64)
+        )
+
+    def reviewed(_connection, _raw):
+        assert held is True
+        return '3' * 64, '4' * 64, '5' * 64
+
+    with engine.begin() as connection:
+        authority.rebootstrap(
+            connection,
+            database_identity=_identity(),
+            review_verifier=reviewed,
+        )
+    assert held is False

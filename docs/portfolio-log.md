@@ -6947,3 +6947,33 @@ Cost/security note:
   init/rebootstrap/disaster command, provider/network/paid call, rollout, push,
   merge or deploy occurred. Task 24 is the next planned **actual implementation**
   step and has not started.
+
+## 2026-09-13 Deliverable D Core Task 23 review remediation
+
+- Independent review rejected the first Task 23 candidate on nine release
+  authority invariants. The revised design composes the exact pinned Task 22
+  provider-safety whole set with the release ledger on one PostgreSQL
+  connection, in registered provider-before-release lock order, and holds both
+  locks through the release commit. A locally owned substitute file or SQLite
+  connection cannot authorize a mutation.
+- Disaster initialization cannot replace an identity in a validation database
+  that already contains release ledger history. Rebootstrap fault recovery
+  retains the ledger UUID, advances from the durable marker, and does not
+  fabricate the missing failed epoch. Signed recovery context and durable nonce
+  reuse checks are re-evaluated only after both locks are acquired.
+- Release transition affected rows now come from typed primary-key registry
+  entries and observed mutations on the same transaction. Exact lifecycle,
+  state/null-owner, count, cost, Decimal and 17-kind row matrices fail closed at
+  service and schema boundaries.
+- PostgreSQL startup/status/mutation verifies a frozen exact-six physical
+  contract: table/column/type/key/check/index/comment/trigger/version identity.
+  The database also prevents two claimed cases for one authorization.
+- Fresh deterministic evidence is `52 passed, 6 skipped` focused and `100
+  passed, 9 skipped` direct impact, with changed-file Ruff clean. The six Task
+  23 PostgreSQL cases are conditional and remain skipped without
+  `PARAWORKS_TEST_POSTGRES_URL`; SQLite is not physical proof. The earlier full
+  backend non-green result was not rerun and remains an explicit limitation.
+- This candidate schema is not in application metadata or Alembic and has not
+  been released. An earlier Task 23 candidate validation database is
+  incompatible and must not be repaired in place. No live release/provider/
+  network/paid/rollout/push/merge/deploy operation occurred.

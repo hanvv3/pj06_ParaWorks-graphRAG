@@ -414,7 +414,7 @@ class RagLiveGateAdminService:
 
     def initialize(self, raw: bytes) -> RagReleaseAdminResult:
         reviewed = self._verify(raw, 'release-ledger-init', None)
-        with self.connection_factory() as connection, connection.begin():
+        with self.connection_factory() as connection:
             if self._nonce_exists(connection, reviewed.nonce_hmac):
                 raise RagReleaseReviewError('release review nonce was already consumed')
             snapshot = self.authority.initialize(
@@ -425,14 +425,12 @@ class RagLiveGateAdminService:
             )
         return self._result('release-ledger-init', snapshot)
 
-    def _recovery_context(self, connection: Connection) -> dict[str, object]:
-        raw_marker: bytes | None = None
-        try:
-            marker_file = DurableFileAuthority.open_runtime(self.target.marker_path)
-            with marker_file.locked():
-                raw_marker = marker_file._read_bytes_unlocked()
-        except DurableFileAuthorityError:
-            raw_marker = None
+    def _recovery_context_locked(
+        self,
+        connection: Connection,
+        raw_marker: bytes | None,
+    ) -> dict[str, object]:
+        """Build signed context only while authority owns provider/release locks."""
         try:
             if raw_marker is None:
                 raise RagReleaseAuthorityError('release marker is unavailable')
@@ -473,6 +471,7 @@ class RagLiveGateAdminService:
                     table.c.last_transition_digest,
                     table.c.marker_file_digest,
                     table.c.validation_database_identity_hmac,
+                    table.c.validation_database_locator_hmac,
                 ).order_by(table.c.ledger_uuid, table.c.ledger_epoch)
             ).all()
             ledger_set_hmac = _review_hmac(
@@ -492,32 +491,52 @@ class RagLiveGateAdminService:
         return context
 
     def rebootstrap(self, raw: bytes) -> RagReleaseAdminResult:
-        with self.connection_factory() as connection, connection.begin():
-            context = self._recovery_context(connection)
-            reviewed = self._verify(raw, 'release-ledger-rebootstrap', context)
-            if self._nonce_exists(connection, reviewed.nonce_hmac):
-                raise RagReleaseReviewError('release review nonce was already consumed')
+        with self.connection_factory() as connection:
+            def verify_locked(
+                locked_connection: Connection,
+                raw_marker: bytes | None,
+            ) -> tuple[str, str, str]:
+                context = self._recovery_context_locked(
+                    locked_connection, raw_marker
+                )
+                reviewed = self._verify(
+                    raw, 'release-ledger-rebootstrap', context
+                )
+                return (
+                    reviewed.envelope_hmac,
+                    reviewed.nonce_hmac,
+                    reviewed.rebootstrap_reason_hmac or '',
+                )
+
             snapshot = self.authority.rebootstrap(
                 connection,
                 database_identity=self._database_identity_factory(connection),
-                rebootstrap_reason_hmac=reviewed.rebootstrap_reason_hmac or '',
-                review_envelope_hmac=reviewed.envelope_hmac,
-                review_nonce_hmac=reviewed.nonce_hmac,
+                review_verifier=verify_locked,
             )
         return self._result('release-ledger-rebootstrap', snapshot)
 
     def disaster_initialize(self, raw: bytes) -> RagReleaseAdminResult:
-        with self.connection_factory() as connection, connection.begin():
-            context = self._recovery_context(connection)
-            reviewed = self._verify(raw, 'release-ledger-disaster-init', context)
-            if self._nonce_exists(connection, reviewed.nonce_hmac):
-                raise RagReleaseReviewError('release review nonce was already consumed')
+        with self.connection_factory() as connection:
+            def verify_locked(
+                locked_connection: Connection,
+                raw_marker: bytes | None,
+            ) -> tuple[str, str, str]:
+                context = self._recovery_context_locked(
+                    locked_connection, raw_marker
+                )
+                reviewed = self._verify(
+                    raw, 'release-ledger-disaster-init', context
+                )
+                return (
+                    reviewed.envelope_hmac,
+                    reviewed.nonce_hmac,
+                    reviewed.rebootstrap_reason_hmac or '',
+                )
+
             snapshot = self.authority.disaster_initialize(
                 connection,
                 database_identity=self._database_identity_factory(connection),
-                rebootstrap_reason_hmac=reviewed.rebootstrap_reason_hmac or '',
-                review_envelope_hmac=reviewed.envelope_hmac,
-                review_nonce_hmac=reviewed.nonce_hmac,
+                review_verifier=verify_locked,
             )
         return self._result('release-ledger-disaster-init', snapshot)
 
@@ -639,13 +658,19 @@ def _load_review_secret(path_value: str | None) -> bytes:
 class _DefaultResources:
     service: RagLiveGateAdminService
     engine: object
+    provider_resources: object
 
     def close(self) -> None:
         self.engine.dispose()  # type: ignore[attr-defined]
+        self.provider_resources.close()  # type: ignore[attr-defined]
 
 
 def _build_default_resources(settings: Settings) -> _DefaultResources:
     from sqlalchemy.engine import make_url
+
+    from backend.app.admin.rag_provider_safety import (
+        _build_default_admin_resources,
+    )
 
     database_url = settings.paraworks_rag_live_validation_database_url
     marker_path = settings.paraworks_release_ledger_authority_path
@@ -683,7 +708,21 @@ def _build_default_resources(settings: Settings) -> _DefaultResources:
         review_secret=review_secret,
     )
     engine = create_engine(database_url, pool_pre_ping=True)
+    provider_resources = None
     try:
+        provider_resources = _build_default_admin_resources(settings)
+        provider_admin = provider_resources.service
+        if (
+            provider_admin.target.kind != 'live_validation'
+            or _database_locator_identity(provider_admin.target.database_url)
+            != _database_locator_identity(database_url)
+            or provider_admin.target.latch_path != target.provider_safety_latch_path
+            or provider_admin.target.designated_environment_id
+            != settings.paraworks_rag_live_validation_environment_id
+        ):
+            raise RagReleaseReviewError(
+                'release provider safety peer target differs'
+            )
         with engine.connect() as connection:
             advisory = load_registered_advisory_capability(
                 connection,
@@ -703,6 +742,7 @@ def _build_default_resources(settings: Settings) -> _DefaultResources:
             repository_roots=(Path.cwd(),),
             database_backup_roots=(backup_path,),
             advisory_capability=advisory,
+            provider_safety_release_peer=provider_admin.release_peer(),
         )
         return _DefaultResources(
             service=RagLiveGateAdminService(
@@ -715,9 +755,12 @@ def _build_default_resources(settings: Settings) -> _DefaultResources:
                 review_key_registry=COMMITTED_RAG_RELEASE_REVIEW_KEYS,
             ),
             engine=engine,
+            provider_resources=provider_resources,
         )
     except Exception:
         engine.dispose()
+        if provider_resources is not None:
+            provider_resources.close()
         raise
 
 

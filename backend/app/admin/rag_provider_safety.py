@@ -8,7 +8,8 @@ import json
 import os
 import stat
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Literal
@@ -602,6 +603,125 @@ class ProviderSafetyAdminResult:
     ready_family_count: int
 
 
+_RELEASE_PEER_SEAL = object()
+
+
+class RagProviderSafetyReleasePeerGuard:
+    """Pinned provider authority held stable for one live-release operation."""
+
+    __slots__ = ('_body', '_ledger', '_provider_safety', '_seal')
+
+    def __init__(
+        self,
+        *,
+        provider_safety: RagProviderSafetyService,
+        ledger: _ProviderSafetyReviewLedger,
+        body: Mapping[str, object],
+        seal: object,
+    ) -> None:
+        if seal is not _RELEASE_PEER_SEAL:
+            raise ProviderSafetyReviewError('provider release peer is invalid')
+        self._provider_safety = provider_safety
+        self._ledger = ledger
+        self._body = body
+        self._seal = seal
+
+    def validate_database_peer(
+        self,
+        connection: Connection,
+        *,
+        order: object,
+        safety_capability: object,
+    ) -> None:
+        from backend.app.agent_runtime.rag_advisory_locks import (
+            RagLockOrderCoordinator,
+        )
+
+        if (
+            type(order) is not RagLockOrderCoordinator
+            or connection.dialect.name != 'postgresql'
+        ):
+            raise RagProviderSafetyError(
+                'provider release peer requires PostgreSQL lock authority'
+            )
+        order.require(safety_capability, stage='provider_safety_rows')
+        self._ledger.assert_pin()
+        self._provider_safety._match_db_whole_set(
+            connection, self._body, for_update=True
+        )
+
+    def revalidate_database_peer(self, connection: Connection) -> None:
+        if connection.dialect.name != 'postgresql':
+            raise RagProviderSafetyError(
+                'provider release peer requires PostgreSQL lock authority'
+            )
+        self._ledger.assert_pin()
+        current = self._provider_safety._read_unlocked()
+        if current['envelope_digest'] != self._body['envelope_digest']:
+            raise RagProviderSafetyError('provider safety binding changed')
+        self._provider_safety._match_db_whole_set(
+            connection, current, for_update=True
+        )
+
+
+class RagProviderSafetyReleasePeer:
+    """Non-forgeable Task-22 inspector/pin used by Task-23 release authority."""
+
+    __slots__ = ('_ledger', '_provider_safety', '_seal')
+
+    def __init__(
+        self,
+        *,
+        provider_safety: RagProviderSafetyService,
+        ledger: _ProviderSafetyReviewLedger,
+        seal: object,
+    ) -> None:
+        if seal is not _RELEASE_PEER_SEAL:
+            raise ProviderSafetyReviewError('provider release peer is invalid')
+        self._provider_safety = provider_safety
+        self._ledger = ledger
+        self._seal = seal
+
+    @contextmanager
+    def locked(
+        self,
+        connection: Connection,
+        *,
+        order: object,
+        sidecar_capability: object,
+    ) -> Iterator[RagProviderSafetyReleasePeerGuard]:
+        from backend.app.agent_runtime.rag_advisory_locks import (
+            RagLockOrderCoordinator,
+        )
+
+        if (
+            type(order) is not RagLockOrderCoordinator
+            or connection.dialect.name != 'postgresql'
+            or self._provider_safety._advisory_capability is None
+        ):
+            raise RagProviderSafetyError(
+                'provider release peer requires PostgreSQL lock authority'
+            )
+        order.require(sidecar_capability, stage='provider_stable_sidecar')
+        self._ledger.assert_pin()
+        with (
+            self._provider_safety._authority.locked(),
+            self._provider_safety._registered_advisory(connection),
+        ):
+            body = self._provider_safety._read_unlocked()
+            guard = RagProviderSafetyReleasePeerGuard(
+                provider_safety=self._provider_safety,
+                ledger=self._ledger,
+                body=body,
+                seal=self._seal,
+            )
+            yield guard
+            self._ledger.assert_pin()
+            current = self._provider_safety._read_unlocked()
+            if current['envelope_digest'] != body['envelope_digest']:
+                raise RagProviderSafetyError('provider safety binding changed')
+
+
 class RagProviderSafetyAdminService:
     def __init__(
         self,
@@ -660,6 +780,15 @@ class RagProviderSafetyAdminService:
             review_key_id=review_key_id,
             review_key_verifier=key_verifier,
             plan_hmac=implementation_plan_reference_hmac,
+        )
+
+    def release_peer(self) -> RagProviderSafetyReleasePeer:
+        """Return the pinned, verifier-backed provider peer for live release."""
+        self._ledger.assert_pin()
+        return RagProviderSafetyReleasePeer(
+            provider_safety=self.provider_safety,
+            ledger=self._ledger,
+            seal=_RELEASE_PEER_SEAL,
         )
 
     def _verify(
