@@ -3122,6 +3122,39 @@ semantics remain unchanged. The remediation requires independent rereview;
 Task25/production readers/PostgreSQL remain outstanding and no actual run is
 authorized or performed.
 
+Round-3 rereview confirmed that global exit-callback removal must be paired with
+locally owned provider/release checkpoints in **all** authority paths, not append
+alone. Initialize, disaster recovery and rebootstrap pin the provider files and
+complete provider/release SQL images before external review/hook callbacks, then
+check them before publication, before release DML and before commit. Inspect
+checks again immediately before return. Never restore injected post-commit
+verification. Genuine Task23 marker-first hooks remain after marker replacement
+and before release DML; hook drift or transaction changes refuse without release
+DB publication and preserve crash-evidence mismatch for separately reviewed
+recovery. Append has no such post-DML callback port.
+
+Every mutation plan crosses internal literal-image executor v1 before DML.
+Caller SQL is a parsing surface, never an execution authority. Consume only
+strict native literal values and matching simple predicates, then construct
+schema-owned INSERT/UPDATE SQL from the exact frozen complete before/after row
+images. Reject callable bindings, SQL expressions, custom processors, lazy
+callable defaults, DELETE, direct provider rows and direct internal ledger/
+transition plans. Complete materialization before the final active-transaction,
+source and peer checkpoint; after DML use only owned SQL and exact after-image
+validation. Existing native driver datetime normalization is preserved: exact builtin
+`timezone`/`ZoneInfo` values remain supported, but custom `tzinfo` must not run.
+The initial case-claim UTC identity/fold requirement remains strict. This narrows
+execution machinery without changing schema, signed
+payloads, reviewer/approval trust policy or Option-A observations. Round-3
+verification and local commits are recorded in the Task24-B report; independent
+rereview is required and Task24 overall remains incomplete.
+
+Round-3 implementation `b1ab6af` has frozen-code verification across all 19
+release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
+skipped** (11 existing Alembic warnings); focused contracts **38 passed**;
+credential **3 passed**. Four changed Python files pass Ruff/format/compile and
+diff checks. PostgreSQL skips remain unexecuted, not a GREEN production claim.
+
 Implementation `656a5c3` has fresh full release evidence **1070 passed, 14
 skipped**, direct-impact evidence **266 passed, 16 skipped**, credential
 **3 passed**, and 12-file Ruff/format/compile plus diff checks. Code/tests were

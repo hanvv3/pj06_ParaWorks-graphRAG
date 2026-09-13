@@ -7271,6 +7271,31 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   This closure changes documentation only; no code/tests, live/provider/release
   operation, OAuth, push, merge or deployment are included.
 
+## 2026-09-14 Task24-B round-3 publication fencing candidate
+
+Independent rereview found that round-2's global provider exit-check removal
+left non-append authority operations unfenced, and a late callable authorization
+binding could commit earlier runtime rows. Five permanent actual-operation RED
+tests reproduced both failures. Init/recovery/inspect now use locally owned
+pinned peer/release checkpoints, and append translates every mutation plan into
+schema-owned literal-image SQL before the first DML. Caller SQL, executable
+bindings, custom processors and implicit callable defaults never execute.
+
+The fix preserves Task23's marker-first crash evidence and external review
+boundary: init/recovery hooks run before release DML and are followed by a final
+transaction/peer/release check; no post-commit verifier callback or automatic
+repair is introduced. Existing fresh-reviewer/source guard lifetimes, Option-A
+observations and exact-six schema remain intact. Implementation `b1ab6af` has
+fresh whole-19-file evidence **1145 passed, 14 skipped**, direct-impact evidence
+**266 passed, 16 skipped** (11 existing Alembic warnings), focused contracts
+**38 passed** and credential **3 passed**. Four changed Python files pass
+Ruff/format/compile and diff checks; code/tests were frozen before final runs.
+Native driver timezone/ZoneInfo normalization has its own RED/GREEN while custom
+tzinfo remains callback-free refusing. Independent rereview,
+PostgreSQL, Task25 and production readers remain outstanding. No actual release,
+bootstrap/rebootstrap, OAuth/provider/network/paid call, push, merge or deployment
+occurred. This candidate is not overall Task24 CLEAN.
+
 ## 2026-09-14 Task24-B round-2 callback isolation candidate
 
 Independent rereview reproduced two P1 transaction-integrity defects in the

@@ -2305,6 +2305,31 @@ All 12 Python files pass Ruff/format/compile and diff checks. The report records
 permanent RED oracles and exact final commands/results. No code/tests changed
 after final suite launch, no actual operation ran, and independent rereview is open.
 
+**Round-3 publication fencing remediation (independent rereview pending).**
+Rereview of `069c034` confirmed global provider-verification regression on
+init/recovery/inspect and partial commits through non-runtime SQL bindings.
+Pin verified provider files/whole DB images and complete release DB state in
+every authority path; use callback-free prepublication/pre-DML/precommit checks,
+plus a final inspect checkpoint. Do not restore post-commit verifier callbacks.
+Keep the genuine marker-first init/recovery hook before release DML, followed by
+transaction/peer/release revalidation; failure preserves crash evidence, not DB
+publication or automatic repair. Append continues to reject publication hooks.
+The smallest internal literal-image executor v1 consumes every plan before DML
+and executes only newly constructed schema-owned SQL with complete frozen row
+images. Reject executable bindings, expressions, custom processors, callable
+defaults, deletion and direct internal/provider plans. Recheck the transaction
+after materialization and retain pure complete-image after-SQL validation.
+Preserve native driver `timezone`/`ZoneInfo` instant normalization while refusing
+custom `tzinfo` without callbacks; initial claim UTC identity/fold stays strict.
+Five permanent RED tests reproduced both P1s; the report records the expanded
+matrix and final verification. Implementation `b1ab6af` passes all 19 release
+files: **1145 passed, 14 skipped**; direct impact **266 passed, 16 skipped**,
+11 existing Alembic warnings; focused contracts **38 passed**; credential
+**3 passed**. Four Python files pass Ruff/format/compile and diff checks, with
+code/tests frozen before final runs. Existing Task24 source/reviewer/guard semantics,
+exact-six schema and Option-A remain unchanged. No actual operation ran and no
+new execution authority, migration, evaluator or production reader is supplied.
+
 B implementation files additionally include `backend/app/rag/release_authority.py`
 (the two approved registry alignments), `backend/app/rag/release_ledger.py`
 (existing sealed-guard propagation), and test-only

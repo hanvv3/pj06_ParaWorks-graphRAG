@@ -2,6 +2,50 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task24-B round-3 publication fencing (rereview pending)
+
+- Independent rereview of `069c034` confirmed P1-C: the round-2 removal of
+  provider exit callbacks left init/recovery/inspect without final peer fencing.
+  It also confirmed P1-D: a late authorization callable binding could commit
+  previously executed case/runtime INSERTs before append refused. The round-2
+  evidence below is historical and is not a CLEAN result.
+- Every non-append authority path now pins the verified provider files/whole DB
+  image and the complete release database before review/hook callbacks. Locally
+  owned checks fence publication, pre-DML and precommit; inspect has a final
+  checkpoint before return. No post-commit provider callback is restored.
+- Preserve Task23's genuine marker-first init/recovery hook: it still runs after
+  marker replacement but before release DML. Drift/commit/rollback/close or
+  transaction replacement there refuses with no release DB publication, leaving
+  detectable marker-first crash evidence. There is no implicit repair/recovery.
+  Append still forbids this post-DML publication hook.
+- Internal literal-image executor v1 parses every mutation plan before DML,
+  including authorization/case/dispatch/quality/runtime/cost. Caller SQL objects
+  are never executed. Only native literal images and simple matching predicates
+  are consumed; schema-owned SQL supplies every column from the frozen image.
+  Callable/expression/processor/default/delete surfaces and provider/internal
+  ledger plans refuse. Schema, externally signed payloads and Option-A remain
+  unchanged. Materialization is followed by the active transaction/source/peer
+  checkpoints; all after-images are checked against their frozen images.
+- Native driver `timezone`/`ZoneInfo` datetimes preserve existing instant
+  normalization; custom `tzinfo` refuses without invoking its methods. The
+  initial case-claim UTC identity/fold requirement is unchanged. This narrow
+  compatibility correction has its own two-case RED and actual-append GREEN.
+- Five permanent RED cases reproduced the actual publications/partial commit.
+  Expanded tests cover all six release tables plus runtime/cost, final peer
+  checkpoints, recovery/hook transaction attacks, materialization transaction
+  changes, literal statement reordering and the existing guard/callback-free
+  lifecycle. Implementation: `b1ab6af48bcbc217658de896bbeaa7676e920696`.
+  Final whole-19-file release evidence: **1145 passed, 14 skipped** across
+  disjoint shards. Direct impact: **266 passed, 16 skipped**, 11 existing Alembic
+  warnings; focused contract verification **38 passed**; credential **3 passed**.
+  Four changed Python files pass Ruff/format/compile and working/staged diff
+  checks. Code/tests were frozen before the final runs. The report distinguishes
+  the interrupted pre-timezone run from final evidence. Independent rereview
+  remains pending; Task24 is not overall CLEAN.
+- PostgreSQL URL is absent. Task25 and production readers remain outstanding;
+  actual CLI still refuses. No real bootstrap/rebootstrap/authorization/OAuth/
+  provider/network/paid/release operation, push, merge or deployment ran.
+
 ## 2026-09-14 Task24-B round-2 callback isolation (rereview pending)
 
 - Rereview of `5e00331` reproduced committed corpus drift from a reviewer result
