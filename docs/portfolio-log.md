@@ -6907,3 +6907,43 @@ Cost/security note:
   adoption require separate future reviewed designs. No actual user
   configuration mutation, provider/network/paid call, rollout activation,
   push, merge, or deploy occurred. Task 22 is complete locally.
+
+## 2026-09-13 Deliverable D Core Task 23 exact-six release authority candidate
+
+- Added validation-only SQLAlchemy metadata containing exactly the six
+  `rag_live_gate_*` tables in PostgreSQL's default schema. It imports no
+  application ORM, is absent from `Base.metadata`, normal DB initialization and
+  Alembic, and is registered as a separate conditional PostgreSQL release gate.
+- The external release marker binds ledger UUID/epoch/generation, transition
+  tail, environment, immutable host and validation database OID/identity using
+  canonical keyed HMACs. Provider and release data/lock leaves are validated as
+  four pairwise-distinct non-ancestor owner-only regular files; the release
+  marker must remain outside the repository and DB backup tree.
+- Init, same-ledger rebootstrap, fresh-ledger disaster initialization and every
+  transition keep the stable release lock plus registered advisory lock through
+  marker-first replacement, DB mutation and commit. Crash gaps remain a
+  fail-stop mismatch. Status is read-only and performs no repair.
+- Added a separate verifier-only signed-stdin release review boundary. Its
+  domain, key verifier registry, nonce HMAC and operation/recovery context are
+  distinct from provider-safety administration; the CLI exposes no signer or
+  preview/authorization/runner command. The production verifier registry is
+  deliberately empty and key rotation remains out of scope.
+- Fresh Task 23 evidence is `38 passed, 4 skipped`; direct-impact Task 22,
+  advisory, DB initialization/migration, settings and release-contract evidence
+  including the release matrix is `95 passed, 7 skipped`; changed-file Ruff and
+  diff/credential scans are clean. The four Task 23 skips require
+  `PARAWORKS_TEST_POSTGRES_URL`, so actual
+  physical PostgreSQL DDL/OID/immutability, advisory race, marker-first fault,
+  CAS and recovery remain an explicit release gate.
+- A full backend attempt completed with `3937 passed, 127 skipped, 102 failed,
+  83 errors`. The 83 reported setup errors include existing PostgreSQL suites
+  that call `pytest.fail` when the DSN is absent. One Task 23-related release
+  profile count failure was isolated and fixed. Ten
+  representative non-PostgreSQL failures were isolated to unchanged deferred
+  Slack/PKCE/orchestration/mock contracts; the remaining full-suite failures
+  were not exhaustively classified and are not claimed as baseline-clean.
+- Candidate chain from `0771405` is `4b59fd8` -> `af54027` -> `ef22070` and
+  remains **DONE_WITH_CONCERNS pending independent review**. No real release
+  init/rebootstrap/disaster command, provider/network/paid call, rollout, push,
+  merge or deploy occurred. Task 24 is the next planned **actual implementation**
+  step and has not started.

@@ -5481,3 +5481,43 @@ tests passed with 53 tests; ruff passed.
   separate future reviewed designs. No actual configuration mutation,
   provider/network/paid call, rollout, push, merge, or deploy occurred. Task 22
   is complete locally; Task 23 is the next planned actual implementation task.
+
+## 2026-09-13 Task 23 candidate handoff
+
+- Candidate commits from Task 22 base `0771405` are `4b59fd8`, `af54027` and
+  `ef22070`. They isolate exact-six release metadata, canonical external marker,
+  append-only/gapless transition validation and the verifier-only release admin
+  CLI. Do not start Task 24 until an independent cumulative review accepts this
+  range.
+- Production runtime must use one explicitly designated validation PostgreSQL
+  database default schema and a registered
+  `RAG_RELEASE_LEDGER_AUTHORITY_LOCK_ID` capability. The release marker and
+  provider-safety marker plus their stable lock leaves are pairwise isolated.
+  Release marker/lock must also be outside both repository and configured DB
+  backup roots. Environment, host and DB identities persist only as HMACs.
+- Mutation commands are exactly `release-ledger-init`,
+  `release-ledger-rebootstrap` and `release-ledger-disaster-init`; `status` is
+  read-only. Every mutation consumes a <=32 KiB canonical external review
+  envelope from stdin and binds a release-specific domain/key-id/verifier,
+  nonce, operation, target, plan reference and recovery context. Provider-safety
+  signatures cannot authorize release commands. There is no runtime signer.
+- The committed release review registry is intentionally empty. Enabling an
+  exact opaque verifier requires a later reviewed code change. Key rotation is
+  fail-closed/out of Task 23. Do not put keys, envelopes, DB URLs, marker paths,
+  UUIDs or HMACs in logs or CLI output.
+- Fresh local gates: Task 23 `38 passed, 4 skipped`; direct-impact regression
+  including the release matrix `95 passed, 7 skipped`; Ruff, diff and
+  credential scan clean. Task 23's four PostgreSQL tests skip without
+  `PARAWORKS_TEST_POSTGRES_URL`; they use only an exact local disposable
+  `127.0.0.1:55432/*_test` controller, create a random
+  `rag_task23_<20 hex>` database, and drop only that validated database. They
+  intentionally do not clean a shared named schema.
+- The full backend run is not green: `3937 passed, 127 skipped, 102 failed, 83
+  errors`. Missing-DSN PostgreSQL fixtures account for the reported setup-error
+  class; one related release-count failure was fixed. Ten representative
+  unchanged Slack/PKCE/orchestration/mock failures reproduce in isolation; all
+  other failures remain unclassified rather than asserted as baseline. This is
+  **DONE_WITH_CONCERNS pending independent review**.
+- Never run a real release init/rebootstrap/disaster/provider/paid/rollout in
+  review. Task 24 is the next **actual implementation** task, not planning and
+  not Deliverable E Neo4j GraphRAG.
