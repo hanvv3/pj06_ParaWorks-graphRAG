@@ -3011,6 +3011,39 @@ repositories with committed fake evaluator/source bytes and explicit locked
 snapshot readers. Neither evaluator readiness nor a valid preview authorizes a
 release operation.
 
+**2026-09-13 Task24-A round-1 preview clarification.** The locked snapshot
+reader must additionally expose a provider-free frozen-candidate oracle for
+each hard-negative case. Its request binds `fixture_manifest_hmac`,
+`case_id_hmac`, `query_bytes_hmac`, `security_scope_fingerprint`,
+`corpus_snapshot_hmac`, and `configured_backend`. The typed result repeats that
+exact request, includes the reader-verified `oracle_definition_hmac`, an ordered
+`visible_candidates` array of `{slot_id, serving_identity_hmac, entailment}`,
+and nonnegative integer `hidden_match_count`. The adapter owns full resource/
+permission filtering and derives labels from its frozen non-entailment oracle,
+not the fixture's expected-no-answer declaration or a caller boolean. No real
+adapter is composed in Task24-A; absence refuses.
+
+Every hard negative must have at least one candidate, with unique allowed slots
+and serving identities, allowed support/permission, and `entailment=not_entailed`.
+Empty visible candidates refuse as `hard_negative_hidden_only` when hidden
+matches exist and `hard_negative_no_match` otherwise. The canonical preview
+binds the ordered case results as `hard_negative_oracles` and
+`hard_negative_oracles_hmac = keyed_fingerprint(schema_version=
+"rag-live-hard-negative-oracles:v1", policy_version="rag-live-gate:v1",
+value=hard_negative_oracles)`. This is subordinate preview evidence only; it
+does not change the file-based manifest root or create execution authority.
+
+The reader also supplies the exact lexical unique
+`pgvector_baseline_serving_identity_hmacs` roster, bound in canonical preview.
+Every participant (including non-relevant candidates), every pgvector relevant/
+required member, and every pgvector oracle candidate must have non-null vector
+state. A corpus member participating only in keyword retrieval may have null
+vector state. Assistant prior-context quotas count actual prepared retrieval
+context after sanitization, deduplication, current-question removal and bounded
+truncation. Declarations that lose all effective prior context refuse. Source
+bytes and clean Git identity are rechecked after the final reader/oracle read
+and derivation, then again after lock exit immediately before provenance issue.
+
 ```text
 fixture_manifest_hmac = keyed_fingerprint(
   schema_version="rag-live-fixture-manifest:v1",

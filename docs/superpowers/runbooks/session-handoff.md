@@ -2,6 +2,32 @@
 
 Updated: 2026-09-13
 
+## 2026-09-13 Task24-A round-1 remediation candidate
+
+- Implementation commit: `b2f247e` (`fix: close task24-a preview evidence and drift gaps`).
+- Four independent-review findings are addressed: hard negatives require the
+  locked reader's frozen visible non-entailing evidence oracle; Assistant prior
+  context must survive actual preparation; final read/lock-exit Git mutations
+  refuse before provenance issuance; keyword-only corpus members may have null
+  vector state, but every frozen pgvector participant must be indexed.
+- The oracle request binds source/case/query/scope/corpus/backend identities.
+  Definition identity and ordered candidate results are subordinate canonical
+  preview evidence, never a new authorization root. No-match and hidden-only
+  refusal codes remain distinct. The changed fixture bytes invalidate prior
+  fixture/preview identities; no authorization was issued for either version.
+- Production snapshot reader/oracle/pgvector-roster adapters remain absent,
+  and Task24-B's approved-case source verifier still refuses. Real preview
+  still returns `evaluator_unavailable` because the Task25 evaluator is absent.
+- Independent re-review is required. Task24 overall remains incomplete. Keep
+  the large release-review module's maintainability concern for a separately
+  scoped future review; no module split is included in this remediation.
+- Verification: complete Task23/24 release/carryover selection `856 passed,
+  14 skipped`; preview impact `131 passed`; final remediation probes `46 passed`;
+  direct provider/cost/runtime/input/credential selection `259 passed, 13 skipped`
+  with 11 existing Alembic warnings. Credential scan `3 passed`; all eight A
+  Python files pass Ruff/format/compile, and diff checks are clean. PostgreSQL
+  DSN remains absent; all 27 conditional skips remain unexecuted gates.
+
 ## 2026-09-13 Task24-A frozen manifest and provider-free preview candidate
 
 - Implementation commit: `2460bdf` (`feat: freeze provider-free rag live gate preview`).

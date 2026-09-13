@@ -7206,3 +7206,30 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
 - No provider/network/OAuth call, actual release operation, push, merge or
   deployment occurred. Task24-A is an implementation review candidate; Task24
   overall and PostgreSQL release verification remain incomplete.
+
+## 2026-09-13 Task24-A round-1 preview contract remediation candidate
+
+- Implementation commit: `b2f247e`; independent re-review pending.
+- Reproduced all four independent-review gaps before production changes.
+  Hard negatives now require a reader-owned frozen visible non-entailing
+  candidate oracle, not only an expected-no-answer label. The exact request,
+  definition identity and candidate result bind into preview provenance; absent
+  adapters and no-match/hidden-only results refuse without provider calls.
+- Assistant context distribution now reflects the actual prepared query after
+  sanitization, deduplication and truncation. Source/Git verification follows
+  the final snapshot/oracle derivation and lock exit before provenance issuance.
+- Corpus vector state is nullable for keyword-only members. The reader's exact
+  pgvector baseline roster is frozen and all participants, including relevant/
+  required and hard-negative oracle candidates, require vector state.
+- The file-based root identity, exact 30/10/40 dispatch envelope and Decimal
+  USD 0.360000 reserve are unchanged. Task24-B remains fail-closed; Task25's
+  evaluator is still absent. No real reader/oracle adapter or execution approval
+  is created. Independent re-review and PostgreSQL verification remain pending.
+- RED evidence: initial four-gap probes `16 failed`; isolated unsafe-context
+  probe `1 failed`; oracle/participation probes `22 failed`; empty negative
+  evidence allowlists `2 failed`. GREEN: full release/carryover selection
+  `856 passed, 14 skipped`, preview impact `131 passed`, final R1 probes
+  `46 passed`, direct impact `259 passed, 13 skipped` (11 existing Alembic
+  warnings), credential `3 passed`, Ruff/format/compile/diff clean. The skips
+  remain unexecuted PostgreSQL gates; no live/network/paid/release operation,
+  OAuth, push, merge or deployment occurred.

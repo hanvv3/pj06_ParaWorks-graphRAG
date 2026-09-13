@@ -2287,6 +2287,27 @@ repositories. Missing committed `backend/app/rag/release_quality.py` (Task25)
 must produce `evaluator_unavailable` with zero mutations/dispatches before any
 real authority construction. Do not add a placeholder evaluator or OAuth flow.
 
+**Task24-A round-1 remediation:** the locked reader's typed hard-negative
+oracle must derive visible non-entailing candidates from frozen corpus/scope/
+query inputs and bind the exact source/case/query/scope/corpus/backend request,
+oracle-definition identity and candidate results in canonical preview. Missing
+adapter, no-match and hidden-only cases refuse before provenance issuance;
+fixture labels and caller booleans are insufficient. The declarative fixture
+therefore permits evidence slots/support modes for negatives while its relevant
+and required answer-support sets remain empty. Prior-context quotas use the
+effective prepared query, not message presence. Recheck source/clean Git after
+the final reader/oracle read and after lock exit, immediately before issuing
+provenance. Permit null vector state only outside the reader's frozen pgvector
+baseline participation roster; relevant/required/oracle pgvector members must
+belong to that roster and have vector state. This adds no production adapter,
+reviewer proof, authorization flow or provider dispatch.
+
+Round-1 candidate `b2f247e` is pending independent re-review. Verification:
+complete release/carryover selection `856 passed, 14 skipped`; preview impact
+`131 passed`; final R1 probes `46 passed`; direct impact `259 passed, 13 skipped`
+(11 existing Alembic warnings); credential `3 passed`; Ruff/format/compile/diff
+clean. PostgreSQL DSN remains absent; Task24 overall remains incomplete.
+
 **Interfaces:**
 
 ```text
