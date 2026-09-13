@@ -2597,6 +2597,13 @@ consumed nonce, settings-only key/id replacement와 ledger tamper를 fail closed
 같은 transition의 재실행을 막는다. key rotation은 이 pin을 수정하는 우회 경로가 아니며 별도 설계 전
 지원하지 않는다.
 
+ledger의 최초 생성은 fresh init의 provider-safety latch/advisory critical section 안에서 DB authority,
+readiness, history가 exact empty이고 paid attempt가 0임을 다시 확인한 뒤, generation-zero authority file을
+쓰기 직전에만 허용한다. latch 또는 DB authority가 이미 존재하면 committed verifier가 맞더라도 missing
+ledger를 만들거나 현재 settings로 repin하지 않는다. unreadable/corrupt/mismatched ledger도 status와 모든
+mutation/recovery에서 inconsistency다. pre-Task22 legacy authority adoption은 ordinary init/recovery가 아니라
+exact-latch-bound 별도 reviewed migration 설계가 승인될 때까지 fail closed한다.
+
 bootstrap recovery의 signed context는 대상 partial latch의 environment, authority UUID, generation-zero
 envelope digest, original reviewed transition reference, fixed plan HMAC과 review-key pin을 exact하게 포함한다.
 review 검증과 nonce reservation 뒤 recovery 직전에 partial file/empty DB를 다시 inspect하므로 A에 대한

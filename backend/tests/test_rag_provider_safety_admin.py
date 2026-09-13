@@ -154,6 +154,55 @@ def _service(tmp_path: Path, *, kind: str = 'production'):
     return engine, target, runtime, admin
 
 
+def _create_file_first_partial_through_admin(
+    *, engine, runtime, admin, reviewed_init: bytes, monkeypatch
+) -> None:
+    original_bootstrap = runtime.bootstrap
+
+    class FailingCommit:
+        def __init__(self, connection):
+            self.connection = connection
+            self.dialect = connection.dialect
+
+        def execute(self, *args, **kwargs):
+            return self.connection.execute(*args, **kwargs)
+
+        def scalar(self, *args, **kwargs):
+            return self.connection.scalar(*args, **kwargs)
+
+        def commit(self):
+            raise RuntimeError('simulated crash')
+
+        def rollback(self):
+            self.connection.rollback()
+
+    def crashing_bootstrap(
+        connection,
+        snapshots,
+        *,
+        reviewed_transition_reference_hmac,
+        before_authority_create,
+    ):
+        del connection
+        real_connection = engine.connect()
+        try:
+            return original_bootstrap(
+                FailingCommit(real_connection),
+                snapshots,
+                reviewed_transition_reference_hmac=(
+                    reviewed_transition_reference_hmac
+                ),
+                before_authority_create=before_authority_create,
+            )
+        finally:
+            real_connection.close()
+
+    monkeypatch.setattr(runtime, 'bootstrap', crashing_bootstrap)
+    with pytest.raises(RagProviderSafetyError, match='bootstrap failed'):
+        admin.initialize(reviewed_init)
+    monkeypatch.setattr(runtime, 'bootstrap', original_bootstrap)
+
+
 def test_review_envelope_is_exact_bounded_and_binds_external_authority_target_and_plan(
     tmp_path: Path,
 ) -> None:
@@ -299,6 +348,72 @@ def test_status_reports_db_latch_drift_without_repairing_or_recreating_file(
     assert not target.latch_path.exists()
 
 
+def test_existing_authority_missing_ledger_refuses_status_and_plan_repin(
+    tmp_path: Path,
+) -> None:
+    engine, target, runtime, admin = _service(tmp_path)
+    admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    ledger = Path(str(target.latch_path) + '.admin-review-ledger.json')
+    ledger.unlink()
+    with pytest.raises(RagProviderSafetyError, match='inconsistent'):
+        admin.status()
+    with pytest.raises(RagProviderSafetyError, match='already exists'):
+        admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    assert not ledger.exists()
+
+    changed_plan = '8' * 64
+    changed = RagProviderSafetyAdminService(
+        target=target,
+        connection_factory=engine.connect,
+        provider_safety=runtime,
+        snapshots=(_snapshot('query_embedding'), _snapshot('answer_generation')),
+        runtime_identity_secret=_RUNTIME_KEY,
+        review_secret=_REVIEW_KEY,
+        review_key_id='provider-safety-review-v1',
+        implementation_plan_reference_hmac=changed_plan,
+        successor_registry={},
+        review_key_registry={
+            'provider-safety-review-v1': review_key_material_verifier(_REVIEW_KEY)
+        },
+    )
+    with engine.connect() as connection:
+        context = runtime.review_context(connection, 'answer_generation')
+    with pytest.raises(ProviderSafetyReviewError, match='pin'):
+        changed.mark_rebind_required(
+            _review_bytes(
+                target,
+                'provider-safety-mark-rebind-required',
+                context=_context(context),
+                plan_hmac=changed_plan,
+            )
+        )
+    assert not ledger.exists()
+
+
+@pytest.mark.parametrize('damage', ['corrupt', 'missing_lock'])
+def test_existing_authority_unreadable_or_corrupt_ledger_refuses_status(
+    tmp_path: Path, damage: str
+) -> None:
+    _engine, target, runtime, admin = _service(tmp_path)
+    admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    with admin.connection_factory() as connection:
+        context = runtime.review_context(connection, 'answer_generation')
+    reviewed = _review_bytes(
+        target,
+        'provider-safety-mark-rebind-required',
+        context=_context(context),
+    )
+    ledger = Path(str(target.latch_path) + '.admin-review-ledger.json')
+    if damage == 'corrupt':
+        ledger.write_bytes(b'{}')
+    else:
+        Path(str(ledger) + '.lock').unlink()
+    with pytest.raises(RagProviderSafetyError, match='inconsistent'):
+        admin.status()
+    with pytest.raises(ProviderSafetyReviewError):
+        admin.mark_rebind_required(reviewed)
+
+
 def test_status_refuses_orphan_readiness_or_history_without_creating_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -316,13 +431,12 @@ def test_status_refuses_orphan_review_ledger_without_creating_latch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _engine, target, runtime, admin = _service(tmp_path)
-    monkeypatch.setattr(
-        runtime,
-        'bootstrap',
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            RagProviderSafetyError('simulated pre-mutation crash')
-        ),
-    )
+    def crash_after_prepare(*args, before_authority_create, **kwargs):
+        del args, kwargs
+        before_authority_create()
+        raise RagProviderSafetyError('simulated pre-mutation crash')
+
+    monkeypatch.setattr(runtime, 'bootstrap', crash_after_prepare)
     with pytest.raises(RagProviderSafetyError):
         admin.initialize(_review_bytes(target, 'provider-safety-init'))
     with pytest.raises(RagProviderSafetyError, match='inconsistent'):
@@ -339,6 +453,7 @@ def test_init_requires_external_review_and_refuses_second_init(tmp_path: Path) -
     assert result.operation == 'provider-safety-init'
     assert result.global_safety_generation == 0
     assert result.ready_family_count == 2
+    assert Path(str(target.latch_path) + '.admin-review-ledger.json').is_file()
     with engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(RagProviderReadiness)) == 2
         assert connection.scalar(select(func.count()).select_from(RagProviderSafetyTransition)) == 1
@@ -352,7 +467,7 @@ def test_review_nonce_is_durable_one_use_and_key_pin_rejects_settings_drift(
     engine, target, runtime, admin = _service(tmp_path)
     init = _review_bytes(target, 'provider-safety-init')
     admin.initialize(init)
-    with pytest.raises(ProviderSafetyReviewError, match='nonce'):
+    with pytest.raises(RagProviderSafetyError, match='already exists'):
         admin.initialize(init)
 
     replacement_key = b'unapproved-replacement-review-authority'
@@ -400,6 +515,7 @@ def test_pending_nonce_allows_exact_retry_after_pre_mutation_crash(
         nonlocal calls
         calls += 1
         if calls == 1:
+            kwargs['before_authority_create']()
             raise RagProviderSafetyError('simulated pre-mutation crash')
         return original_bootstrap(*args, **kwargs)
 
@@ -408,7 +524,7 @@ def test_pending_nonce_allows_exact_retry_after_pre_mutation_crash(
         admin.initialize(reviewed)
     assert not target.latch_path.exists()
     assert admin.initialize(reviewed).global_safety_generation == 0
-    with pytest.raises(ProviderSafetyReviewError, match='nonce'):
+    with pytest.raises(RagProviderSafetyError, match='already exists'):
         admin.initialize(reviewed)
 
 
@@ -418,13 +534,12 @@ def test_same_nonce_with_different_signed_envelope_is_refused_while_pending(
     _engine, target, runtime, admin = _service(tmp_path)
     nonce = str(uuid4())
     first = _review_bytes(target, 'provider-safety-init', nonce=nonce)
-    monkeypatch.setattr(
-        runtime,
-        'bootstrap',
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            RagProviderSafetyError('simulated pre-mutation crash')
-        ),
-    )
+    def crash_after_prepare(*args, before_authority_create, **kwargs):
+        del args, kwargs
+        before_authority_create()
+        raise RagProviderSafetyError('simulated pre-mutation crash')
+
+    monkeypatch.setattr(runtime, 'bootstrap', crash_after_prepare)
     with pytest.raises(RagProviderSafetyError):
         admin.initialize(first)
     changed = _review_bytes(
@@ -567,38 +682,25 @@ def test_production_review_cannot_authorize_live_validation_target(
 
 def test_bootstrap_recovery_requires_a_separate_signed_review_and_only_repairs_file_first_shape(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine, target, runtime, admin = _service(tmp_path)
-    snapshots = (_snapshot('query_embedding'), _snapshot('answer_generation'))
-    real_connection = engine.connect()
-
-    class FailingCommit:
-        dialect = real_connection.dialect
-
-        def execute(self, *args, **kwargs):
-            return real_connection.execute(*args, **kwargs)
-
-        def scalar(self, *args, **kwargs):
-            return real_connection.scalar(*args, **kwargs)
-
-        def commit(self):
-            raise RuntimeError('simulated crash')
-
-        def rollback(self):
-            real_connection.rollback()
-
-    with pytest.raises(RagProviderSafetyError, match='bootstrap failed'):
-        runtime.bootstrap(
-            FailingCommit(),  # type: ignore[arg-type]
-            snapshots,
-            reviewed_transition_reference_hmac=_PLAN_HMAC,
-        )
-    real_connection.close()
+    _create_file_first_partial_through_admin(
+        engine=engine,
+        runtime=runtime,
+        admin=admin,
+        reviewed_init=_review_bytes(target, 'provider-safety-init'),
+        monkeypatch=monkeypatch,
+    )
     assert target.latch_path.exists()
     with pytest.raises(ProviderSafetyReviewError):
         admin.recover_bootstrap(b'')
-    with pytest.raises(RagProviderSafetyError, match='already exists'):
-        admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    ledger = Path(str(target.latch_path) + '.admin-review-ledger.json')
+    held_ledger = Path(str(ledger) + '.held')
+    ledger.replace(held_ledger)
+    with pytest.raises(ProviderSafetyReviewError, match='pin'):
+        admin.bootstrap_recovery_review_context()
+    held_ledger.replace(ledger)
     recovery_context = admin.bootstrap_recovery_review_context()
     recovered = admin.recover_bootstrap(
         _review_bytes(
@@ -618,38 +720,18 @@ def test_bootstrap_recovery_requires_a_separate_signed_review_and_only_repairs_f
         )
 
 
-def test_recovery_review_is_bound_to_exact_partial_latch(tmp_path: Path) -> None:
+def test_recovery_review_is_bound_to_exact_partial_latch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     engine, target, runtime, admin = _service(tmp_path)
-    snapshots = (_snapshot('query_embedding'), _snapshot('answer_generation'))
-
-    class FailingCommit:
-        def __init__(self, connection):
-            self.connection = connection
-            self.dialect = connection.dialect
-
-        def execute(self, *args, **kwargs):
-            return self.connection.execute(*args, **kwargs)
-
-        def scalar(self, *args, **kwargs):
-            return self.connection.scalar(*args, **kwargs)
-
-        def commit(self):
-            raise RuntimeError('simulated crash')
-
-        def rollback(self):
-            self.connection.rollback()
-
-    first = engine.connect()
-    with pytest.raises(RagProviderSafetyError):
-        runtime.bootstrap(
-            FailingCommit(first),
-            snapshots,
-            reviewed_transition_reference_hmac=_PLAN_HMAC,
-        )
-    first.close()
-    # Establish the durable admin key pin for this partial initialization.
-    with pytest.raises(RagProviderSafetyError, match='already exists'):
-        admin.initialize(_review_bytes(target, 'provider-safety-init'))
+    init_review = _review_bytes(target, 'provider-safety-init')
+    _create_file_first_partial_through_admin(
+        engine=engine,
+        runtime=runtime,
+        admin=admin,
+        reviewed_init=init_review,
+        monkeypatch=monkeypatch,
+    )
     first_context = admin.bootstrap_recovery_review_context()
     first_review = _review_bytes(
         target,
@@ -658,14 +740,13 @@ def test_recovery_review_is_bound_to_exact_partial_latch(tmp_path: Path) -> None
     )
 
     target.latch_path.unlink()
-    second = engine.connect()
-    with pytest.raises(RagProviderSafetyError):
-        runtime.bootstrap(
-            FailingCommit(second),
-            snapshots,
-            reviewed_transition_reference_hmac=_PLAN_HMAC,
-        )
-    second.close()
+    _create_file_first_partial_through_admin(
+        engine=engine,
+        runtime=runtime,
+        admin=admin,
+        reviewed_init=init_review,
+        monkeypatch=monkeypatch,
+    )
     assert admin.bootstrap_recovery_review_context() != first_context
     with pytest.raises(ProviderSafetyReviewError, match='context'):
         admin.recover_bootstrap(first_review)

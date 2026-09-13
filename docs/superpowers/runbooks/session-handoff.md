@@ -5430,11 +5430,29 @@ tests passed with 53 tests; ruff passed.
 - No database migration or public status/result DTO change is introduced. A new
   `*.admin-review-ledger.json` plus stable `.lock` is created only by reviewed
   mutation; status remains read-only and checks all three DB authority sets when
-  the latch is absent. Existing deployed authority without a ledger may only
-  establish the pin through an exact committed verifier; otherwise mutation is
-  refused and key rotation remains out of scope.
+  the latch is absent. Existing deployed authority without a ledger cannot be
+  adopted by any Task 22 command; exact-latch reviewed migration remains future
+  work and key rotation remains out of scope.
 - Retained review probes and focused controls are green. Run the full
   direct-impact regression is now `138 passed, 14 skipped`; focused evidence is
   `36 passed, 1 skipped`. Run Ruff, diff/credential checks, and the conditional
   disposable PostgreSQL test before committing, then request independent
   rereview. Do not proceed to Task 23 while Task 22 is not CLEAN.
+
+## 2026-09-13 Task 22 round-2 missing-ledger remediation handoff
+
+- Round-2 review found only F6 P1: deletion of the review ledger allowed the
+  committed key to recreate it with current plan settings. The general recreate
+  path is removed. Fresh init alone can create a ledger, under the provider
+  latch/advisory critical section after exact-empty/zero-attempt revalidation
+  and before writing the authority file.
+- Existing/partial latch or DB authority plus missing, corrupt, unreadable or
+  mismatched ledger is now inconsistent for status and fail-closed for every
+  mutation/recovery. A pre-authority crash can retry only the byte-identical
+  pending init envelope. Missing-ledger legacy adoption requires a future
+  separately reviewed migration and is not part of Task 22.
+- Updated retained probes are `8 passed`; focused permanent/review evidence is
+  `41 passed, 1 skipped`; broader direct-impact evidence is `143 passed, 14
+  skipped`. Run Ruff, diff/credential/import checks, commit locally and request
+  round-3 independent rereview. Actual PostgreSQL remains an environment-gated
+  release requirement.

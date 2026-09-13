@@ -6864,3 +6864,21 @@ Cost/security note:
   rereview remain required. Fresh focused evidence is `36 passed, 1 skipped`
   and direct-impact regression is `138 passed, 14 skipped`, so status stays
   **DONE_WITH_CONCERNS**.
+
+### Task 22 round-2 missing-ledger remediation
+
+- Round-2 review isolated one remaining P1: a deleted ledger could be recreated
+  beside an existing authority when the committed key still matched. Ledger
+  creation now occurs only inside fresh init's provider-latch/advisory critical
+  section, after exact-empty DB and zero-attempt revalidation and immediately
+  before authority-file creation.
+- Existing or partial authority with a missing, unreadable, corrupt or
+  mismatched ledger now makes status inconsistent and every mutation/recovery
+  fail closed. A pending fresh-init ledger accepts only the identical pending
+  init envelope; it cannot accept a new nonce or changed plan. Legacy authority
+  adoption is deliberately deferred to a separate exact-latch reviewed
+  migration design.
+- The expanded retained review probes are `8 passed`; focused permanent and
+  review controls are `41 passed, 1 skipped`; broader direct-impact verification
+  is `143 passed, 14 skipped`. A new independent rereview remains pending, so
+  Task 22 is not CLEAN yet.

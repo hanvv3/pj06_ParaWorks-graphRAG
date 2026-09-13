@@ -239,6 +239,7 @@ class _ProviderSafetyReviewLedger:
         plan_hmac: str,
     ) -> None:
         self.path = DurableFileAuthority.validate_configured_path(path)
+        self.lock_path = Path(str(self.path) + '.lock')
         self._runtime_secret = runtime_secret
         self._target = dict(target)
         self._review_key_id = review_key_id
@@ -342,6 +343,18 @@ class _ProviderSafetyReviewLedger:
                 'review authority pin is unavailable'
             ) from exc
 
+    def create(self, reviewed: VerifiedProviderSafetyReview) -> None:
+        if self.path.exists() or self.lock_path.exists():
+            raise ProviderSafetyReviewError('review authority pin is inconsistent')
+        payload = self._new_payload()
+        payload['events'] = [
+            self._event(sequence=0, event='reserved', reviewed=reviewed)
+        ]
+        try:
+            DurableFileAuthority(self.path).write(self._wrap(payload))
+        except DurableFileAuthorityError as exc:
+            raise ProviderSafetyReviewError('review ledger is unavailable') from exc
+
     def reserve(self, reviewed: VerifiedProviderSafetyReview) -> None:
         def reserve_in(value: dict[str, object]) -> dict[str, object]:
             payload = self._validate(value)
@@ -362,19 +375,34 @@ class _ProviderSafetyReviewLedger:
             return self._wrap({**payload, 'events': events})
 
         try:
-            if self.path.exists():
-                DurableFileAuthority.open_runtime(self.path).update(reserve_in)
-                return
-            initializer = DurableFileAuthority(self.path)
-            payload = self._new_payload()
-            payload['events'] = [
-                self._event(sequence=0, event='reserved', reviewed=reviewed)
-            ]
-            initializer.write(self._wrap(payload))
+            if not self.path.exists():
+                raise ProviderSafetyReviewError('review authority pin is unavailable')
+            DurableFileAuthority.open_runtime(self.path).update(reserve_in)
         except ProviderSafetyReviewError:
             raise
         except DurableFileAuthorityError as exc:
             raise ProviderSafetyReviewError('review ledger is unavailable') from exc
+
+    def assert_pending_retry(self, reviewed: VerifiedProviderSafetyReview) -> None:
+        try:
+            if not self.path.exists():
+                raise ProviderSafetyReviewError('review authority pin is unavailable')
+            payload = self._validate(DurableFileAuthority.open_runtime(self.path).read())
+        except ProviderSafetyReviewError:
+            raise
+        except DurableFileAuthorityError as exc:
+            raise ProviderSafetyReviewError('review ledger is unavailable') from exc
+        matching = [
+            event
+            for event in payload['events']
+            if event['nonce'] == reviewed.nonce
+        ]
+        if (
+            len(matching) != 1
+            or matching[0]['event'] != 'reserved'
+            or matching[0]['envelope_digest'] != reviewed.envelope_digest
+        ):
+            raise ProviderSafetyReviewError('review nonce is not a pending init')
 
     def consume(self, reviewed: VerifiedProviderSafetyReview) -> None:
         def consume_in(value: dict[str, object]) -> dict[str, object]:
@@ -615,7 +643,6 @@ class RagProviderSafetyAdminService:
                 raise ProviderSafetyReviewError(
                     'review authority key is absent from committed registry'
                 )
-        self._committed_review_key = review_key_registry is not None
         self.target = target
         self.connection_factory = connection_factory
         self.provider_safety = provider_safety
@@ -656,12 +683,6 @@ class RagProviderSafetyAdminService:
         )
 
     def _reserve(self, reviewed: VerifiedProviderSafetyReview) -> None:
-        if (
-            not self._ledger.path.exists()
-            and self.target.latch_path.exists()
-            and not self._committed_review_key
-        ):
-            raise ProviderSafetyReviewError('review authority pin is unavailable')
         self._ledger.reserve(reviewed)
 
     def status(self) -> ProviderSafetyAdminStatus:
@@ -678,11 +699,21 @@ class RagProviderSafetyAdminService:
                         select(func.count()).select_from(RagProviderSafetyTransition)
                     ),
                 )
-            if counts != (0, 0, 0) or self._ledger.path.exists():
+            if (
+                counts != (0, 0, 0)
+                or self._ledger.path.exists()
+                or self._ledger.lock_path.exists()
+            ):
                 raise RagProviderSafetyError(
                     'provider safety DB/latch authority is inconsistent'
                 )
             return ProviderSafetyAdminStatus(False, None, 0, 0, 0)
+        try:
+            self._ledger.assert_pin()
+        except ProviderSafetyReviewError:
+            raise RagProviderSafetyError(
+                'provider safety DB/latch authority is inconsistent'
+            ) from None
         with self.connection_factory() as connection:
             contexts = tuple(
                 self.provider_safety.review_context(connection, component)
@@ -711,12 +742,18 @@ class RagProviderSafetyAdminService:
         reviewed = self._verify(
             raw, operation='provider-safety-init', context=None, successor=None
         )
-        self._reserve(reviewed)
+        def prepare_review_ledger() -> None:
+            if self._ledger.path.exists():
+                self._ledger.assert_pending_retry(reviewed)
+            else:
+                self._ledger.create(reviewed)
+
         with self.connection_factory() as connection:
             self.provider_safety.bootstrap(
                 connection,
                 self.snapshots,
                 reviewed_transition_reference_hmac=reviewed.reviewed_gate_reference_hmac,
+                before_authority_create=prepare_review_ledger,
             )
         self._ledger.consume(reviewed)
         return self._result(reviewed.operation)

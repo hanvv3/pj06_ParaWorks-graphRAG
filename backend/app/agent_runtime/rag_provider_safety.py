@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -781,6 +781,7 @@ class RagProviderSafetyService:
         ],
         *,
         reviewed_transition_reference_hmac: str,
+        before_authority_create: Callable[[], None] | None = None,
     ) -> None:
         self._validate_snapshots(snapshots)
         require_lower_hmac(reviewed_transition_reference_hmac)
@@ -795,6 +796,8 @@ class RagProviderSafetyService:
                     raise RagProviderSafetyError(
                         'provider safety authority already exists'
                     )
+                if before_authority_create is not None:
+                    before_authority_create()
                 records = [
                     self._record(
                         snapshot,
