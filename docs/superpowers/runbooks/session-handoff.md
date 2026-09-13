@@ -2,6 +2,24 @@
 
 Updated: 2026-09-13
 
+## 2026-09-13 Task24-A independent CLEAN closure
+
+- Independent round-2 rereview of `e3efbc9..ba229aa`, including implementation
+  `a3444d8`, is **CLEAN: no actionable findings**. This supersedes the historical
+  Task24-A candidate/re-review-pending statuses below, not the remaining gates.
+- Reviewer evidence: combined selection `189 passed in 208.84s`, credential
+  `3 passed`, eight additional independent refusal probes, and clean
+  Ruff/format/AST/diff/status checks.
+- All four round-1 fixes remain intact: reader-owned visible non-entailing
+  hard-negative evidence, effective prepared prior context, final source/Git
+  rechecks, and nullable keyword-only versus mandatory pgvector vector state.
+  The single fixture-manifest root and default Task24-B refusal are unchanged.
+- Task24 overall remains incomplete. PostgreSQL verification, the Task25
+  evaluator, production snapshot/oracle/roster adapters and Task24-B remain
+  outstanding. Actual CLI preview returns `evaluator_unavailable`, with zero
+  dispatch and no authorization. This closure is docs-only; no live/provider/
+  release operation, push, merge or deployment was performed.
+
 ## 2026-09-13 Task24-A round-2 oracle alias remediation candidate
 
 - Implementation commit: `a3444d8` (`fix: isolate task24-a oracle request binding`).

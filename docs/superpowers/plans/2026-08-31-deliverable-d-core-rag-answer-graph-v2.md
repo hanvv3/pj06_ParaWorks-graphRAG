@@ -2318,11 +2318,20 @@ substitution, adapter failure and restored-input/tampered-copy cases. An exact
 restored binding must produce identical canonical bytes/HMAC. No new authority,
 request mutation tracker, evaluator or production adapter is added.
 
-Round-2 candidate `a3444d8` is pending independent re-review. Confirmed RED:
+Round-2 implementation `a3444d8` received independent **CLEAN** rereview over
+`e3efbc9..ba229aa`, with no actionable findings. Confirmed implementation RED:
 `12 failed, 26 passed`; final alias probes `44 passed`; complete release/A/CLI
 regression `900 passed, 14 skipped`; direct impact `259 passed, 13 skipped`
 (11 existing Alembic warnings); credential `3 passed`; Ruff/format/compile/diff
-clean. PostgreSQL and Task24-B/Task25 gates remain; Task24 is not complete.
+clean. Independent reviewer evidence: combined selection `189 passed in 208.84s`,
+credential `3 passed`, eight additional refusal probes, and clean
+Ruff/format/AST/diff/status. This supersedes earlier Task24-A pending-review
+statuses. All four round-1 fixes, the single fixture-manifest root and default
+Task24-B refusal remain intact. PostgreSQL verification, the Task25 evaluator,
+production snapshot/oracle/roster adapters and Task24-B remain incomplete;
+Task24 is not complete. Actual CLI preview returns `evaluator_unavailable` with
+zero dispatch and no authorization. Review closure is docs-only, not release
+approval or permission for live execution.
 
 **Interfaces:**
 

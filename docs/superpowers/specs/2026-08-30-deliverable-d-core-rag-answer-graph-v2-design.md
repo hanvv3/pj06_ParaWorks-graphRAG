@@ -3055,6 +3055,14 @@ both are restored to the exact expected binding, adapter mutation history is
 observationally irrelevant: preview bytes and identity must remain identical;
 no mutation-tracking API or new execution authority is introduced.
 
+**Task24-A review disposition (2026-09-13).** Independent round-2 rereview of
+`e3efbc9..ba229aa` (implementation `a3444d8`) is CLEAN, with no actionable
+findings. The four round-1 boundaries, single fixture-manifest authority and
+default Task24-B refusal remain intact. This is not overall Task24 completion:
+PostgreSQL verification, the Task25 evaluator, production snapshot/oracle/roster
+adapters and Task24-B remain outstanding. Actual CLI preview refuses with
+`evaluator_unavailable`, zero dispatch and no authorization.
+
 ```text
 fixture_manifest_hmac = keyed_fingerprint(
   schema_version="rag-live-fixture-manifest:v1",

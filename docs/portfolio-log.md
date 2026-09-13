@@ -7254,3 +7254,19 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   direct impact `259 passed, 13 skipped` (11 existing Alembic warnings), credential
   `3 passed`, Ruff/format/compile/diff clean. No live/network/paid/OAuth/release
   operation, push, merge or deployment occurred. Task24 overall remains incomplete.
+
+## 2026-09-13 Task24-A independent CLEAN review closure
+
+- Independent round-2 rereview of `e3efbc9..ba229aa` (implementation `a3444d8`)
+  is **CLEAN, with no actionable findings**. This closes the Task24-A candidate
+  review statuses above, without completing Task24 overall.
+- Reviewer verification: combined selection `189 passed in 208.84s`, credential
+  `3 passed`, eight additional independent refusal probes, and clean
+  Ruff/format/AST/diff/status checks. The four round-1 evidence/context/Git/vector
+  fixes, independent scalar binding, single fixture-manifest authority and
+  Task24-B default refusal remain intact.
+- PostgreSQL verification, Task25's committed evaluator, production snapshot/
+  oracle/roster adapters and Task24-B remain incomplete. Actual CLI preview
+  still refuses with `evaluator_unavailable`, zero dispatch and no authorization.
+  This closure changes documentation only; no code/tests, live/provider/release
+  operation, OAuth, push, merge or deployment are included.
