@@ -45,7 +45,9 @@ def _deterministic_non_product_database_seam(monkeypatch) -> None:
     @contextmanager
     def barrier(_self, _connection, *, marker):
         with marker.locked():
-            yield
+            yield release_authority._RagReleaseBarrierGuard(
+                _connection, seal=release_authority._RELEASE_BARRIER_SEAL
+            )
 
     monkeypatch.setattr(release_authority.RagReleaseAuthority, '_authority_barrier', barrier)
     monkeypatch.setattr(

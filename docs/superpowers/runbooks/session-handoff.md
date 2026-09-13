@@ -5553,3 +5553,25 @@ tests passed with 53 tests; ruff passed.
   `0771405..330b9a7`. Do not run a real release
   command, provider/network/paid call, rollout, push, merge or deploy. Task 24
   remains blocked until independent CLEAN and is an actual implementation task.
+
+## 2026-09-13 Task 23 rereview round-2 handoff
+
+- R1-R4 round-2 changes are implemented but not yet independently accepted.
+  Never restore the old `mutation_set.execute(...)` sequence: callers prepare
+  only `plan(statement, typed_pk)`, and SQL is executed after the sealed full
+  provider/release barrier guard is issued.
+- The barrier order remains Task22 provider stable/advisory, release
+  stable/advisory, provider authority/readiness rows, then release/runtime rows.
+  Before/after capture, whole-roster locking, marker replacement, ledger CAS,
+  transition append and commit must stay within it.
+- Disaster may accept a valid same-locator marker only for the exact pending
+  initial shape and an absent or exact-six physical-valid all-zero DB. It must
+  use a fresh signed disaster context/nonce, new UUID, epoch 1 and reason. Any
+  complete authority or existing row still refuses identity reset.
+- Whole-roster checks derive 30 cases, 10 embedding/30 generation/40 total,
+  costs, report and runtime terminal state from DB rows. False terminal payloads
+  must roll back planned mutations and leave marker bytes unchanged.
+- Current gates: focused `66 passed, 6 skipped`; direct impact `115 passed, 9
+  skipped`; Ruff/compile clean. Six Task23 PG cases remain DSN-gated. Finish
+  diff/credential/status checks, commit locally and request another independent
+  rereview. No real release/provider/network/push/merge/deploy is authorized.

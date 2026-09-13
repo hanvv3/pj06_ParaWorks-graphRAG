@@ -36,7 +36,9 @@ def _deterministic_non_product_database_seam(monkeypatch) -> None:
     @contextmanager
     def barrier(_self, _connection, *, marker):
         with marker.locked():
-            yield
+            yield release_authority._RagReleaseBarrierGuard(
+                _connection, seal=release_authority._RELEASE_BARRIER_SEAL
+            )
 
     monkeypatch.setattr(release_authority.RagReleaseAuthority, '_authority_barrier', barrier)
     monkeypatch.setattr(
@@ -83,7 +85,7 @@ def _capture_bootstrap_authorization(connection, ledger, payload):
         },
     )
     mutations = ledger.mutation_set(connection)
-    mutations.execute(
+    mutations.plan(
         insert(tables.authorizations).values(
             ledger_uuid=payload['ledger_uuid'],
             ledger_epoch=payload['ledger_epoch'],
@@ -317,7 +319,7 @@ def test_append_transition_is_gapless_cas_and_exact_affected_set(
         assert bytes(row['payload_canonical_bytes'])
 
     with engine.begin() as connection, pytest.raises(
-        RagReleaseLedgerError, match='transaction'
+        RagReleaseLedgerError, match='generation'
     ):
         ledger.append(
             connection,
@@ -455,7 +457,16 @@ def test_release_mutation_set_rejects_noop_and_wrong_transaction(tmp_path: Path)
         )
     payload = _bootstrap_payload(snapshot)
     with engine.begin() as connection:
-        mutations = _capture_bootstrap_authorization(connection, ledger, payload)
+        ledger.append(
+            connection,
+            payload,
+            actual_mutations=_capture_bootstrap_authorization(
+                connection, ledger, payload
+            ),
+            database_identity=_identity(),
+        )
+    with engine.begin() as connection:
+        mutations = ledger.mutation_set(connection)
         row = ReleaseRowPrimaryKey(
             'authorization',
             {
@@ -464,19 +475,270 @@ def test_release_mutation_set_rejects_noop_and_wrong_transaction(tmp_path: Path)
                 'approval_id_hmac': payload['approval_id_hmac'],
             },
         )
-        with pytest.raises(RagReleaseLedgerError, match='not exact'):
-            authorization_table = release_tables(
-                build_rag_release_metadata()
-            ).authorizations
-            mutations.execute(
-                update(authorization_table)
-                .where(
-                    authorization_table.c.approval_id_hmac
-                    == payload['approval_id_hmac']
-                )
-                .values(state='unused'),
-                row,
+        authorization_table = release_tables(
+            build_rag_release_metadata()
+        ).authorizations
+        mutations.plan(
+            update(authorization_table)
+            .where(
+                authorization_table.c.approval_id_hmac
+                == payload['approval_id_hmac']
             )
+            .values(state='unused'),
+            row,
+        )
+        marker = DurableFileAuthority.open_runtime(authority.marker_path)
+        with pytest.raises(
+            RagReleaseLedgerError, match='not exact'
+        ), authority._authority_barrier(connection, marker=marker) as guard:
+            mutations._execute_under_barrier(
+                connection,
+                authority=authority,
+                barrier_guard=guard,
+            )
+
+
+def test_mutation_plan_executes_only_inside_authority_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.app.rag import release_authority
+    from backend.app.rag.release_ledger import RagReleaseLedger
+
+    authority = _authority(tmp_path)
+    ledger = RagReleaseLedger(authority=authority, identity_secret=_SECRET)
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    with engine.begin() as connection:
+        snapshot = authority.initialize(
+            connection, database_identity=_identity(), **_REVIEW
+        )
+    payload = _bootstrap_payload(snapshot)
+    tables = release_tables(build_rag_release_metadata())
+    entered = False
+    original = release_authority.RagReleaseAuthority._authority_barrier
+
+    @contextmanager
+    def observed(self, connection, *, marker):
+        nonlocal entered
+        assert connection.scalar(
+            select(func.count()).select_from(tables.authorizations)
+        ) == 0
+        entered = True
+        with original(self, connection, marker=marker) as guard:
+            yield guard
+
+    monkeypatch.setattr(
+        release_authority.RagReleaseAuthority, '_authority_barrier', observed
+    )
+    with engine.begin() as connection:
+        mutations = _capture_bootstrap_authorization(connection, ledger, payload)
+        assert connection.scalar(
+            select(func.count()).select_from(tables.authorizations)
+        ) == 0
+        ledger.append(
+            connection,
+            payload,
+            actual_mutations=mutations,
+            database_identity=_identity(),
+        )
+    assert entered is True
+
+
+def test_terminal_payload_counts_require_actual_complete_child_roster(
+    tmp_path: Path,
+) -> None:
+    from backend.app.rag.release_ledger import (
+        RagReleaseLedger,
+        RagReleaseLedgerError,
+        ReleaseRowPrimaryKey,
+        release_row_identity_hmac,
+    )
+
+    authority = _authority(tmp_path)
+    ledger = RagReleaseLedger(authority=authority, identity_secret=_SECRET)
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    with engine.begin() as connection:
+        snapshot = authority.initialize(
+            connection, database_identity=_identity(), **_REVIEW
+        )
+    bootstrap = _bootstrap_payload(snapshot)
+    with engine.begin() as connection:
+        ledger.append(
+            connection,
+            bootstrap,
+            actual_mutations=_capture_bootstrap_authorization(
+                connection, ledger, bootstrap
+            ),
+            database_identity=_identity(),
+        )
+
+    terminal = deepcopy(bootstrap)
+    terminal.update(
+        transition_kind='authorization_complete',
+        outcome='quality_gate_green',
+        from_generation=1,
+        to_generation=2,
+        authorization_state_before='started',
+        authorization_state_after='complete',
+        execution_process_instance_hmac='d' * 64,
+        execution_runner_fence_hmac='e' * 64,
+        case_claim_count=30,
+        embedding_dispatch_count=10,
+        generation_dispatch_count=30,
+        total_dispatch_count=40,
+        quality_report_hmac='f' * 64,
+    )
+    common = {
+        'ledger_uuid': terminal['ledger_uuid'],
+        'ledger_epoch': terminal['ledger_epoch'],
+    }
+    row_keys = {
+        'authorization': {
+            **common,
+            'approval_id_hmac': terminal['approval_id_hmac'],
+        },
+        'quality_report': {
+            **common,
+            'approval_id_hmac': terminal['approval_id_hmac'],
+        },
+        'release_ledger': common,
+        'release_transition': {**common, 'to_generation': 2},
+    }
+    terminal['affected_rows'] = sorted(
+        (
+            {
+                'row_kind': kind,
+                'row_identity_hmac': release_row_identity_hmac(
+                    kind, keys, identity_secret=_SECRET
+                ),
+            }
+            for kind, keys in row_keys.items()
+        ),
+        key=lambda item: (item['row_kind'], item['row_identity_hmac']),
+    )
+    authorization = release_tables(build_rag_release_metadata()).authorizations
+    with engine.begin() as connection:
+        connection.execute(
+            update(authorization)
+            .where(
+                authorization.c.ledger_uuid == terminal['ledger_uuid'],
+                authorization.c.ledger_epoch == terminal['ledger_epoch'],
+                authorization.c.approval_id_hmac
+                == terminal['approval_id_hmac'],
+            )
+            .values(
+                state='started',
+                execution_process_instance_hmac='d' * 64,
+                execution_runner_fence_hmac='e' * 64,
+            )
+        )
+    marker_before = authority.marker_path.read_bytes()
+    with engine.begin() as connection:
+        mutations = ledger.mutation_set(connection)
+        mutations.plan(
+            update(authorization)
+            .where(
+                authorization.c.ledger_uuid == terminal['ledger_uuid'],
+                authorization.c.ledger_epoch == terminal['ledger_epoch'],
+                authorization.c.approval_id_hmac
+                == terminal['approval_id_hmac'],
+            )
+            .values(
+                state='complete',
+                execution_process_instance_hmac='d' * 64,
+                execution_runner_fence_hmac='e' * 64,
+                case_claim_count=30,
+                embedding_dispatch_count=10,
+                generation_dispatch_count=30,
+                total_dispatch_count=40,
+            ),
+            ReleaseRowPrimaryKey('authorization', row_keys['authorization']),
+        )
+        quality = release_tables(build_rag_release_metadata()).quality_reports
+        mutations.plan(
+            insert(quality).values(
+                **row_keys['quality_report'],
+                quality_report_hmac='f' * 64,
+                manifest_hmac='a' * 64,
+                baseline_hmac='b' * 64,
+                reviewer_roster_hmac='c' * 64,
+                payload_canonical_bytes=b'{}',
+            ),
+            ReleaseRowPrimaryKey('quality_report', row_keys['quality_report']),
+        )
+        with pytest.raises(RagReleaseLedgerError, match='terminal roster'):
+            ledger.append(
+                connection,
+                terminal,
+                actual_mutations=mutations,
+                database_identity=_identity(),
+            )
+    assert authority.marker_path.read_bytes() == marker_before
+    with engine.connect() as connection:
+        assert connection.scalar(select(authorization.c.state)) == 'started'
+        quality = release_tables(build_rag_release_metadata()).quality_reports
+        assert connection.scalar(select(func.count()).select_from(quality)) == 0
+
+
+@pytest.mark.parametrize(
+    'kind',
+    [
+        'authorization_abort_control',
+        'authorization_abort_component',
+        'authorization_abort_component_snapshot',
+        'authorization_abort_corpus_drift',
+        'authorization_abort_execution_crash',
+        'authorization_abort_final',
+        'authorization_abort_snapshot',
+        'authorization_complete',
+        'authorization_finish_failed',
+        'authorization_finish_quality_failed',
+    ],
+)
+def test_every_terminal_kind_rejects_self_reported_missing_case_roster(
+    tmp_path: Path, kind: str
+) -> None:
+    from backend.app.rag.release_ledger import RagReleaseLedger, RagReleaseLedgerError
+
+    authority = _authority(tmp_path)
+    ledger = RagReleaseLedger(authority=authority, identity_secret=_SECRET)
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    with engine.begin() as connection:
+        snapshot = authority.initialize(
+            connection, database_identity=_identity(), **_REVIEW
+        )
+    payload = _bootstrap_payload(snapshot)
+    payload['transition_kind'] = kind
+    payload['case_claim_count'] = 1
+    with engine.connect() as connection, pytest.raises(
+        RagReleaseLedgerError, match='terminal roster'
+    ):
+        ledger._assert_database_roster(connection, payload)
+
+
+def test_mutation_plan_refuses_unsealed_barrier_without_executing(
+    tmp_path: Path,
+) -> None:
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+    from backend.app.rag.release_ledger import RagReleaseLedger
+
+    authority = _authority(tmp_path)
+    ledger = RagReleaseLedger(authority=authority, identity_secret=_SECRET)
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    with engine.begin() as connection:
+        snapshot = authority.initialize(
+            connection, database_identity=_identity(), **_REVIEW
+        )
+    payload = _bootstrap_payload(snapshot)
+    tables = release_tables(build_rag_release_metadata())
+    with engine.begin() as connection:
+        mutations = _capture_bootstrap_authorization(connection, ledger, payload)
+        with pytest.raises(RagReleaseAuthorityError, match='barrier guard'):
+            mutations._execute_under_barrier(
+                connection, authority=authority, barrier_guard=object()
+            )
+        assert connection.scalar(
+            select(func.count()).select_from(tables.authorizations)
+        ) == 0
 
 
 def test_authorization_owner_abort_and_single_claim_are_database_enforced() -> None:

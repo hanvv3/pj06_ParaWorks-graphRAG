@@ -36,7 +36,9 @@ def _deterministic_non_product_database_seam(monkeypatch) -> None:
     @contextmanager
     def barrier(_self, _connection, *, marker):
         with marker.locked():
-            yield
+            yield release_authority._RagReleaseBarrierGuard(
+                _connection, seal=release_authority._RELEASE_BARRIER_SEAL
+            )
 
     monkeypatch.setattr(release_authority.RagReleaseAuthority, '_authority_barrier', barrier)
     monkeypatch.setattr(
@@ -432,3 +434,98 @@ def test_recovery_review_verifier_runs_inside_authority_barrier(
             review_verifier=reviewed,
         )
     assert held is False
+
+
+def test_failed_initial_marker_requires_fresh_reviewed_disaster_recovery(
+    tmp_path: Path,
+) -> None:
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    crash = True
+
+    def fail_after_marker() -> None:
+        if crash:
+            raise RuntimeError('initial marker crash')
+
+    authority, marker_path, provider_path = _service(
+        tmp_path, after_marker_replace=fail_after_marker
+    )
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    with engine.begin() as connection, pytest.raises(RuntimeError, match='initial'):
+        authority.initialize(
+            connection, database_identity=_identity(), **_review_args('1')
+        )
+    failed_marker = marker_path.read_bytes()
+    with engine.connect() as connection:
+        assert not __import__('sqlalchemy').inspect(connection).get_table_names()
+
+    crash = False
+    recovered, _path, _provider = _service(
+        tmp_path, provider_safety_latch_path=provider_path
+    )
+    with engine.begin() as connection, pytest.raises(
+        RagReleaseAuthorityError, match='nonce'
+    ):
+        recovered.disaster_initialize(
+            connection,
+            database_identity=_identity(),
+            review_verifier=_recovery_review('1', 'a' * 64),
+        )
+    assert marker_path.read_bytes() == failed_marker
+
+    with engine.begin() as connection:
+        snapshot = recovered.disaster_initialize(
+            connection,
+            database_identity=_identity(),
+            review_verifier=_recovery_review('3', 'b' * 64),
+        )
+    assert snapshot.ledger_epoch == 1
+    assert snapshot.generation == 0
+    assert snapshot.bootstrap_operation == 'release-ledger-disaster-init'
+    assert snapshot.rebootstrap_reason_hmac == 'b' * 64
+    assert snapshot.ledger_uuid != authority._parse(failed_marker)[1].ledger_uuid
+
+
+def test_disaster_schema_refusal_preserves_existing_marker_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.app.rag import release_authority
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    crash = True
+
+    def fail_after_marker() -> None:
+        if crash:
+            raise RuntimeError('initial marker crash')
+
+    authority, marker_path, provider_path = _service(
+        tmp_path, after_marker_replace=fail_after_marker
+    )
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    with engine.begin() as connection, pytest.raises(RuntimeError):
+        authority.initialize(
+            connection, database_identity=_identity(), **_review_args('1')
+        )
+    build_rag_release_metadata().create_all(engine)
+    marker_before = marker_path.read_bytes()
+    crash = False
+    recovered, _path, _provider = _service(
+        tmp_path, provider_safety_latch_path=provider_path
+    )
+    monkeypatch.setattr(
+        release_authority,
+        'assert_rag_release_physical_contract',
+        lambda _connection: (_ for _ in ()).throw(ValueError('drift')),
+    )
+    with engine.begin() as connection, pytest.raises(
+        RagReleaseAuthorityError, match='physical schema'
+    ):
+        recovered.disaster_initialize(
+            connection,
+            database_identity=_identity(),
+            review_verifier=_recovery_review('3', 'b' * 64),
+        )
+    assert marker_path.read_bytes() == marker_before
+    with engine.connect() as connection:
+        tables = release_tables(build_rag_release_metadata())
+        assert connection.scalar(select(func.count()).select_from(tables.ledgers)) == 0

@@ -296,6 +296,7 @@ def test_postgresql_marker_first_fault_is_not_repaired_by_init(
     ), postgres_release_db.connect() as connection:
         authority.initialize(connection, **_review('1'))
     assert authority.marker_path.exists()
+    failed_snapshot = authority._parse(authority.marker_path.read_bytes())[1]
     with postgres_release_db.connect() as connection:
         assert not (
             set(inspect(connection).get_table_names()) & set(RAG_RELEASE_TABLE_NAMES)
@@ -305,6 +306,20 @@ def test_postgresql_marker_first_fault_is_not_repaired_by_init(
         RagReleaseAuthorityError
     ):
         retry.initialize(connection, **_review('3'))
+    with postgres_release_db.connect() as connection, pytest.raises(
+        RagReleaseAuthorityError, match='nonce'
+    ):
+        retry.disaster_initialize(
+            connection,
+            review_verifier=_recovery_review('1', 'a' * 64),
+        )
+    with postgres_release_db.connect() as connection:
+        recovered = retry.disaster_initialize(
+            connection,
+            review_verifier=_recovery_review('3', 'b' * 64),
+        )
+    assert recovered.bootstrap_operation == 'release-ledger-disaster-init'
+    assert recovered.ledger_uuid != failed_snapshot.ledger_uuid
 
 
 def test_postgresql_rebootstrap_preserves_and_same_db_disaster_refuses(
@@ -450,6 +465,15 @@ def test_postgresql_missing_release_trigger_fails_status_without_repair(
             'DROP TRIGGER rag_release_guard_transition '
             'ON rag_live_gate_transitions'
         )
+    marker_before = authority.marker_path.read_bytes()
+    with postgres_release_db.connect() as connection, pytest.raises(
+        RagReleaseAuthorityError, match='physical schema'
+    ):
+        authority.disaster_initialize(
+            connection,
+            review_verifier=_recovery_review('3', 'b' * 64),
+        )
+    assert authority.marker_path.read_bytes() == marker_before
     with postgres_release_db.connect() as connection, pytest.raises(
         RagReleaseAuthorityError, match='physical schema'
     ):

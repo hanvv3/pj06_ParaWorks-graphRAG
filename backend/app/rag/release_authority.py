@@ -70,6 +70,19 @@ class RagReleaseAuthorityError(RuntimeError):
     pass
 
 
+_RELEASE_BARRIER_SEAL = object()
+
+
+class _RagReleaseBarrierGuard:
+    __slots__ = ('connection', '_seal')
+
+    def __init__(self, connection: Connection, *, seal: object) -> None:
+        if seal is not _RELEASE_BARRIER_SEAL:
+            raise RagReleaseAuthorityError('release barrier guard is invalid')
+        self.connection = connection
+        self._seal = seal
+
+
 @dataclass(frozen=True, slots=True)
 class ValidationDatabaseIdentity:
     database_name: str
@@ -490,7 +503,7 @@ class RagReleaseAuthority:
         connection: Connection,
         *,
         marker: DurableFileAuthority,
-    ) -> Iterator[None]:
+    ) -> Iterator[_RagReleaseBarrierGuard]:
         """Hold Task-22 provider then Task-23 release authorities in global order."""
         if connection.dialect.name != 'postgresql':
             raise RagReleaseAuthorityError('release authority requires PostgreSQL')
@@ -511,7 +524,9 @@ class RagReleaseAuthority:
                         safety_capability=provider_rows,
                     )
                     order.acquire('release_rows')
-                    yield
+                    yield _RagReleaseBarrierGuard(
+                        connection, seal=_RELEASE_BARRIER_SEAL
+                    )
         except RagReleaseAuthorityError:
             raise
         except Exception as exc:
@@ -526,6 +541,18 @@ class RagReleaseAuthority:
             raise
 
     @staticmethod
+    def _assert_barrier_guard(
+        guard: object, connection: Connection
+    ) -> _RagReleaseBarrierGuard:
+        if (
+            type(guard) is not _RagReleaseBarrierGuard
+            or guard._seal is not _RELEASE_BARRIER_SEAL
+            or guard.connection is not connection
+        ):
+            raise RagReleaseAuthorityError('release barrier guard is invalid')
+        return guard
+
+    @staticmethod
     def _table_state(connection: Connection) -> set[str]:
         return {
             name
@@ -533,7 +560,9 @@ class RagReleaseAuthority:
             if name.startswith('rag_live_gate_')
         }
 
-    def _require_fresh_database(self, connection: Connection) -> None:
+    def _require_fresh_database(
+        self, connection: Connection, *, disaster: bool = False
+    ) -> None:
         state = self._table_state(connection)
         if state and state != set(RAG_RELEASE_TABLE_NAMES):
             raise RagReleaseAuthorityError('release schema is partial')
@@ -556,7 +585,22 @@ class RagReleaseAuthority:
                     tables.quality_reports,
                 )
             ):
+                if disaster:
+                    raise RagReleaseAuthorityError(
+                        'existing validation database identity refuses disaster init'
+                    )
                 raise RagReleaseAuthorityError('release authority already exists')
+
+    @staticmethod
+    def _is_pending_initial_marker(snapshot: RagReleaseSnapshot) -> bool:
+        return (
+            snapshot.bootstrap_operation == 'release-ledger-init'
+            and snapshot.ledger_epoch == 1
+            and snapshot.generation == 0
+            and snapshot.last_transition_digest is None
+            and snapshot.predecessor_marker_digest is None
+            and snapshot.rebootstrap_reason_hmac is None
+        )
 
     def _insert_ledger(
         self,
@@ -1015,6 +1059,9 @@ class RagReleaseAuthority:
                 current = self._current_database_identity(
                     connection, database_identity
                 )
+                # Attest an existing exact-six schema before any new marker bytes.
+                # An absent schema is the legal marker-first init crash state.
+                self._require_fresh_database(connection, disaster=True)
                 raw_marker: bytes | None = None
                 if self._marker_path.exists():
                     try:
@@ -1026,24 +1073,12 @@ class RagReleaseAuthority:
                         if (
                             valid.validation_database_locator_hmac
                             == self._database_locator_hmac(current)
+                            and not self._is_pending_initial_marker(valid)
                         ):
                             raise RagReleaseAuthorityError(
                                 'valid release authority requires '
                                 'same-ledger rebootstrap'
                             )
-                state = self._table_state(connection)
-                if state and state != set(RAG_RELEASE_TABLE_NAMES):
-                    raise RagReleaseAuthorityError('release schema is partial')
-                if state:
-                    ledger_table = release_tables(
-                        build_rag_release_metadata()
-                    ).ledgers
-                    if connection.scalar(
-                        select(func.count()).select_from(ledger_table)
-                    ):
-                        raise RagReleaseAuthorityError(
-                            'existing validation database identity refuses disaster init'
-                        )
                 (
                     review_envelope_hmac,
                     review_nonce_hmac,

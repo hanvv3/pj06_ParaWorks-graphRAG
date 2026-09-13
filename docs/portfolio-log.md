@@ -6981,3 +6981,28 @@ Cost/security note:
   must inspect `66d2477..330b9a7` for the remediation or
   `0771405..330b9a7` cumulatively. Status remains **DONE_WITH_CONCERNS pending
   independent rereview**.
+
+## 2026-09-13 Deliverable D Core Task 23 rereview round 2
+
+- Rereview exposed four remaining P1 boundaries. A generation-zero init marker
+  crash now has one deterministic path: fresh reviewed disaster-init with a new
+  UUID, only when the old marker has the exact pending-init shape and the target
+  release schema is absent or physically exact and contains zero rows. The old
+  init review nonce cannot authorize recovery.
+- Release mutations are no longer executed before authority acquisition. A
+  sealed mutation plan performs no SQL until Task22 provider stable/advisory,
+  release stable/advisory and ordered provider/release row capabilities are all
+  held on the same PostgreSQL connection. Before/after images, semantic checks,
+  external marker, release CAS and commit share that barrier.
+- Terminal claims are substantiated from locked rows rather than payload counts:
+  exact manifest ordinals and case count, dispatch distribution, report,
+  reserved/charged sums, unique runtime link, exact-two cost children and
+  parent/child terminal states. Ten terminal/abort kinds have retained missing-
+  roster negatives.
+- Disaster physical schema attestation now precedes any marker bytes. A drift
+  rejection leaves marker and database unchanged. Conditional PostgreSQL tests
+  cover both init-crash recovery and marker preservation, but remain skipped
+  without the controlled DSN.
+- Fresh focused evidence is `66 passed, 6 skipped`; direct impact is `115 passed,
+  9 skipped`; Ruff and compile are clean. Status remains
+  **DONE_WITH_CONCERNS pending independent rereview**.
