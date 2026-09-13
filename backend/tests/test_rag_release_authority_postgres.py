@@ -43,6 +43,59 @@ _PROVIDER_REVIEW_KEY = b'task23-provider-review-key-material-32-bytes'
 _SAFE_DATABASE = re.compile(r'^rag_task23_[0-9a-f]{20}$', re.ASCII)
 
 
+@pytest.mark.parametrize(
+    'field,value',
+    [
+        ('permission_level', 'public'),
+        ('generation_provider', 'forged'),
+        ('metadata', {'forged': True}),
+    ],
+)
+def test_postgresql_runtime_piggyback_is_zero_sql_and_marker_change(
+    postgres_release_db, tmp_path, field, value
+):
+    from sqlalchemy import event
+
+    from backend.app.rag.release_ledger import RagReleaseLedgerError
+    from backend.tests.release_ledger_fixtures import ReleaseHarness
+    from backend.tests.test_rag_release_ledger_round5 import failure_changes
+
+    harness = ReleaseHarness(
+        postgres_release_db,
+        _authority(postgres_release_db, tmp_path),
+        _RUNTIME_KEY,
+        None,
+    )
+    harness.claim()
+    changes, failed = failure_changes(harness)
+    changes[1][2][field] = value
+    marker = harness.authority.marker_path.read_bytes()
+    before = harness.records('agent_run')
+    writes = []
+
+    def record(_conn, _cursor, statement, _params, _ctx, _many):
+        if statement.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            writes.append(statement)
+
+    with postgres_release_db.connect() as connection:
+        payload, mutations = harness.prepare(
+            connection,
+            'case_failure',
+            changes,
+            case=failed,
+            outcome='model_unavailable',
+        )
+        event.listen(postgres_release_db, 'before_cursor_execute', record)
+        try:
+            with pytest.raises(RagReleaseLedgerError):
+                harness.ledger.append(connection, payload, actual_mutations=mutations)
+        finally:
+            event.remove(postgres_release_db, 'before_cursor_execute', record)
+    assert writes == []
+    assert harness.records('agent_run') == before
+    assert harness.authority.marker_path.read_bytes() == marker
+
+
 def test_postgresql_release_generation_and_pending_failure_keep_sealed_cost_roster(
     postgres_release_db: Engine,
     tmp_path: Path,
@@ -149,7 +202,7 @@ def test_postgresql_release_component_incident_binds_approved_before_and_blocked
             cost_usd=Decimal('0.100000'),
         )
     failed = {**case, 'state': 'failed'}
-    with postgres_release_db.begin() as connection:
+    with postgres_release_db.connect() as connection:
         payload, mutations = harness.prepare(
             connection,
             'authorization_abort_component',

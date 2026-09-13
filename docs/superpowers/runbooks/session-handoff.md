@@ -5637,3 +5637,34 @@ tests passed with 53 tests; ruff passed.
 - No live provider/release/admin command, network/paid call, push, merge, or
   deploy is authorized. Finish diff/credential/status checks and local commit,
   then request independent rereview before Task24.
+
+## 2026-09-13 Task 23 final round-5 handoff
+
+- Base `8c6f21de0b84dce355089c0cef94e4207828cd4e`; scope is only R4-A affected
+  runtime audit immutability and R4-B actual append coverage. Q1/Q4 and Q3-A-F
+  remain retained gates. No Task24, release operation, provider/network/paid,
+  push, merge or deployment is authorized by this work.
+- Every affected AgentRun/cost child requires `row_mutation_hmac` over the whole
+  typed before/after image (`rag-release-runtime-mutation:v1`). All unlisted
+  fields are immutable. Completion times are explicit signed UTC values at or
+  after unchanged start; cost creation/update times never change. Inserts supply
+  every column, including IDs and clocks; SQL expressions/implicit defaults are
+  rejected. No raw metadata enters the canonical payload.
+- Keep runtime preflight under the established provider -> release barrier and
+  before any planned SQL or sealed provider incident. It verifies locked before,
+  declared after and per-kind exact delta; captured SQL after-images must match
+  the same signature. Do not weaken the complete roster observations or the
+  terminal-child read-only rule to accommodate a caller.
+- The all-kinds test executes 17 registry kinds and both finish-failed outcomes,
+  with real 30-case terminal rosters, exact 10/30/40 paid-dispatch-shaped fixtures
+  (fake/local only), SQL before/after, independently calculated transition HMAC
+  and invalid siblings. Its SQLite incident uses the real Task22 one-use service
+  and sealed plan, with only PostgreSQL transport/advisory substituted. Actual
+  PostgreSQL physical/locking/incident tests remain mandatory and conditional.
+- Final fresh gates: field/signature `61 passed`; all-kind append
+  `18 passed`; expanded direct impact `215 passed, 13 skipped, 20 existing
+  Alembic warnings`; combined focused `258 passed, 17 skipped`. Ruff/compile/
+  diff checks pass, credential signature matches zero. All 30 PostgreSQL skips
+  remain unexecuted gates. The ignored Task23 report/progress records the local
+  commit and exact review ranges. Full backend green remains unclaimed;
+  status is **DONE_WITH_CONCERNS pending final scoped independent rereview**.

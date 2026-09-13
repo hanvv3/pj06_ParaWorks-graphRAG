@@ -13,6 +13,7 @@ from backend.app.rag.release_ledger import (
     ReleaseRowPrimaryKey,
     release_observation_projection_hmac,
     release_row_identity_hmac,
+    release_runtime_mutation_hmac,
 )
 
 
@@ -168,6 +169,37 @@ def complete_payload_roster(payload, secret):
     payload['observation_set'].sort(
         key=lambda item: (item['row_kind'], item['row_identity_hmac'])
     )
+    for item in payload['affected_rows']:
+        if item['row_kind'] in {'agent_run', 'cost_component'}:
+            item.setdefault('row_mutation_hmac', 'a' * 64)
+
+
+def sign_runtime_plans(payload, mutations, connection, secret):
+    """Sign declared literals against real before-images, never execute SQL."""
+    for plan in mutations._plans:
+        if plan.row.row_kind not in {'agent_run', 'cost_component'}:
+            continue
+        before = mutations._snapshot(connection, plan.row)
+        after = {
+            **(before or {}),
+            **{str(key): value.value for key, value in plan.statement._values.items()},
+        }
+        identity = release_row_identity_hmac(
+            plan.row.row_kind, plan.row.primary_key, identity_secret=secret
+        )
+        entry = next(
+            item
+            for item in payload['affected_rows']
+            if item['row_kind'] == plan.row.row_kind
+            and item['row_identity_hmac'] == identity
+        )
+        entry['row_mutation_hmac'] = (
+            'a' * 64
+            if before is None and plan.statement.is_update
+            else release_runtime_mutation_hmac(
+                plan.row.row_kind, before, after, identity_secret=secret
+            )
+        )
 
 
 def row_key(kind, row):
@@ -218,7 +250,7 @@ class ReleaseHarness:
             database_identity,
         )
         self.ledger = RagReleaseLedger(authority=authority, identity_secret=secret)
-        with engine.begin() as connection:
+        with engine.connect() as connection:
             AgentRun.__table__.create(connection, checkfirst=True)
             AgentRunCostComponent.__table__.create(connection, checkfirst=True)
             self.snapshot = authority.initialize(
@@ -228,45 +260,41 @@ class ReleaseHarness:
                 review_nonce_hmac='2' * 64,
             )
         payload = _bootstrap_payload(self.snapshot)
-        if engine.dialect.name == 'postgresql':
-            from backend.app.rag.release_ledger import _derived_payload_rows
+        from backend.app.rag.release_ledger import _derived_payload_rows
 
-            payload['affected_rows'] = [
-                {'row_kind': kind, 'row_identity_hmac': identity}
-                for kind, identity in _derived_payload_rows(
-                    payload, identity_secret=secret
-                )
-            ]
-        with engine.begin() as connection:
+        payload['affected_rows'] = [
+            {'row_kind': kind, 'row_identity_hmac': identity}
+            for kind, identity in _derived_payload_rows(payload, identity_secret=secret)
+        ]
+        with engine.connect() as connection:
             mutations = _capture_bootstrap_authorization(
                 connection, self.ledger, payload
             )
-            # PostgreSQL tests use the real pinned provider whole set.
-            if connection.dialect.name == 'postgresql':
-                mutations._observation_rows.clear()
-                payload['observation_set'] = []
-                for kind in ('provider_safety_authority', 'provider_readiness'):
-                    table, _aliases = mutations._table(kind)
-                    for record in connection.execute(select(table)).mappings():
-                        row = dict(record)
-                        key = row_key(kind, row)
-                        mutations.observe(key)
-                        payload['observation_set'].append(observation(key, row, secret))
-                        if kind == 'provider_safety_authority':
-                            payload['provider_safety_envelope_digest'] = row[
-                                'envelope_digest'
-                            ]
-                payload['observation_set'].sort(
-                    key=lambda item: (item['row_kind'], item['row_identity_hmac'])
-                )
-                mutations._plans[0] = type(mutations._plans[0])(
-                    mutations._plans[0].statement.values(
-                        provider_safety_envelope_digest=payload[
-                            'provider_safety_envelope_digest'
+            # Read the exact provider rows (including an in-process real Task22 peer).
+            mutations._observation_rows.clear()
+            payload['observation_set'] = []
+            for kind in ('provider_safety_authority', 'provider_readiness'):
+                table, _aliases = mutations._table(kind)
+                for record in connection.execute(select(table)).mappings():
+                    row = dict(record)
+                    key = row_key(kind, row)
+                    mutations.observe(key)
+                    payload['observation_set'].append(observation(key, row, secret))
+                    if kind == 'provider_safety_authority':
+                        payload['provider_safety_envelope_digest'] = row[
+                            'envelope_digest'
                         ]
-                    ),
-                    mutations._plans[0].row,
-                )
+            payload['observation_set'].sort(
+                key=lambda item: (item['row_kind'], item['row_identity_hmac'])
+            )
+            mutations._plans[0] = type(mutations._plans[0])(
+                mutations._plans[0].statement.values(
+                    provider_safety_envelope_digest=payload[
+                        'provider_safety_envelope_digest'
+                    ]
+                ),
+                mutations._plans[0].row,
+            )
             self.snapshot = self.ledger.append(
                 connection,
                 payload,
@@ -438,10 +466,11 @@ class ReleaseHarness:
             key=lambda item: (item['row_kind'], item['row_identity_hmac']),
         )
         payload.update(payload_overrides or {})
+        sign_runtime_plans(payload, mutations, connection, self.secret)
         return payload, mutations
 
     def append(self, kind, changes, **kwargs):
-        with self.engine.begin() as connection:
+        with self.engine.connect() as connection:
             payload, mutations = self.prepare(connection, kind, changes, **kwargs)
             self.snapshot = self.ledger.append(
                 connection,

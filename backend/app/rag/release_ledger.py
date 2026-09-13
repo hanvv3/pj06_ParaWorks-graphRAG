@@ -10,6 +10,8 @@ from typing import TypeAlias
 from uuid import UUID
 
 from sqlalchemy import Connection, Table, insert, select, update
+from sqlalchemy.sql.dml import Insert, Update
+from sqlalchemy.sql.elements import BindParameter
 
 from backend.app.agent_runtime.durable_file_authority import (
     DurableFileAuthority,
@@ -130,7 +132,8 @@ class RagReleaseMutationSet:
 
     @staticmethod
     def _table(row_kind: str) -> tuple[Table, Mapping[str, str]]:
-        release = release_tables(build_rag_release_metadata())
+        if row_kind in {'authorization', 'case', 'dispatch', 'quality_report'}:
+            release = release_tables(build_rag_release_metadata())
         if row_kind == 'authorization':
             return release.authorizations, {}
         if row_kind == 'case':
@@ -306,12 +309,15 @@ class RagReleaseMutationSet:
             result = connection.execute(plan.statement)  # type: ignore[call-overload]
             after = self._snapshot(connection, plan.row)
             ignored = {'updated_at'}
-            if plan.row.row_kind == 'agent_run':
-                ignored.add('started_at')
             if (
                 result.rowcount != 1
                 or after is None
                 or after == before
+                or (
+                    plan.row.row_kind == 'agent_run'
+                    and before is not None
+                    and before['started_at'] != after['started_at']
+                )
                 or (
                     before is not None
                     and not _meaningful_changed(
@@ -330,6 +336,83 @@ class RagReleaseMutationSet:
             raise RagReleaseLedgerError('release mutation transaction changed')
         self._transaction = transaction
         self._executed = True
+
+    def _preflight_runtime_mutations(
+        self, payload: Mapping[str, object], *, identity_secret: bytes
+    ) -> None:
+        """Validate literal runtime before/after images before *any* write/incident.
+
+        Runtime inserts supply every column explicitly. This removes implicit
+        defaults, expression evaluation and server clocks from the signed image.
+        Actual SQL after-images are checked against the same HMAC after execution.
+        """
+        projected = []
+        for plan in self._plans:
+            if plan.row.row_kind not in {'agent_run', 'cost_component'}:
+                continue
+            table, _aliases = self._table(plan.row.row_kind)
+            statement = plan.statement
+            if (
+                not isinstance(statement, (Insert, Update))
+                or statement.table.name != table.name
+            ):
+                raise RagReleaseLedgerError('runtime mutation statement is invalid')
+            values = {}
+            for field, binding in (statement._values or {}).items():
+                name = str(field)
+                if (
+                    name not in table.c
+                    or not isinstance(binding, BindParameter)
+                    or binding.callable
+                ):
+                    raise RagReleaseLedgerError(
+                        'runtime mutation must use explicit values'
+                    )
+                values[name] = binding.value
+            before = self._snapshot(self._connection, plan.row, for_update=True)
+            if (before is None) != isinstance(statement, Insert):
+                raise RagReleaseLedgerError('runtime mutation before-image is invalid')
+            after = {**(before or {}), **values}
+            projected.append((plan.row, before, after))
+        costs = [
+            after
+            for row, _before, after in projected
+            if row.row_kind == 'cost_component'
+        ] + [
+            snapshot
+            for row, snapshot in zip(
+                self._observation_rows, self._observation_snapshots, strict=True
+            )
+            if row.row_kind == 'cost_component'
+        ]
+        for row, before, after in projected:
+            _assert_runtime_column_delta(payload, row.row_kind, before, after, costs)
+            self._assert_runtime_mutation_hmac(
+                payload, row, before, after, identity_secret=identity_secret
+            )
+
+    @staticmethod
+    def _assert_runtime_mutation_hmac(payload, row, before, after, *, identity_secret):
+        identity = release_row_identity_hmac(
+            row.row_kind, row.primary_key, identity_secret=identity_secret
+        )
+        signed = next(
+            (
+                item
+                for item in payload['affected_rows']
+                if item['row_kind'] == row.row_kind
+                and item['row_identity_hmac'] == identity
+            ),
+            None,
+        )
+        if signed is None or signed.get(
+            'row_mutation_hmac'
+        ) != release_runtime_mutation_hmac(
+            row.row_kind, before, after, identity_secret=identity_secret
+        ):
+            raise RagReleaseLedgerError(
+                'runtime mutation projection differs from payload'
+            )
 
     @property
     def rows(self) -> tuple[ReleaseRowPrimaryKey, ...]:
@@ -976,6 +1059,20 @@ class RagReleaseMutationSet:
         _assert_exact_transition_snapshots(
             payload, by_kind, before_by_kind, mutated_by_kind
         )
+        for row, before, after in zip(
+            self._rows, self._before_snapshots, self._after_snapshots, strict=True
+        ):
+            if row.row_kind in {'agent_run', 'cost_component'}:
+                _assert_runtime_column_delta(
+                    payload,
+                    row.row_kind,
+                    before,
+                    after,
+                    self._captured_rows('cost_component'),
+                )
+                self._assert_runtime_mutation_hmac(
+                    payload, row, before, after, identity_secret=identity_secret
+                )
 
     def _assert_observation_projection(
         self, payload: Mapping[str, object], *, identity_secret: bytes
@@ -1008,6 +1105,144 @@ def _meaningful_changed(
 ) -> bool:
     keys = (set(before) | set(after)) - ignored
     return any(before.get(key) != after.get(key) for key in keys)
+
+
+def _assert_runtime_column_delta(payload, row_kind, before, after, costs):
+    """Deny every column delta except the exact lifecycle for this kind."""
+    kind = payload['transition_kind']
+    if before is None:
+        if kind != 'case_claim':
+            raise RagReleaseLedgerError('runtime insert kind is invalid')
+        return
+    expected = dict(before)
+    if row_kind == 'agent_run':
+        if kind == 'component_outcome' and payload['component'] == 'answer_generation':
+            expected.update(
+                run_record_phase='cost_finalized_pending_projection',
+                projection_owner_fence_hmac=payload['execution_runner_fence_hmac'],
+            )
+        elif kind in {
+            'case_failure',
+            'case_safe_outcome',
+            'case_outcome',
+            'authorization_abort_control',
+            'authorization_abort_component',
+            'authorization_abort_component_snapshot',
+            'authorization_abort_corpus_drift',
+            'authorization_abort_execution_crash',
+        }:
+            completed = after.get('completed_at')
+            if (
+                before.get('completed_at') is not None
+                or not isinstance(completed, datetime)
+                or _runtime_utc(completed) < _runtime_utc(before['started_at'])
+            ):
+                raise RagReleaseLedgerError('runtime completion timestamp is invalid')
+            expected.update(
+                status='complete'
+                if kind in {'case_safe_outcome', 'case_outcome'}
+                else 'failed',
+                run_record_phase='admission_only'
+                if kind == 'authorization_abort_execution_crash'
+                and before['run_record_phase'] == 'admission'
+                else 'final',
+                completed_at=completed,
+            )
+        else:
+            raise RagReleaseLedgerError('agent run mutation kind is invalid')
+        children = [item for item in costs if item['agent_run_id'] == after['id']]
+        if len(children) != 2 or {item['component'] for item in children} != {
+            'query_embedding',
+            'answer_generation',
+        }:
+            raise RagReleaseLedgerError('runtime mutation child roster is invalid')
+        expected['total_charged_cost_usd'] = sum(
+            Decimal(str(item['charged_cost_usd'])) for item in children
+        )
+    elif before['dispatch_state'] == 'not_attempted':
+        if kind == 'component_claim' and after['component'] == payload['component']:
+            expected.update(
+                dispatch_state='dispatching',
+                attempted=True,
+                dispatch_count=1,
+                process_instance_hmac=payload['execution_process_instance_hmac'],
+                dispatch_fence_hmac=payload['dispatch_fence_hmac'],
+                charge_basis='reserved',
+                charged_cost_usd=before['reserved_cost_usd'],
+            )
+        elif kind in {
+            'case_failure',
+            'case_safe_outcome',
+            'authorization_abort_control',
+            'authorization_abort_component',
+            'authorization_abort_component_snapshot',
+            'authorization_abort_corpus_drift',
+            'authorization_abort_execution_crash',
+        }:
+            expected.update(
+                dispatch_state='terminal',
+                reserved_input_tokens=0,
+                reserved_output_tokens=0,
+                reserved_cost_usd=Decimal(0),
+            )
+        else:
+            raise RagReleaseLedgerError('cost component mutation kind is invalid')
+    elif (
+        before['dispatch_state'] == 'dispatching'
+        and kind
+        in {
+            'component_outcome',
+            'case_failure',
+            'authorization_abort_component',
+            'authorization_abort_component_snapshot',
+            'authorization_abort_corpus_drift',
+            'authorization_abort_execution_crash',
+        }
+        and after['component'] == payload['component']
+    ):
+        crash = kind == 'authorization_abort_execution_crash'
+        actual = payload['charge_basis_after'] == 'actual'
+        for field in ('actual_input_tokens', 'actual_output_tokens'):
+            value = after[field]
+            if (actual and (type(value) is not int or value < 0)) or (
+                not actual and value is not None
+            ):
+                raise RagReleaseLedgerError(
+                    'cost component token projection is invalid'
+                )
+            expected[field] = value
+        expected.update(
+            dispatch_state='abandoned_unknown' if crash else 'terminal',
+            charged_cost_usd=Decimal(str(payload['charged_cost_usd'])),
+            charge_basis=payload['charge_basis_after'],
+            overrun=kind == 'authorization_abort_component'
+            and payload['outcome'] == 'provider_usage_overrun',
+            terminal_outcome='component_succeeded'
+            if kind == 'component_outcome'
+            else 'abandoned_unknown'
+            if crash
+            else payload['outcome'],
+        )
+    else:
+        raise RagReleaseLedgerError('terminal cost component is immutable')
+    if _runtime_projection(row_kind, expected) != _runtime_projection(row_kind, after):
+        if expected.get('projection_owner_fence_hmac') != after.get(
+            'projection_owner_fence_hmac'
+        ):
+            raise RagReleaseLedgerError('runtime projection owner fence changed')
+        if expected.get('overrun') != after.get('overrun'):
+            raise RagReleaseLedgerError(
+                'component overrun requires exact safety incident'
+            )
+        raise RagReleaseLedgerError(
+            f'{row_kind} immutable fields or exact lifecycle changed'
+        )
+    if not _meaningful_changed(before, after):
+        raise RagReleaseLedgerError('runtime mutation is not semantic')
+
+
+def _runtime_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def _assert_exact_transition_snapshots(
@@ -1345,6 +1580,39 @@ def release_observation_projection_hmac(
     )
 
 
+def _runtime_projection(row_kind, snapshot):
+    if row_kind not in {'agent_run', 'cost_component'}:
+        raise RagReleaseLedgerError('runtime mutation kind is invalid')
+    table, _aliases = RagReleaseMutationSet._table(row_kind)
+    if snapshot is None:
+        return None
+    if set(snapshot) != set(table.c.keys()):
+        raise RagReleaseLedgerError('runtime mutation requires every column')
+    result = {}
+    for column in table.c:
+        value = snapshot[column.name]
+        if value is not None and column.type.python_type is Decimal:
+            value = Decimal(str(value)).quantize(Decimal('0.000001'))
+        result[str(column.name)] = _observation_json_value(value)
+    return result
+
+
+def release_runtime_mutation_hmac(
+    row_kind, before, after, *, identity_secret: bytes
+) -> str:
+    """Seal complete typed runtime images; no raw audit or metadata is serialized."""
+    return rag_identity_hmac(
+        {
+            'row_kind': row_kind,
+            'before': _runtime_projection(row_kind, before),
+            'after': _runtime_projection(row_kind, after),
+        },
+        secret=identity_secret,
+        schema_version='rag-release-runtime-mutation:v1',
+        policy_version='rag-live-gate:v1',
+    )
+
+
 _TRANSITION_KEYS = frozenset(
     {
         'affected_rows',
@@ -1538,11 +1806,16 @@ def _validate_affected_rows(value: object) -> tuple[AffectedRow, ...]:
         raise RagReleaseLedgerError('affected rows are invalid')
     rows: list[AffectedRow] = []
     for item in value:
-        if type(item) is not dict or set(item) != {
-            'row_identity_hmac',
-            'row_kind',
+        expected_keys = {'row_identity_hmac', 'row_kind'}
+        if type(item) is dict and item.get('row_kind') in {
+            'agent_run',
+            'cost_component',
         }:
+            expected_keys.add('row_mutation_hmac')
+        if type(item) is not dict or set(item) != expected_keys:
             raise RagReleaseLedgerError('affected row keys are invalid')
+        if 'row_mutation_hmac' in item:
+            require_lower_hmac(item['row_mutation_hmac'])
         kind = item['row_kind']
         identity = item['row_identity_hmac']
         if kind not in _AFFECTED_ROW_KINDS:
@@ -2555,6 +2828,9 @@ class RagReleaseLedger:
                     connection, authority=self._authority, barrier_guard=barrier_guard
                 )
                 actual_mutations._assert_observation_projection(
+                    payload, identity_secret=self._secret
+                )
+                actual_mutations._preflight_runtime_mutations(
                     payload, identity_secret=self._secret
                 )
                 if provider_incident is not None:

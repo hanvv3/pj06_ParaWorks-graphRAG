@@ -7063,3 +7063,31 @@ Cost/security note:
   endpoints, and separate review authority are unchanged. Status remains
   **DONE_WITH_CONCERNS pending scoped independent rereview**. No live
   release/admin/provider/network/paid, push, merge or deploy operation occurred.
+
+## 2026-09-13 Deliverable D Core Task 23 final scoped runtime audit proof
+
+- Round-4 review found that an otherwise legal parent finalization could also
+  rewrite permission, provider/route, legacy accounting, metadata and start time.
+  Round-5 tests first reproduced 23 failures; the final implementation reconstructs
+  each permitted parent/child after-image from its immutable before-image and
+  exact lifecycle values. Every unlisted column, including timestamps, is frozen.
+- Affected runtime rows now carry a domain-separated HMAC over every typed
+  before/after column. Only HMACs enter transition bytes. Locked preflight rejects
+  forbidden changes and stale/changed plans before SQL or a Task22 incident;
+  execution rechecks the actual after-image against the same proof.
+- The permanent actual-append matrix covers all 17 kinds plus both normal and
+  execution-contract finish failures. It uses real 30-case/40-dispatch completed
+  and quality-failed runs, separate 30-case safe and ordinary failure runs, and a
+  real in-process sealed Task22 incident. Every append checks SQL rows, canonical
+  bytes, independently computed HMAC, history/generation, affected/observed sets
+  and a paired invalid variant with no marker/database change.
+- Security field/signature suite: `61 passed`. Actual-append matrix: `18 passed`.
+  Expanded runtime/cost/model/migration direct impact: `215 passed, 13 skipped`,
+  with 20 existing Alembic warnings. Final combined focused gate:
+  `258 passed, 17 skipped`; Ruff, compile and diff checks passed and credential
+  signature matches were zero. All 30 skips require controlled PostgreSQL gates.
+- No physical release schema, ORM/Alembic or public endpoint changed. Prior
+  runtime transition payloads without complete mutation proofs fail closed.
+  Conditional PostgreSQL evidence is not replaced by SQLite evidence. No live
+  provider/release/admin operation, network/paid call, push, merge or deployment
+  occurred; Task24 still awaits independent CLEAN review.

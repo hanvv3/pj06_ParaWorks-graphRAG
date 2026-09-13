@@ -3488,6 +3488,8 @@ transition_payload = {
       "row_kind": "authorization" | "case" | "dispatch" | "agent_run" |
                    "cost_component" | "provider_safety_authority" |
                    "provider_readiness" | "quality_report" | "release_ledger" | "release_transition"
+      // agent_run/cost_component entries additionally require exactly:
+      // "row_mutation_hmac": <64 lower hex>; absent on every other row kind
     }
   ],
   "approval_hmac": <64 lower hex>,
@@ -3636,6 +3638,51 @@ zero dispatch다. normal terminal transition 뒤 `pg_advisory_unlock` exact true
 process/fence + supervisor attestation을 검증해 case-bound 또는 case-null terminal abort를 수행한다.
 
 transition별 exact semantic matrix는 다음과 같다.
+
+**Task23 round-5 clarification (2026-09-13, scoped R4-A/R4-B):** an affected
+AgentRun or cost child also carries `row_mutation_hmac`, using the
+`rag-release-runtime-mutation:v1` / `rag-live-gate:v1` domains. It binds the row
+kind and the complete typed before/after images; insert before is explicit null.
+Every ORM column participates, including physical identity, permission, provider/
+route/config/prompt identity, legacy tokens/cost, metadata, and all timestamps.
+Only the HMAC appears in canonical transition bytes. Missing legacy mutation
+proof fails closed; there is no history rewrite, physical schema or API change.
+Runtime INSERTs must provide every column explicitly (including IDs and clocks),
+and UPDATEs must use literal values. SQL expressions/defaults cannot silently
+choose an unsigned value. Under the existing barrier the locked before-image,
+declared after-image, exact permitted delta and signature are checked before
+any mutation SQL or sealed provider incident. Actual SQL after-images are then
+checked against the same proof before the release marker advances.
+
+The AgentRun update allowlist is exhaustive:
+
+| Kind | Permitted exact parent delta; every unlisted column remains equal |
+|---|---|
+| `case_claim` | Complete signed insert only, `running/admission`, zero charged total, null completion/projection fence |
+| `component_outcome` for answer generation | `admission -> cost_finalized_pending_projection`, null fence -> exact execution fence, total -> exact-two-child charged sum; status remains running and completion null |
+| `case_safe_outcome`, `case_outcome` | `running -> complete`, phase -> final, null completion -> signed UTC time at/after unchanged start, total -> exact-two-child charged sum; projection fence unchanged |
+| `case_failure`, case-bound `authorization_abort_control`, `authorization_abort_component`, `authorization_abort_component_snapshot`, `authorization_abort_corpus_drift` | `running -> failed`, phase -> final, null completion -> signed UTC time at/after unchanged start, exact-two-child total; projection fence unchanged |
+| case-bound `authorization_abort_execution_crash` | `running -> failed`, admission -> admission_only or pending -> final; signed completion and exact-two-child total; projection fence unchanged |
+| bootstrap, component claim, query component outcome, case-null corpus/crash/final/snapshot aborts, authorization complete/finish-failed/finish-quality-failed | No AgentRun mutation |
+
+Cost children likewise use a default-immutable expected image. First component
+claim changes only state/attempt/count, the exact process/fence, reserved charge
+and basis. A current dispatch outcome changes only terminal state/outcome,
+signed actual token counts (or explicit null on reserved charge), exact payload
+charge/basis and incident-only overrun flag. Cancellation changes only state to
+terminal and reservation input/output/cost to zero. Already-terminal children,
+all provider/config/policy identities, IDs, metadata, creation/update clocks and
+once-set owner/fences stay unchanged. No timestamp can substitute for a semantic
+mutation.
+
+The permanent execution matrix must call actual mutation plans and append for
+all 17 registered kinds, including bootstrap, plus both finish-failed outcomes.
+It proves real before/after SQL, exact affected/observation sets, canonical bytes,
+generation/history/digest and an invalid sibling with zero state/marker change.
+Complete/quality-failed use 30 cases and 10/30/40 dispatches; ordinary and execution
+contract failure have their own 30-case runs. SQLite and the in-process sealed
+Task22 incident are deterministic evidence; PostgreSQL lock/physical checks
+remain separate conditional release gates.
 
 **Task23 round-4 clarification (2026-09-13, approved Option A):** every matrix row,
 including authorization bootstrap, requires the current locked provider authority

@@ -343,6 +343,9 @@ def test_case_claim_rejects_two_terminal_zero_children(tmp_path: Path) -> None:
 def _not_attempted_component(run_id: int, component: str) -> dict[str, object]:
     query = component == 'query_embedding'
     return {
+        'id': run_id * 2 + (0 if query else 1),
+        'created_at': datetime(2026, 9, 13, tzinfo=UTC),
+        'updated_at': datetime(2026, 9, 13, tzinfo=UTC),
         'agent_run_id': run_id,
         'component': component,
         'component_ordinal': 0 if query else 1,
@@ -468,9 +471,13 @@ def test_case_claim_appends_with_logical_run_identity_and_exact_runtime_roster(
                     {'agent_run_id': 41, 'component': component},
                 ),
             )
-        from backend.tests.release_ledger_fixtures import observe_provider_fixture
+        from backend.tests.release_ledger_fixtures import (
+            observe_provider_fixture,
+            sign_runtime_plans,
+        )
 
         observe_provider_fixture(connection, mutations)
+        sign_runtime_plans(payload, mutations, connection, _SECRET)
         advanced = ledger.append(
             connection,
             payload,

@@ -2069,6 +2069,30 @@ Conditional PostgreSQL tests exercise the real pinned barrier and both sealed
 component incidents and later snapshot abort. Independent rereview remains the
 next gate; Task24 and actual release/provider operations have not started.
 
+**Round 5 final scoped remediation (R4-A/R4-B, 2026-09-13):** first reproduce
+affected-parent permission/provider/route/token/metadata/start-time piggyback
+changes, paired-child timestamp changes, and identical signatures for different
+runtime completion times. Require complete typed before/after
+`row_mutation_hmac` on affected AgentRun/cost entries and exact per-kind expected
+images, defaulting every other column to immutable. Check literal planned images
+against locked before-images before SQL or a sealed provider incident, then
+recheck executed images against the same HMAC. Runtime inserts explicitly supply
+every column, including physical IDs/timestamps; no implicit defaults or SQL
+expressions enter the signed plan. Keep physical schema, ORM/Alembic and public
+endpoints unchanged; earlier incomplete candidate history fails closed.
+
+Retain exhaustive actual-append field-diff tests for all 25 AgentRun and 27 cost
+columns, stale before/changed after/missing/forged signature and expression
+negatives, and UTC completion-before-start checks. Execute all 17 registry kinds
+plus both finish-failed outcomes through real SQL append. Assert before/after
+rows, exact affected/observed identities, canonical bytes, independently derived
+transition HMAC, gapless generations and paired invalid zero-change behavior.
+Run real 30-case normal/quality/ordinary/contract-failure sequences. Preserve a
+real in-process sealed Task22 incident and conditional PostgreSQL parent-audit
+negatives in addition to the existing physical/lock/incident gates. Fresh focused,
+direct-impact, Ruff/compile/diff/credential/status verification and a local commit
+precede the final independent scoped rereview; release and Task24 remain blocked.
+
 **Files:**
 
 - Create: `backend/app/rag/release_schema.py`

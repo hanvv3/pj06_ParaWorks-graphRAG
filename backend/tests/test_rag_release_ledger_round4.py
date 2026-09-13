@@ -37,7 +37,13 @@ def _observe_affected(payload, row_kind):
     for row in list(payload['affected_rows']):
         if row['row_kind'] == row_kind:
             payload['affected_rows'].remove(row)
-            payload['observation_set'].append({**row, 'row_projection_hmac': 'a' * 64})
+            payload['observation_set'].append(
+                {
+                    key: value
+                    for key, value in {**row, 'row_projection_hmac': 'a' * 64}.items()
+                    if key != 'row_mutation_hmac'
+                }
+            )
     payload['observation_set'].sort(
         key=lambda row: (row['row_kind'], row['row_identity_hmac'])
     )
@@ -81,6 +87,7 @@ def test_generation_outcome_requires_mutated_pending_parent():
                     for key, value in row.items()
                     if key != 'row_projection_hmac'
                 }
+                | {'row_mutation_hmac': 'a' * 64}
             )
     payload['affected_rows'].sort(
         key=lambda row: (row['row_kind'], row['row_identity_hmac'])
