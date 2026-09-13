@@ -2232,6 +2232,17 @@ Fresh focused evidence: `716 passed, 14 skipped`; direct impact: `221 passed,
 changed-file Ruff/format, compileall and diff checks passed. The 28 PostgreSQL
 skips remain unexecuted because the validation DSN is absent.
 
+**2026-09-13 narrow carryover CLEAN closure:** Independent rereview of
+`a67f76b..1de0941`, implementation `402f889`, found no actionable findings.
+Reviewer-fresh projection-types/case-claim/round4/round5 evidence was
+`592 passed in 164.24s`; Ruff/format/compileall/diff were green and the worktree
+was clean. This supersedes the pending rereview status above for this carried
+slice only. "Before SQL" here means zero mutation DML and zero sealed provider
+incident before rejection; barrier/read SELECTs are expected. PostgreSQL DSN
+is absent and its conditional gates remain unexecuted. Task24 overall is still
+incomplete; this closure does not approve preview/authorization/OAuth work or
+any actual release operation. No production or test change is made by closure.
+
 **Files:**
 
 - Create: `backend/app/rag/release_review.py`

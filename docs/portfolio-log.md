@@ -7141,7 +7141,8 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
 
 ## 2026-09-13 Task24 carryover exact-type rereview round 1
 
-- Implementation candidate: `402f889`; independent CLEAN rereview is pending.
+- Implementation `402f889`: independent rereview of `a67f76b..1de0941` is
+  **CLEAN**, with no actionable findings in the narrow Task24 carryover slice.
 - Independent T24-P2-A found that decoded child HMAC bytes could reach four/five
   DML statements before SQLite rejected them. Rollback protected rows and marker,
   but that did not satisfy the required pre-SQL literal validation boundary.
@@ -7161,6 +7162,11 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   14 skipped`, 11 existing Alembic warnings. Credential suite: `3 passed`.
   Changed-file Ruff/format, compileall and diff checks passed. All 28 PostgreSQL
   skips remain unexecuted because the validation DSN is absent.
+- Reviewer-fresh projection-types, case-claim and round4/round5 evidence:
+  `592 passed in 164.24s`; Ruff/format/compileall/diff green and worktree clean.
+  Rejection occurs before mutation DML or sealed incident application; barrier
+  and validation SELECTs are expected, not a violation of the zero-mutation gate.
 - No schema, endpoint, Option-A observation contract, provider policy or visibility
-  rule changed. Task24 overall and preview/authorization/OAuth remain gated by
-  independent CLEAN rereview of this narrow carryover.
+  rule changed. This CLEAN disposition supersedes the carryover's pending-review
+  status only. PostgreSQL DSN remains absent and Task24 overall is incomplete;
+  no preview, authorization, OAuth or release approval is granted.

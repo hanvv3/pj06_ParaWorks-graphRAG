@@ -5731,8 +5731,10 @@ Current implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
 
 ## 2026-09-13 Task24 carryover round-1 exact-type handoff
 
-- Implementation candidate `402f889`, based on reviewed first-slice docs
-  `a67f76b`; request independent rereview, not preview/authorization continuation.
+- Implementation `402f889`, based on first-slice docs `a67f76b`; independent
+  rereview of `a67f76b..1de0941` is **CLEAN**, with no actionable findings in
+  this narrow Task24 carryover slice. Earlier pending-review directions for
+  this slice are superseded; this is not preview/authorization continuation.
 - T24-P2-A remediation remains limited to the initial case-claim projection.
   The new type matrix contributes 389 tests. Both reported bytes/string HMAC
   aliases use actual append with independent zero-DML/zero-incident counters and
@@ -5764,6 +5766,16 @@ Current implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   `PARAWORKS_TEST_POSTGRES_URL` remains absent: all 28 conditional PostgreSQL
   proofs remain unexecuted. No live provider/API/network/OAuth, actual release
   authorization/bootstrap, paid model, push, merge or deployment occurred.
-- Independent CLEAN rereview is still mandatory before preview, authorization
-  or OAuth work. This is not Task24 completion, a release authorization, or a
-  claim of PostgreSQL/full-backend verification.
+- Reviewer-fresh evidence: `592 passed in 164.24s` across
+  `test_rag_release_projection_types.py`, `test_rag_release_case_claim_projection.py`,
+  `test_rag_release_ledger_round4.py` and `test_rag_release_ledger_round5.py`;
+  Ruff/format/compileall/diff green and worktree clean. These are independent
+  rereviewer results, not a new test run by the docs-only closure worker.
+- The rejection guarantee is zero mutation DML and zero sealed incidents;
+  barrier acquisition and locked validation/read SELECTs are expected. Do not
+  interpret "before SQL" shorthand as forbidding those reads.
+- The narrow carryover CLEAN gate is closed. Task24 overall remains incomplete;
+  no preview/authorization/OAuth or release approval follows from this closure.
+  PostgreSQL DSN is absent and its conditional evidence remains unexecuted.
+  No production/test edit or test run, live/external operation, push, merge or
+  deployment is part of this docs-only closure.
