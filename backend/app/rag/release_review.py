@@ -931,14 +931,18 @@ def _hard_negative_oracles(manifest, inputs, reader, pgvector_members):
     for case, executable in zip(manifest.cases, manifest.executable.cases, strict=True):
         if case.case_kind != 'hard_negative':
             continue
-        request = HardNegativeOracleRequest(
-            manifest.fixture_manifest_hmac,
-            case.case_id_hmac,
-            case.query_bytes_hmac,
-            executable.security_scope_fingerprint,
-            inputs.corpus.corpus_snapshot_hmac,
-            case.configured_backend,
+        # Only immutable scalars cross into the adapter's request. Keep this
+        # independent baseline private: a frozen dataclass can still be changed
+        # through object.__setattr__, and returned requests may alias its input.
+        expected = (
+            ('fixture_manifest_hmac', manifest.fixture_manifest_hmac),
+            ('case_id_hmac', case.case_id_hmac),
+            ('query_bytes_hmac', case.query_bytes_hmac),
+            ('security_scope_fingerprint', executable.security_scope_fingerprint),
+            ('corpus_snapshot_hmac', inputs.corpus.corpus_snapshot_hmac),
+            ('configured_backend', case.configured_backend),
         )
+        request = HardNegativeOracleRequest(**dict(expected))
         result = read(request)
         _live_require(
             type(result) is FrozenHardNegativeOracleResult
@@ -947,9 +951,9 @@ def _hard_negative_oracles(manifest, inputs, reader, pgvector_members):
         )
         _live_require(
             all(
-                type(getattr(result.request, field.name)) is str
-                and getattr(result.request, field.name) == getattr(request, field.name)
-                for field in fields(request)
+                type(getattr(actual, name)) is str and getattr(actual, name) == value
+                for actual in (request, result.request)
+                for name, value in expected
             ),
             'hard_negative_oracle_invalid',
         )
@@ -1000,7 +1004,7 @@ def _hard_negative_oracles(manifest, inputs, reader, pgvector_members):
             candidates.append(asdict(candidate))
         records.append(
             {
-                'request': asdict(request),
+                'request': dict(expected),
                 'oracle_definition_hmac': result.oracle_definition_hmac,
                 'visible_candidates': candidates,
                 'hidden_match_count': result.hidden_match_count,
