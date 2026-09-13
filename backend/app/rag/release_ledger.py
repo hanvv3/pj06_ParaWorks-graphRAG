@@ -189,7 +189,14 @@ class RagReleaseMutationSet:
         result = connection.execute(statement).mappings().all()
         if len(result) > 1:
             raise RagReleaseLedgerError('release row identity is not unique')
-        return None if not result else dict(result[0])
+        # SQLAlchemy may expose schema labels as quoted_name (a str subclass).
+        # Normalize only these trusted table labels at the database boundary;
+        # never coerce caller keys or any stored scalar/JSON values.
+        return (
+            None
+            if not result
+            else {str(column.name): result[0][column.name] for column in table.c}
+        )
 
     def plan(self, statement: object, row: ReleaseRowPrimaryKey) -> None:
         if type(row) is not ReleaseRowPrimaryKey:
@@ -1650,20 +1657,65 @@ def release_observation_projection_hmac(
     )
 
 
+def _assert_runtime_json_types(value):
+    """SQL JSON has native JSON types, never observation-encoding aliases."""
+    if value is None or type(value) in {str, bool, int}:
+        return
+    if type(value) is float:
+        if math.isfinite(value):
+            return
+    elif type(value) is dict:
+        if all(type(key) is str for key in value):
+            for item in value.values():
+                _assert_runtime_json_types(item)
+            return
+    elif type(value) is list:
+        for item in value:
+            _assert_runtime_json_types(item)
+        return
+    raise RagReleaseLedgerError('runtime JSON literal type is invalid')
+
+
 def _runtime_projection(row_kind, snapshot):
-    if row_kind not in {'agent_run', 'cost_component'}:
+    if type(row_kind) is not str or row_kind not in {'agent_run', 'cost_component'}:
         raise RagReleaseLedgerError('runtime mutation kind is invalid')
     table, _aliases = RagReleaseMutationSet._table(row_kind)
     if snapshot is None:
         return None
-    if set(snapshot) != set(table.c.keys()):
+    if (
+        type(snapshot) is not dict
+        or any(type(key) is not str for key in snapshot)
+        or set(snapshot) != set(table.c.keys())
+    ):
         raise RagReleaseLedgerError('runtime mutation requires every column')
     result = {}
     for column in table.c:
         value = snapshot[column.name]
-        if value is not None and column.type.python_type is Decimal:
-            value = Decimal(str(value)).quantize(Decimal('0.000001'))
-        result[str(column.name)] = _observation_json_value(value)
+        expected_type = column.type.python_type
+        if value is None:
+            if not column.nullable:
+                raise RagReleaseLedgerError('runtime literal type is invalid')
+        elif type(value) is not expected_type:
+            raise RagReleaseLedgerError('runtime literal type is invalid')
+        if expected_type is dict and value is not None:
+            try:
+                _assert_runtime_json_types(value)
+            except RecursionError:
+                raise RagReleaseLedgerError(
+                    'runtime JSON literal type is invalid'
+                ) from None
+            # Preserve native JSON numbers/objects. The observation encoder's
+            # float tag would collide with an ordinary JSON object of that shape.
+            result[str(column.name)] = value
+        else:
+            if expected_type is Decimal and value is not None:
+                if not value.is_finite():
+                    raise RagReleaseLedgerError('runtime money literal is invalid')
+                quantized = value.quantize(Decimal('0.000001'))
+                if value != quantized:
+                    raise RagReleaseLedgerError('runtime money literal is invalid')
+                value = quantized
+            result[str(column.name)] = _observation_json_value(value)
     return result
 
 

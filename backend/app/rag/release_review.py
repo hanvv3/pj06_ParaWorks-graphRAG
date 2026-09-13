@@ -6,9 +6,10 @@ Runtime ids/clock are allocated by this module, never taken from SQL literals.
 """
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from decimal import Decimal
+from uuid import UUID
 from weakref import WeakKeyDictionary
 
 from sqlalchemy import Connection, func, select
@@ -79,6 +80,15 @@ def _refuse():
 def _manifest_payload(manifest):
     if (
         type(manifest) is not FrozenCaseClaimManifest
+        or any(
+            type(getattr(manifest, name)) is not str
+            for name in (
+                'contract_version',
+                'fixture_manifest_version',
+                'runtime_contract_version',
+                'assembly_version',
+            )
+        )
         or manifest.contract_version != _VERSION
         or manifest.fixture_manifest_version != 'rag-live-quality-30:v1'
         or manifest.runtime_contract_version != 'rag-run:v2'
@@ -91,6 +101,17 @@ def _manifest_payload(manifest):
     for ordinal, case in enumerate(manifest.cases):
         if (
             type(case) is not FrozenCaseClaimCase
+            or any(
+                type(getattr(case, name)) is not str
+                for name in (
+                    'case_id_hmac',
+                    'surface',
+                    'configured_backend',
+                    'current_text_hmac',
+                    'retrieval_query_hmac',
+                    'security_scope_fingerprint',
+                )
+            )
             or type(case.ordinal) is not int
             or case.ordinal != ordinal
             or case.case_id_hmac in seen
@@ -128,7 +149,11 @@ def _manifest_payload(manifest):
                 or component.reserved_cost_usd.as_tuple().exponent < -6
             ):
                 _refuse()
-            for key, value in asdict(component.policy).items():
+            # Check original fields before asdict/deepcopy can invoke a
+            # subclass hook and hide a noncanonical input behind a plain str.
+            for field in fields(AuthorizedProviderPolicySnapshot):
+                key = field.name
+                value = getattr(component.policy, key)
                 if type(value) is not str or not value:
                     _refuse()
                 if key.endswith('_hmac') or key == 'fingerprint_key_material_verifier':
@@ -169,6 +194,61 @@ def case_claim_manifest_hmac(
         schema_version=_VERSION,
         policy_version='rag-live-gate:v1',
     )
+
+
+_BINDING_TYPES = {
+    'ledger_uuid': str,
+    'ledger_epoch': int,
+    'approval_id_hmac': str,
+    'approval_hmac': str,
+    'approved_corpus_snapshot_hmac': str,
+    'approved_provider_safety_snapshot_hmac': str,
+    'provider_safety_envelope_digest': str,
+    'validation_database_identity_hmac': str,
+    'from_generation': int,
+    'execution_process_instance_hmac': str,
+    'execution_runner_fence_hmac': str,
+    'case_id_hmac': str,
+}
+
+
+def _claim_binding(payload):
+    if (
+        type(payload) is not dict
+        or any(type(key) is not str for key in payload)
+        or any(
+            type(payload.get(key)) is not kind for key, kind in _BINDING_TYPES.items()
+        )
+    ):
+        _refuse()
+    binding = {key: payload[key] for key in _BINDING_TYPES}
+    try:
+        if str(UUID(binding['ledger_uuid'])) != binding['ledger_uuid']:
+            _refuse()
+        for key, value in binding.items():
+            if key not in {'ledger_uuid', 'ledger_epoch', 'from_generation'}:
+                require_lower_hmac(value)
+    except ValueError:
+        _refuse()
+    if binding['ledger_epoch'] < 1 or binding['from_generation'] < 0:
+        _refuse()
+    return binding
+
+
+def _assert_exact_image_types(actual, expected):
+    """Literal SQL keys/scalars and nested JSON must keep their exact types."""
+    if type(actual) is not type(expected):
+        _refuse()
+    if type(expected) is dict:
+        if any(type(key) is not str for key in actual) or set(actual) != set(expected):
+            _refuse()
+        for key, value in expected.items():
+            _assert_exact_image_types(actual[key], value)
+    elif type(expected) is list:
+        if len(actual) != len(expected):
+            _refuse()
+        for item, value in zip(actual, expected, strict=True):
+            _assert_exact_image_types(item, value)
 
 
 def _runtime_images(case, *, run_id, child_ids, now, secret):
@@ -342,7 +422,7 @@ def _projection_boundary():
 
         @property
         def runtime_images(self):
-            if self not in issued:
+            if type(self) is not ApprovedCaseClaimProjection or self not in issued:
                 _refuse()
             return deepcopy(issued[self]['images'])
 
@@ -355,6 +435,7 @@ def _projection_boundary():
             ReleaseRowPrimaryKey,
         )
 
+        binding = _claim_binding(payload)
         manifest_hmac = case_claim_manifest_hmac(
             manifest, identity_secret=identity_secret
         )
@@ -394,21 +475,6 @@ def _projection_boundary():
             now=datetime.now(UTC),
             secret=identity_secret,
         )
-        fields = (
-            'ledger_uuid',
-            'ledger_epoch',
-            'approval_id_hmac',
-            'approval_hmac',
-            'approved_corpus_snapshot_hmac',
-            'approved_provider_safety_snapshot_hmac',
-            'provider_safety_envelope_digest',
-            'validation_database_identity_hmac',
-            'from_generation',
-            'execution_process_instance_hmac',
-            'execution_runner_fence_hmac',
-            'case_id_hmac',
-        )
-        binding = {name: payload[name] for name in fields}
         if any(
             binding[name] != auth[name]
             for name in binding
@@ -476,9 +542,10 @@ def _projection_boundary():
         ):
             _refuse()
         state = issued[projection]
+        binding = _claim_binding(payload)
         if (
             connection.engine is not state['engine']
-            or any(payload.get(key) != value for key, value in state['binding'].items())
+            or binding != state['binding']
             or case_claim_manifest_hmac(
                 state['manifest'], identity_secret=identity_secret
             )
@@ -531,6 +598,7 @@ def _projection_boundary():
                 item.reserved_cost_usd for item in case.components
             ),
         }
+        _assert_exact_image_types(case_rows, [expected_case])
         if (
             case_rows != [expected_case]
             or payload['runtime_agent_run_id_hmac'] != run_hmac
@@ -583,6 +651,7 @@ def _projection_boundary():
         for (_, actual_row), expected_row in zip(
             runtime_rows, state['images'], strict=True
         ):
+            _assert_exact_image_types(actual_row, expected_row)
             if set(actual_row) != set(expected_row):
                 _refuse()
             for key, value in expected_row.items():
@@ -596,7 +665,8 @@ def _projection_boundary():
                     and not after_execution
                     and (
                         type(actual_value) is not type(value)
-                        or actual_value.tzinfo is None
+                        or actual_value.tzinfo is not UTC
+                        or actual_value.fold != value.fold
                         or actual_value != value
                     )
                 ):

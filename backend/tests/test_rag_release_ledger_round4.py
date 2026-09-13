@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -290,7 +291,7 @@ def test_admission_failure_cannot_invent_projection_owner(harness):
                         'dispatch_state': 'terminal',
                         'reserved_input_tokens': 0,
                         'reserved_output_tokens': 0,
-                        'reserved_cost_usd': 0,
+                        'reserved_cost_usd': Decimal('0.000000'),
                     },
                 ),
             ],

@@ -236,6 +236,8 @@ def test_every_cost_child_column_has_exact_cancellation_delta_before_sql(
     old = child[field]
     if field.endswith('_at'):
         value = old + timedelta(seconds=1)
+    elif field in {'actual_input_tokens', 'actual_output_tokens'}:
+        value = 1
     elif isinstance(old, bool):
         value = not old
     elif isinstance(old, (int, Decimal)):
