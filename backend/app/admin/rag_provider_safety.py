@@ -27,6 +27,8 @@ from backend.app.agent_runtime.rag_provider_safety import (
     RagProviderSafetyReviewAuthority,
     RagProviderSafetyReviewContext,
     RagProviderSafetyService,
+    _AppliedReleaseProviderIncident,
+    _PreparedReleaseProviderIncident,
 )
 from backend.app.agent_runtime.rag_runtime_contracts import (
     AuthorizedProviderPolicySnapshot,
@@ -606,6 +608,53 @@ class ProviderSafetyAdminResult:
 _RELEASE_PEER_SEAL = object()
 
 
+class RagProviderSafetyIncidentPlan:
+    """One-use, in-memory Task-22 capability for a Task-23 release abort."""
+
+    __slots__ = (
+        '_consumed',
+        '_ledger',
+        '_prepared',
+        '_seal',
+        'agent_run_id',
+        'category',
+        'component',
+        'cost_usd',
+        'input_tokens',
+        'output_tokens',
+    )
+
+    def __init__(
+        self,
+        *,
+        component: str,
+        category: str,
+        agent_run_id: int,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: object,
+        seal: object,
+        prepared: _PreparedReleaseProviderIncident | None = None,
+        ledger: _ProviderSafetyReviewLedger | None = None,
+    ) -> None:
+        if seal is not _RELEASE_PEER_SEAL or prepared is None or ledger is None:
+            raise ProviderSafetyReviewError('provider incident plan is invalid')
+        self.component = component
+        self.category = category
+        self.agent_run_id = agent_run_id
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.cost_usd = cost_usd
+        self._prepared = prepared
+        self._ledger = ledger
+        self._seal = seal
+        self._consumed = False
+
+    @property
+    def new_envelope_digest(self) -> str:
+        return self._prepared.new_envelope_digest
+
+
 class RagProviderSafetyReleasePeerGuard:
     """Pinned provider authority held stable for one live-release operation."""
 
@@ -663,6 +712,27 @@ class RagProviderSafetyReleasePeerGuard:
             connection, current, for_update=True
         )
 
+    def apply_incident(
+        self,
+        connection: Connection,
+        plan: RagProviderSafetyIncidentPlan,
+    ) -> _AppliedReleaseProviderIncident:
+        if (
+            type(plan) is not RagProviderSafetyIncidentPlan
+            or plan._seal is not _RELEASE_PEER_SEAL
+            or plan._ledger is not self._ledger
+            or plan._prepared.service is not self._provider_safety
+            or plan._consumed
+        ):
+            raise ProviderSafetyReviewError('provider incident plan is invalid')
+        self._ledger.assert_pin()
+        plan._consumed = True
+        evidence = self._provider_safety._apply_release_incident(
+            connection, plan._prepared
+        )
+        self._body = evidence.new_body
+        return evidence
+
 
 class RagProviderSafetyReleasePeer:
     """Non-forgeable Task-22 inspector/pin used by Task-23 release authority."""
@@ -681,6 +751,43 @@ class RagProviderSafetyReleasePeer:
         self._provider_safety = provider_safety
         self._ledger = ledger
         self._seal = seal
+
+    def prepare_incident(
+        self,
+        connection: Connection,
+        *,
+        component: str,
+        category: str,
+        agent_run_id: int,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: object,
+    ) -> RagProviderSafetyIncidentPlan:
+        from decimal import Decimal
+
+        if type(cost_usd) is not Decimal:
+            raise ProviderSafetyReviewError('provider incident plan is invalid')
+        self._ledger.assert_pin()
+        prepared = self._provider_safety._prepare_release_incident(
+            connection,
+            component=component,  # type: ignore[arg-type]
+            category=category,
+            agent_run_id=agent_run_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+        )
+        return RagProviderSafetyIncidentPlan(
+            component=component,
+            category=category,
+            agent_run_id=agent_run_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            seal=_RELEASE_PEER_SEAL,
+            prepared=prepared,
+            ledger=self._ledger,
+        )
 
     @contextmanager
     def locked(
@@ -718,8 +825,11 @@ class RagProviderSafetyReleasePeer:
             yield guard
             self._ledger.assert_pin()
             current = self._provider_safety._read_unlocked()
-            if current['envelope_digest'] != body['envelope_digest']:
+            if current['envelope_digest'] != guard._body['envelope_digest']:
                 raise RagProviderSafetyError('provider safety binding changed')
+            self._provider_safety._match_db_whole_set(
+                connection, current, for_update=True
+            )
 
 
 class RagProviderSafetyAdminService:

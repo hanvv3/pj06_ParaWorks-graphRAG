@@ -158,6 +158,7 @@ def _bootstrap_payload(snapshot) -> dict[str, object]:
         'generation_dispatch_count': 0,
         'ledger_epoch': snapshot.ledger_epoch,
         'ledger_uuid': str(snapshot.ledger_uuid),
+        'observation_set': [],
         'outcome': None,
         'provider_safety_envelope_digest': '8' * 64,
         'quality_report_hmac': None,

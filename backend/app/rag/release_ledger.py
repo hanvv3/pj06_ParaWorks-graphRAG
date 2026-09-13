@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TypeAlias
 from uuid import UUID
@@ -27,6 +29,7 @@ from backend.app.rag.release_authority import (
 from backend.app.rag.release_schema import build_rag_release_metadata, release_tables
 
 AffectedRow: TypeAlias = tuple[str, str]
+ObservedRow: TypeAlias = tuple[str, str, str]
 
 _ROW_IDENTITY_REGISTRY: Mapping[str, tuple[str, tuple[str, ...]]] = {
     'authorization': (
@@ -103,6 +106,8 @@ class RagReleaseMutationSet:
         '_before_snapshots',
         '_connection',
         '_executed',
+        '_observation_rows',
+        '_observation_snapshots',
         '_plans',
         '_rows',
         '_seal',
@@ -117,6 +122,8 @@ class RagReleaseMutationSet:
         self._plans: list[_ReleaseMutationPlan] = []
         self._before_snapshots: list[dict[str, object] | None] = []
         self._after_snapshots: list[dict[str, object]] = []
+        self._observation_rows: list[ReleaseRowPrimaryKey] = []
+        self._observation_snapshots: list[dict[str, object]] = []
         self._transaction = None
         self._executed = False
         self._seal = seal
@@ -135,7 +142,11 @@ class RagReleaseMutationSet:
         if row_kind == 'agent_run':
             from backend.app.models.agent_runs import AgentRun
 
-            return AgentRun.__table__, {}
+            # The release ledger's canonical identity deliberately stays
+            # ``agent_run_id`` while the application table's physical primary
+            # key is ``agent_runs.id``.  Never leak the physical spelling into
+            # the signed row-identity domain.
+            return AgentRun.__table__, {'agent_run_id': 'id'}
         if row_kind == 'cost_component':
             from backend.app.models.rag_runtime import AgentRunCostComponent
 
@@ -158,7 +169,11 @@ class RagReleaseMutationSet:
 
     @classmethod
     def _snapshot(
-        cls, connection: Connection, row: ReleaseRowPrimaryKey
+        cls,
+        connection: Connection,
+        row: ReleaseRowPrimaryKey,
+        *,
+        for_update: bool = False,
     ) -> dict[str, object] | None:
         table, aliases = cls._table(row.row_kind)
         predicates = []
@@ -167,7 +182,10 @@ class RagReleaseMutationSet:
             if column_name not in table.c:
                 raise RagReleaseLedgerError('release row primary key is invalid')
             predicates.append(table.c[column_name] == value)
-        result = connection.execute(select(table).where(*predicates)).mappings().all()
+        statement = select(table).where(*predicates)
+        if for_update and connection.dialect.name == 'postgresql':
+            statement = statement.with_for_update()
+        result = connection.execute(statement).mappings().all()
         if len(result) > 1:
             raise RagReleaseLedgerError('release row identity is not unique')
         return None if not result else dict(result[0])
@@ -178,9 +196,71 @@ class RagReleaseMutationSet:
         if self._executed:
             raise RagReleaseLedgerError('release mutation plan was already executed')
         stored = ReleaseRowPrimaryKey(row.row_kind, dict(row.primary_key))
-        if any(plan.row == stored for plan in self._plans):
+        if any(plan.row == stored for plan in self._plans) or stored in (
+            self._observation_rows
+        ):
             raise RagReleaseLedgerError('release row mutated more than once')
         self._plans.append(_ReleaseMutationPlan(statement, stored))
+
+    def observe(self, row: ReleaseRowPrimaryKey) -> None:
+        """Plan a locked, read-only peer snapshot for this release barrier."""
+        if type(row) is not ReleaseRowPrimaryKey or self._executed:
+            raise RagReleaseLedgerError('release observation is invalid')
+        stored = ReleaseRowPrimaryKey(row.row_kind, dict(row.primary_key))
+        if (
+            stored in self._observation_rows
+            or any(plan.row == stored for plan in self._plans)
+            or stored.row_kind in {'release_ledger', 'release_transition'}
+        ):
+            raise RagReleaseLedgerError('release observation is invalid')
+        # Validate both the row kind and the exact logical primary-key spelling
+        # before it can enter a signed observation set.
+        release_row_identity_hmac(
+            stored.row_kind,
+            stored.primary_key,
+            identity_secret=b'0' * 32,
+        )
+        self._observation_rows.append(stored)
+
+    def _capture_provider_incident(self, evidence: object) -> None:
+        from backend.app.agent_runtime.rag_provider_safety import (
+            _RELEASE_INCIDENT_PLAN_SEAL,
+            _AppliedReleaseProviderIncident,
+        )
+
+        if (
+            type(evidence) is not _AppliedReleaseProviderIncident
+            or evidence._seal is not _RELEASE_INCIDENT_PLAN_SEAL
+            or self._executed
+        ):
+            raise RagReleaseLedgerError('provider incident evidence is invalid')
+        authority_uuid = str(evidence.new_body['authority_uuid'])
+        readiness = evidence.readiness_after
+        rows = (
+            ReleaseRowPrimaryKey(
+                'provider_safety_authority', {'authority_uuid': authority_uuid}
+            ),
+            ReleaseRowPrimaryKey(
+                'provider_readiness',
+                {
+                    'component': readiness['component'],
+                    'provider_bytes': readiness['provider'],
+                    'model_bytes': readiness['model'],
+                    'reasoning_or_config_identity_bytes': readiness[
+                        'reasoning_or_config_identity'
+                    ],
+                },
+            ),
+        )
+        if any(plan.row in rows for plan in self._plans):
+            raise RagReleaseLedgerError('provider incident rows cannot be SQL planned')
+        self._rows.extend(rows)
+        self._before_snapshots.extend(
+            [dict(evidence.authority_before), dict(evidence.readiness_before)]
+        )
+        self._after_snapshots.extend(
+            [dict(evidence.authority_after), dict(evidence.readiness_after)]
+        )
 
     def _execute_under_barrier(
         self,
@@ -197,11 +277,29 @@ class RagReleaseMutationSet:
         transaction = connection.get_transaction()
         if transaction is None:
             raise RagReleaseLedgerError('release mutation transaction is unavailable')
+        for row in self._observation_rows:
+            snapshot = self._snapshot(connection, row, for_update=True)
+            if snapshot is None:
+                raise RagReleaseLedgerError('release observation row is missing')
+            self._observation_snapshots.append(snapshot)
         for plan in self._plans:
             before = self._snapshot(connection, plan.row)
             result = connection.execute(plan.statement)  # type: ignore[call-overload]
             after = self._snapshot(connection, plan.row)
-            if result.rowcount != 1 or after is None or after == before:
+            ignored = {'updated_at'}
+            if plan.row.row_kind == 'agent_run':
+                ignored.add('started_at')
+            if (
+                result.rowcount != 1
+                or after is None
+                or after == before
+                or (
+                    before is not None
+                    and not _meaningful_changed(
+                        before, after, ignored=frozenset(ignored)
+                    )
+                )
+            ):
                 raise RagReleaseLedgerError('release row mutation was not exact')
             if connection.get_transaction() is not transaction:
                 raise RagReleaseLedgerError('release mutation transaction changed')
@@ -218,6 +316,10 @@ class RagReleaseMutationSet:
     def rows(self) -> tuple[ReleaseRowPrimaryKey, ...]:
         return tuple(self._rows)
 
+    @property
+    def observation_rows(self) -> tuple[ReleaseRowPrimaryKey, ...]:
+        return tuple(self._observation_rows)
+
     def assert_current(self, connection: Connection) -> None:
         if (
             connection is not self._connection
@@ -232,12 +334,18 @@ class RagReleaseMutationSet:
         ):
             if self._snapshot(connection, row) != expected:
                 raise RagReleaseLedgerError('release mutation row changed after capture')
+        for row, expected in zip(
+            self._observation_rows, self._observation_snapshots, strict=True
+        ):
+            if self._snapshot(connection, row) != expected:
+                raise RagReleaseLedgerError('observed release peer changed after capture')
 
     def assert_payload_projection(
         self, payload: Mapping[str, object], *, identity_secret: bytes
     ) -> None:
         by_kind: dict[str, list[dict[str, object]]] = {}
         before_by_kind: dict[str, list[dict[str, object] | None]] = {}
+        mutated_by_kind: dict[str, list[bool]] = {}
         for row, before, snapshot in zip(
             self._rows,
             self._before_snapshots,
@@ -246,9 +354,40 @@ class RagReleaseMutationSet:
         ):
             by_kind.setdefault(row.row_kind, []).append(snapshot)
             before_by_kind.setdefault(row.row_kind, []).append(before)
+            mutated_by_kind.setdefault(row.row_kind, []).append(True)
+        for row, snapshot in zip(
+            self._observation_rows, self._observation_snapshots, strict=True
+        ):
+            by_kind.setdefault(row.row_kind, []).append(snapshot)
+            before_by_kind.setdefault(row.row_kind, []).append(snapshot)
+            mutated_by_kind.setdefault(row.row_kind, []).append(False)
+        actual_observations = tuple(
+            sorted(
+                (
+                    row.row_kind,
+                    release_row_identity_hmac(
+                        row.row_kind,
+                        row.primary_key,
+                        identity_secret=identity_secret,
+                    ),
+                    release_observation_projection_hmac(
+                        row.row_kind,
+                        snapshot,
+                        identity_secret=identity_secret,
+                    ),
+                )
+                for row, snapshot in zip(
+                    self._observation_rows,
+                    self._observation_snapshots,
+                    strict=True,
+                )
+            )
+        )
+        if actual_observations != _validate_observation_set(payload['observation_set']):
+            raise RagReleaseLedgerError('actual observation set differs from payload')
         authorizations = by_kind.get('authorization', [])
         if len(authorizations) != 1:
-            raise RagReleaseLedgerError('authorization mutation is required')
+            raise RagReleaseLedgerError('authorization peer is required')
         authorization = authorizations[0]
         authorization_before = before_by_kind['authorization'][0]
         expected_authorization_before = payload['authorization_state_before']
@@ -278,6 +417,39 @@ class RagReleaseMutationSet:
         }
         if any(authorization[key] != value for key, value in exact_authorization.items()):
             raise RagReleaseLedgerError('authorization payload differs from mutation')
+        expected_authorization_identity = {
+            'ledger_uuid': payload['ledger_uuid'],
+            'ledger_epoch': payload['ledger_epoch'],
+            'approval_id_hmac': payload['approval_id_hmac'],
+            'approval_hmac': payload['approval_hmac'],
+            'approved_corpus_snapshot_hmac': payload[
+                'approved_corpus_snapshot_hmac'
+            ],
+            'approved_provider_safety_snapshot_hmac': payload[
+                'approved_provider_safety_snapshot_hmac'
+            ],
+            'validation_database_identity_hmac': payload[
+                'validation_database_identity_hmac'
+            ],
+        }
+        if payload['transition_kind'] == 'authorization_bootstrap':
+            expected_authorization_identity.update(
+                base_generation=payload['from_generation'],
+                provider_safety_envelope_digest=payload[
+                    'provider_safety_envelope_digest'
+                ],
+            )
+        elif payload['transition_kind'] != 'authorization_abort_component':
+            expected_authorization_identity['provider_safety_envelope_digest'] = (
+                payload['provider_safety_envelope_digest']
+            )
+        if any(
+            authorization[key] != value
+            for key, value in expected_authorization_identity.items()
+        ):
+            raise RagReleaseLedgerError(
+                'authorization immutable identity differs from payload'
+            )
         if any(
             Decimal(str(authorization[column])) != Decimal(str(payload[key]))
             for column, key in (
@@ -322,7 +494,11 @@ class RagReleaseMutationSet:
             ):
                 raise RagReleaseLedgerError('case before-image differs from payload')
             if (
-                case['state'] != payload['case_state_after']
+                case['ledger_uuid'] != payload['ledger_uuid']
+                or case['ledger_epoch'] != payload['ledger_epoch']
+                or case['approval_id_hmac'] != payload['approval_id_hmac']
+                or case['case_id_hmac'] != payload['case_id_hmac']
+                or case['state'] != payload['case_state_after']
                 or case['case_projection_hmac'] != payload['case_projection_hmac']
                 or case['runtime_agent_run_id_hmac']
                 != payload['runtime_agent_run_id_hmac']
@@ -379,7 +555,11 @@ class RagReleaseMutationSet:
             ):
                 raise RagReleaseLedgerError('dispatch before-image differs from payload')
             if (
-                dispatch['component'] != payload['component']
+                dispatch['ledger_uuid'] != payload['ledger_uuid']
+                or dispatch['ledger_epoch'] != payload['ledger_epoch']
+                or dispatch['approval_id_hmac'] != payload['approval_id_hmac']
+                or dispatch['case_id_hmac'] != payload['case_id_hmac']
+                or dispatch['component'] != payload['component']
                 or dispatch['state'] != payload['dispatch_state_after']
                 or dispatch['dispatch_count'] != payload['dispatch_count_after']
                 or dispatch['dispatch_fence_hmac'] != payload['dispatch_fence_hmac']
@@ -410,6 +590,9 @@ class RagReleaseMutationSet:
         if reports and (
             len(reports) != 1
             or before_by_kind['quality_report'][0] is not None
+            or reports[0]['ledger_uuid'] != payload['ledger_uuid']
+            or reports[0]['ledger_epoch'] != payload['ledger_epoch']
+            or reports[0]['approval_id_hmac'] != payload['approval_id_hmac']
             or reports[0]['quality_report_hmac'] != payload['quality_report_hmac']
             or reports[0]['manifest_hmac'] != authorization['manifest_hmac']
             or reports[0]['baseline_hmac'] != authorization['baseline_hmac']
@@ -532,6 +715,66 @@ class RagReleaseMutationSet:
                 != Decimal(str(payload['charged_cost_usd']))
             ):
                 raise RagReleaseLedgerError('cost component payload differs')
+        if payload['transition_kind'] == 'case_claim':
+            runs = by_kind.get('agent_run', [])
+            components = by_kind.get('cost_component', [])
+            if len(runs) != 1 or len(components) != 2:
+                raise RagReleaseLedgerError('case claim runtime roster is invalid')
+            run = runs[0]
+            component_map = {
+                str(component['component']): component for component in components
+            }
+            if set(component_map) != {'query_embedding', 'answer_generation'}:
+                raise RagReleaseLedgerError('case claim runtime roster is invalid')
+            expected_reserves = {
+                'query_embedding': payload['case_embedding_reserved_cost_usd'],
+                'answer_generation': payload['case_generation_reserved_cost_usd'],
+            }
+            if (
+                run['status'] != 'running'
+                or run['run_record_phase'] != 'admission'
+                or run['completed_at'] is not None
+                or run['projection_owner_fence_hmac'] is not None
+                or Decimal(str(run['total_charged_cost_usd']))
+                != Decimal('0.000000')
+            ):
+                raise RagReleaseLedgerError('case claim runtime parent is invalid')
+            terminal_zero = 0
+            for component_name, item in component_map.items():
+                state = item['dispatch_state']
+                if state not in {'not_attempted', 'terminal'}:
+                    raise RagReleaseLedgerError('case claim runtime child is invalid')
+                if state == 'terminal':
+                    terminal_zero += 1
+                    if (
+                        int(item['reserved_input_tokens']) != 0
+                        or int(item['reserved_output_tokens']) != 0
+                        or Decimal(str(item['reserved_cost_usd']))
+                        != Decimal('0.000000')
+                    ):
+                        raise RagReleaseLedgerError(
+                            'case claim runtime child is invalid'
+                        )
+                elif Decimal(str(item['reserved_cost_usd'])) != Decimal(
+                    str(expected_reserves[component_name])
+                ):
+                    raise RagReleaseLedgerError('case claim runtime child is invalid')
+                if (
+                    item['attempted'] is not False
+                    or item['dispatch_count'] != 0
+                    or item['actual_input_tokens'] is not None
+                    or item['actual_output_tokens'] is not None
+                    or Decimal(str(item['charged_cost_usd']))
+                    != Decimal('0.000000')
+                    or item['charge_basis'] != 'zero'
+                    or item['overrun'] is not False
+                    or item['dispatch_fence_hmac'] is not None
+                    or item['process_instance_hmac'] is not None
+                    or item['terminal_outcome'] is not None
+                ):
+                    raise RagReleaseLedgerError('case claim runtime child is invalid')
+            if terminal_zero > 1:
+                raise RagReleaseLedgerError('case claim runtime children are invalid')
         readiness = by_kind.get('provider_readiness', [])
         for index, item in enumerate(readiness):
             item_before = before_by_kind['provider_readiness'][index]
@@ -558,6 +801,241 @@ class RagReleaseMutationSet:
                 )
             ):
                 raise RagReleaseLedgerError('provider readiness differs from mutation')
+        if payload['transition_kind'] == 'authorization_abort_component':
+            if (
+                len(provider) != 1
+                or len(readiness) != 1
+                or mutated_by_kind.get('provider_safety_authority') != [True]
+                or mutated_by_kind.get('provider_readiness') != [True]
+            ):
+                raise RagReleaseLedgerError('provider incident mutation is required')
+            authority_before = before_by_kind['provider_safety_authority'][0]
+            readiness_before = before_by_kind['provider_readiness'][0]
+            authority_after = provider[0]
+            readiness_after = readiness[0]
+            expected_state = (
+                'blocked_overrun'
+                if payload['outcome'] == 'provider_usage_overrun'
+                else 'blocked_remediation'
+            )
+            if (
+                authority_before is None
+                or readiness_before is None
+                or authority_after['global_safety_generation']
+                != authority_before['global_safety_generation'] + 1
+                or readiness_before['state'] != 'ready'
+                or readiness_after['state'] != expected_state
+                or readiness_after['state_version']
+                != readiness_before['state_version'] + 1
+                or readiness_after['family_safety_generation']
+                != authority_after['global_safety_generation']
+                or readiness_after['reviewed_gate_reference_hmac']
+                != readiness_before['reviewed_gate_reference_hmac']
+                or readiness_after['reset_by'] != readiness_before['reset_by']
+                or readiness_after['reset_at'] != readiness_before['reset_at']
+            ):
+                raise RagReleaseLedgerError('provider incident state differs')
+            run_hmac = rag_identity_hmac(
+                {'agent_run_id': readiness_after['overrun_agent_run_id']},
+                secret=identity_secret,
+                schema_version='rag-runtime-agent-run-id:v1',
+                policy_version='rag-run:v2',
+            )
+            if (
+                run_hmac != payload['runtime_agent_run_id_hmac']
+                or Decimal(str(readiness_after['overrun_cost_usd']))
+                != Decimal(str(payload['charged_cost_usd']))
+                or readiness_after['overrun_input_tokens'] is None
+                or readiness_after['overrun_output_tokens'] is None
+                or readiness_after['overrun_observed_at'] is None
+            ):
+                raise RagReleaseLedgerError('provider incident evidence differs')
+        elif any(mutated_by_kind.get('provider_safety_authority', ())) or any(
+            mutated_by_kind.get('provider_readiness', ())
+        ):
+            raise RagReleaseLedgerError('unexpected provider safety mutation')
+        _assert_exact_transition_snapshots(
+            payload, by_kind, before_by_kind, mutated_by_kind
+        )
+
+
+def _meaningful_changed(
+    before: Mapping[str, object],
+    after: Mapping[str, object],
+    *,
+    ignored: frozenset[str] = frozenset({'updated_at'}),
+) -> bool:
+    keys = (set(before) | set(after)) - ignored
+    return any(before.get(key) != after.get(key) for key in keys)
+
+
+def _assert_exact_transition_snapshots(
+    payload: Mapping[str, object],
+    after_by_kind: Mapping[str, list[dict[str, object]]],
+    before_by_kind: Mapping[str, list[dict[str, object] | None]],
+    mutated_by_kind: Mapping[str, list[bool]],
+) -> None:
+    """Bind each signed transition kind to its actual mutable DB lifecycle."""
+    kind = str(payload['transition_kind'])
+    case_bound = payload['case_id_hmac'] is not None
+    runs = after_by_kind.get('agent_run', [])
+    run_befores = before_by_kind.get('agent_run', [])
+    costs = after_by_kind.get('cost_component', [])
+    cost_befores = before_by_kind.get('cost_component', [])
+    dispatches = after_by_kind.get('dispatch', [])
+    dispatch_befores = before_by_kind.get('dispatch', [])
+
+    if len(runs) != (1 if case_bound else 0):
+        raise RagReleaseLedgerError('runtime parent mutation matrix is invalid')
+    if len(dispatches) != (1 if payload['component'] is not None else 0):
+        raise RagReleaseLedgerError('runtime dispatch mutation matrix is invalid')
+    for row_before, row_after, mutated in zip(
+        run_befores, runs, mutated_by_kind.get('agent_run', []), strict=True
+    ):
+        if mutated and row_before is not None and not _meaningful_changed(
+            row_before, row_after, ignored=frozenset({'updated_at', 'started_at'})
+        ):
+            raise RagReleaseLedgerError('agent run mutation is timestamp-only')
+    for row_before, row_after, mutated in zip(
+        cost_befores, costs, mutated_by_kind.get('cost_component', []), strict=True
+    ):
+        if mutated and row_before is not None and not _meaningful_changed(
+            row_before, row_after
+        ):
+            raise RagReleaseLedgerError('cost component mutation is timestamp-only')
+    for row_before, row_after, mutated in zip(
+        dispatch_befores, dispatches, mutated_by_kind.get('dispatch', []), strict=True
+    ):
+        if mutated and row_before is not None and not _meaningful_changed(
+            row_before, row_after
+        ):
+            raise RagReleaseLedgerError('dispatch mutation is timestamp-only')
+
+    if not case_bound:
+        if costs or dispatches:
+            raise RagReleaseLedgerError('case-null runtime mutation is invalid')
+        return
+
+    run = runs[0]
+    run_before = run_befores[0]
+    if kind == 'case_claim':
+        return
+    if run_before is None:
+        raise RagReleaseLedgerError('runtime parent before-image is missing')
+
+    component = payload['component']
+    current_after = next(
+        (item for item in costs if item['component'] == component), None
+    )
+    current_before = None
+    if current_after is not None:
+        current_index = costs.index(current_after)
+        current_before = cost_befores[current_index]
+
+    if component is not None:
+        if current_after is None or current_before is None:
+            raise RagReleaseLedgerError('runtime current component is missing')
+        dispatch = dispatches[0]
+        dispatch_before = dispatch_befores[0]
+        if (
+            current_after['dispatch_count'] != dispatch['dispatch_count']
+            or current_after['dispatch_fence_hmac']
+            != dispatch['dispatch_fence_hmac']
+            or Decimal(str(current_after['reserved_cost_usd']))
+            != Decimal(str(dispatch['reserved_cost_usd']))
+            or Decimal(str(current_after['charged_cost_usd']))
+            != Decimal(str(dispatch['charged_cost_usd']))
+            or current_after['charge_basis'] != dispatch['charge_basis']
+            or (
+                current_after['dispatch_state'] == 'abandoned_unknown'
+                and dispatch['state'] != 'terminal'
+            )
+            or (
+                current_after['dispatch_state'] != 'abandoned_unknown'
+                and current_after['dispatch_state'] != dispatch['state']
+            )
+        ):
+            raise RagReleaseLedgerError('release/runtime dispatch pair differs')
+        if kind == 'component_claim':
+            if (
+                dispatch_before is not None
+                or current_before['dispatch_state'] != 'not_attempted'
+                or current_after['dispatch_state'] != 'dispatching'
+                or current_after['attempted'] is not True
+                or current_after['dispatch_count'] != 1
+                or current_after['actual_input_tokens'] is not None
+                or current_after['actual_output_tokens'] is not None
+                or current_after['charge_basis'] != 'reserved'
+                or current_after['terminal_outcome'] is not None
+                or current_after['overrun'] is not False
+                or current_after['process_instance_hmac']
+                != payload['execution_process_instance_hmac']
+            ):
+                raise RagReleaseLedgerError('component claim runtime state is invalid')
+        else:
+            if (
+                dispatch_before is None
+                or dispatch_before['state'] != 'dispatching'
+                or current_before['dispatch_state'] != 'dispatching'
+                or current_after['dispatch_state']
+                not in {'terminal', 'abandoned_unknown'}
+                or current_after['attempted'] is not True
+                or current_after['dispatch_count'] != 1
+                or current_after['process_instance_hmac']
+                != payload['execution_process_instance_hmac']
+            ):
+                raise RagReleaseLedgerError('component outcome runtime state is invalid')
+            expected_terminal = (
+                'component_succeeded'
+                if kind == 'component_outcome'
+                else payload['outcome']
+            )
+            if kind == 'authorization_abort_execution_crash':
+                expected_terminal = 'abandoned_unknown'
+            if current_after['terminal_outcome'] != expected_terminal:
+                raise RagReleaseLedgerError('component terminal outcome differs')
+
+    if kind in {'component_claim', 'component_outcome'}:
+        expected_phase = 'admission'
+        expected_fence = None
+        if kind == 'component_outcome' and component == 'answer_generation':
+            expected_phase = 'cost_finalized_pending_projection'
+            expected_fence = payload['execution_runner_fence_hmac']
+        if (
+            run_before['status'] != 'running'
+            or run_before['run_record_phase'] != 'admission'
+            or run['status'] != 'running'
+            or run['run_record_phase'] != expected_phase
+            or run['completed_at'] is not None
+            or run['projection_owner_fence_hmac'] != expected_fence
+        ):
+            raise RagReleaseLedgerError('component parent lifecycle is invalid')
+        return
+
+    complete_kinds = {'case_safe_outcome', 'case_outcome'}
+    crash = kind == 'authorization_abort_execution_crash'
+    if kind in complete_kinds:
+        expected_status = 'complete'
+        expected_phase = 'final'
+    else:
+        expected_status = 'failed'
+        expected_phase = 'admission_only' if crash else 'final'
+    if (
+        run_before['status'] != 'running'
+        or run['status'] != expected_status
+        or run['run_record_phase'] != expected_phase
+        or run['completed_at'] is None
+    ):
+        raise RagReleaseLedgerError('case terminal parent lifecycle is invalid')
+    if kind == 'case_outcome' and run_before['run_record_phase'] != (
+        'cost_finalized_pending_projection'
+    ):
+        raise RagReleaseLedgerError('case projection parent phase is invalid')
+    if kind != 'case_outcome' and run_before['run_record_phase'] != 'admission':
+        raise RagReleaseLedgerError('case terminal parent phase is invalid')
+    for item in costs:
+        if item['dispatch_state'] not in {'terminal', 'abandoned_unknown'}:
+            raise RagReleaseLedgerError('case terminal child is nonterminal')
 
 
 def release_row_identity_hmac(
@@ -597,6 +1075,57 @@ def release_row_identity_hmac(
         policy_version='rag-live-gate:v1',
     )
 
+
+def _observation_json_value(value: object) -> object:
+    """Encode SQL after-images without relying on driver-specific reprs."""
+    if value is None or type(value) in {bool, int, str}:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise RagReleaseLedgerError('release observation projection is invalid')
+        return {'binary64_hex': value.hex()}
+    if isinstance(value, Decimal):
+        return format(value, 'f')
+    if isinstance(value, datetime):
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return aware.astimezone(UTC).isoformat().replace('+00:00', 'Z')
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise RagReleaseLedgerError('release observation projection is invalid')
+        return {
+            str(key): _observation_json_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, Sequence):
+        return [_observation_json_value(item) for item in value]
+    raise RagReleaseLedgerError('release observation projection is invalid')
+
+
+def release_observation_projection_hmac(
+    row_kind: str,
+    snapshot: Mapping[str, object],
+    *,
+    identity_secret: bytes,
+) -> str:
+    """Seal a typed read-only DB after-image without exposing raw values."""
+    if row_kind not in _ROW_IDENTITY_REGISTRY or type(snapshot) is not dict:
+        raise RagReleaseLedgerError('release observation projection is invalid')
+    projection = {
+        str(key): _observation_json_value(value)
+        for key, value in sorted(snapshot.items(), key=lambda pair: str(pair[0]))
+        if key not in {'created_at', 'updated_at'}
+    }
+    return rag_identity_hmac(
+        {'row_kind': row_kind, 'projection': projection},
+        secret=identity_secret,
+        schema_version='rag-release-row-observation-projection:v1',
+        policy_version='rag-live-gate:v1',
+    )
+
 _TRANSITION_KEYS = frozenset(
     {
         'affected_rows',
@@ -633,6 +1162,7 @@ _TRANSITION_KEYS = frozenset(
         'generation_dispatch_count',
         'ledger_epoch',
         'ledger_uuid',
+        'observation_set',
         'outcome',
         'provider_safety_envelope_digest',
         'quality_report_hmac',
@@ -777,6 +1307,7 @@ class ValidatedReleaseTransition:
     from_generation: int
     to_generation: int
     affected_rows: tuple[AffectedRow, ...]
+    observation_set: tuple[ObservedRow, ...]
     payload_canonical_bytes: bytes
     transition_digest: str
 
@@ -808,6 +1339,33 @@ def _validate_affected_rows(value: object) -> tuple[AffectedRow, ...]:
     required = {'release_ledger', 'release_transition'}
     if not required <= {kind for kind, _identity in rows}:
         raise RagReleaseLedgerError('affected rows omit release authority mutation')
+    return tuple(rows)
+
+
+def _validate_observation_set(value: object) -> tuple[ObservedRow, ...]:
+    if type(value) is not list:
+        raise RagReleaseLedgerError('observation set is invalid')
+    rows: list[ObservedRow] = []
+    for item in value:
+        if type(item) is not dict or set(item) != {
+            'row_identity_hmac',
+            'row_kind',
+            'row_projection_hmac',
+        }:
+            raise RagReleaseLedgerError('observation set keys are invalid')
+        kind = item['row_kind']
+        identity = item['row_identity_hmac']
+        projection = item['row_projection_hmac']
+        if kind not in _AFFECTED_ROW_KINDS or kind in {
+            'release_ledger',
+            'release_transition',
+        }:
+            raise RagReleaseLedgerError('observation row kind is invalid')
+        require_lower_hmac(identity)
+        require_lower_hmac(projection)
+        rows.append((kind, identity, projection))
+    if rows != sorted(set(rows)):
+        raise RagReleaseLedgerError('observation set must be unique lexical order')
     return tuple(rows)
 
 
@@ -933,7 +1491,9 @@ def _require_present_matrix(
 
 
 def _validate_transition_matrix(
-    payload: Mapping[str, object], rows: tuple[AffectedRow, ...]
+    payload: Mapping[str, object],
+    rows: tuple[AffectedRow, ...],
+    observations: tuple[ObservedRow, ...],
 ) -> None:
     kind = payload['transition_kind']
     common_hmacs = (
@@ -1178,72 +1738,136 @@ def _validate_transition_matrix(
     if has_case and payload['case_claim_count'] == 0:
         raise RagReleaseLedgerError('case aggregate matrix is invalid')
 
-    row_kinds = [row_kind for row_kind, _identity in rows]
-    base = {'authorization', 'release_ledger', 'release_transition'}
-    exact: set[str] | None = None
-    allowed: set[str] = set(base)
-    cost_range = (0, 0)
-    if kind == 'authorization_bootstrap':
-        exact = base
-    elif kind == 'case_claim':
-        allowed |= {'case', 'agent_run', 'cost_component'}
-        cost_range = (2, 2)
-    elif kind in {'component_claim', 'component_outcome'}:
-        allowed |= {'case', 'dispatch', 'agent_run', 'cost_component'}
-        cost_range = (1, 1)
-    elif kind in {'case_failure', 'case_safe_outcome', 'authorization_abort_control'}:
-        allowed |= {'case', 'agent_run', 'cost_component'}
-        if has_component:
-            allowed.add('dispatch')
-        cost_range = (1, 2)
-    elif kind == 'case_outcome':
-        exact = base | {'case', 'agent_run'}
-    elif kind == 'authorization_abort_component':
-        allowed |= {
+    affected = [row_kind for row_kind, _identity in rows]
+    observed = [row_kind for row_kind, _identity, _projection in observations]
+    if affected.count('release_ledger') != 1 or affected.count(
+        'release_transition'
+    ) != 1:
+        raise RagReleaseLedgerError('affected row matrix is invalid')
+    if any(kind in observed for kind in {'release_ledger', 'release_transition'}):
+        raise RagReleaseLedgerError('observation row matrix is invalid')
+
+    def _require_peer(row_kind: str, *, mode: str) -> None:
+        actual = affected.count(row_kind)
+        read_only = observed.count(row_kind)
+        valid = (
+            (actual == 1 and read_only == 0)
+            if mode == 'affected'
+            else (actual == 0 and read_only == 1)
+            if mode == 'observed'
+            else (actual + read_only == 1)
+        )
+        if not valid:
+            raise RagReleaseLedgerError(f'{row_kind} peer matrix is invalid')
+
+    authorization_mode = (
+        'observed'
+        if kind in {'case_safe_outcome', 'case_outcome'}
+        else 'either'
+        if kind in {'component_outcome', 'case_failure'}
+        else 'affected'
+    )
+    _require_peer('authorization', mode=authorization_mode)
+
+    if has_case:
+        _require_peer(
             'case',
-            'dispatch',
+            mode=(
+                'observed'
+                if kind == 'component_claim'
+                else 'either'
+                if kind == 'component_outcome'
+                else 'affected'
+            ),
+        )
+        _require_peer(
             'agent_run',
-            'cost_component',
-            'provider_safety_authority',
-            'provider_readiness',
-        }
-        cost_range = (1, 2)
-    elif kind == 'authorization_abort_component_snapshot':
-        allowed |= {'case', 'dispatch', 'agent_run', 'cost_component'}
-        cost_range = (1, 2)
-    elif kind in {
+            mode=(
+                'observed'
+                if kind in {'component_claim', 'component_outcome'}
+                else 'affected'
+            ),
+        )
+    elif affected.count('case') + observed.count('case') + affected.count(
+        'agent_run'
+    ) + observed.count('agent_run'):
+        raise RagReleaseLedgerError('case-null peer matrix is invalid')
+
+    if has_component:
+        _require_peer('dispatch', mode='affected')
+    elif affected.count('dispatch') + observed.count('dispatch'):
+        raise RagReleaseLedgerError('component-null dispatch matrix is invalid')
+
+    cost_range = {
+        'case_claim': (2, 2),
+        'component_claim': (1, 1),
+        'component_outcome': (1, 1),
+        'case_failure': (1, 2),
+        'case_safe_outcome': (1, 2),
+        'authorization_abort_control': (1, 2),
+        'authorization_abort_component': (1, 2),
+        'authorization_abort_component_snapshot': (1, 2),
+        'authorization_abort_corpus_drift': (0, 2),
+        'authorization_abort_execution_crash': (0, 2),
+    }.get(str(kind), (0, 0))
+    cost_count = affected.count('cost_component')
+    if not cost_range[0] <= cost_count <= cost_range[1] or observed.count(
+        'cost_component'
+    ):
+        raise RagReleaseLedgerError('cost component matrix is invalid')
+
+    provider_observation_kinds = {
+        'authorization_abort_control',
+        'authorization_abort_component_snapshot',
         'authorization_abort_corpus_drift',
         'authorization_abort_execution_crash',
-    }:
-        if has_case:
-            allowed |= {'case', 'agent_run', 'cost_component'}
-            if has_component:
-                allowed.add('dispatch')
-            cost_range = (0, 2)
-        else:
-            exact = base
-    elif kind in {
+        'authorization_abort_final',
+        'authorization_abort_snapshot',
         'authorization_complete',
+        'authorization_finish_failed',
         'authorization_finish_quality_failed',
-    }:
-        exact = base | {'quality_report'}
-    elif kind == 'authorization_finish_failed':
-        exact = base | ({'quality_report'} if payload['quality_report_hmac'] else set())
-    else:
-        exact = base
-    row_set = set(row_kinds)
-    if exact is not None:
-        if row_set != exact or len(row_kinds) != len(exact):
-            raise RagReleaseLedgerError('affected row matrix is invalid')
-    elif (
-        row_set
-        != (allowed if row_kinds.count('cost_component') else allowed - {'cost_component'})
-        or not cost_range[0]
-        <= row_kinds.count('cost_component')
-        <= cost_range[1]
-        or any(row_kinds.count(item) != 1 for item in allowed - {'cost_component'})
+    }
+    if kind == 'authorization_abort_component':
+        _require_peer('provider_safety_authority', mode='affected')
+        _require_peer('provider_readiness', mode='affected')
+    elif kind in provider_observation_kinds:
+        if affected.count('provider_safety_authority') or observed.count(
+            'provider_safety_authority'
+        ) not in {0, 1}:
+            raise RagReleaseLedgerError('provider safety peer matrix is invalid')
+        readiness_expected = kind == 'authorization_abort_component_snapshot'
+        readiness_count = observed.count('provider_readiness')
+        if (
+            affected.count('provider_readiness')
+            or readiness_count not in ({0, 1} if readiness_expected else {0})
+        ):
+            raise RagReleaseLedgerError('provider readiness peer matrix is invalid')
+    elif any(
+        affected.count(item) + observed.count(item)
+        for item in ('provider_safety_authority', 'provider_readiness')
     ):
-        raise RagReleaseLedgerError('affected row matrix is invalid')
+        raise RagReleaseLedgerError('provider safety row matrix is invalid')
+
+    quality_expected = payload['quality_report_hmac'] is not None
+    if affected.count('quality_report') != int(quality_expected) or observed.count(
+        'quality_report'
+    ):
+        raise RagReleaseLedgerError('quality report row matrix is invalid')
+
+    allowed = {
+        'authorization',
+        'case',
+        'dispatch',
+        'agent_run',
+        'cost_component',
+        'provider_safety_authority',
+        'provider_readiness',
+        'quality_report',
+        'release_ledger',
+        'release_transition',
+    }
+    if set(affected + observed) - allowed:
+        raise RagReleaseLedgerError('release peer matrix is invalid')
 
 
 def validate_transition_payload(
@@ -1319,18 +1943,27 @@ def validate_transition_payload(
     elif approved != current:
         raise RagReleaseLedgerError('current corpus snapshot differs from approval')
     rows = _validate_affected_rows(payload['affected_rows'])
+    observations = _validate_observation_set(payload['observation_set'])
+    affected_identities = {(kind, identity) for kind, identity in rows}
+    observed_identities = {
+        (kind, identity) for kind, identity, _projection in observations
+    }
+    if affected_identities & observed_identities:
+        raise RagReleaseLedgerError('affected and observed rows overlap')
     derived = _derived_payload_rows(payload, identity_secret=identity_secret)
-    rows_by_kind = dict(rows)
-    if any(rows_by_kind.get(kind) != identity for kind, identity in derived):
-        raise RagReleaseLedgerError('affected row identity is invalid')
+    bound_identities = affected_identities | observed_identities
+    if any(item not in bound_identities for item in derived):
+        raise RagReleaseLedgerError(
+            'affected or observed release row identity is unbound'
+        )
     if kind == 'authorization_bootstrap':
         _validate_bootstrap(payload)
-    _validate_transition_matrix(payload, rows)
+    _validate_transition_matrix(payload, rows, observations)
     canonical = canonical_json_bytes(dict(payload))
     digest = rag_identity_hmac(
         dict(payload),
         secret=identity_secret,
-        schema_version='rag-release-ledger-transition:v1',
+        schema_version='rag-release-ledger-transition:v2',
         policy_version='rag-live-gate:v1',
     )
     return ValidatedReleaseTransition(
@@ -1338,6 +1971,7 @@ def validate_transition_payload(
         from_generation=from_generation,
         to_generation=to_generation,
         affected_rows=rows,
+        observation_set=observations,
         payload_canonical_bytes=canonical,
         transition_digest=digest,
     )
@@ -1603,8 +2237,37 @@ class RagReleaseLedger:
         *,
         actual_mutations: RagReleaseMutationSet,
         database_identity: ValidationDatabaseIdentity | None = None,
+        provider_incident: object = None,
     ) -> RagReleaseSnapshot:
         validated = validate_transition_payload(payload, identity_secret=self._secret)
+        from backend.app.admin.rag_provider_safety import (
+            RagProviderSafetyIncidentPlan,
+        )
+
+        if provider_incident is not None and (
+            type(provider_incident) is not RagProviderSafetyIncidentPlan
+            or provider_incident._seal is None
+        ):
+            raise RagReleaseLedgerError('provider incident capability is invalid')
+        if (payload['transition_kind'] == 'authorization_abort_component') != (
+            provider_incident is not None
+        ):
+            raise RagReleaseLedgerError('provider incident capability is required')
+        if provider_incident is not None:
+            expected_run_hmac = rag_identity_hmac(
+                {'agent_run_id': provider_incident.agent_run_id},
+                secret=self._secret,
+                schema_version='rag-runtime-agent-run-id:v1',
+                policy_version='rag-run:v2',
+            )
+            if (
+                provider_incident.component != payload['component']
+                or provider_incident.category != payload['outcome']
+                or expected_run_hmac != payload['runtime_agent_run_id_hmac']
+                or Decimal(str(provider_incident.cost_usd))
+                != Decimal(str(payload['charged_cost_usd']))
+            ):
+                raise RagReleaseLedgerError('provider incident capability differs')
         if (
             type(actual_mutations) is not RagReleaseMutationSet
             or actual_mutations._seal is not _MUTATION_SET_SEAL
@@ -1636,6 +2299,18 @@ class RagReleaseLedger:
                     raise RagReleaseLedgerError(
                         'release transition generation CAS failed'
                     )
+                if provider_incident is not None:
+                    incident_evidence = barrier_guard.apply_provider_incident(
+                        provider_incident
+                    )
+                    if (
+                        incident_evidence.new_body['envelope_digest']
+                        != payload['provider_safety_envelope_digest']
+                    ):
+                        raise RagReleaseLedgerError(
+                            'provider incident envelope differs from payload'
+                        )
+                    actual_mutations._capture_provider_incident(incident_evidence)
                 actual_mutations._execute_under_barrier(
                     connection,
                     authority=self._authority,

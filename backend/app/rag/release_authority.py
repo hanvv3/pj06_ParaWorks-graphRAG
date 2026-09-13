@@ -74,13 +74,23 @@ _RELEASE_BARRIER_SEAL = object()
 
 
 class _RagReleaseBarrierGuard:
-    __slots__ = ('connection', '_seal')
+    __slots__ = ('connection', '_provider_guard', '_seal')
 
-    def __init__(self, connection: Connection, *, seal: object) -> None:
+    def __init__(
+        self, connection: Connection, *, seal: object, provider_guard: object = None
+    ) -> None:
         if seal is not _RELEASE_BARRIER_SEAL:
             raise RagReleaseAuthorityError('release barrier guard is invalid')
         self.connection = connection
+        self._provider_guard = provider_guard
         self._seal = seal
+
+    def apply_provider_incident(self, plan: object) -> object:
+        if self._provider_guard is None:
+            raise RagReleaseAuthorityError(
+                'provider incident capability requires production barrier'
+            )
+        return self._provider_guard.apply_incident(self.connection, plan)
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,7 +535,9 @@ class RagReleaseAuthority:
                     )
                     order.acquire('release_rows')
                     yield _RagReleaseBarrierGuard(
-                        connection, seal=_RELEASE_BARRIER_SEAL
+                        connection,
+                        seal=_RELEASE_BARRIER_SEAL,
+                        provider_guard=provider_guard,
                     )
         except RagReleaseAuthorityError:
             raise

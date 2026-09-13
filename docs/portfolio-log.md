@@ -7009,3 +7009,25 @@ Cost/security note:
 - R1-R4 implementation is committed locally as `6e08051`. Independent review
   should inspect `e20ccd5..6e08051` for round 2 or `0771405..6e08051`
   cumulatively.
+
+## 2026-09-13 Deliverable D Core Task 23 semantic release evidence
+
+- The release ledger now distinguishes actual semantic mutations from locked
+  read-only proof. `affected_rows` contains only rows whose meaningful
+  before/after image changes; unchanged authorization, case, runtime, and
+  provider peers are sealed in a canonical `observation_set` instead of being
+  rewritten as no-ops.
+- Observation payloads expose only domain-separated identity/projection HMACs.
+  They are captured beneath the same provider/release barrier, rechecked before
+  commit, and included in the transition digest, so missing or changed evidence
+  fails closed without leaking raw database identities.
+- The same remediation maps the signed logical AgentRun identity to its physical
+  key, binds approval/corpus/provider/runtime identities to DB evidence, enforces
+  exact 17-kind parent/child/dispatch lifecycles, and integrates a sealed Task22
+  provider-safety incident path with external-first persistence and rollback
+  fail-stop behavior.
+- Fresh provider-free verification is `46 passed` for the Q1-Q4/Option-A probes
+  and `137 passed, 11 skipped` for release/provider/schema/advisory direct
+  impact. Conditional PostgreSQL cases remain skipped without the controlled
+  test DSN; no live release, provider, network, paid-model, rollout, push, merge,
+  or deploy operation occurred.

@@ -5578,3 +5578,27 @@ tests passed with 53 tests; ruff passed.
   rereview. No real release/provider/network/push/merge/deploy is authorized.
 - Use `e20ccd5..6e08051` for round-2 rereview and `0771405..6e08051` for the
   cumulative Task23 review.
+
+## 2026-09-13 Task 23 round-3 Option-A implementation handoff
+
+- The user approved the contract amendment: `affected_rows` contains only
+  semantic mutations; unchanged locked authorization/case/runtime/provider
+  peers are represented by canonical `observation_set` identity/projection
+  HMACs. Never reintroduce no-op, timestamp-only, or clock-only writes.
+- The mutation collector snapshots observations under the existing provider ->
+  release -> provider rows -> release/runtime rows lock order and rechecks them
+  in the same transaction. Observation identity/projection changes alter the
+  transition HMAC; raw row identities/values are not serialized.
+- Q1 maps logical `agent_run_id` to physical `AgentRun.id` while preserving the
+  canonical identity domain. Q2/Q3 bind payload identities to exact DB peers and
+  enforce the 17-kind parent/child/dispatch lifecycle. Q4 uses a Task22-issued,
+  service/ledger-bound, one-use incident plan that mutates the external provider
+  envelope before exact DB CAS and fails stopped after DB rollback.
+- Fresh current gates: Option-A/Q1-Q4 `46 passed`; release/provider/schema/
+  advisory direct impact `137 passed, 11 skipped`; changed-file Ruff and compile
+  clean. Skips are conditional PostgreSQL proofs because
+  `PARAWORKS_TEST_POSTGRES_URL` is unavailable. The Task23 report/progress and
+  approved spec/plan contain the exact ruling.
+- No live provider/release/admin command, network/paid call, push, merge, or
+  deploy is authorized. Finish diff/credential/status checks and local commit,
+  then request independent rereview before Task24.

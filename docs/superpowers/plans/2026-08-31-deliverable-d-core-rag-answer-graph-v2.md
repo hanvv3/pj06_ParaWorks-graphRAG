@@ -2036,6 +2036,16 @@ uv run python -m backend.app.admin.rag_provider_safety provider-safety-supersede
 
 ### Task 23: Isolate the Exact-Six Live Release Authority
 
+**Ruling (2026-09-13, user-approved):** the canonical `affected_rows` contract
+contains only rows with a semantic before/after mutation. Same-barrier locked,
+read-only peers required to validate authorization, case, runtime, or provider
+safety state belong to a separately domain-separated `observation_set`. Each
+observation carries only typed row-identity and row-projection HMACs; it never
+exposes raw IDs or row values. Missing, changed, duplicated, overlapping, or
+out-of-barrier observations fail closed, and the observation set is part of the
+canonical transition HMAC. No no-op, `updated_at`-only, or clock-only write may
+be introduced to satisfy an affected-set matrix.
+
 **Files:**
 
 - Create: `backend/app/rag/release_schema.py`
@@ -2045,6 +2055,10 @@ uv run python -m backend.app.admin.rag_provider_safety provider-safety-supersede
 - Create: `backend/tests/test_rag_live_gate_schema.py`
 - Create: `backend/tests/test_rag_release_authority.py`
 - Create: `backend/tests/test_rag_release_ledger.py`
+- Create: `backend/tests/test_rag_release_ledger_review_q.py`
+- Modify: `backend/app/admin/rag_provider_safety.py`
+- Modify: `backend/app/agent_runtime/rag_provider_safety.py`
+- Modify: `backend/tests/test_rag_release_authority_postgres.py`
 - Modify: `backend/tests/release_contracts.py`
 - Modify: `backend/app/core/config.py`
 - Modify: `.env.example`
@@ -2097,10 +2111,11 @@ uv run python -m backend.app.admin.rag_live_gate status
 - [ ] Add RED tests proving the exact six release tables exist only in a separate validation metadata/schema and are absent from application `Base.metadata`, Alembic revisions, normal `create_all`, and production DB bootstrap.
 - [ ] Add RED schema tests for composite ledger UUID/epoch/generation authority, immutable authorization snapshot, case/run links, component dispatch accounting, append-only transition bytes, insert-only unique quality report, exact FKs/checks, and no raw query/evidence/model output columns.
 - [ ] Add RED durable marker tests for `PARAWORKS_RELEASE_LEDGER_AUTHORITY_PATH` plus distinct stable `.lock`, provider/release four-leaf cross-alias rejection, canonical envelope/HMAC, DB identity, marker-first/DB-second crash fail-stop, and no runner repair.
-- [ ] Add RED transition tests for generation 1..N gaplessness within epoch, immutable row identity across mutable state, exact affected-row digest, transition kind before/after/null matrix, aggregate count/cost equality, and no-op/false affected sets.
+- [ ] Add RED transition tests for generation 1..N gaplessness within epoch, immutable row identity across mutable state, exact semantic affected-row digest, separately sealed observation-set digest, transition kind before/after/null matrix, aggregate count/cost equality, and no-op/false affected sets. Include case-outcome unchanged authorization, component unchanged case/runtime parent, missing/changed observation, barrier TOCTOU, and clock-only negative cases.
+- [ ] Add RED Task-22 provider-incident seam tests for an internally sealed, one-use plan; stable global lock order; external-first envelope change; same-transaction exact DB authority/readiness generations, state, digest, blocker evidence; and fail-stop external/DB mismatch after DB rollback. Do not broaden existing public/admin reset/rebind behavior and do not call a live provider.
 - [ ] Add RED rebootstrap tests for same UUID/new epoch with predecessor/reason HMAC and generation zero, prior rows read-only, old authorization unusable, crash mismatch fail-stop, and disaster-init only for missing/corrupt authority with fresh approval.
 - [ ] Run `uv run pytest backend/tests/test_rag_live_gate_schema.py backend/tests/test_rag_release_authority.py backend/tests/test_rag_release_ledger.py backend/tests/release_contracts.py -q` and confirm RED.
-- [ ] Implement release authority against one explicitly designated validation PostgreSQL connection. Do not import application ORM models into `release_schema.py` and do not add a third Alembic revision.
+- [ ] Implement release authority against one explicitly designated validation PostgreSQL connection. Mutation capture must map canonical `agent_run_id` to physical `AgentRun.id`, bind every payload identity to exact DB after-images or locked peer observations, and enforce the exhaustive per-kind parent/child/dispatch/provider lifecycle. Do not import application ORM models into `release_schema.py` and do not add a third Alembic revision.
 - [ ] Rerun focused tests and `uv run ruff check backend/app/rag/release_schema.py backend/app/rag/release_authority.py backend/app/rag/release_ledger.py backend/app/admin/rag_live_gate.py backend/tests/test_rag_live_gate_schema.py backend/tests/test_rag_release_authority.py backend/tests/test_rag_release_ledger.py`.
 - [ ] Commit with `git commit -m "feat: add isolated rag release authority"`.
 

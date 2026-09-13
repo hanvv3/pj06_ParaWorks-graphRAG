@@ -5,6 +5,7 @@ import hmac
 import os
 import re
 from collections.abc import Iterator
+from decimal import Decimal
 from pathlib import Path
 from threading import Barrier, Thread
 from uuid import uuid4
@@ -20,6 +21,7 @@ from backend.app.agent_runtime.rag_advisory_locks import (
     load_registered_advisory_capability,
     register_advisory_identity_db,
 )
+from backend.app.models.agent_runs import AgentRun
 from backend.app.models.rag_runtime import (
     RagAdvisoryLockKey,
     RagProviderReadiness,
@@ -70,6 +72,7 @@ def postgres_release_db() -> Iterator[Engine]:
     engine = create_engine(target_url, pool_pre_ping=True)
     try:
         with engine.begin() as connection:
+            AgentRun.__table__.create(connection)
             RagAdvisoryLockKey.__table__.create(connection)
             RagProviderSafetyAuthority.__table__.create(connection)
             RagProviderReadiness.__table__.create(connection)
@@ -204,6 +207,150 @@ def _recovery_review(seed: str, reason: str):
         review['review_nonce_hmac'],
         reason,
     )
+
+
+def _insert_incident_parent(connection, run_id: int = 41) -> None:
+    connection.execute(
+        AgentRun.__table__.insert().values(
+            id=run_id,
+            agent_name='rag_orchestrator',
+            prompt_version='rag-answer:v2',
+            status='running',
+            source_window='task23-provider-incident',
+            cache_key=f'task23-provider-incident-{run_id}',
+            model_name='gpt-5.4-mini-2026-03-17',
+            generation_provider='openai',
+            generation_reasoning_effort='low',
+            generation_route_version='rag-route:v2',
+            generation_output_contract_version='rag-answer:v2',
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            estimated_cost_usd=0.0,
+            permission_level='internal',
+            metadata={},
+            workflow_thread_id=f'task23-provider-incident-{run_id}',
+            effect_key=f'task23-provider-incident-{run_id}',
+            run_contract_version='rag-run:v2',
+            run_record_phase='admission',
+            total_charged_cost_usd=Decimal('0.000000'),
+            projection_owner_fence_hmac=None,
+            completed_at=None,
+        )
+    )
+
+
+def test_postgresql_release_barrier_applies_external_first_incident_once(
+    postgres_release_db: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.admin.rag_provider_safety import ProviderSafetyReviewError
+    from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
+
+    authority = _authority(postgres_release_db, tmp_path)
+    with postgres_release_db.connect() as connection:
+        authority.initialize(connection, **_review('1'))
+    peer = authority._provider_safety_release_peer
+    service = peer._provider_safety
+    with postgres_release_db.begin() as connection:
+        _insert_incident_parent(connection)
+    with postgres_release_db.connect() as connection:
+        plan = peer.prepare_incident(
+            connection,
+            component='query_embedding',
+            category='provider_usage_overrun',
+            agent_run_id=41,
+            input_tokens=7,
+            output_tokens=0,
+            cost_usd=Decimal('0.100000'),
+        )
+    observed_generation: list[int] = []
+    original_replace = service._authority._replace_unlocked
+
+    def observe_external_first(envelope):
+        original_replace(envelope)
+        with postgres_release_db.connect() as observer:
+            observed_generation.append(
+                int(
+                    observer.scalar(
+                        select(RagProviderSafetyAuthority.global_safety_generation)
+                    )
+                )
+            )
+
+    monkeypatch.setattr(service._authority, '_replace_unlocked', observe_external_first)
+    marker = DurableFileAuthority.open_runtime(authority.marker_path)
+    with (
+        postgres_release_db.begin() as connection,
+        authority._authority_barrier(connection, marker=marker) as guard,
+    ):
+        evidence = guard.apply_provider_incident(plan)
+        assert evidence.new_body['envelope_digest'] == plan.new_envelope_digest
+        with pytest.raises(ProviderSafetyReviewError, match='incident plan'):
+            guard.apply_provider_incident(plan)
+    assert observed_generation == [0]
+    with postgres_release_db.connect() as connection:
+        authority_row = connection.execute(
+            select(RagProviderSafetyAuthority.__table__)
+        ).mappings().one()
+        readiness = connection.execute(
+            select(RagProviderReadiness.__table__).where(
+                RagProviderReadiness.component == 'query_embedding',
+                RagProviderReadiness.active.is_(True),
+            )
+        ).mappings().one()
+        assert authority_row['global_safety_generation'] == 1
+        assert authority_row['envelope_digest'] == plan.new_envelope_digest
+        assert readiness['state'] == 'blocked_overrun'
+        assert readiness['state_version'] == 2
+        assert readiness['family_safety_generation'] == 1
+
+
+def test_postgresql_incident_db_failure_leaves_external_mismatch_fail_stopped(
+    postgres_release_db: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
+    from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyError
+
+    authority = _authority(postgres_release_db, tmp_path)
+    with postgres_release_db.connect() as connection:
+        authority.initialize(connection, **_review('1'))
+    peer = authority._provider_safety_release_peer
+    service = peer._provider_safety
+    with postgres_release_db.begin() as connection:
+        _insert_incident_parent(connection)
+    with postgres_release_db.connect() as connection:
+        plan = peer.prepare_incident(
+            connection,
+            component='query_embedding',
+            category='provider_safety_unavailable',
+            agent_run_id=41,
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=Decimal('0.000000'),
+        )
+    monkeypatch.setattr(
+        service,
+        '_commit_transition',
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RagProviderSafetyError('simulated provider DB failure')
+        ),
+    )
+    marker = DurableFileAuthority.open_runtime(authority.marker_path)
+    with postgres_release_db.connect() as connection, pytest.raises(
+        RagReleaseAuthorityError, match='provider safety authority'
+    ), authority._authority_barrier(connection, marker=marker) as guard:
+        guard.apply_provider_incident(plan)
+    assert service._read_unlocked()['envelope_digest'] == plan.new_envelope_digest
+    with postgres_release_db.connect() as connection:
+        assert connection.scalar(
+            select(RagProviderSafetyAuthority.global_safety_generation)
+        ) == 0
+        with pytest.raises(RagReleaseAuthorityError, match='provider safety authority'):
+            authority.inspect(connection)
 
 
 def test_postgresql_creates_exact_six_in_default_schema_and_binds_oid(

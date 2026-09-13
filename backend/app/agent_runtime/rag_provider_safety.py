@@ -112,6 +112,47 @@ class RagProviderSafetyInspectionError(RagProviderSafetyError):
 
 
 _REVIEW_CAPABILITY_SEAL = object()
+_RELEASE_INCIDENT_PLAN_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedReleaseProviderIncident:
+    service: RagProviderSafetyService
+    component: RagPaidComponent
+    category: str
+    state: Literal['blocked_overrun', 'blocked_remediation']
+    agent_run_id: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: Decimal
+    observed_at: datetime
+    old_envelope_digest: str
+    old_global_generation: int
+    old_state_version: int
+    reviewed_reference: str
+    actor_subject_hmac: str
+    new_envelope: Mapping[str, object]
+    new_envelope_digest: str
+    _seal: object
+
+    def __post_init__(self) -> None:
+        if self._seal is not _RELEASE_INCIDENT_PLAN_SEAL:
+            raise RagProviderSafetyError('provider incident plan is invalid')
+
+
+@dataclass(frozen=True, slots=True)
+class _AppliedReleaseProviderIncident:
+    old_body: Mapping[str, object]
+    new_body: Mapping[str, object]
+    authority_before: Mapping[str, object]
+    authority_after: Mapping[str, object]
+    readiness_before: Mapping[str, object]
+    readiness_after: Mapping[str, object]
+    _seal: object
+
+    def __post_init__(self) -> None:
+        if self._seal is not _RELEASE_INCIDENT_PLAN_SEAL:
+            raise RagProviderSafetyError('provider incident evidence is invalid')
 
 
 @dataclass(frozen=True, slots=True)
@@ -1297,6 +1338,210 @@ class RagProviderSafetyService:
             policy_version='rag-provider-safety:v1',
         )
 
+    @staticmethod
+    def _validate_incident_values(
+        *,
+        component: RagPaidComponent,
+        category: str,
+        agent_run_id: int,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: Decimal,
+    ) -> Literal['blocked_overrun', 'blocked_remediation']:
+        if (
+            component not in _COMPONENTS
+            or category not in _BLOCKER_CATEGORIES
+            or type(agent_run_id) is not int
+            or agent_run_id <= 0
+            or type(input_tokens) is not int
+            or input_tokens < 0
+            or type(output_tokens) is not int
+            or output_tokens < 0
+            or type(cost_usd) is not Decimal
+            or not cost_usd.is_finite()
+            or cost_usd < 0
+        ):
+            raise RagProviderSafetyError('provider blocker values are invalid')
+        if category == 'provider_usage_overrun':
+            return 'blocked_overrun'
+        return 'blocked_remediation'
+
+    def _prepare_release_incident(
+        self,
+        connection: Connection,
+        *,
+        component: RagPaidComponent,
+        category: str,
+        agent_run_id: int,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: Decimal,
+    ) -> _PreparedReleaseProviderIncident:
+        """Prepare, but never apply, a release-bound provider incident.
+
+        The returned object is an in-memory, service-bound capability.  Its
+        CAS values are revalidated under the Task-23 provider/release barrier.
+        """
+        state = self._validate_incident_values(
+            component=component,
+            category=category,
+            agent_run_id=agent_run_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+        )
+        with self._authority.locked(), self._registered_advisory(connection):
+            old = self._read_unlocked()
+            self._match_db_whole_set(connection, old, for_update=True)
+            record = self._active_record(old, component)
+            if record['state'] != 'ready':
+                raise RagProviderSafetyError('provider family is blocked')
+            reviewed_reference = str(
+                record['reviewed_transition_reference_hmac']
+            )
+            require_lower_hmac(reviewed_reference)
+            actor_reference = self._incident_reference(
+                component=component,
+                state=state,
+                agent_run_id=agent_run_id,
+                category=category,
+            )
+            parsed = json.loads(
+                canonical_json_bytes(old['_envelope']).decode('utf-8')
+            )
+            signed = parsed['signed_payload']
+            body = signed['body']
+            active_identity = body['active_family_by_component'][component]
+            target = next(
+                item
+                for item in body['family_records']
+                if all(item[key] == active_identity[key] for key in _FAMILY_IDENTITY_KEYS)
+            )
+            new_generation = body['global_safety_generation'] + 1
+            observed_at = datetime.now(UTC)
+            target['state'] = state
+            target['state_version'] += 1
+            target['family_safety_generation'] = new_generation
+            target['reviewed_transition_reference_hmac'] = reviewed_reference
+            if target['first_blocker_category'] is None:
+                target['first_blocker_agent_run_hmac'] = self._blocker_agent_run_hmac(
+                    agent_run_id
+                )
+                target['first_blocker_category'] = category
+                target['first_blocker_observed_at'] = observed_at.isoformat().replace(
+                    '+00:00', 'Z'
+                )
+            body['global_safety_generation'] = new_generation
+            envelope = self._wrap(
+                body,
+                key_version=signed['fingerprint_key_version'],
+                key_verifier=signed['fingerprint_key_material_verifier'],
+            )
+            raw = canonical_json_bytes(envelope)
+            prepared = self._validate_envelope(dict(envelope), raw=raw)
+            return _PreparedReleaseProviderIncident(
+                service=self,
+                component=component,
+                category=category,
+                state=state,
+                agent_run_id=agent_run_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost_usd,
+                observed_at=observed_at,
+                old_envelope_digest=str(old['envelope_digest']),
+                old_global_generation=int(old['global_safety_generation']),
+                old_state_version=int(record['state_version']),
+                reviewed_reference=reviewed_reference,
+                actor_subject_hmac=actor_reference,
+                new_envelope=envelope,
+                new_envelope_digest=str(prepared['envelope_digest']),
+                _seal=_RELEASE_INCIDENT_PLAN_SEAL,
+            )
+
+    def _apply_release_incident(
+        self,
+        connection: Connection,
+        prepared: _PreparedReleaseProviderIncident,
+    ) -> _AppliedReleaseProviderIncident:
+        """Apply one prepared incident while the caller holds both locks."""
+        if (
+            type(prepared) is not _PreparedReleaseProviderIncident
+            or prepared._seal is not _RELEASE_INCIDENT_PLAN_SEAL
+            or prepared.service is not self
+        ):
+            raise RagProviderSafetyError('provider incident plan is invalid')
+        old = self._read_unlocked()
+        authority_before, rows_before = self._match_db_whole_set(
+            connection, old, for_update=True
+        )
+        record = self._active_record(old, prepared.component)
+        readiness_before = next(
+            row
+            for row in rows_before
+            if row['active'] and row['component'] == prepared.component
+        )
+        if (
+            old['envelope_digest'] != prepared.old_envelope_digest
+            or old['global_safety_generation'] != prepared.old_global_generation
+            or record['state'] != 'ready'
+            or record['state_version'] != prepared.old_state_version
+        ):
+            raise RagProviderSafetyError('provider incident plan CAS failed')
+        # External authority always moves first.  A later DB failure deliberately
+        # leaves a detectable external/DB mismatch and therefore fails stopped.
+        self._authority._replace_unlocked(dict(prepared.new_envelope))
+        new = self._read_unlocked()
+        if new['envelope_digest'] != prepared.new_envelope_digest:
+            raise RagProviderSafetyError('provider incident envelope differs')
+        try:
+            self._commit_transition(
+                connection,
+                old_body=old,
+                new_body=new,
+                new_digest=prepared.new_envelope_digest,
+                component=prepared.component,
+                transition_kind=(
+                    'block_overrun'
+                    if prepared.state == 'blocked_overrun'
+                    else 'block_remediation'
+                ),
+                reviewed_reference=prepared.reviewed_reference,
+                actor_subject_hmac=prepared.actor_subject_hmac,
+                agent_run_id=prepared.agent_run_id,
+                snapshot=None,
+                supersession=False,
+                blocker_values=(
+                    prepared.input_tokens,
+                    prepared.output_tokens,
+                    prepared.cost_usd,
+                    prepared.observed_at,
+                ),
+                commit=False,
+            )
+            authority_after, rows_after = self._match_db_whole_set(
+                connection, new, for_update=True
+            )
+        except Exception:
+            connection.rollback()
+            raise RagProviderSafetyError(
+                'external provider incident persisted but DB transition failed'
+            ) from None
+        readiness_after = next(
+            row
+            for row in rows_after
+            if row['active'] and row['component'] == prepared.component
+        )
+        return _AppliedReleaseProviderIncident(
+            old_body=old,
+            new_body=new,
+            authority_before=dict(authority_before),
+            authority_after=dict(authority_after),
+            readiness_before=dict(readiness_before),
+            readiness_after=dict(readiness_after),
+            _seal=_RELEASE_INCIDENT_PLAN_SEAL,
+        )
+
     def _commit_transition(
         self,
         connection: Connection,
@@ -1312,6 +1557,7 @@ class RagProviderSafetyService:
         snapshot: AuthorizedProviderPolicySnapshot | None,
         supersession: bool,
         blocker_values: tuple[int, int, Decimal, datetime] | None,
+        commit: bool = True,
     ) -> None:
         _, rows = self._match_db_whole_set(connection, old_body, for_update=True)
         old_record = self._active_record(old_body, component)
@@ -1425,7 +1671,8 @@ class RagProviderSafetyService:
             )
         )
         del old_identity
-        connection.commit()
+        if commit:
+            connection.commit()
 
     def _mutate(
         self,
