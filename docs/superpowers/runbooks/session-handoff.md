@@ -1,6 +1,32 @@
 # ParaWorks Harness Session Handoff
 
-Updated: 2026-09-13
+Updated: 2026-09-14
+
+## 2026-09-14 Task24-B round-1 lifecycle remediation (rereview pending)
+
+- Independent review of `6174cee` found two P1 defects: reader-exit key
+  revocation could publish a case claim, and an expired genuine guard could be
+  reused. The candidate below is historical, not an independent CLEAN result.
+- The authority now owns guard issuance/lifetime and the outer source barrier.
+  Adapters must borrow `locked_approved(connection, barrier_guard=...)`; they
+  cannot acquire or fabricate the final authority. Their read/oracle/context
+  callbacks finish before independent source/key/peer validation. Guard checks
+  require the exact active owner/connection/provider/thread and release SQL
+  transaction; normal/exceptional exit is irreversible and nesting refuses.
+- Callback-free source checkpoints run before DML, before marker publication,
+  and before DB commit, including independent corpus-generation/key/policy and
+  provider SQL fencing. Post-marker failure rolls back DB but preserves Task23
+  crash-evidence mismatch; never repair/rebootstrap it implicitly.
+- Implementation: `3f143763dacb9a6e44c6d319265fdbb0a24cfb71`. Fresh full
+  19-file release selection, partitioned into three disjoint file shards:
+  **1041 passed, 14 skipped**. Expanded direct impact **266 passed, 16 skipped**
+  (11 existing Alembic warnings); standalone credential **3 passed**. All 11
+  changed Python files pass Ruff/format/compile and staged/working diff checks.
+  No code/test changes occurred after final verification started. All 30
+  PostgreSQL conditional skips remain unexecuted; independent rereview is pending.
+- No real command,
+  live OAuth/provider/network/paid call, bootstrap/rebootstrap, push, merge or
+  deployment ran. Task25, production readers and PostgreSQL remain outstanding.
 
 ## 2026-09-13 Task24-B authorization candidate (review pending)
 

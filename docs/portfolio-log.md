@@ -7273,6 +7273,16 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
 
 ## 2026-09-13 Task24-B bounded authorization candidate
 
+Round-1 independent review subsequently identified two P1 authority-lifetime
+defects; the verification below is historical, not a CLEAN review result.
+The remediation makes authority ownership/lifetime explicit and completes all
+reader callbacks before independent source/key/peer checks. Remediation commit
+`3f14376` passes the full 19-file release selection: **1041 passed, 14 skipped**
+across three disjoint file shards. Expanded direct impact: **266 passed, 16
+skipped**, with 11 existing Alembic warnings; credential: **3 passed**. All 11
+changed Python files pass Ruff/format/compile and diff checks. Independent
+rereview is pending; Task24 is not CLEAN and no actual run is authorized.
+
 - Implementation commit: `da4da6d`. Final provider-free release regression:
   **1025 passed, 14 skipped**; direct impact: **259 passed, 13 skipped**, with
   11 existing Alembic warnings. Credential scan: **3 passed**. All eight changed

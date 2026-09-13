@@ -3087,6 +3087,21 @@ and production readers are absent. Opaque approved-source capabilities require
 current locked release/provider peers; append-time verification reuses the
 existing sealed barrier and retains the reader's separate corpus/scope locks.
 
+Round-1 remediation clarifies the lifetime requirement: a guard is valid only
+inside its exact issuing authority's active scope, on its original connection
+and release transaction with an active underlying provider guard. Raw/copy,
+expired, cross-owner, cross-connection, nested and replayed guards are invalid.
+The caller owns the outer barrier; adapter read/oracle/context callbacks must
+finish before final independent source, external review-key/signature, approval,
+target, marker/DB, provider and corpus-generation/key/policy validation. Recheck
+before DML, before marker publication and before commit while rollback remains
+possible. Preserve marker-first crash evidence on post-marker refusal; no
+automatic repair/rebootstrap or new execution authority is implied. This
+remediation remains independent-rereview pending, not Task24 CLEAN.
+Implementation `3f14376` has fresh full release evidence **1041 passed, 14
+skipped**, expanded direct evidence **266 passed, 16 skipped** and credential
+**3 passed**. No schema/public-endpoint change or live execution occurred.
+
 ```text
 fixture_manifest_hmac = keyed_fingerprint(
   schema_version="rag-live-fixture-manifest:v1",

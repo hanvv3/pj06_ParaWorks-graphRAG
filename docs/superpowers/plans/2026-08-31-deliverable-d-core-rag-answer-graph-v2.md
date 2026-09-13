@@ -2270,6 +2270,22 @@ schema, complete runtime images/types and Option-A observations remain intact.
 Production CLI remains evaluator-first refusing with no signer or secret args.
 Task25, production readers and PostgreSQL verification remain outstanding.
 
+**Round-1 remediation (independent rereview pending).** Two P1 findings exposed
+adapter-exit revocation and expired-guard reuse. Authority-owned private guard
+lifetimes now bind owner/connection/provider/thread and the release transaction;
+adapters borrow the mandatory guard and complete teardown before callback-free
+source/key/target/peer validation. Independent corpus SQL generation/key/policy
+checks fence the complete approved adapter snapshot. Ledger revalidation runs
+before DML, before marker publication and before commit. Marker-first crash
+evidence and rollback semantics remain unchanged; no implicit repair is allowed.
+The report records permanent actual-append RED reproducers and final evidence.
+Remediation implementation: `3f143763dacb9a6e44c6d319265fdbb0a24cfb71`.
+Fresh full release selection: **1041 passed, 14 skipped** across three disjoint
+shards of all 19 files; expanded direct impact: **266 passed, 16 skipped**
+(11 existing Alembic warnings); standalone credential: **3 passed**. All 11
+Python files pass Ruff/format/compile and diff checks. Code/tests were frozen
+before the final shard launch. PostgreSQL and independent rereview remain open.
+
 B implementation files additionally include `backend/app/rag/release_authority.py`
 (the two approved registry alignments), `backend/app/rag/release_ledger.py`
 (existing sealed-guard propagation), and test-only
