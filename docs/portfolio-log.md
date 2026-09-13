@@ -7271,10 +7271,10 @@ Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
   This closure changes documentation only; no code/tests, live/provider/release
   operation, OAuth, push, merge or deployment are included.
 
-## 2026-09-14 Task24-B round-5 transition and SQL ownership candidate
+## 2026-09-14 Task24-B round-5: IMPLEMENTED / NOT RELEASE-CLEAN
 
-The final scoped fix round closes a reproduced partial-commit path: a source
-callback could replace caller payload scalars, then run comparison code after
+The final scoped fix round addresses a reproduced payload partial-commit path:
+a source callback could replace caller payload scalars, then run comparison code after
 mutation DML. Append now owns the complete exact native payload, literal plans,
 observation identities and subsequent before/after images before acquisition.
 An identity audit covers every payload field/container, and actual callback tests
@@ -7295,8 +7295,24 @@ CLI are retained. Implementation `3617c0e` has final green per-file evidence:
 **5 passed**. Four Python files pass Ruff/format/compile and diff checks. Production
 code stayed frozen; six obsolete callback-count/error-text test expectations were
 updated and their files/shard rerun. The SDD report preserves initial failures and
-the final disjoint green selections. Independent final
-review, PostgreSQL, Task25 and production readers remain open. No actual release,
+the final disjoint green selections. Final independent review of `3617c0e` / docs
+`26d8337` reached **breaker 5/5**, reproducing one remaining load-bearing P1:
+sealed provider-incident SQL in `RagProviderSafetyService._apply_release_incident`
+and `_commit_transition` still uses shared ORM Table/Column/Type objects outside
+the append-local schema. The probe observed partial provider-authority generation
+and latch publication while readiness, provider history and release marker stayed
+unchanged. This independent verdict claims only that focused failure, not a rerun
+of the implementation suites above.
+
+Task24-B and Task24 overall remain **NOT RELEASE-CLEAN**; actual release and
+authorization are blocked. No open-ended sixth Task24-B fix is planned. Task25's
+mandatory first RED slice, before composite runner/quality work, must isolate all
+provider-incident SQL into authority-owned immutable schema/type metadata, enforce
+no injected callbacks after first DML, prove atomic provider authority + exact
+readiness peers + provider history + latch + release state/marker, and receive an
+independent CLEAN review. Cost if wrong: persistent provider authority/readiness/
+history divergence and reviewed recovery. PostgreSQL and production readers remain
+open. This final closure changes documentation only. No actual release,
 bootstrap/rebootstrap/authorization/OAuth/provider/network/paid operation, push,
 merge or deployment occurred.
 

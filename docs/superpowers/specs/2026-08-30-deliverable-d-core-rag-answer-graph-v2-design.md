@@ -3199,14 +3199,31 @@ consumption slot must refuse before any mutation/publication. Numeric UPDATE
 predicate bindings require exact finite unsigned Decimal within column precision
 and with exponent exactly equal to negative column scale; compare these canonical
 native values to the locked trusted before-image. SET validation and external
-six-place money strings are unchanged. Final independent review and PostgreSQL
-verification remain required; no actual release operation is authorized.
+six-place money strings are unchanged. PostgreSQL verification remains required;
+no actual release operation is authorized.
 Implementation `3617c0e` passes final per-file release verification **1379 passed,
 14 skipped**, direct impact **266 passed, 16 skipped** with 11 existing warnings,
 credential **3 passed** and independent adapted probes **5 passed**. The report
 records the six superseded test-expectation failures and complete replacement
-runs; production code remained unchanged throughout final verification. This is
-a local candidate awaiting final independent review, not overall Task24 CLEAN.
+runs; production code remained unchanged throughout final verification.
+
+**Final Round-5 breaker ruling (2026-09-14): IMPLEMENTED / NOT RELEASE-CLEAN.**
+Independent review of `3617c0e` / docs `26d8337` reached breaker **5/5**, reproducing
+one load-bearing P1: sealed provider-incident SQL in
+`RagProviderSafetyService._apply_release_incident` / `_commit_transition` still
+uses shared ORM Table/Column/Type objects outside the append-local schema. The
+focused probe observed partial provider-authority generation and latch publication
+while readiness, provider history and release marker remained unchanged. The final
+review claims only this focused failure, not a rerun of the implementation suites.
+Task24-B and Task24 overall remain **NOT RELEASE-CLEAN**; actual release and
+authorization stay blocked. No open-ended sixth Task24-B fix is authorized.
+
+Task25 must carry this as its mandatory first RED slice before composite runner or
+quality work: isolate all provider-incident SQL into authority-owned immutable
+schema/type metadata, enforce no injected callbacks after first DML, prove atomic
+provider authority + exact readiness peers + provider history + latch + release
+state/marker, and receive independent **CLEAN** review. Cost if wrong: persistent
+provider authority/readiness/history divergence and reviewed recovery requirement.
 
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16

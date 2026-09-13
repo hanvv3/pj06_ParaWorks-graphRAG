@@ -2,7 +2,31 @@
 
 Updated: 2026-09-14
 
-## 2026-09-14 Task24-B round-5 complete input ownership (final review pending)
+## 2026-09-14 Task24-B final breaker closure: IMPLEMENTED / NOT RELEASE-CLEAN
+
+- Final independent review of implementation `3617c0e` / docs `26d8337` reached
+  **breaker 5/5** with one reproduced load-bearing P1. Sealed provider-incident
+  SQL in `RagProviderSafetyService._apply_release_incident` / `_commit_transition`
+  still uses shared ORM Table/Column/Type objects outside the append-local schema.
+  The focused probe observed partial provider-authority generation and latch
+  publication while readiness, provider history and release marker stayed unchanged.
+- Task24-B and Task24 overall are **NOT RELEASE-CLEAN**; actual release and
+  authorization remain blocked. This supersedes the pending-review wording below.
+  There is no open-ended sixth Task24-B fix round.
+- Task25 must begin with this P1 as its mandatory first RED slice, before any
+  composite runner or quality work: isolate all provider-incident SQL into
+  authority-owned immutable schema/type metadata, prohibit injected callbacks
+  after first DML, prove atomic provider authority + exact readiness peers +
+  provider history + latch + release state/marker, and obtain independent CLEAN.
+  Cost if wrong: persistent provider authority/readiness/history divergence and
+  a reviewed recovery requirement.
+- Round-5 implementation evidence remains **1379 passed, 14 skipped** (19 release
+  files) and **266 passed, 16 skipped** (direct impact). The final independent
+  reviewer claims only its one focused reproduced failure, not a suite rerun.
+  PostgreSQL and production-reader gates remain open. This closure is docs-only;
+  no release, live/external operation, push, merge or deployment is authorized.
+
+## 2026-09-14 Task24-B round-5 input ownership implementation (historical evidence)
 
 - Round-4 review was NOT CLEAN: caller payload replacement ran a comparison
   callback after DML and committed case/runtime/cost rows without advancing
@@ -33,8 +57,9 @@ Updated: 2026-09-14
   Ruff/format/compile and diff checks. Production code stayed frozen; six obsolete
   callback-count/error-text expectations were corrected in two tests and their
   complete files/shard rerun. The SDD report distinguishes those initial failures
-  from the final green selections. Final independent review, PostgreSQL (URL
-  absent; all 30 conditional skips unexecuted), Task25 and production readers remain open.
+  from the final green selections. Final independent review is NOT RELEASE-CLEAN
+  as recorded above. PostgreSQL (URL absent; all 30 conditional skips unexecuted),
+  Task25 and production readers remain open.
   No actual release/bootstrap/rebootstrap/authorization/OAuth/provider/network/
   paid operation, push, merge or deployment ran.
 

@@ -2354,7 +2354,7 @@ Credential **3 passed**; six-file Ruff/format/compile and diff checks pass.
 Code/tests were frozen before final launch. All 30 conditional PostgreSQL skips
 remain unexecuted; independent rereview, Task25 and production readers are open.
 
-**Round-5 complete ownership remediation (final independent review pending).**
+**Round-5 ownership remediation: IMPLEMENTED / NOT RELEASE-CLEAN (breaker 5/5).**
 Before any append callback, validate/materialize the whole exact native transition
 tree and detach all mutation plans, primary keys and observations. Retain private
 scalars/containers only; custom types, protocols and shared/cyclic containers refuse
@@ -2370,13 +2370,23 @@ Permanent REDs cover payload and SQL-processor partial commits, incident envelop
 publication and noncanonical predicates; generic identity/field and callback matrices
 verify the owned boundary. Final verification/commits are recorded in the Task24-B
 report. No Task25, real execution approval, migration or production reader is added;
-PostgreSQL and independent final review remain open.
+PostgreSQL remains open; the final independent verdict below supersedes pending review.
 Implementation `3617c0e` has final green per-file release evidence **1379 passed,
 14 skipped**, direct impact **266 passed, 16 skipped** (11 existing warnings),
 credential **3 passed**, and independent adapted probes **5 passed**. Ruff/format/
 compile/diff checks pass on four Python files. Production remained frozen; six
 obsolete test expectations were updated and their complete files/shard rerun,
-as distinguished in the report. No final independent CLEAN ruling is implied.
+as distinguished in the report. Final independent review of `3617c0e` / docs
+`26d8337` reproduced one load-bearing P1: sealed provider-incident SQL in
+`RagProviderSafetyService._apply_release_incident` / `_commit_transition` retains
+shared ORM Table/Column/Type objects outside the append-local schema. The focused
+probe observed partial provider-authority generation and latch publication while
+readiness, provider history and release marker remained unchanged. The reviewer
+claims only that focused failure, not a rerun of the implementation suites.
+Task24-B and Task24 overall remain **NOT RELEASE-CLEAN**; actual release and
+authorization remain blocked. Carry this finding into Task25's mandatory first
+RED slice below; no open-ended sixth Task24-B fix. Cost if wrong: persistent
+provider authority/readiness/history divergence and reviewed recovery requirement.
 
 B implementation files additionally include `backend/app/rag/release_authority.py`
 (the two approved registry alignments), `backend/app/rag/release_ledger.py`
@@ -2629,6 +2639,19 @@ class FreshGoogleReviewerVerifier:
 - [ ] Independent Task24-B review, PostgreSQL verification and production reader/Task25 readiness; Task24 overall remains incomplete.
 
 ### Task 25: Add Composite Runner and Provider-Free Quality Adjudication
+
+**Mandatory first RED slice — Task24-B breaker 5/5 carry-forward.** Before
+composite runner or quality work, reproduce the sealed provider-incident shared
+ORM metadata partial-publication P1 from final review of `3617c0e` / `26d8337`.
+Isolate all provider-incident SQL, including
+`RagProviderSafetyService._apply_release_incident` / `_commit_transition`, into
+authority-owned immutable schema/type metadata. Enforce no injected callbacks
+after first DML and prove atomic provider authority + exact readiness peers +
+provider history + latch + release state/marker with independent database/file
+oracles. Obtain an independent **CLEAN** review of this slice before proceeding.
+This is not a sixth Task24-B fix round and grants no release/authorization authority;
+Task24-B and Task24 overall remain NOT RELEASE-CLEAN. Passing this slice alone
+does not satisfy the other open release gates.
 
 **Files:**
 
