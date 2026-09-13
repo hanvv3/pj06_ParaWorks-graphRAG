@@ -5456,3 +5456,28 @@ tests passed with 53 tests; ruff passed.
   skipped`. Run Ruff, diff/credential/import checks, commit locally and request
   round-3 independent rereview. Actual PostgreSQL remains an environment-gated
   release requirement.
+
+## 2026-09-13 Task 22 COMPLETE / CLEAN handoff
+
+- Independent round-3 review marked
+  `163e790779ef2024f2d43db44a0c44d6d526135f` **CLEAN**. Final Task 22 chain
+  from `21520134844a6a0553c9213b3ea2ffd7c5e59888` is `ef9370b` -> `7acbdbf` ->
+  `163e790`; all prior F1-F6 findings are resolved.
+- Reviewer-fresh gates: retained probes `8 passed in 3.92s`; focused admin/PG
+  plus probes `41 passed, 1 skipped in 11.45s`; broader provider-safety,
+  runtime, cost, default-runtime and settings `105 passed, 11 skipped in
+  51.30s`. Changed/relevant Ruff, cumulative diff check and tracked worktree
+  status are clean.
+- The PostgreSQL skips require `PARAWORKS_TEST_POSTGRES_URL`. A real PostgreSQL
+  run covering registered advisory locks and concurrency is still a mandatory
+  release gate and must not be described as passed.
+- The approved security contract is fixed: external signed stdin review only,
+  no CLI signer/self-approval, signed bootstrap recovery, two-step rebind,
+  production/live-validation isolation, signed-plus-committed successor,
+  externally fixed plan HMAC, and fail-closed review-key behavior. The
+  production review-key registry is intentionally empty until the exact opaque
+  verifier is approved and committed; it contains no secret key material.
+- Review-key rotation and legacy authority adoption are out of Task 22 and need
+  separate future reviewed designs. No actual configuration mutation,
+  provider/network/paid call, rollout, push, merge, or deploy occurred. Task 22
+  is complete locally; Task 23 is the next planned actual implementation task.

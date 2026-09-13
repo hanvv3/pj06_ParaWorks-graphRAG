@@ -6882,3 +6882,28 @@ Cost/security note:
   review controls are `41 passed, 1 skipped`; broader direct-impact verification
   is `143 passed, 14 skipped`. A new independent rereview remains pending, so
   Task 22 is not CLEAN yet.
+
+## 2026-09-13 Deliverable D Core Task 22 COMPLETE / CLEAN
+
+- Independent round-3 review approved
+  `163e790779ef2024f2d43db44a0c44d6d526135f` as **CLEAN**, with no actionable
+  finding remaining. The final Task 22 chain is `ef9370b` -> `7acbdbf` ->
+  `163e790` from base `21520134844a6a0553c9213b3ea2ffd7c5e59888`.
+- Reviewer-fresh evidence is retained adversarial probes `8 passed`, focused
+  admin/PostgreSQL plus probes `41 passed, 1 skipped`, and broader
+  provider-safety/runtime/cost/default/settings `105 passed, 11 skipped`.
+  Changed-file Ruff, cumulative diff check and tracked status are clean. The
+  skipped cases require `PARAWORKS_TEST_POSTGRES_URL`; actual PostgreSQL
+  advisory-lock/concurrency validation remains a mandatory release gate and is
+  not represented as passing evidence.
+- The approved amendment is enforced: the runtime admin CLI is verifier-only;
+  every mutation requires a bounded canonical externally signed stdin envelope;
+  init/recovery are reviewed; rebind is mark then rebind; application and
+  live-validation targets are isolated; supersession is bound to a signed
+  snapshot plus committed registry; the plan reference is external and fixed;
+  key rotation is not implemented.
+- The production review-key registry remains deliberately empty until an exact
+  opaque verifier is approved and committed. Key rotation and legacy authority
+  adoption require separate future reviewed designs. No actual user
+  configuration mutation, provider/network/paid call, rollout activation,
+  push, merge, or deploy occurred. Task 22 is complete locally.
