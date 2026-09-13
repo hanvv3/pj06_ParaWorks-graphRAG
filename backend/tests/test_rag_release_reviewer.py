@@ -60,7 +60,7 @@ def make_reviewer_harness():
         for i, role in enumerate(ROLES, 1)
     }
     state = SimpleNamespace(
-        now=NOW, users=users, calls=[], response={}, selected=ROLES[0]
+        now=NOW, users=users, calls=[], response={}, selected=ROLES[0], callback=None
     )
 
     def handle(request):
@@ -94,6 +94,17 @@ def make_reviewer_harness():
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handle), follow_redirects=False)
+
+    def read_user(user_id):
+        if state.callback is not None:
+            state.callback('auth_user_reader')
+        return next(u for u in users.values() if u.id == user_id)
+
+    def read_clock():
+        if state.callback is not None:
+            state.callback('clock')
+        return state.now
+
     verifier = cls(
         settings=SimpleNamespace(
             google_client_id='release-client',
@@ -102,12 +113,10 @@ def make_reviewer_harness():
         ),
         redirect_uri=REDIRECT,
         selected_auth_user_ids={role: user.id for role, user in users.items()},
-        auth_user_reader=lambda user_id: next(
-            u for u in users.values() if u.id == user_id
-        ),
+        auth_user_reader=read_user,
         identity_secret=SECRET,
         http_client=client,
-        clock=lambda: state.now,
+        clock=read_clock,
     )
     state.verifier = verifier
     return state

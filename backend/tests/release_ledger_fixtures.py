@@ -20,6 +20,21 @@ from backend.app.rag.release_ledger import (
 )
 
 
+def install_fake_provider_checkpoint(monkeypatch):
+    """Extend the existing explicit fake peer, never the production composition."""
+    from backend.app.admin import rag_provider_safety as admin
+
+    def require(owner, guard, connection):
+        assert guard is owner and not connection.closed
+
+    def freeze(owner, guard, connection):
+        require(owner, guard, connection)
+        return lambda: require(owner, guard, connection)
+
+    monkeypatch.setattr(admin, '_require_provider_guard', require)
+    monkeypatch.setattr(admin, '_freeze_release_peer', freeze)
+
+
 def provider_rows():
     now = datetime(2026, 9, 13, tzinfo=UTC)
     authority = {

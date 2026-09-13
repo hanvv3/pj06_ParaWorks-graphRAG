@@ -31,6 +31,9 @@ def _deterministic_non_product_database_seam(monkeypatch) -> None:
     monkeypatch.setattr(
         rag_provider_safety, 'RagProviderSafetyReleasePeer', _TestProviderPeer
     )
+    from backend.tests.release_ledger_fixtures import install_fake_provider_checkpoint
+
+    install_fake_provider_checkpoint(monkeypatch)
     monkeypatch.setattr(
         release_authority,
         'assert_rag_release_physical_contract',
@@ -112,12 +115,18 @@ def test_release_barrier_guard_expires_irreversibly(tmp_path, exceptional_exit):
                 connection, marker=DurableFileAuthority(marker_path)
             ) as saved:
                 assert authority._assert_barrier_guard(saved, connection) is saved
+                saved.freeze_provider()
+                saved.revalidate_provider()
+                with pytest.raises(RagReleaseAuthorityError):
+                    saved.freeze_provider()
                 if exceptional_exit:
                     raise RuntimeError('test-only unwind')
         except RuntimeError:
             assert exceptional_exit
         with pytest.raises(RagReleaseAuthorityError):
             authority._assert_barrier_guard(saved, connection)
+        with pytest.raises(RagReleaseAuthorityError):
+            saved.revalidate_provider()
         with authority._authority_barrier(
             connection, marker=DurableFileAuthority(marker_path)
         ) as current:

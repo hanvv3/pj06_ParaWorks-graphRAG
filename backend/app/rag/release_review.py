@@ -1784,6 +1784,28 @@ def _authorization_boundary():
     consumed = set()
     lock = RLock()
 
+    def check_reader_binding(s):
+        # Adapter properties are acquisition callbacks, never publication checks.
+        _live_require(
+            s['reader'].authority is s['authority']
+            and s['reader'].engine is s['engine']
+            and _exact_frozen_equal(
+                s['reader'].database_identity, s['database_identity']
+            ),
+            'approved_authority_unavailable',
+        )
+
+    def check_registry(s):
+        # The committed registry is a plain mapping of immutable strings. Do not
+        # invoke a user-defined Mapping.get/items/equality after acquisition.
+        _live_require(
+            type(s['registry']) is dict
+            and all(
+                type(k) is str and type(v) is str for k, v in dict.items(s['registry'])
+            ),
+            'review_key_registry_invalid',
+        )
+
     def locked_release(s, connection, guard):
         from backend.app.admin.rag_live_gate import (
             RagReleaseAdminTarget,
@@ -1796,12 +1818,7 @@ def _authorization_boundary():
 
         _live_require(
             type(s['authority']) is RagReleaseAuthority
-            and connection.engine is s['engine']
-            and s['reader'].authority is s['authority']
-            and s['reader'].engine is s['engine']
-            and _exact_frozen_equal(
-                s['reader'].database_identity, s['database_identity']
-            ),
+            and connection.engine is s['engine'],
             'approved_authority_unavailable',
         )
         authority = s['authority']
@@ -1958,6 +1975,7 @@ def _authorization_boundary():
             )
 
             s = self.s
+            check_reader_binding(s)
             marker = DurableFileAuthority.open_runtime(s['authority'].marker_path)
             with (
                 s['engine'].connect() as connection,
@@ -2047,6 +2065,9 @@ def _authorization_boundary():
             _live_require(
                 type(identity_secret) is bytes and len(identity_secret) >= 32,
                 'key_unavailable',
+            )
+            _live_require(
+                type(review_key_registry) is dict, 'review_key_registry_invalid'
             )
             services[self] = {
                 'repository': Path(repository).resolve(),
@@ -2327,6 +2348,8 @@ def _authorization_boundary():
                             identity_secret=identity_secret,
                             barrier_guard=guard,
                         )
+                check_reader_binding(s)
+                check_registry(s)
                 value = json.loads(record['value'])
                 require_verified_preview_source(
                     record['preview_source'],
@@ -2483,28 +2506,40 @@ def _authorization_boundary():
                         )
                     frozen_inputs = deepcopy(inputs)
 
+                # Finish fresh subject lookup, clock and result-property callbacks
+                # after adapter teardown, before issuing a trusted checkpoint.
+                _live_require(
+                    s['reviewer'].reviewer_roster_hmac(record['reviewers'])
+                    == approved.reviewer_roster_hmac,
+                    'reviewer_roster_changed',
+                )
+                check_reader_binding(s)
+                check_registry(s)
+                _live_require(
+                    _exact_frozen_equal(inputs, frozen_inputs)
+                    and _exact_frozen_equal(saved[0], saved[1])
+                    and _exact_frozen_equal(manifest, approved.manifest.executable),
+                    'approved_snapshot_changed',
+                )
+
                 def final_check(expected_release):
-                    # No adapter read/context/oracle callback runs in this check.
-                    # Its owner must retain this exact active release/provider scope.
-                    _live_require(
-                        s['authorization'] is saved
-                        and _exact_frozen_equal(saved[0], saved[1])
-                        and _exact_frozen_equal(manifest, approved.manifest.executable)
-                        and _exact_frozen_equal(inputs, frozen_inputs),
-                        'approved_snapshot_changed',
-                    )
+                    # Only locally owned code, frozen values, plain registry bytes
+                    # and SQL/filesystem reads are permitted beyond acquisition.
                     actual_release = locked_release(s, connection, barrier_guard)
                     _live_require(
                         _exact_frozen_equal(actual_release, expected_release),
                         'release_marker_changed',
                     )
+                    current_auth = RagReleaseMutationSet._snapshot(
+                        connection, key, for_update=True
+                    )
                     _live_require(
-                        _exact_frozen_equal(
-                            RagReleaseMutationSet._snapshot(
-                                connection, key, for_update=True
-                            ),
-                            locked_auth,
-                        ),
+                        type(current_auth) is dict
+                        and all(
+                            _exact_frozen_equal(current_auth.get(k), v)
+                            for k, v in expected_auth.items()
+                        )
+                        and current_auth['state'] in {'unused', 'started'},
                         'approved_authorization_changed',
                     )
                     _live_require(
@@ -2519,11 +2554,7 @@ def _authorization_boundary():
                         actual_release,
                         unused=False,
                     )
-                    _live_require(
-                        s['reviewer'].reviewer_roster_hmac(record['reviewers'])
-                        == approved.reviewer_roster_hmac,
-                        'reviewer_roster_changed',
-                    )
+                    check_registry(s)
                     verify_release_review_envelope(
                         record['envelope'],
                         expected_operation='authorization-bootstrap',
@@ -3269,14 +3300,25 @@ def _projection_boundary():
             )
         ):
             _refuse()
-        checkpoint = require_approved_case_source(
-            connection,
-            manifest=state['manifest'],
-            source_binding=state['source_binding'],
-            authorization=auth,
-            identity_secret=identity_secret,
-            barrier_guard=barrier_guard,
-        )
+        if after_execution:
+            saved = checkpoints.get(projection)
+            if (
+                saved is None
+                or saved[0] is not connection
+                or saved[1] is not barrier_guard
+                or saved[2] != binding
+            ):
+                _refuse()
+            checkpoint = saved[3]
+        else:
+            checkpoint = require_approved_case_source(
+                connection,
+                manifest=state['manifest'],
+                source_binding=state['source_binding'],
+                authorization=auth,
+                identity_secret=identity_secret,
+                barrier_guard=barrier_guard,
+            )
         case = state['case']
         run_hmac = rag_identity_hmac(
             {'agent_run_id': state['images'][0]['id']},
@@ -3399,7 +3441,13 @@ def _projection_boundary():
         ):
             _refuse()
 
-        checkpoints[projection] = (connection, barrier_guard, binding, checkpoint)
+        checkpoints[projection] = (
+            connection,
+            barrier_guard,
+            binding,
+            checkpoint,
+            deepcopy(auth),
+        )
 
     def revalidate_source(
         projection, *, connection, payload, barrier_guard, expected_release
@@ -3416,6 +3464,24 @@ def _projection_boundary():
                 or saved[1] is not barrier_guard
                 or saved[2] != _claim_binding(payload)
             ):
+                _refuse()
+            from backend.app.rag.release_ledger import (
+                RagReleaseMutationSet,
+                ReleaseRowPrimaryKey,
+            )
+
+            current_auth = RagReleaseMutationSet._snapshot(
+                connection,
+                ReleaseRowPrimaryKey(
+                    'authorization',
+                    {
+                        key: payload[key]
+                        for key in ('ledger_uuid', 'ledger_epoch', 'approval_id_hmac')
+                    },
+                ),
+                for_update=True,
+            )
+            if not _exact_frozen_equal(current_auth, saved[4]):
                 _refuse()
             saved[3](expected_release)
         except Exception:

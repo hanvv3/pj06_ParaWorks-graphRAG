@@ -682,7 +682,6 @@ def _provider_peer_lifetime():
                 active[guard] = (self, connection, get_ident())
                 try:
                     yield guard
-                    guard.revalidate_database_peer(connection)
                 finally:
                     del active[guard]
         finally:
@@ -693,6 +692,59 @@ def _provider_peer_lifetime():
 
 
 _provider_scope, _require_provider_guard = _provider_peer_lifetime()
+
+
+def _freeze_release_peer(owner, guard, connection):
+    """Pin a verified peer for callback-free release publication checks.
+
+    No transport callback or context teardown is a commit checkpoint. The
+    release owner calls this before its first write, then compares the complete
+    pinned file/SQL images while both authority locks and the transaction live.
+    """
+    from backend.app.models.rag_runtime import (
+        RagProviderReadiness,
+        RagProviderSafetyAuthority,
+    )
+
+    _require_provider_guard(owner, guard, connection)
+    _ProviderSafetyReviewLedger.assert_pin(guard._ledger)
+    body = RagProviderSafetyService._read_unlocked(guard._provider_safety)
+    if body['envelope_digest'] != guard._body['envelope_digest']:
+        raise RagProviderSafetyError('provider safety binding changed')
+    RagProviderSafetyService._match_db_whole_set(
+        guard._provider_safety, connection, body, for_update=True
+    )
+    pin = DurableFileAuthority.open_runtime(guard._ledger.path)
+    latch = DurableFileAuthority.open_runtime(guard._provider_safety._latch_path)
+
+    def database_image():
+        return tuple(
+            tuple(
+                tuple(row)
+                for row in connection.execute(
+                    select(table).order_by(*table.primary_key.columns)
+                )
+            )
+            for table in (
+                RagProviderSafetyAuthority.__table__,
+                RagProviderReadiness.__table__,
+            )
+        )
+
+    pin_bytes = pin._read_bytes_unlocked()
+    latch_bytes = latch._read_bytes_unlocked()
+    database = database_image()
+
+    def checkpoint():
+        _require_provider_guard(owner, guard, connection)
+        if (
+            pin._read_bytes_unlocked() != pin_bytes
+            or latch._read_bytes_unlocked() != latch_bytes
+            or database_image() != database
+        ):
+            raise RagProviderSafetyError('provider release checkpoint changed')
+
+    return checkpoint
 
 
 class RagProviderSafetyReleasePeerGuard:

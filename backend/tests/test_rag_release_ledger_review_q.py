@@ -35,6 +35,9 @@ def _release_test_seam(
     monkeypatch.setattr(
         rag_provider_safety, 'RagProviderSafetyReleasePeer', _TestProviderPeer
     )
+    from backend.tests.release_ledger_fixtures import install_fake_provider_checkpoint
+
+    install_fake_provider_checkpoint(monkeypatch)
     monkeypatch.setattr(
         release_authority,
         'assert_rag_release_physical_contract',

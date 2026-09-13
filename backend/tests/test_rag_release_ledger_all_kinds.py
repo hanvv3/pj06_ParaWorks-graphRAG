@@ -16,6 +16,12 @@ from sqlalchemy import create_engine, select
 from backend.app.admin.rag_provider_safety import (
     RagProviderSafetyReleasePeer as RealPeer,
 )
+from backend.app.admin.rag_provider_safety import (
+    _freeze_release_peer as real_freeze_release_peer,
+)
+from backend.app.admin.rag_provider_safety import (
+    _require_provider_guard as real_require_provider_guard,
+)
 from backend.app.rag.release_ledger import (
     RagReleaseLedger,
     RagReleaseLedgerError,
@@ -406,6 +412,10 @@ def incident_harness(tmp_path, monkeypatch):
     from backend.tests.test_rag_provider_safety_admin import _review_bytes, _service
 
     monkeypatch.setattr(admin_module, 'RagProviderSafetyReleasePeer', RealPeer)
+    monkeypatch.setattr(admin_module, '_freeze_release_peer', real_freeze_release_peer)
+    monkeypatch.setattr(
+        admin_module, '_require_provider_guard', real_require_provider_guard
+    )
     engine, target, runtime, admin = _service(tmp_path, kind='live_validation')
     admin.initialize(_review_bytes(target, 'provider-safety-init'))
     peer = admin.release_peer()
@@ -528,6 +538,65 @@ def test_real_provider_and_release_guard_lifetimes(
             ),
         ):
             pytest.fail('release accepted an expired underlying provider guard')
+
+
+@pytest.mark.parametrize('fail_after_sql', [False, True])
+def test_real_append_ends_transaction_before_trusted_provider_cleanup(
+    tmp_path, monkeypatch, fail_after_sql
+):
+    from sqlalchemy import event
+
+    from backend.app.admin.rag_provider_safety import RagProviderSafetyReleasePeerGuard
+
+    harness = incident_harness(tmp_path, monkeypatch)
+    before = harness.records('authorization')
+    old_marker = harness.authority.marker_path.read_bytes()
+    phase = {'dml': False}
+    external_calls = []
+    cleanup_transactions = []
+    original = RealPeer._locked_transport
+    original_check = RagProviderSafetyReleasePeerGuard.revalidate_database_peer
+
+    @contextmanager
+    def transport(peer, connection, **options):
+        with original(peer, connection, **options) as guard:
+            try:
+                yield guard
+            finally:
+                if phase['dml']:
+                    cleanup_transactions.append(connection.get_transaction() is None)
+
+    def callback(guard, connection):
+        if phase['dml']:
+            external_calls.append('provider_revalidation')
+        return original_check(guard, connection)
+
+    def observe(_connection, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            phase['dml'] = True
+        if fail_after_sql and sql.lstrip().upper().startswith(
+            'INSERT INTO RAG_LIVE_GATE_CASES'
+        ):
+            raise RuntimeError('test-only before-publication failure')
+
+    monkeypatch.setattr(RealPeer, '_locked_transport', transport)
+    monkeypatch.setattr(
+        RagProviderSafetyReleasePeerGuard, 'revalidate_database_peer', callback
+    )
+    event.listen(harness.engine, 'after_cursor_execute', observe)
+    if fail_after_sql:
+        with pytest.raises(RuntimeError, match='test-only before-publication failure'):
+            harness.claim()
+        assert harness.records('authorization') == before
+        assert harness.records('case') == []
+        assert harness.authority.marker_path.read_bytes() == old_marker
+    else:
+        harness.claim()
+        assert len(harness.records('case')) == 1
+        assert harness.records('authorization')[0]['case_claim_count'] == 1
+        assert harness.snapshot.generation == 2
+    assert phase['dml'] and cleanup_transactions == [True]
+    assert external_calls == []
 
 
 def incident_abort(harness):

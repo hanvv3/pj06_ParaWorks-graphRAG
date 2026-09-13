@@ -786,7 +786,7 @@ def test_genuine_approved_source_validates_locked_runtime_snapshots(tmp_path):
         False,
         True,
         'preflight_exit',
-        'post_sql_exit',
+        'final_reader_exit',
         'corpus_exit',
         'provider_exit',
         'source_exit',
@@ -796,7 +796,7 @@ def test_genuine_approved_source_validates_locked_runtime_snapshots(tmp_path):
     ],
 )
 def test_genuine_source_case_projection_reuses_append_barrier(
-    tmp_path, monkeypatch, drift
+    tmp_path, monkeypatch, drift, r2_attack=None
 ):
     from contextlib import contextmanager
 
@@ -874,9 +874,90 @@ def test_genuine_source_case_projection_reuses_append_barrier(
     monkeypatch.setattr(h.reader.authority, '_authority_barrier', barrier)
     original_reader_lock = h.reader.locked_approved
     reader_exits = []
+    callbacks_after_dml = []
+    phase = {'dml': False, 'transition': False, 'connection': None}
+    attack_calls = []
+
+    def attack(effect):
+        from sqlalchemy import update
+
+        from backend.app.models.rag_runtime import RagProviderSafetyAuthority
+        from backend.app.models.rag_serving import RagServingCorpusGeneration
+
+        attack_calls.append(effect)
+        if effect == 'corpus':
+            phase['connection'].execute(
+                update(RagServingCorpusGeneration).values(corpus_generation=99)
+            )
+        elif effect == 'provider':
+            phase['connection'].execute(
+                update(RagProviderSafetyAuthority).values(envelope_digest='f' * 64)
+            )
+        elif effect == 'key':
+            h.options['review_key_registry'].clear()
+        elif effect == 'marker':
+            h.target.marker_path.write_bytes(b'test-only-invalid-marker')
+        elif effect == 'replace_transaction':
+            phase['connection'].rollback()
+            phase['connection'].begin()
+        else:
+            getattr(phase['connection'], effect)()
+
+    def callback(kind):
+        if phase['dml']:
+            callbacks_after_dml.append(kind)
+        if r2_attack and ':' in r2_attack and not attack_calls:
+            when, selected_kind, effect = r2_attack.split(':')
+            armed = phase['transition'] if when == 'post_dml' else bool(reader_exits)
+            if armed and kind == selected_kind:
+                attack(effect)
+
+    if r2_attack is not None:
+        h.rh.callback = callback
+
+        class CurrentUser:
+            def __init__(self, user):
+                self.values = vars(user).copy()
+
+            def __getattr__(self, key):
+                callback('property')
+                return self.values[key]
+
+        for role, user in tuple(h.rh.users.items()):
+            h.rh.users[role] = CurrentUser(user)
+
+        def mark_dml(connection, _cursor, sql, *_):
+            phase['connection'] = connection
+            if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+                phase['dml'] = True
+            if sql.lstrip().upper().startswith('INSERT INTO RAG_LIVE_GATE_TRANSITIONS'):
+                phase['transition'] = True
+
+        event.listen(h.engine, 'before_cursor_execute', mark_dml)
+        for method in (
+            'read',
+            'read_hard_negative_oracle',
+            'read_pgvector_baseline_members',
+        ):
+            original = getattr(h.reader, method)
+
+            def counted(*args, _original=original, _method=method, **kwargs):
+                callback(_method)
+                return _original(*args, **kwargs)
+
+            setattr(h.reader, method, counted)
+        peer = h.reader.authority._provider_safety_release_peer
+        original_peer_check = peer.revalidate_database_peer
+
+        def counted_peer_check(*args, **kwargs):
+            callback('provider_revalidation')
+            return original_peer_check(*args, **kwargs)
+
+        peer.revalidate_database_peer = counted_peer_check
 
     @contextmanager
     def reader_lock(connection, *, barrier_guard=None):
+        callback('reader_enter')
         if barrier_guard is None:
             with original_reader_lock(connection) as reader:
                 yield reader
@@ -889,11 +970,14 @@ def test_genuine_source_case_projection_reuses_append_barrier(
                 finally:
                     h.reader.barrier_guard = None
             reader_exits.append(len(reader_exits) + 1)
+            callback('reader_exit')
+            if r2_attack and r2_attack.startswith('reader_') and phase['dml']:
+                attack(r2_attack.removeprefix('reader_'))
             if (drift == 'preflight_exit' and len(reader_exits) == 1) or (
-                drift == 'post_sql_exit' and len(reader_exits) == 2
+                drift == 'final_reader_exit' and len(reader_exits) == 1
             ):
                 h.options['review_key_registry'].clear()
-            if drift == 'corpus_exit' and len(reader_exits) == 2:
+            if drift == 'corpus_exit' and len(reader_exits) == 1:
                 from sqlalchemy import update
 
                 from backend.app.models.rag_serving import RagServingCorpusGeneration
@@ -901,7 +985,7 @@ def test_genuine_source_case_projection_reuses_append_barrier(
                 connection.execute(
                     update(RagServingCorpusGeneration).values(corpus_generation=99)
                 )
-            if drift == 'provider_exit' and len(reader_exits) == 2:
+            if drift == 'provider_exit' and len(reader_exits) == 1:
                 from sqlalchemy import update
 
                 from backend.app.models.rag_runtime import RagProviderSafetyAuthority
@@ -909,10 +993,12 @@ def test_genuine_source_case_projection_reuses_append_barrier(
                 connection.execute(
                     update(RagProviderSafetyAuthority).values(envelope_digest='f' * 64)
                 )
-            if drift == 'source_exit' and len(reader_exits) == 2:
+            if drift == 'source_exit' and len(reader_exits) == 1:
                 (h.repo / 'unapproved-reader-exit').write_text('test-only drift')
 
     h.reader.locked_approved = reader_lock
+    if r2_attack == 'publication_hook':
+        h.reader.authority._after_marker_replace = lambda: attack_calls.append('hook')
     if drift == 'after_preflight':
         original_preflight = RagReleaseMutationSet._preflight_runtime_mutations
 
@@ -971,6 +1057,49 @@ def test_genuine_source_case_projection_reuses_append_barrier(
             )
         except RagReleaseLedgerError as exc:
             refusal = exc
+        if r2_attack is not None:
+            from backend.app.models.rag_serving import RagServingCorpusGeneration
+
+            with h.engine.connect() as inspector:
+                auth = (
+                    inspector.execute(select(h.tables.authorizations)).mappings().one()
+                )
+                generation_now = inspector.scalar(select(h.tables.ledgers.c.generation))
+                corpus_now = inspector.scalar(
+                    select(RagServingCorpusGeneration.corpus_generation)
+                )
+                cases_now = inspector.execute(select(h.tables.cases)).mappings().all()
+            assert corpus_now == 7
+            if refusal is not None:
+                assert dict(auth) == before
+                assert generation_now == 1 and cases_now == []
+                if r2_attack.endswith(':marker'):
+                    assert (
+                        h.target.marker_path.read_bytes() == b'test-only-invalid-marker'
+                    )
+                else:
+                    assert h.target.marker_path.read_bytes() == marker_before
+            else:
+                assert (
+                    generation_now == 2
+                    and auth['case_claim_count'] == len(cases_now) == 1
+                )
+            if r2_attack.startswith('pre_dml:'):
+                assert refusal is not None and len(attack_calls) == 1
+                assert not any(
+                    sql.lstrip().upper().startswith('INSERT') for sql in writes
+                )
+                return
+            if r2_attack == 'publication_hook':
+                assert refusal is not None and attack_calls == []
+                assert reader_exits == [] and callbacks_after_dml == []
+                assert not any(
+                    sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))
+                    for sql in writes
+                )
+                return
+            assert attack_calls == []
+            assert callbacks_after_dml == []
         if not drift:
             assert refusal is None
             assert snapshot.generation == builder.snapshot.generation + 1
@@ -982,13 +1111,13 @@ def test_genuine_source_case_projection_reuses_append_barrier(
             == {
                 True: [],
                 'preflight_exit': [1],
-                'post_sql_exit': [1, 2],
-                'corpus_exit': [1, 2],
-                'provider_exit': [1, 2],
-                'source_exit': [1, 2],
+                'final_reader_exit': [1],
+                'corpus_exit': [1],
+                'provider_exit': [1],
+                'source_exit': [1],
                 'after_preflight': [1],
-                'before_publication': [1, 2],
-                'before_commit': [1, 2],
+                'before_publication': [1],
+                'before_commit': [1],
             }[drift]
         )
         if drift == 'before_commit':
@@ -1008,6 +1137,7 @@ def test_genuine_source_case_projection_reuses_append_barrier(
         assert builder.records('agent_run') == []
         assert builder.records('cost_component') == []
         assert builder.records('dispatch') == []
+
         with h.engine.connect() as connection:
             assert connection.scalar(select(h.tables.ledgers.c.generation)) == 1
             assert len(connection.execute(select(h.tables.transitions)).all()) == 1
@@ -1027,6 +1157,77 @@ def test_genuine_source_case_projection_reuses_append_barrier(
         assert len(builder.records('case')) == 1
         assert len(builder.records('cost_component')) == 2
         assert builder.records('dispatch') == []
+
+
+@pytest.mark.parametrize(
+    'attack',
+    [
+        *[
+            f'post_dml:property:{effect}'
+            for effect in (
+                'corpus',
+                'provider',
+                'key',
+                'marker',
+                'commit',
+                'rollback',
+                'close',
+                'begin',
+                'replace_transaction',
+            )
+        ],
+        'post_dml:auth_user_reader:corpus',
+        'post_dml:clock:provider',
+        'reader_commit',
+        'reader_rollback',
+        'reader_close',
+        'reader_begin',
+        'reader_replace_transaction',
+        'count',
+    ],
+)
+def test_actual_append_never_invokes_external_callbacks_after_first_dml(
+    tmp_path, monkeypatch, attack
+):
+    test_genuine_source_case_projection_reuses_append_barrier(
+        tmp_path,
+        monkeypatch,
+        False,
+        r2_attack=attack,
+    )
+
+
+def test_actual_append_refuses_publication_callback_without_calling_it(
+    tmp_path, monkeypatch
+):
+    test_genuine_source_case_projection_reuses_append_barrier(
+        tmp_path, monkeypatch, False, r2_attack='publication_hook'
+    )
+
+
+@pytest.mark.parametrize(
+    'effect',
+    [
+        'corpus',
+        'provider',
+        'key',
+        'marker',
+        'commit',
+        'rollback',
+        'close',
+        'begin',
+        'replace_transaction',
+    ],
+)
+def test_last_reviewer_callback_drift_refuses_before_release_dml(
+    tmp_path, monkeypatch, effect
+):
+    test_genuine_source_case_projection_reuses_append_barrier(
+        tmp_path,
+        monkeypatch,
+        False,
+        r2_attack=f'pre_dml:property:{effect}',
+    )
 
 
 @pytest.mark.parametrize(

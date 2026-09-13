@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -1917,6 +1918,18 @@ class RagReleaseLedgerError(RagReleaseAuthorityError):
     pass
 
 
+@contextmanager
+def _rollback_before_barrier_exit(connection):
+    """Finish the transaction before authority-owned lock cleanup, also on error."""
+    try:
+        yield
+        if connection.in_transaction():
+            raise RagReleaseLedgerError('release transaction was not completed')
+    except BaseException:
+        connection.rollback()
+        raise
+
+
 @dataclass(frozen=True, slots=True)
 class ValidatedReleaseTransition:
     transition_kind: str
@@ -2899,6 +2912,8 @@ class RagReleaseLedger:
         approved_case_claim: object = None,
     ) -> RagReleaseSnapshot:
         validated = validate_transition_payload(payload, identity_secret=self._secret)
+        if self._authority._after_marker_replace is not None:
+            raise RagReleaseLedgerError('append refuses publication callbacks')
         from backend.app.admin.rag_provider_safety import (
             RagProviderSafetyIncidentPlan,
         )
@@ -2939,9 +2954,12 @@ class RagReleaseLedger:
             )
         marker = DurableFileAuthority.open_runtime(self._authority.marker_path)
         try:
-            with self._authority._authority_barrier(
-                connection, marker=marker
-            ) as barrier_guard:
+            with (
+                self._authority._authority_barrier(
+                    connection, marker=marker
+                ) as barrier_guard,
+                _rollback_before_barrier_exit(connection),
+            ):
                 _body, current = self._authority._parse(marker._read_bytes_unlocked())
                 self._authority._inspect_locked(
                     connection,
@@ -2970,6 +2988,27 @@ class RagReleaseLedger:
                     approved_case_claim=approved_case_claim,
                     barrier_guard=barrier_guard,
                 )
+
+                # Complete all adapter acquisition and envelope construction before
+                # any DML. Publication has no reader/reviewer/transport callback port.
+                next_body = self._authority._body(
+                    ledger_uuid=current.ledger_uuid,
+                    ledger_epoch=current.ledger_epoch,
+                    generation=validated.to_generation,
+                    last_transition_digest=validated.transition_digest,
+                    predecessor_marker_digest=current.predecessor_marker_digest,
+                    rebootstrap_reason_hmac=current.rebootstrap_reason_hmac,
+                    database_identity_hmac=current.validation_database_identity_hmac,
+                    database_locator_hmac=current.validation_database_locator_hmac,
+                    review_envelope_hmac=current.bootstrap_review_envelope_hmac,
+                    review_nonce_hmac=current.bootstrap_review_nonce_hmac,
+                    review_operation=current.bootstrap_operation,
+                )
+                next_envelope = self._authority._wrap(next_body)
+                _next_body, next_snapshot = self._authority._parse(
+                    canonical_json_bytes(next_envelope)
+                )
+                barrier_guard.freeze_provider()
 
                 def revalidate_authorities(expected_release):
                     self._authority._assert_barrier_guard(
@@ -3070,31 +3109,11 @@ class RagReleaseLedger:
                     raise RagReleaseLedgerError(
                         'actual affected rows differ from payload'
                     )
-                next_body = self._authority._body(
-                    ledger_uuid=current.ledger_uuid,
-                    ledger_epoch=current.ledger_epoch,
-                    generation=validated.to_generation,
-                    last_transition_digest=validated.transition_digest,
-                    predecessor_marker_digest=current.predecessor_marker_digest,
-                    rebootstrap_reason_hmac=current.rebootstrap_reason_hmac,
-                    database_identity_hmac=(current.validation_database_identity_hmac),
-                    database_locator_hmac=(current.validation_database_locator_hmac),
-                    review_envelope_hmac=(current.bootstrap_review_envelope_hmac),
-                    review_nonce_hmac=current.bootstrap_review_nonce_hmac,
-                    review_operation=current.bootstrap_operation,
-                )
-                next_envelope = self._authority._wrap(next_body)
-                _next_body, next_snapshot = self._authority._parse(
-                    canonical_json_bytes(next_envelope)
-                )
                 tables = release_tables(build_rag_release_metadata())
-                # All reader callbacks and post-SQL projections have completed.
-                # These independent checks run while rollback remains possible,
-                # before the marker-first crash-detection protocol publishes.
+                # Pure complete-image and trusted checkpoints only after DML;
+                # rollback is still possible before marker-first publication.
                 revalidate_authorities(current)
                 marker._replace_unlocked(next_envelope)
-                if self._authority._after_marker_replace is not None:
-                    self._authority._after_marker_replace()
                 result = connection.execute(
                     update(tables.ledgers)
                     .where(
@@ -3129,6 +3148,7 @@ class RagReleaseLedger:
                 if transition_result.rowcount != 1:
                     raise RagReleaseLedgerError('release transition insert failed')
                 revalidate_authorities(next_snapshot)
+                actual_mutations.assert_current(connection)
                 connection.commit()
                 return next_snapshot
         except DurableFileAuthorityError as exc:

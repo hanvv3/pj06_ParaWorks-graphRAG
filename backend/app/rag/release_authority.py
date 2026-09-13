@@ -76,6 +76,7 @@ def _release_barrier_boundary():
     from weakref import WeakKeyDictionary
 
     active = WeakKeyDictionary()
+    provider_checkpoints = WeakKeyDictionary()
     held = set()
     held_threads = set()
 
@@ -100,7 +101,11 @@ def _release_barrier_boundary():
                 thread,
                 connection.get_transaction(),
             )
-        owner._provider_safety_release_peer._assert_active_guard(provider, connection)
+        from backend.app.admin.rag_provider_safety import _require_provider_guard
+
+        _require_provider_guard(
+            owner._provider_safety_release_peer, provider, connection
+        )
         return owner, connection, provider, thread
 
     class Guard:
@@ -114,12 +119,36 @@ def _release_barrier_boundary():
             return state(self)[1]
 
         def apply_provider_incident(self, plan):
+            from backend.app.admin.rag_provider_safety import (
+                RagProviderSafetyReleasePeerGuard,
+                _freeze_release_peer,
+            )
+
             _owner, connection, provider, _thread = state(self)
-            return provider.apply_incident(connection, plan)
+            evidence = RagProviderSafetyReleasePeerGuard.apply_incident(
+                provider, connection, plan
+            )
+            provider_checkpoints[self] = _freeze_release_peer(
+                _owner._provider_safety_release_peer, provider, connection
+            )
+            return evidence
+
+        def freeze_provider(self):
+            from backend.app.admin.rag_provider_safety import _freeze_release_peer
+
+            owner, connection, provider, _thread = state(self)
+            if self in provider_checkpoints:
+                raise RagReleaseAuthorityError('provider checkpoint is already frozen')
+            provider_checkpoints[self] = _freeze_release_peer(
+                owner._provider_safety_release_peer, provider, connection
+            )
 
         def revalidate_provider(self):
             _owner, connection, provider, _thread = state(self)
-            provider.revalidate_database_peer(connection)
+            if self in provider_checkpoints:
+                provider_checkpoints[self]()
+            else:
+                provider.revalidate_database_peer(connection)
 
         def __copy__(self):
             raise TypeError('release guards cannot be copied')
@@ -154,6 +183,7 @@ def _release_barrier_boundary():
                 finally:
                     # Expiration precedes transport teardown, even on exceptions.
                     del active[guard]
+                    provider_checkpoints.pop(guard, None)
         finally:
             held.remove(connection)
             held_threads.remove(thread)
