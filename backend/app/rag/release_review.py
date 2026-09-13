@@ -256,6 +256,38 @@ class LiveGatePreviewInputs:
         return '<LiveGatePreviewInputs redacted>'
 
 
+@dataclass(frozen=True, slots=True)
+class HardNegativeOracleRequest:
+    fixture_manifest_hmac: str
+    case_id_hmac: str
+    query_bytes_hmac: str
+    security_scope_fingerprint: str
+    corpus_snapshot_hmac: str
+    configured_backend: Literal['keyword', 'pgvector']
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenOracleVisibleCandidate:
+    slot_id: str
+    serving_identity_hmac: str
+    entailment: Literal['not_entailed', 'entailed', 'ambiguous']
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenHardNegativeOracleResult:
+    """Reader-owned evaluation of frozen, permission-filtered candidates.
+
+    The locked adapter must derive this from the requested corpus/query/scope
+    and its frozen non-entailment oracle, never a declaration or caller flag.
+    This result is provenance evidence, not an authorization capability.
+    """
+
+    request: HardNegativeOracleRequest
+    oracle_definition_hmac: str
+    visible_candidates: tuple[FrozenOracleVisibleCandidate, ...]
+    hidden_match_count: int
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class LiveGatePreview:
     manifest: FrozenLiveManifestSnapshot
@@ -334,9 +366,10 @@ def _corpus_payload(value):
             'serving_version_fingerprint',
             'model_content_hmac',
             'canonical_citation_projection_hmac',
-            'vector_index_state_hmac',
         ):
             _live_digest(getattr(member, name))
+        if member.vector_index_state_hmac is not None:
+            _live_digest(member.vector_index_state_hmac)
         _live_require(
             type(member.effective_permission) is str
             and member.effective_permission in ('public', 'internal', 'restricted'),
@@ -621,7 +654,32 @@ def _provider_snapshot(inputs, secret):
     return body, policies
 
 
-def _build_manifest(raw, commit, inputs, secret, policies):
+def _pgvector_baseline_members(reader, corpus):
+    """The locked reader owns the complete baseline participation roster."""
+    read = getattr(reader, 'read_pgvector_baseline_members', None)
+    _live_require(callable(read), 'pgvector_member_invalid')
+    identities = read()
+    _live_require(
+        type(identities) is tuple
+        and bool(identities)
+        and all(type(item) is str for item in identities),
+        'pgvector_member_invalid',
+    )
+    _live_require(
+        identities == tuple(sorted(set(identities))), 'pgvector_member_invalid'
+    )
+    members = {member.serving_identity_hmac: member for member in corpus.members}
+    for identity in identities:
+        _live_digest(identity)
+        _live_require(
+            identity in members
+            and members[identity].vector_index_state_hmac is not None,
+            'pgvector_member_invalid',
+        )
+    return identities
+
+
+def _build_manifest(raw, commit, inputs, secret, policies, pgvector_members):
     from types import SimpleNamespace
 
     from backend.app.agent_runtime.rag_v2_identity import (
@@ -670,6 +728,7 @@ def _build_manifest(raw, commit, inputs, secret, policies):
         secret,
     )
     claims, cases = [], []
+    effective_context_distribution = Counter()
     for row in rows:
         scope = scopes[row['security_scope_fixture_id']]
         _live_require(type(scope) is SecurityScope, 'scope_invalid')
@@ -687,12 +746,18 @@ def _build_manifest(raw, commit, inputs, secret, policies):
                 and all(type(item) is AssistantContextMessage for item in context),
                 'context_invalid',
             )
-            _live_require(
-                row['prior_context_fixture_id'] is None
-                or any(item.role == 'user' for item in context),
-                'context_invalid',
-            )
             prepared = prepare_assistant_request_text(question, context, key=secret)
+            without_context = prepare_assistant_request_text(question, (), key=secret)
+            has_context = (
+                prepared.retrieval_query_text != without_context.retrieval_query_text
+            )
+            _live_require(
+                has_context == (row['prior_context_fixture_id'] is not None),
+                'context_distribution_invalid',
+            )
+            effective_context_distribution[
+                f'{row["configured_backend"]}_{"with" if has_context else "without"}_prior_context'
+            ] += 1
         else:
             prepared = prepare_direct_request_text(question, key=secret)
         case_id_hmac = _live_hmac(
@@ -713,6 +778,8 @@ def _build_manifest(raw, commit, inputs, secret, policies):
                 and member.support_mode in row['allowed_support_modes'],
                 'fixture_mapping_invalid',
             )
+            if row['configured_backend'] == 'pgvector':
+                _live_require(identity in pgvector_members, 'pgvector_member_invalid')
         query_cost, answer_cost, case_cost = (
             _live_money(row[name])
             for name in (
@@ -776,6 +843,10 @@ def _build_manifest(raw, commit, inputs, secret, policies):
                 ),
             )
         )
+    _live_require(
+        effective_context_distribution == _CONTEXT_DISTRIBUTION,
+        'context_distribution_invalid',
+    )
     executable = FrozenCaseClaimManifest(
         tuple(claims), source_manifest_hmac=source_hmac
     )
@@ -851,7 +922,94 @@ def _baseline(manifest, corpus, files, secret):
     }
 
 
-def _preview_from_inputs(files, commit, inputs, secret):
+def _hard_negative_oracles(manifest, inputs, reader, pgvector_members):
+    read = getattr(reader, 'read_hard_negative_oracle', None)
+    _live_require(callable(read), 'hard_negative_oracle_unavailable')
+    members = {member.serving_identity_hmac: member for member in inputs.corpus.members}
+    scopes = dict(inputs.security_scopes)
+    records = []
+    for case, executable in zip(manifest.cases, manifest.executable.cases, strict=True):
+        if case.case_kind != 'hard_negative':
+            continue
+        request = HardNegativeOracleRequest(
+            manifest.fixture_manifest_hmac,
+            case.case_id_hmac,
+            case.query_bytes_hmac,
+            executable.security_scope_fingerprint,
+            inputs.corpus.corpus_snapshot_hmac,
+            case.configured_backend,
+        )
+        result = read(request)
+        _live_require(
+            type(result) is FrozenHardNegativeOracleResult
+            and type(result.request) is HardNegativeOracleRequest,
+            'hard_negative_oracle_invalid',
+        )
+        _live_require(
+            all(
+                type(getattr(result.request, field.name)) is str
+                and getattr(result.request, field.name) == getattr(request, field.name)
+                for field in fields(request)
+            ),
+            'hard_negative_oracle_invalid',
+        )
+        _live_digest(result.oracle_definition_hmac)
+        _live_number(result.hidden_match_count)
+        _live_require(
+            type(result.visible_candidates) is tuple, 'hard_negative_oracle_invalid'
+        )
+        _live_require(
+            bool(result.visible_candidates),
+            'hard_negative_hidden_only'
+            if result.hidden_match_count
+            else 'hard_negative_no_match',
+        )
+        _live_require(
+            len(result.visible_candidates) <= 8, 'hard_negative_oracle_invalid'
+        )
+        seen_slots, seen_members, candidates = set(), set(), []
+        scope = scopes[case.security_scope_fixture_id]
+        for candidate in result.visible_candidates:
+            _live_require(
+                type(candidate) is FrozenOracleVisibleCandidate,
+                'hard_negative_oracle_invalid',
+            )
+            _live_require(
+                type(candidate.slot_id) is str
+                and candidate.slot_id in case.allowed_slot_ids
+                and candidate.slot_id not in seen_slots
+                and type(candidate.entailment) is str
+                and candidate.entailment == 'not_entailed',
+                'hard_negative_oracle_invalid',
+            )
+            identity = _live_digest(candidate.serving_identity_hmac)
+            _live_require(
+                identity in members and identity not in seen_members,
+                'hard_negative_oracle_invalid',
+            )
+            member = members[identity]
+            _live_require(
+                member.effective_permission in scope.allowed_permission_levels
+                and member.support_mode in case.allowed_support_modes,
+                'hard_negative_oracle_invalid',
+            )
+            if case.configured_backend == 'pgvector':
+                _live_require(identity in pgvector_members, 'pgvector_member_invalid')
+            seen_slots.add(candidate.slot_id)
+            seen_members.add(identity)
+            candidates.append(asdict(candidate))
+        records.append(
+            {
+                'request': asdict(request),
+                'oracle_definition_hmac': result.oracle_definition_hmac,
+                'visible_candidates': candidates,
+                'hidden_match_count': result.hidden_match_count,
+            }
+        )
+    return records
+
+
+def _preview_from_inputs(files, commit, inputs, secret, reader):
     _live_require(
         type(inputs) is LiveGatePreviewInputs
         and type(inputs.release) is RagReleaseSnapshot,
@@ -907,10 +1065,14 @@ def _preview_from_inputs(files, commit, inputs, secret):
         'corpus_changed',
     )
     provider, policies = _provider_snapshot(inputs, secret)
+    pgvector_members = _pgvector_baseline_members(reader, inputs.corpus)
     manifest = _build_manifest(
-        files[LIVE_FIXTURE_PATH], commit, inputs, secret, policies
+        files[LIVE_FIXTURE_PATH], commit, inputs, secret, policies, pgvector_members
     )
     manifest.limits.__post_init__()
+    negative_oracles = _hard_negative_oracles(
+        manifest, inputs, reader, pgvector_members
+    )
     baseline = _baseline(manifest, inputs.corpus, files, secret)
     baseline_hmac = _live_hmac(baseline, 'rag-live-baseline-definition:v1', secret)
     limits = {
@@ -945,6 +1107,11 @@ def _preview_from_inputs(files, commit, inputs, secret):
         'fingerprint_key_version': release.fingerprint_key_version,
         'fingerprint_key_material_verifier': release.fingerprint_key_material_verifier,
         'approved_corpus_snapshot_hmac': inputs.corpus.corpus_snapshot_hmac,
+        'pgvector_baseline_serving_identity_hmacs': list(pgvector_members),
+        'hard_negative_oracles': negative_oracles,
+        'hard_negative_oracles_hmac': _live_hmac(
+            negative_oracles, 'rag-live-hard-negative-oracles:v1', secret
+        ),
         'approved_provider_safety_snapshot_hmac': inputs.approved_provider_safety_snapshot_hmac,
         'provider_authority_uuid': provider['authority_uuid'],
         'provider_safety_envelope_digest': provider['envelope_digest'],
@@ -989,12 +1156,10 @@ def _build_live_gate_preview(
     try:
         with snapshot_reader.locked() as reader:
             first = _preview_from_inputs(
-                files, expected_commit, reader.read(), identity_secret
+                files, expected_commit, reader.read(), identity_secret, reader
             )
-            current_files = _source_snapshot(repository, expected_commit)
-            _live_require(current_files == files, 'committed_source_changed')
             second = _preview_from_inputs(
-                current_files, expected_commit, reader.read(), identity_secret
+                files, expected_commit, reader.read(), identity_secret, reader
             )
             _live_require(
                 first.canonical_bytes == second.canonical_bytes, 'snapshot_changed'
@@ -1004,6 +1169,10 @@ def _build_live_gate_preview(
                     first.preview_hmac == _live_digest(expected_preview_hmac),
                     'preview_changed',
                 )
+            _live_require(
+                _source_snapshot(repository, expected_commit) == files,
+                'committed_source_changed',
+            )
             return first
     except LiveGatePreviewError:
         raise
@@ -1036,6 +1205,9 @@ def _preview_source_boundary():
         from dataclasses import replace
 
         result = _build_live_gate_preview(**kwargs)
+        # The lock owner's exit can perform work too. Recheck after it and all
+        # derivation, immediately before issuing the in-memory provenance token.
+        _source_snapshot(kwargs['repository'], kwargs['expected_commit'])
         source = object.__new__(VerifiedSource)
         issued[source] = (
             result.canonical_bytes,
@@ -1173,6 +1345,9 @@ def parse_live_fixture(raw: bytes) -> dict:
             set(row['allowed_support_modes']) <= {'trusted_fact', 'source_observation'}
         )
         _live_require(set(row['allowed_slot_ids']) <= {f'E{i}' for i in range(1, 9)})
+        _live_require(
+            bool(row['allowed_support_modes']) and bool(row['allowed_slot_ids'])
+        )
         for name in ('relevant_serving_fixture_ids', 'required_serving_fixture_ids'):
             for item in row[name]:
                 _fixture_id(item)

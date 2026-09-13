@@ -137,7 +137,7 @@ def test_invalid_corpus_refuses(change):
             'permission': ('effective_permission', 'unknown'),
             'support': ('support_mode', 'llm_fact'),
             'hmac': ('model_content_hmac', 'A' * 64),
-            'vector': ('vector_index_state_hmac', None),
+            'vector': ('vector_index_state_hmac', 'bad-vector'),
         }[change]
         arguments['members'] = (
             replace(original.members[0], **{name: val}),
@@ -164,6 +164,76 @@ class SnapshotReader:
         assert self.locked_now
         self.reads += 1
         return self.after if self.reads > 1 and self.after is not None else self.value
+
+    def read_pgvector_baseline_members(self):
+        assert self.locked_now
+        return ('1' * 64, '2' * 64)
+
+    def read_hard_negative_oracle(self, request):
+        from types import SimpleNamespace
+
+        from backend.app.agent_runtime.rag_v2_identity import security_scope_fingerprint
+
+        assert self.locked_now
+        current = (
+            self.after if self.reads > 1 and self.after is not None else self.value
+        )
+        assert request.corpus_snapshot_hmac == current.corpus.corpus_snapshot_hmac
+        scope = next(
+            scope
+            for _, scope in current.security_scopes
+            if security_scope_fingerprint(
+                scope,
+                settings=SimpleNamespace(
+                    agent_runtime_fingerprint_secret=SECRET.decode(),
+                    agent_runtime_fingerprint_key_version='v1',
+                    paraworks_env='test',
+                ),
+            )
+            == request.security_scope_fingerprint
+        )
+        # Frozen test oracle annotations are separate from fixture declarations.
+        # The adapter derives visible candidates using the resolved current scope.
+        annotated_cases = {
+            fingerprint(
+                {
+                    'case_id_bytes': utf8(f'live-{ordinal + 1:02}'),
+                    'case_ordinal': ordinal,
+                    'fixture_manifest_hmac': request.fixture_manifest_hmac,
+                },
+                'rag-live-case-id:v1',
+            )
+            for ordinal in (4, 9, 14, 19, 24, 29)
+        }
+        assert request.case_id_hmac in annotated_cases
+        candidates, hidden = [], 0
+        for index, member in enumerate(current.corpus.members[:2], 1):
+            if (
+                member.effective_permission not in scope.allowed_permission_levels
+                or scope.project_constraints
+                or (
+                    scope.source_constraints
+                    and f'source_pk:{index}' not in scope.source_constraints
+                )
+            ):
+                hidden += 1
+                continue
+            candidates.append(
+                review.FrozenOracleVisibleCandidate(
+                    f'E{len(candidates) + 1}',
+                    member.serving_identity_hmac,
+                    'not_entailed',
+                )
+            )
+        return review.FrozenHardNegativeOracleResult(
+            request,
+            fingerprint(
+                {'frozen_oracle': 'isolated-non-entailing-candidates:v1'},
+                'rag-live-test-oracle-definition:v1',
+            ),
+            tuple(candidates),
+            hidden,
+        )
 
 
 def preview_inputs():
@@ -996,10 +1066,8 @@ def declaration():
                 if prior
                 else None,
                 'expected_no_answer': negative,
-                'allowed_support_modes': []
-                if negative
-                else ['trusted_fact', 'source_observation'],
-                'allowed_slot_ids': [] if negative else ['E1', 'E2'],
+                'allowed_support_modes': ['trusted_fact', 'source_observation'],
+                'allowed_slot_ids': ['E1', 'E2'],
                 'relevant_serving_fixture_ids': []
                 if negative
                 else ['serving-01', 'serving-02'],

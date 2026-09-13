@@ -147,8 +147,14 @@
       "security_scope_fixture_id": "scope-internal",
       "prior_context_fixture_id": null,
       "expected_no_answer": true,
-      "allowed_support_modes": [],
-      "allowed_slot_ids": [],
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
       "relevant_serving_fixture_ids": [],
       "required_serving_fixture_ids": [],
       "query_embedding_required": false,
@@ -306,8 +312,14 @@
       "security_scope_fixture_id": "scope-internal",
       "prior_context_fixture_id": null,
       "expected_no_answer": true,
-      "allowed_support_modes": [],
-      "allowed_slot_ids": [],
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
       "relevant_serving_fixture_ids": [],
       "required_serving_fixture_ids": [],
       "query_embedding_required": false,
@@ -465,8 +477,14 @@
       "security_scope_fixture_id": "scope-internal",
       "prior_context_fixture_id": null,
       "expected_no_answer": true,
-      "allowed_support_modes": [],
-      "allowed_slot_ids": [],
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
       "relevant_serving_fixture_ids": [],
       "required_serving_fixture_ids": [],
       "query_embedding_required": true,
@@ -624,8 +642,14 @@
       "security_scope_fixture_id": "scope-internal",
       "prior_context_fixture_id": "context-20",
       "expected_no_answer": true,
-      "allowed_support_modes": [],
-      "allowed_slot_ids": [],
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
       "relevant_serving_fixture_ids": [],
       "required_serving_fixture_ids": [],
       "query_embedding_required": false,
@@ -783,8 +807,14 @@
       "security_scope_fixture_id": "scope-internal",
       "prior_context_fixture_id": null,
       "expected_no_answer": true,
-      "allowed_support_modes": [],
-      "allowed_slot_ids": [],
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
       "relevant_serving_fixture_ids": [],
       "required_serving_fixture_ids": [],
       "query_embedding_required": false,
@@ -942,8 +972,14 @@
       "security_scope_fixture_id": "scope-internal",
       "prior_context_fixture_id": null,
       "expected_no_answer": true,
-      "allowed_support_modes": [],
-      "allowed_slot_ids": [],
+      "allowed_support_modes": [
+        "trusted_fact",
+        "source_observation"
+      ],
+      "allowed_slot_ids": [
+        "E1",
+        "E2"
+      ],
       "relevant_serving_fixture_ids": [],
       "required_serving_fixture_ids": [],
       "query_embedding_required": true,
