@@ -1,5 +1,37 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-14 D Core Task25-A provider-free quality adjudication
+
+- Implementation `5f0e605` adds only the provider-free
+  `RagReleaseQualityEvaluator` slice. Immutable sanitized case/block, frozen
+  legacy baseline, signed reviewer-label/adjudication and canonical report
+  contracts enforce the exact 30-case roster, 100% hard-negative accuracy,
+  100% positive/required-slot coverage, at least 95% faithfulness, retrieval
+  precision/recall parity with the frozen legacy baseline, and zero leak or
+  invalid-slot tolerance.
+- Reviewer A then reviewer B are mandatory; the distinct adjudicator is accepted
+  only on disagreement. Exact role/subject/order/signature HMACs, manifest,
+  approval, corpus and baseline bindings fail closed on missing, duplicate,
+  takeover or drift. The constructor receives the exact immutable role-to-subject
+  map so the roster and every signature can be recomputed without changing the
+  approved `evaluate(...)` interface. Raw answer/evidence blocks are ephemeral,
+  absent from sanitized rows and reports, and cannot be inferred from them.
+- TDD evidence: the initial test collection failed because
+  `backend.app.rag.release_quality` did not exist; added policy-boundary tests also
+  failed before their minimal implementations. Final evaluator/credential tests
+  are `44 passed`, exact authorization refusal/evaluator nodes are `43 passed`,
+  and the broad adjacent release matrix is `408 passed`. Ruff, format, compile,
+  credential and diff checks are green. No provider, network, paid call, database
+  persistence, runner, CLI execution, release, push, merge or deployment ran.
+- Task25-B is still actual implementation work. Its mandatory first RED is the
+  clean-Windows `core.autocrlf=true` source-binding defect: the current raw
+  worktree-byte versus committed-blob comparison reports
+  `committed_source_changed` for `service.py`, `pgvector_store.py` and
+  `search_store.py` even when Git is clean. Fix it cross-platform without
+  weakening committed-source/baseline HMAC or fail-closed guarantees, then add
+  production readers, composite runner, live gate, schema and CLI integration.
+  PostgreSQL and live-release gates remain open.
+
 ## 2026-09-14 D Core Task25 provider-incident independent-review round 3
 
 - Implementation `64a414b` corrects the remaining release/provider consistency

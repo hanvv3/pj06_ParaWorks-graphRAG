@@ -2717,6 +2717,31 @@ migration/rebootstrap, while PostgreSQL and live-release gates remain open.
 Composite runner/evaluator work may now begin, but this CLEAN prerequisite does
 not authorize release execution.
 
+**Task25-A evaluator slice implemented (2026-09-14).** Commit `5f0e605`
+implements only `backend/app/rag/release_quality.py` and its provider-free test
+matrix. The immutable evaluator enforces the exact 30-case roster/order,
+baseline/manifest/corpus/approval binding, signed A -> B -> adjudicator-only-on-
+disagreement review order, complete/pairwise-distinct reviewer subjects, exact
+signature HMACs, hard-negative and positive/required-slot coverage, at least 95%
+faithfulness, V2 retrieval parity with the frozen legacy baseline, and zero
+leaks/invalid slots. The constructor takes the exact immutable role-to-subject
+map so the approved `evaluate(...)` signature remains unchanged while roster and
+label signatures are recomputed independently. Raw review answer/evidence stays
+ephemeral and is absent from sanitized rows and reports. Frozen evidence is `44
+passed` for evaluator/credential, `43 passed` for exact authorization-refusal plus
+evaluator nodes, and `408 passed` for the adjacent release matrix; static checks
+are green. No runner, production reader, DB schema/persistence, CLI execution,
+provider/network/paid call or release is part of this slice.
+
+Task25-B remains actual implementation. Its mandatory first RED prerequisite is
+the clean-Windows committed-source binding defect exposed by this slice:
+`core.autocrlf=true` makes raw worktree bytes differ from committed blobs for
+`service.py`, `pgvector_store.py` and `search_store.py`, so the current checker
+returns `committed_source_changed` on a clean checkout. Fix this cross-platform
+without weakening exact committed-byte baseline binding, Git-clean enforcement,
+zero provider/authorization behavior or fail-closed refusal; then implement the
+production readers, composite runner/live gate, schema and CLI integration.
+
 - [x] Complete the mandatory provider-incident prerequisite and receive
   independent local-code **CLEAN** review; PostgreSQL/live-release and legacy v1
   rebind recovery remain separate open gates.
@@ -2971,7 +2996,7 @@ uv run python -m backend.app.admin.rag_live_gate authorization-abort-execution-c
 - [ ] Add RED one-physical-connection tests: release/runtime/safety/case/AgentRun claims share the exact validation PostgreSQL connection/transaction; separate engine/DSN or database identity mismatch performs zero marker mutation/call.
 - [ ] Add RED crash/failure matrix for pre-dispatch local refusal, response-less embedding/generation failure, claim-before-call, call-before-outcome, component/finalization gap, post-30 pre-report/scoring, process/supervisor/fence mismatch, corpus drift at every barrier, safety/control change, overrun, malformed provider metadata, and marker/DB divergence. No automatic resume or missing downstream call.
 - [ ] Add RED transition precedence: safety envelope block persists before release abort for overrun/remediation; corpus/safety abort outranks ordinary finished-failed; all 30 terminal ordinary failures may finish failed with lower dispatch counts.
-- [ ] Add RED quality tests with no LLM judge: hard-negative accuracy 100%, positive coverage 100%, required-slot coverage, claim-to-evidence faithfulness >=95%, retrieval precision/recall not below legacy, zero leaks/invalid slots, exact reviewer adjudication order/signature, and red report on any failed metric. The evaluator must reject missing/mismatched signed labels, baseline/manifest/corpus/approval drift, or any attempt to infer faithfulness from sanitized terminal rows alone.
+- [x] Add RED quality tests with no LLM judge: hard-negative accuracy 100%, positive coverage 100%, required-slot coverage, claim-to-evidence faithfulness >=95%, retrieval precision/recall not below legacy, zero leaks/invalid slots, exact reviewer adjudication order/signature, and red report on any failed metric. The evaluator rejects missing/mismatched signed labels, baseline/manifest/corpus/approval drift, and any attempt to infer faithfulness from sanitized terminal rows alone. This closes Task25-A only; runner, PostgreSQL and combined gate checks remain open.
 - [ ] Run `uv run pytest backend/tests/test_rag_release_quality.py backend/tests/test_rag_live_gate.py backend/tests/test_rag_live_gate_postgres.py -q` using fake transports only and confirm RED.
 - [ ] Implement the live-only composite one-use permit, runner, and authenticated review session. Raw answer/evidence review blocks exist in process memory only, are shown only to the authenticated role in rubric order, and are destroyed after signing; DB/report rows keep HMACs/labels only. The CLI `run` is the only **release-harness/live-gate** paid path; production V2 enforce remains possible only through the ordinary runtime cost claim plus provider-safety admission. Unit/integration tests inject fake dispatch/reviewer boundaries and assert public network is unavailable.
 - [ ] Rerun focused tests and `uv run ruff check backend/app/rag/release_quality.py backend/app/rag/live_gate.py backend/app/admin/rag_live_gate.py backend/tests/test_rag_release_quality.py backend/tests/test_rag_live_gate.py backend/tests/test_rag_live_gate_postgres.py`.

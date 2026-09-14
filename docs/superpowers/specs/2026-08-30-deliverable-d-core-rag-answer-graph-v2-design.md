@@ -3291,6 +3291,33 @@ closed pending separately reviewed migration/rebootstrap. PostgreSQL and live-
 release gates remain open. Task25 composite runner/evaluator work may now begin;
 this prerequisite disposition grants no release authorization.
 
+**Task25-A quality evaluator implementation status (2026-09-14).** Commit
+`5f0e605` implements only the provider-free quality-adjudication boundary and its
+tests. Immutable sanitized terminal/result, frozen legacy baseline, signed label,
+case/block adjudication and canonical quality-report contracts enforce the exact
+30-case roster/order; complete pairwise-distinct reviewer A, reviewer B and
+adjudicator subjects; A -> B -> adjudicator-only-on-disagreement review order;
+exact role/subject/signature HMACs; approval/manifest/corpus/baseline binding; and
+the specified hard-negative, positive/required-slot, faithfulness, retrieval
+parity and zero-leak/invalid-slot gates. The evaluator constructor receives the
+exact immutable role-to-subject map because the approved `evaluate(...)` input
+contains only its HMAC; this preserves the interface while allowing independent
+roster and signature recomputation. Raw answer/evidence is ephemeral and neither
+accepted by the evaluator nor present in sanitized rows/reports.
+
+Verification is evaluator/credential `44 passed`, exact authorization-refusal
+plus evaluator `43 passed`, and adjacent release/reviewer/identity `408 passed`,
+with Ruff/format/compile/diff checks green. No LLM judge, provider/network/paid
+call, DB persistence/schema, production reader, runner, CLI execution or release
+is added. Task25-B is still actual implementation. Before it adds those pieces,
+its mandatory first RED must reproduce and fix the clean-Windows
+`core.autocrlf=true` committed-source binding defect: raw worktree bytes currently
+differ from committed blobs for `service.py`, `pgvector_store.py` and
+`search_store.py`, causing `committed_source_changed` despite clean Git state.
+The fix must remain cross-platform and preserve exact committed-byte baseline
+HMAC binding, Git-clean enforcement, zero provider/authorization activity and
+fail-closed behavior. PostgreSQL and live-release gates remain open.
+
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
 skipped** (11 existing Alembic warnings); focused contracts **38 passed**;

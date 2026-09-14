@@ -2,6 +2,43 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task25-A provider-free evaluator implemented
+
+- Commit `5f0e605` implements and tests only the provider-free
+  `RagReleaseQualityEvaluator` and immutable quality contracts in
+  `backend/app/rag/release_quality.py`. It has no LLM judge, provider/network
+  call, database persistence, production reader, composite runner or CLI/live
+  execution path.
+- The evaluator validates the exact 30-case manifest roster and order; frozen
+  baseline/manifest/corpus/approval bindings; exact reviewer A -> reviewer B ->
+  adjudicator-on-disagreement role, subject and signature HMACs; hard-negative,
+  positive/required-slot, faithfulness, retrieval parity and zero-leak/invalid-
+  slot gates. Its constructor accepts the exact immutable reviewer-subject map so
+  the approved `evaluate(...)` signature stays unchanged while the roster and
+  signatures remain independently recomputable. Sanitized terminal rows contain
+  no raw answer/evidence and cannot substitute for signed review labels.
+- RED began with collection failure for the absent module; later support-mode,
+  positive-count/required-slot and outcome/block consistency tests failed before
+  the corresponding minimal implementation. Frozen GREEN: evaluator plus secret
+  hygiene `44 passed`; two authorization refusal nodes plus evaluator `43
+  passed`; adjacent release/reviewer/identity matrix `408 passed`; Ruff, format,
+  compile and diff checks pass.
+- The two Task24 CLI tests now assert the honest clean-checkout refusal
+  `committed_source_changed`, while preserving zero dispatch/authorization and no
+  authority/stdin access. Root cause is pre-existing cross-platform source
+  binding: with Windows `core.autocrlf=true` and no relevant `.gitattributes`,
+  raw worktree bytes differ from `git show` blobs for
+  `backend/app/agents/rag_orchestrator_agent/service.py`,
+  `backend/app/rag/pgvector_store.py` and
+  `backend/app/rag/search_store.py`, although `git status` is clean.
+- Task25-B remains **actual implementation**, not planning. Its mandatory first
+  RED prerequisite is a cross-platform committed-source binding fix that keeps
+  exact committed bytes for baseline HMAC, Git-clean enforcement, zero provider/
+  authorization activity and fail-closed behavior. Only then implement production
+  snapshot/oracle/roster readers, the composite runner/live gate, six-table
+  persistence and CLI integration. PostgreSQL/live release validation remains
+  open and no release is authorized.
+
 ## 2026-09-14 Task25 provider-incident prerequisite: independent Round 3 CLEAN
 
 - Implementation `64a414b` / documentation `efa72c0` passed fresh independent
