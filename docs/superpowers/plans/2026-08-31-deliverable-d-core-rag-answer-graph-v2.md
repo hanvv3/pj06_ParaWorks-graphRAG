@@ -2778,6 +2778,27 @@ Task24 preview/corpus/reviewer `202 passed`, and clean-commit adjacent release
 call, persistence, runner/CLI or release occurred. Fresh dual independent review
 of `5affa36` is mandatory; Task25-B remains blocked and unstarted.
 
+**Task25-B first vertical slice implemented (2026-09-14).** Commit `2b53f55`
+completes the approved committed-source reader and execution-capability slice.
+The Git-clean fence and exact committed blob now form the cross-platform source
+identity, so clean CRLF checkout conversion is accepted and a true dirty edit is
+still rejected. The existing Task24 source/authorization lifecycle and barrier
+mint one opaque, one-use process-local capability binding the exact issued
+authorization identity, native ledger UUID/epoch, complete 30-case executable
+preimage, fixture/manifest/corpus/provider snapshots and release generation.
+`RagReleaseQualityEvaluator.evaluate(...)` requires and consumes this capability;
+DTO/HMAC co-mutation, copy, construction, serialization and replay refuse.
+
+Verification is quality/capability `163 passed`, saved ordinal review probe `3
+passed`, adjacent Task24/25 authorization/source/schema/CLI `234 passed`,
+provider/secret `216 passed, 1 skipped`, preview/r1 `131 passed`, plus green Ruff,
+format, compile and diff checks. Clean CLI readiness advances to
+`preview_snapshot_reader_unavailable` with zero provider dispatch and no
+authorization. Task25-B remains incomplete and actual implementation: obtain
+fresh independent spec/code review, then add production snapshot/oracle/roster
+readers and 30-case dispatch composition. Persistence, reviewer session, `run`
+CLI, PostgreSQL proof and live release remain later, separately gated slices.
+
 - [x] Complete the mandatory provider-incident prerequisite and receive
   independent local-code **CLEAN** review; PostgreSQL/live-release and legacy v1
   rebind recovery remain separate open gates.

@@ -3365,6 +3365,30 @@ Fresh dual independent review of `5affa36` is required. No runner, provider,
 network, paid call, persistence, CLI execution or release is added, and Task25-B
 remains blocked and unstarted.
 
+**Task25-B execution-authority first slice (2026-09-14).** Implementation
+`2b53f55` fixes the mandatory clean-Windows committed-source RED: exact Git blob
+bytes remain the source/HMAC identity and before/after clean-worktree fences
+still reject true edits, but CRLF checkout conversion is no longer treated as a
+source change. Under the existing Task24 release/provider barrier, the exact
+issued opaque source and `AuthorizedRagLiveGate` object may mint one opaque,
+process-local, one-use capability. Its private binding covers native ledger
+UUID/epoch, the complete approved 30-case executable preimage, fixture,
+manifest, corpus and provider snapshots, and release generation. The public
+quality evaluator requires and consumes that capability; caller-supplied
+approval/manifest/corpus recomputation is not authority. Construction, copy,
+serialization, cross-ledger use, post-issue mutation and replay fail closed.
+
+RED was `4 failed, 1 passed` for CRLF/dirty/ordinal behavior followed by absent
+capability API failures. GREEN is focused `163 passed`, saved ordinal probe `3
+passed`, adjacent authorization/source/schema/CLI `234 passed`, provider/secret
+`216 passed, 1 skipped`, and preview/r1 `131 passed`, with static checks green.
+The clean CLI now refuses at the next honest boundary,
+`preview_snapshot_reader_unavailable`, with zero dispatch and no authorization.
+This is only the first Task25-B slice: production snapshot/oracle/roster readers,
+30-case dispatch, quality persistence, authenticated reviewer session, `run`
+CLI, PostgreSQL proof and live release remain unimplemented. Fresh independent
+specification/code review is required before the next implementation slice.
+
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
 skipped** (11 existing Alembic warnings); focused contracts **38 passed**;

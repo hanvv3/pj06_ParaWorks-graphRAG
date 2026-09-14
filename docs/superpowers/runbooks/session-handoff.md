@@ -2,6 +2,39 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task25-B execution-authority first slice
+
+- Implementation/test commit `2b53f55` completes only the first Task25-B
+  vertical slice. It fixes the clean-Windows `core.autocrlf=true` source-binding
+  false refusal by using the exact committed Git blob as HMAC input while a
+  before/after Git-clean fence still rejects real source edits.
+- The existing Task24 opaque `ApprovedLiveManifestSource`, exact issued
+  `AuthorizedRagLiveGate` object identity, native ledger UUID/epoch, complete
+  30-case executable preimage, fixture/manifest/corpus/provider snapshots and
+  current release generation are bound into an opaque process-memory-only,
+  one-use capability under the existing release/provider barrier. The public
+  `RagReleaseQualityEvaluator.evaluate(...)` consumes this capability; supplied
+  approval/manifest/corpus DTOs cannot replace it. The capability cannot be
+  ordinarily constructed, copied, deep-copied, pickled, JSON-serialized or
+  replayed. The exported review signer now rejects bool, negative and non-int
+  block ordinals with bounded `RagReleaseQualityError`.
+- RED evidence was `4 failed, 1 passed` for the CRLF/dirty/ordinal boundary,
+  followed by missing capability API failures. GREEN evidence is capability and
+  quality `163 passed`, saved independent ordinal probes `3 passed`, Task24/25
+  adjacent authorization/source/schema/CLI `234 passed`, provider/credential
+  `216 passed, 1 skipped`, and the previously completed preview/r1 matrix `131
+  passed`. Ruff, format, compile and diff checks pass. On clean commit, the real
+  preview reports `preview_snapshot_reader_unavailable`,
+  `provider_dispatch_count=0`, `authorization_issued=false`; the former false
+  `committed_source_changed` is gone.
+- Task25-B is **still actual implementation and incomplete**. Do not claim a
+  composite run or release. Next, after fresh independent spec/code review,
+  implement production snapshot/oracle/roster readers and the 30-case dispatch
+  composition. DB quality persistence, authenticated interactive review,
+  `run` CLI, PostgreSQL proof and any paid/live release remain later slices.
+  No network/provider/paid call, release DB write, push, merge, deploy or live
+  release occurred.
+
 ## 2026-09-14 Task25-A independent-review Round 2 correction
 
 - Fresh specification and code-quality review of Round-1 HEAD `6d7353a` were

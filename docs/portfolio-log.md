@@ -1,5 +1,34 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-14 D Core Task25-B one-use execution authority
+
+- Commit `2b53f55` delivers the first Task25-B trust-boundary slice. A clean
+  Windows checkout now hashes the exact committed Git blob rather than comparing
+  platform-converted checkout bytes, while the Git-clean fence continues to
+  reject genuine source edits.
+- Task24's opaque approved source and exact issued authorization identity now
+  mint a one-use, process-memory-only capability under the existing DB/release/
+  provider barrier. It binds the native ledger UUID/epoch, full approved 30-case
+  executable image, fixture/manifest/corpus/provider snapshots and release
+  generation. The public quality evaluator requires and consumes it, preventing
+  a caller from turning co-mutated DTOs or recomputed HMACs into execution
+  authority. Copy, serialization, construction, cross-ledger use, mutation and
+  replay attacks are covered. Review-signature ordinals are now exact native
+  non-negative integers.
+- TDD evidence: the initial CRLF/dirty/ordinal selection was `4 failed, 1
+  passed`; capability tests first failed on the absent API. Final focused quality
+  and capability evidence is `163 passed`; the saved ordinal review probe is `3
+  passed`; adjacent Task24/25 authorization/source/schema/CLI is `234 passed`;
+  provider/secret hygiene is `216 passed, 1 skipped`; preview/r1 is `131 passed`.
+  Ruff, format, compile and diff checks are green. The clean-commit CLI advances
+  to the next honest unavailable boundary, `preview_snapshot_reader_unavailable`,
+  with zero provider dispatch and no authorization.
+- This is not Task25-B completion. Production readers, 30-case dispatch, quality
+  persistence, authenticated reviewer interaction, `run` CLI, PostgreSQL and
+  live-release evidence remain open, with fresh independent review required
+  before proceeding. No external/provider/paid call, push, merge, deploy or
+  release occurred.
+
 ## 2026-09-14 D Core Task25-A independent-review Round 2 correction
 
 - Both fresh reviews of the Round-1 candidate `6d7353a` were **NOT CLEAN**.
