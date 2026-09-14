@@ -1,5 +1,36 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-14 D Core Task25-A independent-review Round 2 correction
+
+- Both fresh reviews of the Round-1 candidate `6d7353a` were **NOT CLEAN**.
+  Implementation `5affa36` closes only those Task25-A findings. The quality
+  manifest must now carry the complete Task24 `FrozenCaseClaimManifest`; the
+  evaluator reuses `_manifest_payload`, requires the exact 30 resolved cases in
+  annotation order, binds case/surface/backend and the
+  `query_bytes_hmac == retrieval_query_hmac` alias, validates provider/runtime/
+  config/input identities, and binds exact component reserves to each annotation.
+- Every monetary input must be a native finite, non-negative, unsigned
+  `Decimal` with exponent exactly `-6`. Scale aliases, signed zero, NaN,
+  infinity, bool/int aliases and over-reserve charge refuse before scoring.
+  Sanitized result primitives are type-checked before equality, hashing or
+  canonicalization. Baseline ratio corruption now reports `baseline_drift`.
+- Reviewer authority rejects ordinary deletion and converts forced missing or
+  malformed frozen-roster mutation to `reviewer_roster_invalid`; the exact
+  ordered role/subject tuple and its HMAC remain immutable and takeover cannot
+  be authorized by re-signing.
+- RED evidence: saved Round-1 probes `11 failed, 5 passed`; initial permanent
+  Round-2 matrix `26 failed, 92 passed`; type-before-comparison regression `2
+  failed, 11 passed`. GREEN: permanent evaluator `147 passed`; evaluator plus
+  both saved probe files and credential hygiene `170 passed`; Task24 preview/
+  corpus/reviewer validators `202 passed`; clean-commit adjacent release matrix
+  `514 passed in 1574.72s`. Ruff, format, compile and diff checks are green.
+  No provider/network/paid call, persistence, runner/CLI, release, push, merge
+  or deployment ran.
+- Fresh dual independent review of `5affa36` remains mandatory. Task25-B has not
+  started and is still actual implementation; it must begin with the documented
+  clean-Windows committed-source/CRLF RED. PostgreSQL and live-release gates
+  remain open.
+
 ## 2026-09-14 D Core Task25-A independent-review Round 1 correction
 
 - Both initial Task25-A reviews were **NOT CLEAN**. Commit `2686306` corrects

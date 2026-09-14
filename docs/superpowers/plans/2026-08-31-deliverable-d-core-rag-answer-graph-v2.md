@@ -2758,6 +2758,26 @@ green. No provider/network/paid call, persistence, runner/CLI or release ran.
 Fresh dual independent review of `2686306` is mandatory before this slice is
 CLEAN or Task25-B may begin.
 
+**Task25-A independent-review Round 2 correction (2026-09-14).** Fresh reviews
+of Round-1 HEAD `6d7353a` were NOT CLEAN. Implementation `5affa36` reuses the
+Task24 `_manifest_payload` validator for the complete executable
+`FrozenCaseClaimManifest`, requires the exact 30 resolved cases and order,
+binds case/surface/backend plus `query_bytes_hmac == retrieval_query_hmac`,
+validates provider/runtime/config/input identities, and binds the exact two
+component reserves to the annotation. Decimal values now require exact native,
+finite, non-negative, unsigned exponent `-6` representation. Every sanitized
+result leaf is type-checked before comparison/HMAC/canonicalization. Reviewer
+authority refuses deletion and bounds forced missing/malformed frozen rosters;
+baseline ratio corruption reports `baseline_drift`.
+
+RED is saved probes `11 failed, 5 passed`, permanent Round-2 matrix `26 failed,
+92 passed`, and operation-order regression `2 failed, 11 passed`. GREEN is
+evaluator `147 passed`, evaluator/two saved probes/credential `170 passed`,
+Task24 preview/corpus/reviewer `202 passed`, and clean-commit adjacent release
+`514 passed in 1574.72s`; static checks are green. No external/provider/paid
+call, persistence, runner/CLI or release occurred. Fresh dual independent review
+of `5affa36` is mandatory; Task25-B remains blocked and unstarted.
+
 - [x] Complete the mandatory provider-incident prerequisite and receive
   independent local-code **CLEAN** review; PostgreSQL/live-release and legacy v1
   rebind recovery remain separate open gates.

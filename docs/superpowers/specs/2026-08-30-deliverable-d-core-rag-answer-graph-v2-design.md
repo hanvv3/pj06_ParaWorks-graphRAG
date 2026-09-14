@@ -3343,6 +3343,28 @@ reviewer `202 passed`, and clean-commit adjacent release `454 passed in
 release occurred. Fresh dual independent review of `2686306` remains required;
 this correction does not authorize Task25-B.
 
+**Task25-A independent-review Round 2 correction (2026-09-14).** Both fresh
+reviews of Round-1 HEAD `6d7353a` were NOT CLEAN. Implementation `5affa36`
+requires the complete Task24 executable preimage rather than a nullable or empty
+placeholder: `_manifest_payload` validates `FrozenCaseClaimManifest`, followed
+by exact 30-case annotation/resolved identity and order checks, the
+`query_bytes_hmac == retrieval_query_hmac` alias, provider/runtime/config/input
+identity validation, and exact component-reserve binding. Money accepts only a
+native finite non-negative unsigned Decimal whose exponent is exactly `-6`;
+scale aliases, signed zero and non-finite/coercive values refuse.
+
+All sanitized result primitives are validated before equality, hashing or
+canonicalization. Reviewer authority slots cannot be deleted and forced missing
+or malformed frozen rosters return `reviewer_roster_invalid`; the ordered frozen
+role/subject mapping and HMAC remain authoritative. Baseline ratio corruption
+returns `baseline_drift`. RED evidence is `11 failed, 5 passed`, then `26 failed,
+92 passed`, plus `2 failed, 11 passed`; GREEN evidence is evaluator `147 passed`,
+evaluator/probes/credential `170 passed`, Task24 validators `202 passed`, and
+clean-commit adjacent release `514 passed in 1574.72s`, with static checks green.
+Fresh dual independent review of `5affa36` is required. No runner, provider,
+network, paid call, persistence, CLI execution or release is added, and Task25-B
+remains blocked and unstarted.
+
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
 skipped** (11 existing Alembic warnings); focused contracts **38 passed**;

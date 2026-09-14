@@ -2,6 +2,33 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task25-A independent-review Round 2 correction
+
+- Fresh specification and code-quality review of Round-1 HEAD `6d7353a` were
+  **NOT CLEAN**. Implementation `5affa36` addresses only those evaluator
+  findings; obtain fresh dual independent review before calling Task25-A CLEAN
+  or beginning Task25-B.
+- `FrozenLiveManifestSnapshot.executable` must be a complete valid Task24
+  `FrozenCaseClaimManifest`. The evaluator reuses `_manifest_payload`, requires
+  exactly 30 resolved cases in identical order, checks case/surface/backend and
+  the annotation-query alias, validates provider/runtime/config/input identities,
+  and binds exact query/answer component reserves to each annotation. None,
+  empty/short, reordered, duplicate or drifted executable images refuse.
+- All costs are exact native unsigned finite non-negative six-place Decimals;
+  scale aliases and signed zero refuse. Result leaf types are validated before
+  equality/HMAC/canonical operations. Reviewer authority cannot be deleted;
+  forced missing/malformed frozen rosters become `reviewer_roster_invalid`.
+  Baseline ratio type/count corruption remains in the `baseline_drift` domain.
+- RED: saved probes `11 failed, 5 passed`; permanent suite `26 failed, 92
+  passed`; additional operation-order probe `2 failed, 11 passed`. GREEN:
+  evaluator `147 passed`; evaluator/two saved probes/credential `170 passed`;
+  Task24 preview/corpus/reviewer `202 passed`; clean-commit adjacent release
+  `514 passed in 1574.72s`. Ruff, format, compile and diff checks pass.
+- Task25-B remains **actual implementation** and has not started. Its first RED
+  is still the clean-Windows committed-source/CRLF defect. PostgreSQL and
+  live-release evidence remain open. No provider/network/paid call, DB write,
+  runner/CLI, release, push, merge or deployment occurred.
+
 ## 2026-09-14 Task25-A independent-review Round 1 correction
 
 - Initial specification and code-quality reviews of `ab10514` were **NOT
