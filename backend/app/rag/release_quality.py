@@ -12,7 +12,7 @@ import hmac
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from typing import Literal, cast
 
 from backend.app.agent_runtime.fingerprints import canonical_json_bytes
@@ -26,7 +26,10 @@ from backend.app.rag.release_review import (
     FrozenCorpusSnapshot,
     FrozenLiveManifestCase,
     FrozenLiveManifestSnapshot,
+    LiveGateLimits,
+    LiveGatePreviewError,
     ReviewerRole,
+    _corpus_payload,
     _exact_frozen_equal,
 )
 
@@ -71,7 +74,7 @@ _ROLES: tuple[ReviewerRole, ...] = (
     'adjudicator_c',
 )
 _LABELS = frozenset(('entailed', 'not_entailed', 'ambiguous'))
-_OUTCOMES = frozenset(
+_QUALITY_OUTCOMES = frozenset(
     (
         'supported',
         'no_match',
@@ -79,20 +82,6 @@ _OUTCOMES = frozenset(
         'safety_filter_empty',
         'insufficient_evidence',
         'evidence_unavailable',
-        'budget_exceeded',
-        'retriever_unavailable',
-        'model_unavailable',
-        'model_provider_failed',
-        'structured_output_invalid',
-        'citation_validation_failed',
-        'persistence_failed',
-        'unexpected_internal_error',
-        'provider_safety_unavailable',
-        'provider_usage_overrun',
-        'provider_response_identity_invalid',
-        'provider_embedding_payload_invalid',
-        'live_corpus_snapshot_changed',
-        'abandoned_unknown',
     )
 )
 _SIX_PLACES = Decimal('0.000001')
@@ -265,12 +254,12 @@ def _ratio(numerator: object, denominator: object) -> tuple[int, int]:
 
 
 def _cost(value: object) -> bool:
-    return (
-        type(value) is Decimal
-        and value.is_finite()
-        and value >= 0
-        and value == value.quantize(_SIX_PLACES)
-    )
+    if type(value) is not Decimal:
+        return False
+    try:
+        return value.is_finite() and value >= 0 and value == value.quantize(_SIX_PLACES)
+    except DecimalException:
+        return False
 
 
 def build_reviewer_roster_hmac(
@@ -317,8 +306,16 @@ def build_review_signature_hmac(
 ) -> str:
     """Build the exact role-, case-, block-, and approval-bound review seal."""
 
-    _require(type(block) is SanitizedLiveBlockResult, 'review_labels_invalid')
-    _require(reviewer_role in _ROLES and label in _LABELS, 'review_labels_invalid')
+    _require(
+        type(identity_secret) is bytes
+        and len(identity_secret) >= 32
+        and type(block) is SanitizedLiveBlockResult
+        and type(reviewer_role) is str
+        and reviewer_role in _ROLES
+        and type(label) is str
+        and label in _LABELS,
+        'review_labels_invalid',
+    )
     return rag_identity_hmac(
         {
             'approval_hmac': _digest(approval_hmac, 'review_labels_invalid'),
@@ -349,7 +346,20 @@ def build_review_signature_hmac(
 class RagReleaseQualityEvaluator:
     """Validate signed human labels and produce one canonical aggregate report."""
 
-    __slots__ = ('_identity_secret', '_reviewer_subjects', '_reviewer_roster_hmac')
+    __slots__ = (
+        '_identity_secret',
+        '_reviewer_subjects',
+        '_frozen_reviewer_subjects',
+        '_reviewer_roster_hmac',
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        try:
+            object.__getattribute__(self, name)
+        except AttributeError:
+            object.__setattr__(self, name, value)
+            return
+        raise AttributeError(f'{type(self).__name__} is immutable')
 
     def __init__(
         self,
@@ -361,14 +371,26 @@ class RagReleaseQualityEvaluator:
             type(identity_secret) is bytes and len(identity_secret) >= 32,
             'key_unavailable',
         )
-        _require(type(reviewer_subject_hmacs) is dict, 'reviewer_roster_invalid')
+        _require(
+            type(reviewer_subject_hmacs) is dict
+            and set(reviewer_subject_hmacs) == set(_ROLES),
+            'reviewer_roster_invalid',
+        )
         self._identity_secret = identity_secret
-        self._reviewer_subjects = {
+        subjects = {
             role: _digest(reviewer_subject_hmacs.get(role), 'reviewer_roster_invalid')
             for role in _ROLES
         }
+        _require(len(set(subjects.values())) == 3, 'reviewer_roster_invalid')
+        self._frozen_reviewer_subjects = tuple(
+            (role, subjects[role]) for role in _ROLES
+        )
+        # A mutable compatibility mirror is never authoritative.  Revalidating it
+        # against the frozen tuple makes even direct in-process tampering fail
+        # closed instead of silently changing the reviewer authority.
+        self._reviewer_subjects = dict(self._frozen_reviewer_subjects)
         self._reviewer_roster_hmac = build_reviewer_roster_hmac(
-            self._reviewer_subjects, identity_secret=identity_secret
+            subjects, identity_secret=identity_secret
         )
 
     def evaluate(
@@ -381,6 +403,16 @@ class RagReleaseQualityEvaluator:
         corpus: FrozenCorpusSnapshot,
         approval: AuthorizedRagLiveGate,
     ) -> RagQualityReport:
+        _require(type(terminal_cases) is tuple, 'case_roster_invalid')
+        _require(type(signed_labels) is tuple, 'review_labels_invalid')
+        _require(
+            type(baseline_metrics) is FrozenLegacyBaselineMetrics,
+            'baseline_drift',
+        )
+        _require(type(manifest) is FrozenLiveManifestSnapshot, 'manifest_invalid')
+        _require(type(corpus) is FrozenCorpusSnapshot, 'corpus_drift')
+        _require(type(approval) is AuthorizedRagLiveGate, 'approval_drift')
+        self._validate_reviewer_roster()
         self._validate_authorities(
             manifest=manifest,
             corpus=corpus,
@@ -393,7 +425,6 @@ class RagReleaseQualityEvaluator:
             corpus=corpus,
             approval=approval,
         )
-        _require(type(signed_labels) is tuple, 'review_labels_invalid')
         adjudications, entailed, total = self._adjudicate(
             cases=cases,
             labels=cast(tuple[SignedReviewLabel, ...], signed_labels),
@@ -562,16 +593,36 @@ class RagReleaseQualityEvaluator:
             quality_report_hmac=report_hmac,
         )
 
-    def _validate_authorities(self, *, manifest, corpus, approval, baseline) -> None:
-        _require(type(manifest) is FrozenLiveManifestSnapshot, 'manifest_invalid')
-        _require(type(corpus) is FrozenCorpusSnapshot, 'corpus_drift')
-        _require(type(approval) is AuthorizedRagLiveGate, 'approval_drift')
+    def _frozen_subject_map(self) -> dict[ReviewerRole, str]:
+        return dict(self._frozen_reviewer_subjects)
+
+    def _validate_reviewer_roster(self) -> None:
+        frozen = self._frozen_subject_map()
         _require(
-            type(baseline) is FrozenLegacyBaselineMetrics,
-            'baseline_drift',
+            type(self._reviewer_subjects) is dict
+            and set(self._reviewer_subjects) == set(_ROLES)
+            and all(type(self._reviewer_subjects[role]) is str for role in _ROLES),
+            'reviewer_roster_invalid',
+        )
+        frozen_hmac = build_reviewer_roster_hmac(
+            frozen, identity_secret=self._identity_secret
+        )
+        current_hmac = build_reviewer_roster_hmac(
+            self._reviewer_subjects, identity_secret=self._identity_secret
         )
         _require(
-            approval.live_gate_contract_version == _POLICY
+            hmac.compare_digest(frozen_hmac, self._reviewer_roster_hmac)
+            and hmac.compare_digest(current_hmac, frozen_hmac),
+            'reviewer_roster_invalid',
+        )
+
+    def _validate_authorities(self, *, manifest, corpus, approval, baseline) -> None:
+        corpus_members = self._validate_corpus(corpus)
+        self._validate_manifest(manifest, corpus_members)
+        _require(
+            type(approval.live_gate_contract_version) is str
+            and approval.live_gate_contract_version == _POLICY
+            and type(approval.authorization_state) is str
             and approval.authorization_state == 'unused'
             and type(approval.ledger_epoch) is int
             and approval.ledger_epoch > 0
@@ -599,34 +650,39 @@ class RagReleaseQualityEvaluator:
         ):
             _digest(value, 'approval_drift')
         _require(
-            type(corpus.corpus_generation) is int
-            and corpus.corpus_generation >= 0
-            and type(corpus.vector_index_generation) is int
-            and corpus.vector_index_generation >= 0
-            and type(corpus.embedding_model_bytes) is bytes
-            and bool(corpus.embedding_model_bytes)
-            and type(corpus.index_policy_version_bytes) is bytes
-            and bool(corpus.index_policy_version_bytes)
-            and type(corpus.pgvector_cosine_policy_version) is str
-            and corpus.pgvector_cosine_policy_version
-            == 'rag-pgvector-cosine-distance:v1'
-            and type(corpus.members) is tuple,
-            'corpus_drift',
-        )
-        _require(
             approval.reviewer_roster_hmac == self._reviewer_roster_hmac,
             'reviewer_roster_invalid',
         )
-        self._validate_manifest(manifest)
         self._validate_baseline(baseline, manifest, corpus, approval)
 
-    def _validate_manifest(self, manifest: FrozenLiveManifestSnapshot) -> None:
+    def _validate_corpus(self, corpus: FrozenCorpusSnapshot):
+        try:
+            payload = _corpus_payload(corpus)
+        except (LiveGatePreviewError, AttributeError, TypeError, ValueError):
+            raise RagReleaseQualityError('corpus_drift') from None
+        snapshot_hmac = _digest(corpus.corpus_snapshot_hmac, 'corpus_drift')
+        expected_hmac = rag_identity_hmac(
+            payload,
+            secret=self._identity_secret,
+            schema_version='rag-live-corpus-snapshot:v1',
+            policy_version=_POLICY,
+        )
+        _require(hmac.compare_digest(snapshot_hmac, expected_hmac), 'corpus_drift')
+        return {member.serving_identity_hmac: member for member in corpus.members}
+
+    def _validate_manifest(self, manifest, corpus_members) -> None:
         _require(
-            manifest.live_gate_contract_version == _POLICY
+            type(manifest.live_gate_contract_version) is str
+            and manifest.live_gate_contract_version == _POLICY
+            and type(manifest.fixture_manifest_version) is str
             and manifest.fixture_manifest_version == 'rag-live-quality-30:v1'
+            and type(manifest.fixture_manifest_path) is str
             and manifest.fixture_manifest_path
             == 'backend/tests/fixtures/rag_v2_live_gate_30.json'
+            and type(manifest.rubric_version) is str
             and manifest.rubric_version == _RUBRIC
+            and type(manifest.fixture_manifest_hmac) is str
+            and type(manifest.manifest_hmac) is str
             and manifest.fixture_manifest_hmac == manifest.manifest_hmac
             and all(
                 type(getattr(manifest, name)) is int
@@ -652,6 +708,7 @@ class RagReleaseQualityEvaluator:
                 manifest.pgvector_without_prior_context_count,
             )
             == (10, 5, 10, 5, 5, 5, 3, 2)
+            and type(manifest.limits) is LiveGateLimits
             and manifest.limits.case_claims == 30
             and manifest.limits.answer_generation_dispatches == 30
             and manifest.limits.query_embedding_dispatches == 10
@@ -660,7 +717,17 @@ class RagReleaseQualityEvaluator:
             and manifest.limits.total_max_cost_usd == Decimal('0.360000')
             and type(manifest.cases) is tuple
             and len(manifest.cases) == 30
+            and type(manifest.clean_git_commit) is str
             and re.fullmatch(r'[0-9a-f]{40}', manifest.clean_git_commit) is not None,
+            'manifest_invalid',
+        )
+        _require(
+            type(manifest.limits.case_claims) is int
+            and type(manifest.limits.answer_generation_dispatches) is int
+            and type(manifest.limits.query_embedding_dispatches) is int
+            and type(manifest.limits.total_dispatches) is int
+            and type(manifest.limits.case_max_cost_usd) is Decimal
+            and type(manifest.limits.total_max_cost_usd) is Decimal,
             'manifest_invalid',
         )
         _digest(manifest.fixture_manifest_sha256, 'manifest_invalid')
@@ -683,8 +750,11 @@ class RagReleaseQualityEvaluator:
                 type(case) is FrozenLiveManifestCase
                 and type(case.ordinal) is int
                 and case.ordinal == ordinal
+                and type(case.case_kind) is str
                 and case.case_kind in {'positive', 'hard_negative'}
+                and type(case.surface) is str
                 and case.surface in {'ask', 'assistant'}
+                and type(case.configured_backend) is str
                 and case.configured_backend in {'keyword', 'pgvector'}
                 and type(case.question_fixture_id) is str
                 and re.fullmatch(r'[a-z][a-z0-9-]{0,63}', case.question_fixture_id)
@@ -710,25 +780,20 @@ class RagReleaseQualityEvaluator:
                 and case.expected_no_answer == (case.case_kind == 'hard_negative')
                 and type(case.allowed_support_modes) is tuple
                 and bool(case.allowed_support_modes)
-                and len(set(case.allowed_support_modes))
-                == len(case.allowed_support_modes)
-                and set(case.allowed_support_modes)
-                <= {'trusted_fact', 'source_observation'}
+                and all(type(mode) is str for mode in case.allowed_support_modes)
                 and type(case.allowed_slot_ids) is tuple
                 and bool(case.allowed_slot_ids)
-                and len(set(case.allowed_slot_ids)) == len(case.allowed_slot_ids)
                 and all(
                     type(slot) is str and re.fullmatch(r'E[1-8]', slot)
                     for slot in case.allowed_slot_ids
                 )
                 and type(case.relevant_serving_identity_hmacs) is tuple
                 and type(case.required_serving_identity_hmacs) is tuple
-                and len(set(case.relevant_serving_identity_hmacs))
-                == len(case.relevant_serving_identity_hmacs)
-                and len(set(case.required_serving_identity_hmacs))
-                == len(case.required_serving_identity_hmacs)
-                and set(case.required_serving_identity_hmacs)
-                <= set(case.relevant_serving_identity_hmacs)
+                and all(
+                    type(identity) is str
+                    for identity in case.relevant_serving_identity_hmacs
+                    + case.required_serving_identity_hmacs
+                )
                 and (
                     case.case_kind == 'hard_negative'
                     or (
@@ -736,6 +801,20 @@ class RagReleaseQualityEvaluator:
                         and bool(case.required_serving_identity_hmacs)
                     )
                 ),
+                'manifest_invalid',
+            )
+            _require(
+                len(set(case.allowed_support_modes)) == len(case.allowed_support_modes)
+                and set(case.allowed_support_modes)
+                <= {'trusted_fact', 'source_observation'}
+                and len(set(case.allowed_slot_ids)) == len(case.allowed_slot_ids)
+                and len(set(case.relevant_serving_identity_hmacs))
+                == len(case.relevant_serving_identity_hmacs)
+                and len(set(case.required_serving_identity_hmacs))
+                == len(case.required_serving_identity_hmacs)
+                and set(case.required_serving_identity_hmacs)
+                <= set(case.relevant_serving_identity_hmacs)
+                and set(case.relevant_serving_identity_hmacs) <= corpus_members.keys(),
                 'manifest_invalid',
             )
             _digest(case.case_id_hmac, 'manifest_invalid')
@@ -747,6 +826,17 @@ class RagReleaseQualityEvaluator:
                 + case.required_serving_identity_hmacs
             ):
                 _digest(identity, 'manifest_invalid')
+            _require(
+                all(
+                    corpus_members[identity].support_mode in case.allowed_support_modes
+                    and (
+                        case.configured_backend != 'pgvector'
+                        or corpus_members[identity].vector_index_state_hmac is not None
+                    )
+                    for identity in case.relevant_serving_identity_hmacs
+                ),
+                'manifest_invalid',
+            )
             _require(
                 type(case.query_embedding_required) is bool
                 and case.query_embedding_required
@@ -896,7 +986,12 @@ class RagReleaseQualityEvaluator:
                 type(result) is SanitizedLiveCaseResult
                 and type(result.ordinal) is int
                 and result.ordinal == ordinal
-                and result.case_id_hmac == case.case_id_hmac
+                and type(result.case_id_hmac) is str,
+                'case_roster_invalid',
+            )
+            _digest(result.case_id_hmac, 'case_roster_invalid')
+            _require(
+                result.case_id_hmac == case.case_id_hmac
                 and result.case_id_hmac not in seen,
                 'case_roster_invalid',
             )
@@ -914,8 +1009,10 @@ class RagReleaseQualityEvaluator:
                 'case_identity_drift',
             )
             _require(
-                result.state == 'complete'
-                and result.outcome in _OUTCOMES
+                type(result.state) is str
+                and result.state == 'complete'
+                and type(result.outcome) is str
+                and result.outcome in _QUALITY_OUTCOMES
                 and result.case_projection_hmac is not None
                 and type(result.expected_no_answer) is bool
                 and type(result.hard_negative_correct) is bool
@@ -925,6 +1022,7 @@ class RagReleaseQualityEvaluator:
                 and _cost(result.reserved_cost_usd)
                 and _cost(result.charged_cost_usd)
                 and result.reserved_cost_usd == case.case_total_reserved_cost_usd
+                and result.charged_cost_usd <= result.reserved_cost_usd
                 and type(result.query_embedding_dispatch_count) is int
                 and result.query_embedding_dispatch_count
                 == int(case.query_embedding_required)
@@ -1068,13 +1166,15 @@ class RagReleaseQualityEvaluator:
     ) -> SignedReviewLabel:
         _require(index < len(labels), 'review_labels_invalid')
         signed = labels[index]
+        subjects = self._frozen_subject_map()
         _require(
             type(signed) is SignedReviewLabel
             and signed.reviewer_role == role
-            and signed.reviewer_subject_hmac == self._reviewer_subjects[role]
+            and signed.reviewer_subject_hmac == subjects[role]
             and signed.case_id_hmac == case.case_id_hmac
             and type(signed.block_ordinal) is int
             and signed.block_ordinal == block.block_ordinal
+            and type(signed.label) is str
             and signed.label in _LABELS,
             'review_labels_invalid',
         )
@@ -1084,7 +1184,7 @@ class RagReleaseQualityEvaluator:
             case_id_hmac=case.case_id_hmac,
             block=block,
             reviewer_role=role,
-            reviewer_subject_hmac=self._reviewer_subjects[role],
+            reviewer_subject_hmac=subjects[role],
             label=signed.label,
             identity_secret=self._identity_secret,
         )

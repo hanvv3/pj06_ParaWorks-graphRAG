@@ -22,10 +22,12 @@ from backend.app.rag.release_quality import (
 from backend.app.rag.release_review import (
     AuthorizedRagLiveGate,
     FrozenCaseClaimManifest,
+    FrozenCorpusMember,
     FrozenCorpusSnapshot,
     FrozenLiveManifestCase,
     FrozenLiveManifestSnapshot,
     LiveGateLimits,
+    freeze_live_corpus,
 )
 
 SECRET = b'rag-release-quality-test-secret-v1'
@@ -125,14 +127,26 @@ def _manifest() -> FrozenLiveManifestSnapshot:
 
 
 def _corpus() -> FrozenCorpusSnapshot:
-    return FrozenCorpusSnapshot(
+    return freeze_live_corpus(
         corpus_generation=9,
         vector_index_generation=4,
         embedding_model_bytes=b'text-embedding-3-small',
-        index_policy_version_bytes=b'rag-index:v2',
-        pgvector_cosine_policy_version='rag-pgvector-cosine-distance:v1',
-        members=(),
-        corpus_snapshot_hmac=f'{103:064x}',
+        index_policy_version_bytes=b'rag-v2-serving-index:v1',
+        pgvector_cosine_policy_version='pgvector-cosine-indexable:v1',
+        members=tuple(
+            FrozenCorpusMember(
+                ordinal=ordinal,
+                serving_identity_hmac=f'{3000 + ordinal:064x}',
+                serving_version_fingerprint=f'{3100 + ordinal:064x}',
+                model_content_hmac=f'{3200 + ordinal:064x}',
+                canonical_citation_projection_hmac=f'{3300 + ordinal:064x}',
+                effective_permission='internal',
+                support_mode='trusted_fact',
+                vector_index_state_hmac=f'{3400 + ordinal:064x}',
+            )
+            for ordinal in range(30)
+        ),
+        identity_secret=SECRET,
     )
 
 
@@ -837,3 +851,253 @@ def test_sanitized_contracts_have_no_raw_answer_or_evidence_fields() -> None:
     assert 'answer_text' not in names
     assert 'evidence_projection' not in names
     assert 'source_snippets' not in names
+
+
+def test_evaluator_rejects_a_mutated_internal_reviewer_map_and_resigned_takeover(
+    quality_inputs,
+) -> None:
+    evaluator = RagReleaseQualityEvaluator(
+        identity_secret=SECRET,
+        reviewer_subject_hmacs=SUBJECTS,
+    )
+    attacker = f'{999_001:064x}'
+    evaluator._reviewer_subjects['reviewer_a'] = attacker
+    cases_by_id = {case.case_id_hmac: case for case in quality_inputs['terminal_cases']}
+    labels = []
+    for signed in quality_inputs['signed_labels']:
+        if signed.reviewer_role != 'reviewer_a':
+            labels.append(signed)
+            continue
+        case = cases_by_id[signed.case_id_hmac]
+        block = case.blocks[signed.block_ordinal]
+        labels.append(
+            replace(
+                signed,
+                reviewer_subject_hmac=attacker,
+                signature_hmac=_signature(
+                    quality_inputs['approval'],
+                    quality_inputs['manifest'],
+                    case.case_id_hmac,
+                    block,
+                    'reviewer_a',
+                    attacker,
+                    signed.label,
+                ),
+            )
+        )
+
+    with pytest.raises(RagReleaseQualityError, match='reviewer_roster_invalid'):
+        evaluator.evaluate(**(quality_inputs | {'signed_labels': tuple(labels)}))
+
+
+def test_evaluator_defensively_copies_the_constructor_reviewer_map(
+    quality_inputs,
+) -> None:
+    subjects = dict(SUBJECTS)
+    evaluator = RagReleaseQualityEvaluator(
+        identity_secret=SECRET,
+        reviewer_subject_hmacs=subjects,
+    )
+    subjects['reviewer_a'] = f'{999_002:064x}'
+
+    report = evaluator.evaluate(**quality_inputs)
+
+    assert report.gate_outcome == 'green'
+
+
+def test_evaluator_prevents_rebinding_the_frozen_reviewer_authority() -> None:
+    evaluator = RagReleaseQualityEvaluator(
+        identity_secret=SECRET,
+        reviewer_subject_hmacs=SUBJECTS,
+    )
+
+    with pytest.raises(AttributeError):
+        evaluator._frozen_reviewer_subjects = (
+            ('reviewer_a', f'{999_010:064x}'),
+            ('reviewer_b', SUBJECTS['reviewer_b']),
+            ('adjudicator_c', SUBJECTS['adjudicator_c']),
+        )
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('limits', None),
+        ('clean_git_commit', 7),
+    ],
+)
+def test_evaluator_bounds_malformed_manifest_top_level_values(
+    quality_inputs, field, value
+) -> None:
+    manifest = replace(quality_inputs['manifest'], **{field: value})
+    approval = replace(
+        quality_inputs['approval'], manifest=manifest, limits=manifest.limits
+    )
+
+    with pytest.raises(RagReleaseQualityError, match='manifest_invalid'):
+        _evaluate(quality_inputs | {'manifest': manifest, 'approval': approval})
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('allowed_support_modes', ([],)),
+        ('allowed_slot_ids', ([],)),
+        ('relevant_serving_identity_hmacs', ([],)),
+        ('required_serving_identity_hmacs', ([],)),
+        ('query_embedding_required', 1),
+        ('case_total_reserved_cost_usd', True),
+    ],
+)
+def test_evaluator_bounds_malformed_manifest_case_leaf_values(
+    quality_inputs, field, value
+) -> None:
+    cases = list(quality_inputs['manifest'].cases)
+    cases[0] = replace(cases[0], **{field: value})
+    manifest = replace(quality_inputs['manifest'], cases=tuple(cases))
+    approval = replace(quality_inputs['approval'], manifest=manifest)
+
+    with pytest.raises(RagReleaseQualityError, match='manifest_invalid'):
+        _evaluate(quality_inputs | {'manifest': manifest, 'approval': approval})
+
+
+def test_evaluator_requires_a_valid_nonempty_hmac_bound_corpus(
+    quality_inputs,
+) -> None:
+    empty = replace(quality_inputs['corpus'], members=())
+    forged = replace(quality_inputs['corpus'], corpus_snapshot_hmac=f'{999_003:064x}')
+
+    for corpus in (empty, forged):
+        approval = replace(quality_inputs['approval'], corpus=corpus)
+        with pytest.raises(RagReleaseQualityError, match='corpus_drift'):
+            _evaluate(quality_inputs | {'corpus': corpus, 'approval': approval})
+
+
+def test_evaluator_rejects_the_superseded_corpus_policy_literal(
+    quality_inputs,
+) -> None:
+    corpus = replace(
+        quality_inputs['corpus'],
+        pgvector_cosine_policy_version='rag-pgvector-cosine-distance:v1',
+        corpus_snapshot_hmac=f'{999_005:064x}',
+    )
+    baseline = _baseline(quality_inputs['manifest'], corpus)
+    approval = _approval(quality_inputs['manifest'], corpus, baseline)
+    cases = _terminal_cases(quality_inputs['manifest'], corpus, approval)
+
+    with pytest.raises(RagReleaseQualityError, match='corpus_drift'):
+        _evaluate(
+            {
+                'terminal_cases': cases,
+                'signed_labels': _labels(cases, quality_inputs['manifest'], approval),
+                'baseline_metrics': baseline,
+                'manifest': quality_inputs['manifest'],
+                'corpus': corpus,
+                'approval': approval,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    'field',
+    ['relevant_serving_identity_hmacs', 'required_serving_identity_hmacs'],
+)
+def test_evaluator_requires_manifest_identities_to_exist_in_frozen_corpus(
+    quality_inputs, field
+) -> None:
+    cases = list(quality_inputs['manifest'].cases)
+    cases[0] = replace(cases[0], **{field: (f'{999_004:064x}',)})
+    manifest = replace(quality_inputs['manifest'], cases=tuple(cases))
+    approval = replace(quality_inputs['approval'], manifest=manifest)
+
+    with pytest.raises(RagReleaseQualityError, match='manifest_invalid'):
+        _evaluate(quality_inputs | {'manifest': manifest, 'approval': approval})
+
+
+def test_evaluator_binds_manifest_support_modes_to_frozen_corpus_members(
+    quality_inputs,
+) -> None:
+    cases = list(quality_inputs['manifest'].cases)
+    cases[0] = replace(cases[0], allowed_support_modes=('source_observation',))
+    manifest = replace(quality_inputs['manifest'], cases=tuple(cases))
+    approval = replace(quality_inputs['approval'], manifest=manifest)
+
+    with pytest.raises(RagReleaseQualityError, match='manifest_invalid'):
+        _evaluate(quality_inputs | {'manifest': manifest, 'approval': approval})
+
+
+@pytest.mark.parametrize(
+    'outcome',
+    [
+        'budget_exceeded',
+        'retriever_unavailable',
+        'model_unavailable',
+        'provider_usage_overrun',
+        'model_provider_failed',
+        'structured_output_invalid',
+        'citation_validation_failed',
+        'persistence_failed',
+        'unexpected_internal_error',
+        'provider_safety_unavailable',
+        'provider_response_identity_invalid',
+        'provider_embedding_payload_invalid',
+        'live_corpus_snapshot_changed',
+        'abandoned_unknown',
+    ],
+)
+def test_evaluator_rejects_non_product_terminal_outcomes(
+    quality_inputs, outcome
+) -> None:
+    values = _replace_case(quality_inputs, 1, outcome=outcome)
+
+    with pytest.raises(RagReleaseQualityError, match='case_result_invalid'):
+        _evaluate(values)
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('reserved_cost_usd', 0),
+        ('charged_cost_usd', True),
+        ('charged_cost_usd', Decimal('0.0000001')),
+        ('charged_cost_usd', Decimal('0.012001')),
+        ('charged_cost_usd', Decimal('99.000000')),
+        ('charged_cost_usd', Decimal('NaN')),
+        ('query_embedding_dispatch_count', True),
+        ('answer_generation_dispatch_count', True),
+        ('outcome', []),
+    ],
+)
+def test_evaluator_bounds_malformed_or_over_budget_case_accounting(
+    quality_inputs, field, value
+) -> None:
+    values = _replace_case(quality_inputs, 2, **{field: value})
+
+    with pytest.raises(RagReleaseQualityError, match='case_result_invalid'):
+        _evaluate(values)
+
+
+@pytest.mark.parametrize(
+    ('field', 'value', 'code'),
+    [
+        ('terminal_cases', None, 'case_roster_invalid'),
+        ('signed_labels', None, 'review_labels_invalid'),
+        ('baseline_metrics', None, 'baseline_drift'),
+        ('manifest', None, 'manifest_invalid'),
+        ('corpus', None, 'corpus_drift'),
+        ('approval', None, 'approval_drift'),
+    ],
+)
+def test_evaluator_bounds_malformed_top_level_inputs(
+    quality_inputs, field, value, code
+) -> None:
+    with pytest.raises(RagReleaseQualityError, match=code):
+        _evaluate(quality_inputs | {field: value})
+
+
+def test_evaluator_bounds_an_unhashable_signed_label(quality_inputs) -> None:
+    labels = list(quality_inputs['signed_labels'])
+    labels[0] = replace(labels[0], label=[])
+
+    with pytest.raises(RagReleaseQualityError, match='review_labels_invalid'):
+        _evaluate(quality_inputs | {'signed_labels': tuple(labels)})
