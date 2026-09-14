@@ -1,5 +1,36 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-14 D Core Task25-A independent-review Round 1 correction
+
+- Both initial Task25-A reviews were **NOT CLEAN**. Commit `2686306` corrects
+  their evaluator-boundary findings without beginning Task25-B: it reuses the
+  Task24 `_corpus_payload` validator and recomputes the exact frozen corpus HMAC,
+  accepts only the approved `pgvector-cosine-indexable:v1` corpus policy, and
+  binds every manifest relevant/required identity to the ordered non-empty
+  corpus member roster, including support-mode and pgvector-index eligibility.
+- Completed quality input now accepts only the six approved product outcomes.
+  Provider/runtime/overrun/safety/internal outcomes fail closed; Decimal values
+  must be finite, non-negative and exactly six-place, charged cost cannot exceed
+  the exact manifest reserve, and dispatch counts remain exact. Reviewer
+  authority is copied into an immutable ordered tuple, its attributes are
+  write-once, and a mutable compatibility mirror is revalidated against the
+  frozen roster/HMAC before any label is consumed. Nested malformed values are
+  type-checked before regex, set, Decimal or attribute operations and produce
+  bounded `RagReleaseQualityError` codes.
+- RED: the saved independent probe was `4 failed`; the legitimate Task24 corpus
+  fixture plus permanent attacks produced `52 failed, 19 passed`; the explicit
+  frozen-authority rebinding regression was `1 failed`. GREEN: permanent
+  evaluator `87 passed`; saved probe plus evaluator `91 passed`; evaluator,
+  probes and credential hygiene `94 passed`; existing Task24 corpus/preview/
+  reviewer validators `202 passed`; clean-commit broad adjacent release matrix
+  `454 passed in 1572.25s`. Ruff, format, compile and diff checks passed before
+  commit. No provider/network/paid call, DB write, runner/CLI, release, push,
+  merge or deployment ran.
+- Fresh dual independent review of `2686306` is required before Task25-A can be
+  called CLEAN or Task25-B may start. The previously documented Windows
+  committed-source/CRLF prerequisite, PostgreSQL and live-release gates remain
+  open.
+
 ## 2026-09-14 D Core Task25-A provider-free quality adjudication
 
 - Implementation `5f0e605` adds only the provider-free

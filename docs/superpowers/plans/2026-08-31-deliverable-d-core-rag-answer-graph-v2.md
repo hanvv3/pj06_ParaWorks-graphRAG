@@ -2742,6 +2742,22 @@ without weakening exact committed-byte baseline binding, Git-clean enforcement,
 zero provider/authorization behavior or fail-closed refusal; then implement the
 production readers, composite runner/live gate, schema and CLI integration.
 
+**Task25-A independent-review Round 1 correction (2026-09-14).** Both initial
+reviews of `ab10514` were NOT CLEAN. Commit `2686306` reuses the Task24 corpus
+canonical validator, recomputes the snapshot HMAC and binds manifest identities
+to the valid non-empty member roster under the approved
+`pgvector-cosine-indexable:v1` policy. It narrows completed quality input to the
+six approved product outcomes, validates exact Decimal/cost/dispatch bounds,
+freezes and revalidates reviewer authority, and totalizes malformed nested input
+as bounded `RagReleaseQualityError` refusals. RED evidence is saved probes `4
+failed`, permanent corpus/adversarial suite `52 failed, 19 passed`, and frozen-
+attribute test `1 failed`. GREEN is permanent evaluator `87 passed`, evaluator/
+saved probes/credential `94 passed`, Task24 corpus/preview/reviewer `202 passed`,
+and clean-commit adjacent release `454 passed in 1572.25s`; static checks are
+green. No provider/network/paid call, persistence, runner/CLI or release ran.
+Fresh dual independent review of `2686306` is mandatory before this slice is
+CLEAN or Task25-B may begin.
+
 - [x] Complete the mandatory provider-incident prerequisite and receive
   independent local-code **CLEAN** review; PostgreSQL/live-release and legacy v1
   rebind recovery remain separate open gates.

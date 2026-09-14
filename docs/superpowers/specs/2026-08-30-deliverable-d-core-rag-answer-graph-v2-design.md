@@ -3318,6 +3318,31 @@ The fix must remain cross-platform and preserve exact committed-byte baseline
 HMAC binding, Git-clean enforcement, zero provider/authorization activity and
 fail-closed behavior. PostgreSQL and live-release gates remain open.
 
+**Task25-A independent-review Round 1 correction (2026-09-14).** Initial
+specification and code-quality reviews of `ab10514` were NOT CLEAN. Correction
+`2686306` delegates corpus canonical validation to Task24 `_corpus_payload`,
+recomputes `rag-live-corpus-snapshot:v1`, requires the approved
+`pgvector-cosine-indexable:v1` policy and binds relevant/required identities to
+the ordered non-empty member roster with support-mode/pgvector eligibility. The
+quality scorer now accepts only the six product outcomes defined below; every
+provider/runtime/overrun/safety/internal terminal value is ineligible for
+adjudication. Case reserve/charge requires exact finite non-negative six-place
+Decimal values, charge no greater than the manifest reserve, and exact dispatch
+accounting.
+
+Reviewer subjects are copied into an immutable ordered tuple; evaluator
+authority attributes are write-once, and any mutation of the compatibility map
+is detected by recomputing it against the frozen roster and HMAC before labels
+are consumed. Leaf types are validated before attribute, regex, set, Decimal or
+HMAC operations so malformed input stays a bounded `RagReleaseQualityError`.
+RED is saved probes `4 failed`, permanent valid-corpus/adversarial tests `52
+failed, 19 passed`, and immutable-attribute test `1 failed`. GREEN is evaluator
+`87 passed`, evaluator/probes/credential `94 passed`, Task24 corpus/preview/
+reviewer `202 passed`, and clean-commit adjacent release `454 passed in
+1572.25s`; static checks are green. No external call, persistence, runner/CLI or
+release occurred. Fresh dual independent review of `2686306` remains required;
+this correction does not authorize Task25-B.
+
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
 skipped** (11 existing Alembic warnings); focused contracts **38 passed**;

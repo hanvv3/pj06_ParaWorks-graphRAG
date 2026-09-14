@@ -2,6 +2,40 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task25-A independent-review Round 1 correction
+
+- Initial specification and code-quality reviews of `ab10514` were **NOT
+  CLEAN**. Correction commit `2686306` is Task25-A only; do not begin Task25-B
+  until this commit receives fresh dual independent review.
+- Corpus validation now delegates to the existing Task24 `_corpus_payload`
+  authority, recomputes `rag-live-corpus-snapshot:v1`, requires the approved
+  `pgvector-cosine-indexable:v1` policy and a non-empty ordered typed member
+  roster. Manifest relevant/required identities must exist in that roster and
+  retain support-mode and pgvector-index eligibility.
+- Completed quality cases accept only `supported`, `no_match`, `hidden_only`,
+  `safety_filter_empty`, `insufficient_evidence` or `evidence_unavailable`.
+  Provider/runtime/overrun/safety/internal outcomes refuse before scoring.
+  Reserved/charged values require exact finite non-negative six-place Decimals,
+  charged cannot exceed the exact case reserve, and dispatch counts are exact.
+- The authoritative reviewer map is an immutable ordered tuple with write-once
+  evaluator attributes. The compatibility mirror is never used for signatures
+  and is recomputed against the frozen roster/HMAC before evaluation, so direct
+  mutation plus re-signing refuses. All top-level and nested inputs are type-
+  checked before regex, set, Decimal, attribute or HMAC operations and failures
+  stay within `RagReleaseQualityError`.
+- RED: saved review probes `4 failed`; valid Task24 corpus fixture and permanent
+  attacks `52 failed, 19 passed`; immutable-attribute regression `1 failed`.
+  GREEN: permanent evaluator `87 passed`; evaluator plus saved probes `91
+  passed`; evaluator/probes/credential `94 passed`; Task24 corpus/preview/
+  reviewer validators `202 passed`; clean-commit adjacent release matrix `454
+  passed in 1572.25s`. Ruff, format, compile and diff checks passed before the
+  implementation commit. No external/provider/paid call, DB write, runner/CLI,
+  release, push, merge or deployment ran.
+- Fresh dual independent review of `2686306` remains mandatory. Task25-B is
+  still actual implementation and must start with the documented clean-Windows
+  committed-source/CRLF RED only after Task25-A is CLEAN. PostgreSQL and live-
+  release gates remain open.
+
 ## 2026-09-14 Task25-A provider-free evaluator implemented
 
 - Commit `5f0e605` implements and tests only the provider-free
