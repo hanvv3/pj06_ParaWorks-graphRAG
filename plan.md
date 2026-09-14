@@ -205,18 +205,18 @@ Next priorities:
 
 1. Keep C.5 rollout disabled unless a separate operational rollout action is
    explicitly authorized. Both C.5 paid release gates are complete.
-2. Deliverable D Core Task25-B has completed its first local implementation
-   slice in `2b53f55`. Clean Windows checkouts now bind the exact committed Git
-   blob while true dirty source still refuses. The Task24-issued opaque source
-   and exact `AuthorizedRagLiveGate` identity can mint one process-local,
-   one-use execution capability under the existing release/provider barrier;
-   the public quality evaluator consumes that capability and no longer accepts
-   caller-recomputed approval/manifest DTOs as authority. This is not the full
-   Task25-B runner: production snapshot/oracle/roster readers, 30-case dispatch,
-   DB quality persistence, authenticated reviewer session, `run` CLI,
-   PostgreSQL proof and live release remain open. Independent spec/code review
-   of this slice is required before the next implementation slice. Legacy v1
-   rebind histories remain fail-closed pending reviewed migration/rebootstrap.
+2. Deliverable D Core Task25-B first slice received a NOT CLEAN initial review.
+   Round-1 correction `61eb6d7` sanitizes Git subprocess routing, verifies every
+   bound source's index and clean-filtered worktree object against the approved
+   commit blob, removes the DTO-only quality path and public issuer closure, and
+   requires one fresh runner-owned connection/barrier revalidation at capability
+   consumption. Generation, transition, source, corpus or provider drift now
+   terminally invalidates the one-use capability. Fresh dual independent review
+   is required before the next implementation slice. The full Task25-B runner,
+   production snapshot/oracle/roster readers, 30-case dispatch, DB quality
+   persistence, authenticated reviewer session, `run` CLI, PostgreSQL proof and
+   live release remain open. Legacy v1 rebind histories remain fail-closed
+   pending reviewed migration/rebootstrap.
 3. Reach a separate D Core green checkpoint, then design, plan, approve, and
    reach a separate green checkpoint for D.1 PostgreSQL answer cache.
 4. Follow D.1 with Deliverable E Neo4j GraphRAG, then handle Slack data

@@ -1,5 +1,30 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-14 D Core Task25-B authority Round 1 correction
+
+- Initial independent specification and code reviews of `7299183` were **NOT
+  CLEAN**. P1 probes showed hidden-index/Git-environment source substitution, a
+  directly callable DTO-only evaluator path, stale capability use after release
+  drift, and registry cloning through the public issuer closure.
+- Correction `61eb6d7` binds each exact approved source across repository root,
+  lexical path, regular/non-reparse file, safe index flags, index/commit blob and
+  clean-filtered worktree object identity under a sanitized Git environment.
+  The evaluator no longer exposes a successful DTO-only path. Capability
+  consumption requires a fresh runner-owned DB connection/barrier and repeats
+  Task24 source, authorization, corpus, provider, generation and transition
+  validation; all attempts are terminal and the public issuer retains neither a
+  registry closure nor identity secret.
+- Evidence: initial saved spec `3 failed`; permanent RED `7 failed, 2 passed`;
+  final capability/quality `184 passed`; saved spec `3 passed`; clean-commit
+  adjacent `361 passed`; provider/secret `216 passed, 1 skipped`; Ruff, format,
+  compile and diff green. Four exploit-success probes now fail at the expected
+  refusal boundaries. Clean readiness stays at
+  `preview_snapshot_reader_unavailable` with no authorization or dispatch.
+- Fresh dual independent review is pending. Production readers, 30-case
+  dispatch, persistence, reviewer session, `run` CLI, PostgreSQL/live-release
+  proof and the remaining Task25-B work have not started. No provider/network/
+  paid call, push, merge, deployment or release occurred.
+
 ## 2026-09-14 D Core Task25-B one-use execution authority
 
 - Commit `2b53f55` delivers the first Task25-B trust-boundary slice. A clean

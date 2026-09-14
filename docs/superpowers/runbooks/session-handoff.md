@@ -2,6 +2,40 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task25-B authority independent-review Round 1 correction
+
+- Both independent reviews of `7299183` were **NOT CLEAN**. They reproduced
+  three P1 authority gaps: assume-unchanged or hostile Git routing could hide
+  dirty executable source, `_evaluate_approved(...)` remained a DTO-only bypass,
+  and capability consumption did not re-enter the live barrier after release
+  drift. Code review also copied the public issuer closure registry to replay an
+  `object.__new__` capability.
+- Correction `61eb6d7` uses an allowlisted Git subprocess environment,
+  `--no-replace-objects`, exact repository root, approved lexical paths,
+  regular/non-reparse files, normal index flags, exact index/commit blob ids,
+  safe attributes and clean-filtered worktree object ids. CRLF remains valid;
+  assume-unchanged, skip-worktree, alternate worktree/index/config environment,
+  symlink/reparse, alias and true dirty content refuse.
+- The evaluator's computation now exists only after successful capability
+  consumption; the former DTO seam is refusal-only. The public issuer has no
+  registry-bearing closure and retains no identity secret. Consumption requires
+  the runner's fresh connection and authenticated barrier, then repeats exact
+  Task24 source/authorization/corpus/provider validation and checks the same
+  ledger generation/transition digest. Any attempt is terminal, so authority
+  drift cannot be repaired and replayed with the same capability.
+- RED was saved spec probes `3 failed` plus permanent focused `7 failed, 2
+  passed`. GREEN is strengthened capability/quality `184 passed`, saved spec
+  probes `3 passed`, clean-commit adjacent Task24/25 `361 passed`, provider/
+  secret `216 passed, 1 skipped`, and static/compile/diff checks green. The four
+  saved exploit-success probes now all fail at the intended defenses. Clean CLI
+  remains provider-free at `preview_snapshot_reader_unavailable`, zero dispatch
+  and no authorization.
+- This is a correction candidate, not a CLEAN verdict or Task25-B completion.
+  Fresh dual independent review of `7299183..61eb6d7` is required. Do not start
+  production readers/dispatch, persistence, reviewer session or `run` CLI yet.
+  No network/provider/paid call, release write, push, merge, deployment or live
+  release occurred.
+
 ## 2026-09-14 Task25-B execution-authority first slice
 
 - Implementation/test commit `2b53f55` completes only the first Task25-B

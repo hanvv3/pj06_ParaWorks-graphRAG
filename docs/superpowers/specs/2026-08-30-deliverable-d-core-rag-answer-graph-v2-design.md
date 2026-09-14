@@ -3389,6 +3389,27 @@ This is only the first Task25-B slice: production snapshot/oracle/roster readers
 CLI, PostgreSQL proof and live release remain unimplemented. Fresh independent
 specification/code review is required before the next implementation slice.
 
+**Task25-B authority independent-review Round 1 correction (2026-09-14).** Both
+reviews of `7299183` were NOT CLEAN. Saved P1 probes bypassed source identity via
+assume-unchanged or inherited Git routing, called the DTO-only evaluator seam,
+used a capability after ledger drift, and cloned the registry exposed through
+the public issuer closure. Correction `61eb6d7` sanitizes/allowlists Git process
+state, disables replace objects, binds the exact repository and approved lexical
+paths, rejects reparse/index flags and compares each index and clean-filtered
+worktree object to the approved commit blob. The public evaluator core is reached
+only after capability consumption; its old seam only refuses. The public issuer
+has no closure registry or retained secret.
+
+Consumption now requires the runner-owned current connection and authenticated
+barrier, repeats the existing Task24 source/authorization/corpus/provider checks,
+and compares current ledger generation and transition digest to issuance. Every
+attempt is terminal, including drift failure. GREEN is capability/quality `184
+passed`, saved spec probes `3 passed`, clean-commit adjacent `361 passed`, and
+provider/secret `216 passed, 1 skipped`; static checks are green and the four
+exploit-success probes fail at their intended defenses. Fresh dual review is
+required; this correction neither completes Task25-B nor authorizes the next
+runner, persistence, reviewer, CLI, PostgreSQL or live-release slice.
+
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
 skipped** (11 existing Alembic warnings); focused contracts **38 passed**;

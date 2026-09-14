@@ -2799,6 +2799,24 @@ fresh independent spec/code review, then add production snapshot/oracle/roster
 readers and 30-case dispatch composition. Persistence, reviewer session, `run`
 CLI, PostgreSQL proof and live release remain later, separately gated slices.
 
+**Task25-B authority independent-review Round 1 correction (2026-09-14).** The
+initial reviews of `7299183` were NOT CLEAN. Correction `61eb6d7` closes their
+P1 reproductions without starting another Task25-B slice: sanitized Git plumbing
+now validates exact repository/path/index/commit/worktree object identity and
+rejects assume-unchanged, skip-worktree, hostile routing/config, aliases and
+reparse files; CRLF clean-filter equivalence remains accepted. The successful
+DTO-only evaluator path is removed, the public issuer no longer owns an exposed
+closure registry or retained identity secret, and consume requires a fresh
+runner connection/barrier that repeats Task24 source/corpus/provider authority
+and exact ledger generation/transition checks. Any consume attempt is terminal.
+
+Final implementer evidence is capability/quality `184 passed`, saved spec `3
+passed`, adjacent clean-commit `361 passed`, provider/secret `216 passed, 1
+skipped`, with static checks green. Existing exploit-success probes now fail all
+four attacks. Obtain fresh dual independent review of `7299183..61eb6d7`; do not
+begin production readers, dispatch, persistence, reviewer session, `run` CLI,
+PostgreSQL execution or live release under this correction.
+
 - [x] Complete the mandatory provider-incident prerequisite and receive
   independent local-code **CLEAN** review; PostgreSQL/live-release and legacy v1
   rebind recovery remain separate open gates.
