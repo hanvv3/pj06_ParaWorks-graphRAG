@@ -2705,8 +2705,21 @@ Ordinary inspection remains fail-stop; invalid authority, wrong digest/kind and
 replay refuse before DML. Fresh frozen evidence is focused `195 passed`, affected
 release state/schema `80 passed`, broad release/provider `1268 passed, 15 skipped`,
 direct impact `221 passed, 14 skipped`, and credential `3 passed`. PostgreSQL,
-legacy-v1-rebind recovery and independent CLEAN Round-3 review remain open. Do not
-start the composite runner/evaluator or execute a release.
+legacy-v1-rebind recovery and independent CLEAN Round-3 review remained open at
+candidate handoff. Do not execute a release.
+
+**Independent Round-3 CLEAN closeout (2026-09-14).** Independent review of
+`efa72c0` found no actionable P1/P2 issue and closes every historical finding for
+this prerequisite's local code-correctness slice. Fresh reviewer evidence is
+`334 passed, 15 skipped`; static/range checks are green and tracked files were
+unchanged. Legacy v1 rebind remains fail-closed pending separately reviewed
+migration/rebootstrap, while PostgreSQL and live-release gates remain open.
+Composite runner/evaluator work may now begin, but this CLEAN prerequisite does
+not authorize release execution.
+
+- [x] Complete the mandatory provider-incident prerequisite and receive
+  independent local-code **CLEAN** review; PostgreSQL/live-release and legacy v1
+  rebind recovery remain separate open gates.
 
 **Files:**
 

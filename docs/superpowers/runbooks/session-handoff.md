@@ -2,10 +2,17 @@
 
 Updated: 2026-09-14
 
-## 2026-09-14 Task25 provider-incident independent-review round 3 correction
+## 2026-09-14 Task25 provider-incident prerequisite: independent Round 3 CLEAN
 
-- Implementation `64a414b` supersedes `69b4a00` for fresh independent review.
-  It permits the two existing case-null terminal contracts omitted in Round 2:
+- Implementation `64a414b` / documentation `efa72c0` passed fresh independent
+  review with no actionable P1/P2 finding. This closes every historical finding
+  for the prerequisite's local code-correctness slice.
+- Independent evidence is `334 passed, 15 skipped` across disjoint selections;
+  Ruff, format, AST/compile and range-diff checks are green, and the reviewer left
+  tracked files unchanged. The 15 skips are PostgreSQL-dependent because the test
+  URL is absent, not PostgreSQL release evidence.
+- The implementation permits the two existing case-null terminal contracts
+  omitted in Round 2:
   `authorization_abort_corpus_drift -> aborted_corpus_drift /
   live_corpus_snapshot_changed` and `authorization_abort_execution_crash ->
   aborted_execution_crash / abandoned_unknown`, even when unrelated reviewed
@@ -22,11 +29,13 @@ Updated: 2026-09-14
   prior/saved probe set `195 passed`; affected release state/schema `80 passed`;
   broad release/provider `1268 passed, 15 skipped`; direct impact `221 passed,
   14 skipped`; credential `3 passed`; Ruff/format/compile/diff green.
-- PostgreSQL URL is absent, legacy v1 rebind remains fail-closed pending reviewed
-  migration/rebootstrap, and independent CLEAN Round-3 review is pending. Do not
-  start Task25 composite/evaluator work or authorize/execute a release. No
-  external/provider/paid call, push, merge or deployment ran. Full evidence is in
-  ignored `.tmp/task25-r3-provider-incident-carryover.md`.
+- Legacy v1 rebind remains fail-closed pending separately reviewed migration/
+  rebootstrap. PostgreSQL and live-release gates remain open. Task25 composite
+  runner/evaluator work may now begin, but this CLEAN prerequisite does not
+  authorize a release. No external/provider/paid call, push, merge or deployment
+  ran. Implementer evidence is in ignored
+  `.tmp/task25-r3-provider-incident-carryover.md`; independent evidence is in
+  ignored `.tmp/task25-r3-independent-review.md`.
 
 ## 2026-09-14 Task25 provider-incident independent-review round 2 correction
 
