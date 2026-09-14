@@ -464,16 +464,16 @@ def test_only_external_exact_canonical_approval_can_authorize(tmp_path, attack):
 def test_authorization_cli_refuses_before_authority_or_approval_read():
     class NeverRead:
         def read(self, *args):
-            raise AssertionError('approval was read before evaluator readiness')
+            raise AssertionError('approval was read before snapshot-reader readiness')
 
     def never():
-        raise AssertionError('authority opened before evaluator readiness')
+        raise AssertionError('authority opened before snapshot-reader readiness')
 
     outcome = cli._run_cli(
         ['authorization-bootstrap'], stdin=NeverRead(), service_factory=never
     )
     assert outcome.payload == {
-        'code': 'evaluator_unavailable',
+        'code': 'committed_source_changed',
         'ok': False,
         'provider_dispatch_count': 0,
         'authorization_issued': False,
@@ -498,7 +498,7 @@ def test_cli_does_not_use_secret_environment_or_create_self_approval(
     )
     assert cli.main(['authorization-bootstrap']) == 2
     output = capsys.readouterr().out
-    assert json.loads(output)['code'] == 'evaluator_unavailable'
+    assert json.loads(output)['code'] == 'committed_source_changed'
     assert 'never-use-or-print-this-secret' not in output
 
 
