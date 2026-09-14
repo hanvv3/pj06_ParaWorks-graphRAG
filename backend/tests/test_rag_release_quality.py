@@ -11,6 +11,9 @@ from backend.app.agent_runtime.fingerprints import (
     canonical_json_bytes,
     keyed_fingerprint,
 )
+from backend.app.agent_runtime.rag_runtime_contracts import (
+    AuthorizedProviderPolicySnapshot,
+)
 from backend.app.rag.release_quality import (
     FrozenLegacyBaselineMetrics,
     RagReleaseQualityError,
@@ -21,6 +24,8 @@ from backend.app.rag.release_quality import (
 )
 from backend.app.rag.release_review import (
     AuthorizedRagLiveGate,
+    FrozenCaseClaimCase,
+    FrozenCaseClaimComponent,
     FrozenCaseClaimManifest,
     FrozenCorpusMember,
     FrozenCorpusSnapshot,
@@ -35,6 +40,14 @@ RUBRIC = 'rag-live-quality-rubric:v1'
 POLICY = 'rag-live-gate:v1'
 ROLES = ('reviewer_a', 'reviewer_b', 'adjudicator_c')
 SUBJECTS = {role: f'{7000 + ordinal:064x}' for ordinal, role in enumerate(ROLES, 1)}
+
+
+class _TextAlias(str):
+    pass
+
+
+class _IntegerAlias(int):
+    pass
 
 
 def _hmac(value: object, schema: str, *, policy: str = POLICY) -> str:
@@ -77,6 +90,31 @@ def _case_shape(ordinal: int) -> tuple[str, str, str | None]:
     )
 
 
+def _provider_policy(component: str) -> AuthorizedProviderPolicySnapshot:
+    query = component == 'query_embedding'
+    return AuthorizedProviderPolicySnapshot(
+        component=component,
+        provider='openai',
+        model='text-embedding-3-small' if query else 'gpt-5.4-mini-2026-03-17',
+        reasoning_or_config_identity=('dimensions:1536' if query else 'none'),
+        authorized_model_config_version=(
+            'rag-query-embedding-config:v1' if query else 'rag-answer-model-config:v1'
+        ),
+        authorized_model_config_snapshot_hmac=(f'{8101 if query else 8102:064x}'),
+        authorized_cost_policy_version=(
+            'rag-query-embedding-cost:v1' if query else 'rag-answer-cost:v1'
+        ),
+        authorized_token_estimator_version=(
+            'openai-cl100k-text-embedding-3-small:v1'
+            if query
+            else 'openai-o200k-rag-answer:v1'
+        ),
+        fingerprint_key_version='test-v1',
+        fingerprint_key_material_verifier=f'{8103:064x}',
+        authorized_policy_snapshot_hmac=f'{8104 if query else 8105:064x}',
+    )
+
+
 def _manifest() -> FrozenLiveManifestSnapshot:
     fixture_hmac = f'{101:064x}'
     cases = []
@@ -112,6 +150,37 @@ def _manifest() -> FrozenLiveManifestSnapshot:
                 case_total_reserved_cost_usd=Decimal('0.012000'),
             )
         )
+    executable = FrozenCaseClaimManifest(
+        cases=tuple(
+            FrozenCaseClaimCase(
+                ordinal=case.ordinal,
+                case_id_hmac=case.case_id_hmac,
+                surface=case.surface,
+                configured_backend=case.configured_backend,
+                current_text_hmac=f'{2200 + case.ordinal:064x}',
+                retrieval_query_hmac=case.query_bytes_hmac,
+                security_scope_fingerprint=f'{2300 + case.ordinal:064x}',
+                components=(
+                    FrozenCaseClaimComponent(
+                        policy=_provider_policy('query_embedding'),
+                        reserved_input_tokens=(
+                            128 if case.query_embedding_required else 0
+                        ),
+                        reserved_output_tokens=0,
+                        reserved_cost_usd=case.query_embedding_reserved_cost_usd,
+                    ),
+                    FrozenCaseClaimComponent(
+                        policy=_provider_policy('answer_generation'),
+                        reserved_input_tokens=2048,
+                        reserved_output_tokens=512,
+                        reserved_cost_usd=case.answer_generation_reserved_cost_usd,
+                    ),
+                ),
+            )
+            for case in cases
+        ),
+        source_manifest_hmac=fixture_hmac,
+    )
     return FrozenLiveManifestSnapshot(
         live_gate_contract_version=POLICY,
         fixture_manifest_version='rag-live-quality-30:v1',
@@ -122,7 +191,7 @@ def _manifest() -> FrozenLiveManifestSnapshot:
         clean_git_commit='a' * 40,
         rubric_version=RUBRIC,
         cases=tuple(cases),
-        executable=FrozenCaseClaimManifest((), source_manifest_hmac=fixture_hmac),
+        executable=executable,
     )
 
 
@@ -1101,3 +1170,349 @@ def test_evaluator_bounds_an_unhashable_signed_label(quality_inputs) -> None:
 
     with pytest.raises(RagReleaseQualityError, match='review_labels_invalid'):
         _evaluate(quality_inputs | {'signed_labels': tuple(labels)})
+
+
+@pytest.mark.parametrize(
+    'mutator',
+    [
+        lambda executable: None,
+        lambda executable: replace(executable, cases=()),
+        lambda executable: replace(executable, cases=executable.cases[:-1]),
+        lambda executable: replace(
+            executable,
+            cases=(executable.cases[1], executable.cases[0]) + executable.cases[2:],
+        ),
+        lambda executable: replace(
+            executable,
+            cases=(
+                executable.cases[0],
+                replace(
+                    executable.cases[1],
+                    case_id_hmac=executable.cases[0].case_id_hmac,
+                ),
+            )
+            + executable.cases[2:],
+        ),
+        lambda executable: replace(
+            executable,
+            cases=(
+                replace(executable.cases[0], retrieval_query_hmac=f'{998_001:064x}'),
+            )
+            + executable.cases[1:],
+        ),
+        lambda executable: replace(executable, source_manifest_hmac=f'{998_002:064x}'),
+    ],
+)
+def test_evaluator_requires_the_complete_resolved_executable_manifest(
+    quality_inputs, mutator
+) -> None:
+    manifest = replace(
+        quality_inputs['manifest'],
+        executable=mutator(quality_inputs['manifest'].executable),
+    )
+    approval = replace(quality_inputs['approval'], manifest=manifest)
+
+    with pytest.raises(RagReleaseQualityError, match='manifest_invalid'):
+        _evaluate(quality_inputs | {'manifest': manifest, 'approval': approval})
+
+
+def test_evaluator_binds_executable_component_reserves_to_annotations(
+    quality_inputs,
+) -> None:
+    executable = quality_inputs['manifest'].executable
+    first = executable.cases[0]
+    components = list(first.components)
+    components[1] = replace(components[1], reserved_cost_usd=Decimal('0.011000'))
+    changed = replace(first, components=tuple(components))
+    manifest = replace(
+        quality_inputs['manifest'],
+        executable=replace(executable, cases=(changed,) + executable.cases[1:]),
+    )
+    approval = replace(quality_inputs['approval'], manifest=manifest)
+
+    with pytest.raises(RagReleaseQualityError, match='manifest_invalid'):
+        _evaluate(quality_inputs | {'manifest': manifest, 'approval': approval})
+
+
+@pytest.mark.parametrize(
+    'mutator',
+    [
+        lambda executable: replace(
+            executable,
+            runtime_contract_version=_TextAlias(executable.runtime_contract_version),
+        ),
+        lambda executable: replace(
+            executable,
+            cases=(
+                replace(
+                    executable.cases[0],
+                    current_text_hmac=_TextAlias(executable.cases[0].current_text_hmac),
+                ),
+            )
+            + executable.cases[1:],
+        ),
+        lambda executable: replace(
+            executable,
+            cases=(
+                replace(
+                    executable.cases[0],
+                    components=(
+                        replace(
+                            executable.cases[0].components[0],
+                            policy=replace(
+                                executable.cases[0].components[0].policy,
+                                provider=_TextAlias('openai'),
+                            ),
+                        ),
+                        executable.cases[0].components[1],
+                    ),
+                ),
+            )
+            + executable.cases[1:],
+        ),
+        lambda executable: replace(
+            executable,
+            cases=(
+                replace(
+                    executable.cases[0],
+                    components=(
+                        replace(
+                            executable.cases[0].components[0],
+                            reserved_input_tokens=True,
+                        ),
+                        executable.cases[0].components[1],
+                    ),
+                ),
+            )
+            + executable.cases[1:],
+        ),
+        lambda executable: replace(
+            executable,
+            cases=(
+                replace(
+                    executable.cases[0],
+                    components=tuple(reversed(executable.cases[0].components)),
+                ),
+            )
+            + executable.cases[1:],
+        ),
+    ],
+)
+def test_evaluator_requires_canonical_executable_runtime_and_input_identities(
+    quality_inputs, mutator
+) -> None:
+    manifest = replace(
+        quality_inputs['manifest'],
+        executable=mutator(quality_inputs['manifest'].executable),
+    )
+    approval = replace(quality_inputs['approval'], manifest=manifest)
+
+    with pytest.raises(RagReleaseQualityError, match='manifest_invalid'):
+        _evaluate(quality_inputs | {'manifest': manifest, 'approval': approval})
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('reserved_cost_usd', Decimal('0.012')),
+        ('charged_cost_usd', Decimal('0.012')),
+        ('charged_cost_usd', Decimal('-0.000000')),
+        ('charged_cost_usd', Decimal('NaN')),
+        ('charged_cost_usd', Decimal('Infinity')),
+        ('charged_cost_usd', True),
+    ],
+)
+def test_evaluator_rejects_noncanonical_case_cost_decimals(
+    quality_inputs, field, value
+) -> None:
+    values = _replace_case(quality_inputs, 2, **{field: value})
+
+    with pytest.raises(RagReleaseQualityError, match='case_result_invalid'):
+        _evaluate(values)
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('query_embedding_reserved_cost_usd', Decimal('0')),
+        ('query_embedding_reserved_cost_usd', Decimal('-0.000000')),
+        ('answer_generation_reserved_cost_usd', Decimal('0.012')),
+        ('case_total_reserved_cost_usd', Decimal('0.012')),
+        ('case_total_reserved_cost_usd', Decimal('-0.000000')),
+    ],
+)
+def test_evaluator_rejects_noncanonical_manifest_cost_decimals(
+    quality_inputs, field, value
+) -> None:
+    cases = list(quality_inputs['manifest'].cases)
+    cases[0] = replace(cases[0], **{field: value})
+    manifest = replace(quality_inputs['manifest'], cases=tuple(cases))
+    approval = replace(quality_inputs['approval'], manifest=manifest)
+
+    with pytest.raises(RagReleaseQualityError, match='manifest_invalid'):
+        _evaluate(quality_inputs | {'manifest': manifest, 'approval': approval})
+
+
+@pytest.mark.parametrize(
+    'value',
+    [
+        Decimal('0.000'),
+        Decimal('-0.000000'),
+        Decimal('NaN'),
+        Decimal('Infinity'),
+        True,
+    ],
+)
+def test_evaluator_rejects_noncanonical_executable_cost_scale(
+    quality_inputs, value
+) -> None:
+    executable = quality_inputs['manifest'].executable
+    first = executable.cases[0]
+    components = list(first.components)
+    components[0] = replace(components[0], reserved_cost_usd=value)
+    changed = replace(first, components=tuple(components))
+    manifest = replace(
+        quality_inputs['manifest'],
+        executable=replace(executable, cases=(changed,) + executable.cases[1:]),
+    )
+    approval = replace(quality_inputs['approval'], manifest=manifest)
+
+    with pytest.raises(RagReleaseQualityError, match='manifest_invalid'):
+        _evaluate(quality_inputs | {'manifest': manifest, 'approval': approval})
+
+
+def test_evaluator_rejects_noncanonical_limit_decimal_scale(
+    quality_inputs,
+) -> None:
+    limits = replace(
+        quality_inputs['manifest'].limits,
+        case_max_cost_usd=Decimal('0.012'),
+    )
+    manifest = replace(quality_inputs['manifest'], limits=limits)
+    approval = replace(quality_inputs['approval'], manifest=manifest, limits=limits)
+
+    with pytest.raises(RagReleaseQualityError, match='manifest_invalid'):
+        _evaluate(quality_inputs | {'manifest': manifest, 'approval': approval})
+
+
+@pytest.mark.parametrize(
+    'field',
+    ['case_kind', 'surface', 'configured_backend'],
+)
+def test_evaluator_rejects_result_primitive_subclasses(quality_inputs, field) -> None:
+    original = getattr(quality_inputs['terminal_cases'][0], field)
+    values = _replace_case(quality_inputs, 0, **{field: _TextAlias(original)})
+
+    with pytest.raises(RagReleaseQualityError, match='case_result_invalid'):
+        _evaluate(values)
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('state', _TextAlias('complete')),
+        ('outcome', _TextAlias('supported')),
+        ('runtime_agent_run_id_hmac', _TextAlias(f'{3100:064x}')),
+        ('case_projection_hmac', _TextAlias(f'{4100:064x}')),
+        ('current_corpus_snapshot_hmac', _TextAlias(f'{301:064x}')),
+        ('provider_safety_snapshot_hmac', _TextAlias(f'{1008:064x}')),
+        ('query_embedding_dispatch_count', _IntegerAlias(1)),
+        ('answer_generation_dispatch_count', _IntegerAlias(1)),
+        ('legacy_precision_numerator', _IntegerAlias(1)),
+        ('expected_no_answer', _IntegerAlias(0)),
+        ('hard_negative_correct', _IntegerAlias(0)),
+        ('positive_answered', _IntegerAlias(1)),
+        ('required_slot_covered', _IntegerAlias(1)),
+    ],
+)
+def test_evaluator_validates_all_case_primitives_before_comparison(
+    quality_inputs, field, value
+) -> None:
+    values = _replace_case(quality_inputs, 0, **{field: value})
+
+    with pytest.raises(RagReleaseQualityError, match='case_result_invalid'):
+        _evaluate(values)
+
+
+@pytest.mark.parametrize(
+    'malformed',
+    [
+        (('reviewer_a',),),
+        (['reviewer_a'],),
+        {'reviewer_a': SUBJECTS['reviewer_a']},
+        None,
+    ],
+)
+def test_evaluator_bounds_forced_malformed_frozen_reviewer_rosters(
+    quality_inputs, malformed
+) -> None:
+    evaluator = RagReleaseQualityEvaluator(
+        identity_secret=SECRET,
+        reviewer_subject_hmacs=SUBJECTS,
+    )
+    object.__setattr__(evaluator, '_frozen_reviewer_subjects', malformed)
+
+    with pytest.raises(RagReleaseQualityError, match='reviewer_roster_invalid'):
+        evaluator.evaluate(**quality_inputs)
+
+
+@pytest.mark.parametrize(
+    'attribute',
+    [
+        '_identity_secret',
+        '_reviewer_subjects',
+        '_frozen_reviewer_subjects',
+        '_reviewer_roster_hmac',
+    ],
+)
+def test_evaluator_forbids_deleting_reviewer_authority_slots(attribute) -> None:
+    evaluator = RagReleaseQualityEvaluator(
+        identity_secret=SECRET,
+        reviewer_subject_hmacs=SUBJECTS,
+    )
+
+    with pytest.raises(AttributeError, match='immutable'):
+        delattr(evaluator, attribute)
+
+
+def test_evaluator_bounds_forced_missing_frozen_reviewer_roster(
+    quality_inputs,
+) -> None:
+    evaluator = RagReleaseQualityEvaluator(
+        identity_secret=SECRET,
+        reviewer_subject_hmacs=SUBJECTS,
+    )
+    object.__delattr__(evaluator, '_frozen_reviewer_subjects')
+
+    with pytest.raises(RagReleaseQualityError, match='reviewer_roster_invalid'):
+        evaluator.evaluate(**quality_inputs)
+
+
+@pytest.mark.parametrize(
+    'field',
+    [
+        'precision_numerator',
+        'precision_denominator',
+        'recall_numerator',
+        'recall_denominator',
+    ],
+)
+def test_evaluator_reports_malformed_baseline_ratios_as_baseline_drift(
+    quality_inputs, field
+) -> None:
+    baseline = replace(quality_inputs['baseline_metrics'], **{field: True})
+
+    with pytest.raises(RagReleaseQualityError, match='baseline_drift'):
+        _evaluate(quality_inputs | {'baseline_metrics': baseline})
+
+
+def test_evaluator_rejects_reviewer_role_key_subclasses() -> None:
+    subjects = dict(SUBJECTS)
+    reviewer_a = subjects.pop('reviewer_a')
+    subjects[_TextAlias('reviewer_a')] = reviewer_a
+
+    with pytest.raises(RagReleaseQualityError, match='reviewer_roster_invalid'):
+        RagReleaseQualityEvaluator(
+            identity_secret=SECRET,
+            reviewer_subject_hmacs=subjects,
+        )

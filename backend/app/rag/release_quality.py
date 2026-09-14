@@ -21,8 +21,10 @@ from backend.app.agent_runtime.rag_safety_identity import (
     require_lower_hmac,
 )
 from backend.app.rag.evidence_projection import V1EvidenceProjection
+from backend.app.rag.release_ledger import RagReleaseLedgerError
 from backend.app.rag.release_review import (
     AuthorizedRagLiveGate,
+    FrozenCaseClaimManifest,
     FrozenCorpusSnapshot,
     FrozenLiveManifestCase,
     FrozenLiveManifestSnapshot,
@@ -31,6 +33,7 @@ from backend.app.rag.release_review import (
     ReviewerRole,
     _corpus_payload,
     _exact_frozen_equal,
+    _manifest_payload,
 )
 
 ReviewLabel = Literal['entailed', 'not_entailed', 'ambiguous']
@@ -84,7 +87,6 @@ _QUALITY_OUTCOMES = frozenset(
         'evidence_unavailable',
     )
 )
-_SIX_PLACES = Decimal('0.000001')
 
 
 class RagReleaseQualityError(ValueError):
@@ -243,12 +245,17 @@ def _nonnegative_int(value: object) -> bool:
     return type(value) is int and value >= 0
 
 
-def _ratio(numerator: object, denominator: object) -> tuple[int, int]:
+def _ratio(
+    numerator: object,
+    denominator: object,
+    *,
+    code: str = 'case_result_invalid',
+) -> tuple[int, int]:
     _require(
         _nonnegative_int(numerator)
         and _nonnegative_int(denominator)
         and cast(int, numerator) <= cast(int, denominator),
-        'case_result_invalid',
+        code,
     )
     return cast(int, numerator), cast(int, denominator)
 
@@ -257,7 +264,12 @@ def _cost(value: object) -> bool:
     if type(value) is not Decimal:
         return False
     try:
-        return value.is_finite() and value >= 0 and value == value.quantize(_SIX_PLACES)
+        return (
+            value.is_finite()
+            and value >= 0
+            and not value.is_signed()
+            and value.as_tuple().exponent == -6
+        )
     except DecimalException:
         return False
 
@@ -272,6 +284,7 @@ def build_reviewer_roster_hmac(
     )
     _require(
         type(reviewer_subject_hmacs) is dict
+        and all(type(role) is str for role in reviewer_subject_hmacs)
         and set(reviewer_subject_hmacs) == set(_ROLES),
         'reviewer_roster_invalid',
     )
@@ -361,6 +374,9 @@ class RagReleaseQualityEvaluator:
             return
         raise AttributeError(f'{type(self).__name__} is immutable')
 
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f'{type(self).__name__} is immutable')
+
     def __init__(
         self,
         *,
@@ -373,6 +389,7 @@ class RagReleaseQualityEvaluator:
         )
         _require(
             type(reviewer_subject_hmacs) is dict
+            and all(type(role) is str for role in reviewer_subject_hmacs)
             and set(reviewer_subject_hmacs) == set(_ROLES),
             'reviewer_roster_invalid',
         )
@@ -594,24 +611,53 @@ class RagReleaseQualityEvaluator:
         )
 
     def _frozen_subject_map(self) -> dict[ReviewerRole, str]:
-        return dict(self._frozen_reviewer_subjects)
+        try:
+            frozen = object.__getattribute__(self, '_frozen_reviewer_subjects')
+        except AttributeError:
+            raise RagReleaseQualityError('reviewer_roster_invalid') from None
+        _require(
+            type(frozen) is tuple and len(frozen) == len(_ROLES),
+            'reviewer_roster_invalid',
+        )
+        subjects: dict[ReviewerRole, str] = {}
+        for expected_role, item in zip(_ROLES, frozen, strict=True):
+            _require(
+                type(item) is tuple
+                and len(item) == 2
+                and type(item[0]) is str
+                and item[0] == expected_role,
+                'reviewer_roster_invalid',
+            )
+            subjects[expected_role] = _digest(item[1], 'reviewer_roster_invalid')
+        _require(len(set(subjects.values())) == 3, 'reviewer_roster_invalid')
+        return subjects
 
     def _validate_reviewer_roster(self) -> None:
         frozen = self._frozen_subject_map()
+        try:
+            identity_secret = object.__getattribute__(self, '_identity_secret')
+            current = object.__getattribute__(self, '_reviewer_subjects')
+            cached_hmac = object.__getattribute__(self, '_reviewer_roster_hmac')
+        except AttributeError:
+            raise RagReleaseQualityError('reviewer_roster_invalid') from None
         _require(
-            type(self._reviewer_subjects) is dict
-            and set(self._reviewer_subjects) == set(_ROLES)
-            and all(type(self._reviewer_subjects[role]) is str for role in _ROLES),
+            type(identity_secret) is bytes
+            and len(identity_secret) >= 32
+            and type(current) is dict
+            and all(type(role) is str for role in current)
+            and set(current) == set(_ROLES)
+            and all(type(current[role]) is str for role in _ROLES),
             'reviewer_roster_invalid',
         )
+        cached_hmac = _digest(cached_hmac, 'reviewer_roster_invalid')
         frozen_hmac = build_reviewer_roster_hmac(
-            frozen, identity_secret=self._identity_secret
+            frozen, identity_secret=identity_secret
         )
         current_hmac = build_reviewer_roster_hmac(
-            self._reviewer_subjects, identity_secret=self._identity_secret
+            current, identity_secret=identity_secret
         )
         _require(
-            hmac.compare_digest(frozen_hmac, self._reviewer_roster_hmac)
+            hmac.compare_digest(frozen_hmac, cached_hmac)
             and hmac.compare_digest(current_hmac, frozen_hmac),
             'reviewer_roster_invalid',
         )
@@ -727,7 +773,9 @@ class RagReleaseQualityEvaluator:
             and type(manifest.limits.query_embedding_dispatches) is int
             and type(manifest.limits.total_dispatches) is int
             and type(manifest.limits.case_max_cost_usd) is Decimal
-            and type(manifest.limits.total_max_cost_usd) is Decimal,
+            and type(manifest.limits.total_max_cost_usd) is Decimal
+            and _cost(manifest.limits.case_max_cost_usd)
+            and _cost(manifest.limits.total_max_cost_usd),
             'manifest_invalid',
         )
         _digest(manifest.fixture_manifest_sha256, 'manifest_invalid')
@@ -884,6 +932,60 @@ class RagReleaseQualityEvaluator:
             == Decimal('0.360000'),
             'manifest_invalid',
         )
+        self._validate_executable_manifest(manifest)
+
+    def _validate_executable_manifest(self, manifest) -> None:
+        executable = manifest.executable
+        try:
+            _manifest_payload(executable)
+        except (RagReleaseLedgerError, AttributeError, TypeError, ValueError):
+            raise RagReleaseQualityError('manifest_invalid') from None
+        _require(
+            type(executable) is FrozenCaseClaimManifest
+            and type(executable.cases) is tuple
+            and len(executable.cases) == 30
+            and type(executable.source_manifest_hmac) is str
+            and executable.source_manifest_hmac == manifest.fixture_manifest_hmac,
+            'manifest_invalid',
+        )
+        for annotation, resolved in zip(manifest.cases, executable.cases, strict=True):
+            _require(
+                type(resolved.ordinal) is int
+                and resolved.ordinal == annotation.ordinal
+                and type(resolved.case_id_hmac) is str
+                and resolved.case_id_hmac == annotation.case_id_hmac
+                and type(resolved.surface) is str
+                and resolved.surface == annotation.surface
+                and type(resolved.configured_backend) is str
+                and resolved.configured_backend == annotation.configured_backend
+                and type(resolved.current_text_hmac) is str
+                and type(resolved.retrieval_query_hmac) is str
+                and resolved.retrieval_query_hmac == annotation.query_bytes_hmac
+                and type(resolved.security_scope_fingerprint) is str
+                and type(resolved.components) is tuple
+                and len(resolved.components) == 2,
+                'manifest_invalid',
+            )
+            for value in (
+                resolved.case_id_hmac,
+                resolved.current_text_hmac,
+                resolved.retrieval_query_hmac,
+                resolved.security_scope_fingerprint,
+            ):
+                _digest(value, 'manifest_invalid')
+            query_component, answer_component = resolved.components
+            _require(
+                _cost(query_component.reserved_cost_usd)
+                and _cost(answer_component.reserved_cost_usd)
+                and query_component.reserved_cost_usd
+                == annotation.query_embedding_reserved_cost_usd
+                and answer_component.reserved_cost_usd
+                == annotation.answer_generation_reserved_cost_usd
+                and query_component.reserved_cost_usd
+                + answer_component.reserved_cost_usd
+                == annotation.case_total_reserved_cost_usd,
+                'manifest_invalid',
+            )
 
     def _validate_baseline(self, baseline, manifest, corpus, approval) -> None:
         for value in (
@@ -966,7 +1068,7 @@ class RagReleaseQualityEvaluator:
             (baseline.precision_numerator, baseline.precision_denominator),
             (baseline.recall_numerator, baseline.recall_denominator),
         ):
-            _ratio(*pair)
+            _ratio(*pair, code='baseline_drift')
         _require(
             baseline.precision_denominator > 0 and baseline.recall_denominator > 0,
             'baseline_drift',
@@ -997,41 +1099,27 @@ class RagReleaseQualityEvaluator:
             )
             seen.add(result.case_id_hmac)
             _require(
-                result.case_kind == case.case_kind
-                and result.surface == case.surface
-                and result.configured_backend == case.configured_backend
-                and result.expected_no_answer == case.expected_no_answer
-                and result.current_corpus_snapshot_hmac
-                == corpus.corpus_snapshot_hmac
-                == approval.corpus.corpus_snapshot_hmac
-                and result.provider_safety_snapshot_hmac
-                == approval.approved_provider_safety_snapshot_hmac,
-                'case_identity_drift',
-            )
-            _require(
-                type(result.state) is str
-                and result.state == 'complete'
+                type(result.case_kind) is str
+                and type(result.surface) is str
+                and type(result.configured_backend) is str
+                and type(result.state) is str
                 and type(result.outcome) is str
-                and result.outcome in _QUALITY_OUTCOMES
-                and result.case_projection_hmac is not None
+                and type(result.runtime_agent_run_id_hmac) is str
+                and type(result.case_projection_hmac) is str
+                and type(result.current_corpus_snapshot_hmac) is str
+                and type(result.provider_safety_snapshot_hmac) is str
+                and type(result.query_embedding_dispatch_count) is int
+                and type(result.answer_generation_dispatch_count) is int
                 and type(result.expected_no_answer) is bool
                 and type(result.hard_negative_correct) is bool
                 and type(result.positive_answered) is bool
                 and type(result.required_slot_covered) is bool
                 and type(result.blocks) is tuple
                 and _cost(result.reserved_cost_usd)
-                and _cost(result.charged_cost_usd)
-                and result.reserved_cost_usd == case.case_total_reserved_cost_usd
-                and result.charged_cost_usd <= result.reserved_cost_usd
-                and type(result.query_embedding_dispatch_count) is int
-                and result.query_embedding_dispatch_count
-                == int(case.query_embedding_required)
-                and type(result.answer_generation_dispatch_count) is int
-                and result.answer_generation_dispatch_count == 1,
+                and _cost(result.charged_cost_usd),
                 'case_result_invalid',
             )
             for value in (
-                result.case_id_hmac,
                 result.runtime_agent_run_id_hmac,
                 result.case_projection_hmac,
                 result.current_corpus_snapshot_hmac,
@@ -1048,6 +1136,28 @@ class RagReleaseQualityEvaluator:
                 (result.v2_recall_numerator, result.v2_recall_denominator),
             ):
                 _ratio(*pair)
+            _require(
+                result.case_kind == case.case_kind
+                and result.surface == case.surface
+                and result.configured_backend == case.configured_backend
+                and result.expected_no_answer == case.expected_no_answer
+                and result.current_corpus_snapshot_hmac
+                == corpus.corpus_snapshot_hmac
+                == approval.corpus.corpus_snapshot_hmac
+                and result.provider_safety_snapshot_hmac
+                == approval.approved_provider_safety_snapshot_hmac,
+                'case_identity_drift',
+            )
+            _require(
+                result.state == 'complete'
+                and result.outcome in _QUALITY_OUTCOMES
+                and result.reserved_cost_usd == case.case_total_reserved_cost_usd
+                and result.charged_cost_usd <= result.reserved_cost_usd
+                and result.query_embedding_dispatch_count
+                == int(case.query_embedding_required)
+                and result.answer_generation_dispatch_count == 1,
+                'case_result_invalid',
+            )
             if case.case_kind == 'positive':
                 _require(
                     result.hard_negative_correct is False
@@ -1169,8 +1279,11 @@ class RagReleaseQualityEvaluator:
         subjects = self._frozen_subject_map()
         _require(
             type(signed) is SignedReviewLabel
+            and type(signed.reviewer_role) is str
             and signed.reviewer_role == role
+            and type(signed.reviewer_subject_hmac) is str
             and signed.reviewer_subject_hmac == subjects[role]
+            and type(signed.case_id_hmac) is str
             and signed.case_id_hmac == case.case_id_hmac
             and type(signed.block_ordinal) is int
             and signed.block_ordinal == block.block_ordinal
