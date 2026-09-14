@@ -877,11 +877,10 @@ def _committed_bytes(repository, commit, path):
         else 'committed_source_unavailable',
     )
     committed = _git_read(repository, 'show', f'{commit}:{path}')
-    try:
-        current = target.read_bytes()
-    except OSError:
-        raise LiveGatePreviewError('committed_source_unavailable') from None
-    _live_require(current == committed, 'committed_source_changed')
+    # Git's clean filter, rather than platform-specific checkout bytes, is the
+    # authority for deciding whether a tracked file differs.  `_clean_commit`
+    # fences the read on both sides; the blob returned here is the exact byte
+    # identity bound into the approval regardless of CRLF checkout conversion.
     return committed
 
 
@@ -2571,12 +2570,44 @@ def _authorization_boundary():
             except Exception:
                 _refuse()
 
-    return RagLiveGateAuthorizer, ApprovedLiveManifestSource, require_source
+    def require_issued_authorization_identity(source_binding, authorization):
+        """Prove the exact Task24-issued DTO/source pair without exposing state."""
+
+        with lock:
+            try:
+                _live_require(
+                    type(source_binding) is ApprovedLiveManifestSource
+                    and source_binding in sources,
+                    'approved_source_unissued',
+                )
+                record = sources[source_binding]
+                saved = record['owner']['authorization']
+                _live_require(
+                    saved is not None
+                    and source_binding is saved[2]
+                    and authorization is saved[0]
+                    and type(authorization) is AuthorizedRagLiveGate
+                    and _exact_frozen_equal(authorization, saved[1])
+                    and _exact_frozen_equal(authorization, record['authority']),
+                    'authorization_unissued',
+                )
+            except Exception:
+                _refuse()
+
+    return (
+        RagLiveGateAuthorizer,
+        ApprovedLiveManifestSource,
+        require_source,
+        require_issued_authorization_identity,
+    )
 
 
-(RagLiveGateAuthorizer, ApprovedLiveManifestSource, _require_authorized_case_source) = (
-    _authorization_boundary()
-)
+(
+    RagLiveGateAuthorizer,
+    ApprovedLiveManifestSource,
+    _require_authorized_case_source,
+    require_issued_live_authorization_identity,
+) = _authorization_boundary()
 
 
 def _live_money(value):

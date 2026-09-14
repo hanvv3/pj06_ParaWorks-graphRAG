@@ -461,7 +461,7 @@ def test_only_external_exact_canonical_approval_can_authorize(tmp_path, attack):
         authorize(h, raw)
 
 
-def test_authorization_cli_refuses_before_authority_or_approval_read():
+def test_authorization_cli_refuses_before_authority_or_approval_read(monkeypatch):
     class NeverRead:
         def read(self, *args):
             raise AssertionError('approval was read before snapshot-reader readiness')
@@ -469,11 +469,15 @@ def test_authorization_cli_refuses_before_authority_or_approval_read():
     def never():
         raise AssertionError('authority opened before snapshot-reader readiness')
 
+    monkeypatch.setattr(
+        review, 'require_live_preview_sources', lambda _repository: 'a' * 40
+    )
+
     outcome = cli._run_cli(
         ['authorization-bootstrap'], stdin=NeverRead(), service_factory=never
     )
     assert outcome.payload == {
-        'code': 'committed_source_changed',
+        'code': 'preview_snapshot_reader_unavailable',
         'ok': False,
         'provider_dispatch_count': 0,
         'authorization_issued': False,
@@ -496,9 +500,12 @@ def test_cli_does_not_use_secret_environment_or_create_self_approval(
         '_build_default_resources',
         lambda *_: pytest.fail('unready command opened authority'),
     )
+    monkeypatch.setattr(
+        review, 'require_live_preview_sources', lambda _repository: 'a' * 40
+    )
     assert cli.main(['authorization-bootstrap']) == 2
     output = capsys.readouterr().out
-    assert json.loads(output)['code'] == 'committed_source_changed'
+    assert json.loads(output)['code'] == 'preview_snapshot_reader_unavailable'
     assert 'never-use-or-print-this-secret' not in output
 
 

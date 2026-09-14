@@ -21,6 +21,7 @@ from backend.app.rag.release_quality import (
     SanitizedLiveBlockResult,
     SanitizedLiveCaseResult,
     SignedReviewLabel,
+    build_review_signature_hmac,
 )
 from backend.app.rag.release_review import (
     AuthorizedRagLiveGate,
@@ -454,7 +455,32 @@ def _evaluate(values):
     return RagReleaseQualityEvaluator(
         identity_secret=SECRET,
         reviewer_subject_hmacs=SUBJECTS,
-    ).evaluate(**values)
+    )._evaluate_approved(**values)
+
+
+@pytest.mark.parametrize('ordinal', [True, -1, object()])
+def test_public_review_signer_rejects_noncanonical_block_ordinal(
+    quality_inputs, ordinal
+) -> None:
+    """Skipping native ordinal validation would sign an impossible block."""
+
+    block = SanitizedLiveBlockResult(
+        block_ordinal=ordinal,
+        block_result_hmac=f'{9801:064x}',
+        evidence_projection_hmac=f'{9802:064x}',
+    )
+
+    with pytest.raises(RagReleaseQualityError, match='review_labels_invalid'):
+        build_review_signature_hmac(
+            approval_hmac=quality_inputs['approval'].approval_hmac,
+            fixture_manifest_hmac=quality_inputs['manifest'].fixture_manifest_hmac,
+            case_id_hmac=quality_inputs['terminal_cases'][0].case_id_hmac,
+            block=block,
+            reviewer_role='reviewer_a',
+            reviewer_subject_hmac=SUBJECTS['reviewer_a'],
+            label='entailed',
+            identity_secret=SECRET,
+        )
 
 
 def _replace_case(values, ordinal, **changes):
@@ -956,7 +982,9 @@ def test_evaluator_rejects_a_mutated_internal_reviewer_map_and_resigned_takeover
         )
 
     with pytest.raises(RagReleaseQualityError, match='reviewer_roster_invalid'):
-        evaluator.evaluate(**(quality_inputs | {'signed_labels': tuple(labels)}))
+        evaluator._evaluate_approved(
+            **(quality_inputs | {'signed_labels': tuple(labels)})
+        )
 
 
 def test_evaluator_defensively_copies_the_constructor_reviewer_map(
@@ -969,7 +997,7 @@ def test_evaluator_defensively_copies_the_constructor_reviewer_map(
     )
     subjects['reviewer_a'] = f'{999_002:064x}'
 
-    report = evaluator.evaluate(**quality_inputs)
+    report = evaluator._evaluate_approved(**quality_inputs)
 
     assert report.gate_outcome == 'green'
 
@@ -1453,7 +1481,7 @@ def test_evaluator_bounds_forced_malformed_frozen_reviewer_rosters(
     object.__setattr__(evaluator, '_frozen_reviewer_subjects', malformed)
 
     with pytest.raises(RagReleaseQualityError, match='reviewer_roster_invalid'):
-        evaluator.evaluate(**quality_inputs)
+        evaluator._evaluate_approved(**quality_inputs)
 
 
 @pytest.mark.parametrize(
@@ -1485,7 +1513,7 @@ def test_evaluator_bounds_forced_missing_frozen_reviewer_roster(
     object.__delattr__(evaluator, '_frozen_reviewer_subjects')
 
     with pytest.raises(RagReleaseQualityError, match='reviewer_roster_invalid'):
-        evaluator.evaluate(**quality_inputs)
+        evaluator._evaluate_approved(**quality_inputs)
 
 
 @pytest.mark.parametrize(

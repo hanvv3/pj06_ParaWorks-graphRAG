@@ -24,10 +24,11 @@ _PLAN_HMAC = '1' * 64
 _KEY_ID = 'rag-release-review-v1'
 
 
-def test_preview_cli_refuses_missing_evaluator_without_loading_authority_or_stdin(
+def test_preview_cli_refuses_uncomposed_reader_without_loading_authority_or_stdin(
     monkeypatch,
 ):
     from backend.app.admin import rag_live_gate
+    from backend.app.rag import release_review
 
     calls = []
 
@@ -39,13 +40,17 @@ def test_preview_cli_refuses_missing_evaluator_without_loading_authority_or_stdi
         def read(self, *_args):
             raise AssertionError('preview must not read approval material')
 
+    monkeypatch.setattr(
+        release_review, 'require_live_preview_sources', lambda _repository: 'a' * 40
+    )
+
     result = rag_live_gate._run_cli(
         ['preview'], stdin=Unreadable(), service_factory=forbidden
     )
     assert result.exit_code == 2
     assert result.payload == {
         'ok': False,
-        'code': 'evaluator_unavailable',
+        'code': 'preview_snapshot_reader_unavailable',
         'provider_dispatch_count': 0,
         'authorization_issued': False,
     }
@@ -54,14 +59,18 @@ def test_preview_cli_refuses_missing_evaluator_without_loading_authority_or_stdi
 
 def test_preview_main_never_builds_default_runtime_resources(monkeypatch, capsys):
     from backend.app.admin import rag_live_gate
+    from backend.app.rag import release_review
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError('read-only preview must not initialize runtime')
 
     monkeypatch.setattr(rag_live_gate, '_build_default_resources', forbidden)
+    monkeypatch.setattr(
+        release_review, 'require_live_preview_sources', lambda _repository: 'a' * 40
+    )
     assert rag_live_gate.main(['preview']) == 2
     value = json.loads(capsys.readouterr().out)
-    assert value['code'] == 'evaluator_unavailable'
+    assert value['code'] == 'preview_snapshot_reader_unavailable'
     assert value['provider_dispatch_count'] == 0
 
 

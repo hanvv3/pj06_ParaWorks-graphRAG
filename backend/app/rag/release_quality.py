@@ -323,6 +323,8 @@ def build_review_signature_hmac(
         type(identity_secret) is bytes
         and len(identity_secret) >= 32
         and type(block) is SanitizedLiveBlockResult
+        and type(block.block_ordinal) is int
+        and block.block_ordinal >= 0
         and type(reviewer_role) is str
         and reviewer_role in _ROLES
         and type(label) is str
@@ -411,6 +413,44 @@ class RagReleaseQualityEvaluator:
         )
 
     def evaluate(
+        self,
+        *,
+        capability=None,
+        terminal_cases: Sequence[SanitizedLiveCaseResult],
+        signed_labels: Sequence[SignedReviewLabel],
+        baseline_metrics: FrozenLegacyBaselineMetrics,
+        manifest=None,
+        corpus=None,
+        approval=None,
+    ) -> RagQualityReport:
+        _require(
+            capability is not None
+            and manifest is None
+            and corpus is None
+            and approval is None,
+            'execution_capability_required',
+        )
+        try:
+            from backend.app.rag.live_gate import (
+                RagLiveGateCapabilityError,
+                _consume_approved_execution_capability,
+            )
+
+            authority = _consume_approved_execution_capability(
+                capability, identity_secret=self._identity_secret
+            )
+        except (RagLiveGateCapabilityError, AttributeError, TypeError, ValueError):
+            raise RagReleaseQualityError('execution_capability_invalid') from None
+        return self._evaluate_approved(
+            terminal_cases=terminal_cases,
+            signed_labels=signed_labels,
+            baseline_metrics=baseline_metrics,
+            manifest=authority.manifest,
+            corpus=authority.corpus,
+            approval=authority.authorization,
+        )
+
+    def _evaluate_approved(
         self,
         *,
         terminal_cases: Sequence[SanitizedLiveCaseResult],
