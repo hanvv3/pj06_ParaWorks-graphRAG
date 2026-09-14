@@ -2694,6 +2694,20 @@ broad release/provider, `221 passed, 14 skipped` direct impact and `3 passed`
 credential hygiene. PostgreSQL and independent CLEAN rereview remain open. Do not
 start the composite runner/evaluator or execute a release.
 
+**Independent-review round 3 correction (2026-09-14).** Implementation
+`64a414b` closes the remaining false refusal for the existing case-null
+`authorization_abort_corpus_drift` and `authorization_abort_execution_crash`
+contracts after unrelated valid provider drift. The private binding now carries
+the exact kind, terminal state/outcome, authorization identity and immutable
+predecessor/current provider digests, and is derived only after all existing
+kind-specific mutation, corpus/attestation, roster and provider validations.
+Ordinary inspection remains fail-stop; invalid authority, wrong digest/kind and
+replay refuse before DML. Fresh frozen evidence is focused `195 passed`, affected
+release state/schema `80 passed`, broad release/provider `1268 passed, 15 skipped`,
+direct impact `221 passed, 14 skipped`, and credential `3 passed`. PostgreSQL,
+legacy-v1-rebind recovery and independent CLEAN Round-3 review remain open. Do not
+start the composite runner/evaluator or execute a release.
+
 **Files:**
 
 - Create: `backend/app/rag/release_quality.py`

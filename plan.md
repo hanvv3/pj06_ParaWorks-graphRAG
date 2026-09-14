@@ -206,14 +206,15 @@ Next priorities:
 1. Keep C.5 rollout disabled unless a separate operational rollout action is
    explicitly authorized. Both C.5 paid release gates are complete.
 2. Deliverable D Core has reached Task25's mandatory first prerequisite.
-   Round-2 correction `69b4a00` supersedes `cb6b99f`: the exact owned
-   authorization-abort path may reconcile one predecessor-to-current provider
-   drift while ordinary inspection still rejects that mixed state. Incident
-   preparation authenticates blocker attribution and reconstructible history to
-   bootstrap; legacy v1 rebind histories fail closed pending reviewed
-   migration/rebootstrap because their predecessor policy material was not
-   retained. Independent CLEAN rereview and PostgreSQL execution remain required
-   before composite runner or quality work; actual release stays blocked.
+   Round-3 correction `64a414b` supersedes `69b4a00`: the exact owned
+   authorization-abort path also permits corpus-drift and reviewed execution-crash
+   terminalization after unrelated valid provider drift. The immutable binding
+   includes the exact kind, terminal state/outcome, authorization identity and
+   predecessor/current provider digests; ordinary inspection remains strict.
+   Legacy v1 rebind histories still fail closed pending reviewed
+   migration/rebootstrap. Independent CLEAN rereview and PostgreSQL execution
+   remain required before composite runner or quality work; actual release stays
+   blocked.
 3. Reach a separate D Core green checkpoint, then design, plan, approve, and
    reach a separate green checkpoint for D.1 PostgreSQL answer cache.
 4. Follow D.1 with Deliverable E Neo4j GraphRAG, then handle Slack data

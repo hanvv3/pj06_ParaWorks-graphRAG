@@ -3271,6 +3271,22 @@ direct impact `221 passed, 14 skipped`, and credential `3 passed`. PostgreSQL an
 independent CLEAN rereview remain open; no composite/evaluator or release
 execution is authorized.
 
+**Task25 prerequisite independent-review round 3 correction (2026-09-14).**
+Implementation `64a414b` supersedes `69b4a00`. The transition-aware barrier now
+also covers the already-approved case-null corpus-drift and reviewed
+execution-crash terminal paths after unrelated, internally valid provider drift.
+The owned immutable binding carries the exact transition kind, terminal
+state/outcome, authorization identity and predecessor/current provider digests;
+it is derived only after the full existing kind-specific transition, roster,
+corpus/attestation and provider-snapshot validations. Ordinary inspection still
+receives no binding and rejects the mixed state, while invalid authority,
+tampered digest/kind and replay refuse before DML. Frozen evidence is focused
+`195 passed`, affected release state/schema `80 passed`, broad release/provider
+`1268 passed, 15 skipped`, direct impact `221 passed, 14 skipped`, and credential
+`3 passed`. PostgreSQL and independent CLEAN Round-3 review remain open; legacy
+v1 rebind still requires reviewed migration/rebootstrap. No composite/evaluator
+or release execution is authorized.
+
 Round-3 implementation `b1ab6af` has frozen-code verification across all 19
 release files: **1145 passed, 14 skipped**; direct impact **266 passed, 16
 skipped** (11 existing Alembic warnings); focused contracts **38 passed**;

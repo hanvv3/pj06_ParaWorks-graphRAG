@@ -1,5 +1,31 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-14 D Core Task25 provider-incident independent-review round 3
+
+- Implementation `64a414b` corrects the remaining release/provider consistency
+  false refusal. A valid case-null `authorization_abort_corpus_drift` or
+  `authorization_abort_execution_crash` can now terminalize after an unrelated
+  reviewed provider change, preserving the existing terminal case, nonzero
+  charge/cost accounting, dispatch rows, provider rows and signed latch.
+- This is not a broad allowlist bypass. The private immutable drift binding now
+  carries an exact transition kind, terminal state, terminal outcome,
+  authorization identity, immutable predecessor digest and current provider
+  digest. It is constructed only after the existing kind-specific mutation,
+  attestation/corpus, roster and provider-snapshot checks. Ordinary `inspect()`
+  still rejects the pre-terminal mixed state; invalid authority, tampered
+  digest/kind and replay attempts remain zero-DML refusals.
+- RED: the saved reviewer matrix was `2 failed, 1 passed`; the permanent positive
+  and replay selection was `4 failed`, while six permanent negative controls
+  already passed. GREEN: all ten new permanent cases passed, the saved reviewer
+  matrix passed `3`, and the final all-probe focus passed `195`.
+- Final frozen evidence: affected release state/schema `80 passed`; broad
+  release/provider `1268 passed, 15 skipped`; direct impact `221 passed,
+  14 skipped` with 11 existing Alembic warnings; credential `3 passed`.
+  Ruff, format, compile and diff checks pass. PostgreSQL is unavailable and
+  independent CLEAN Round-3 review is pending. No public API, migration,
+  runner/evaluator, production reader, external/provider/live/release operation,
+  push, merge or deployment was performed.
+
 ## 2026-09-14 D Core Task25 provider-incident independent-review round 2
 
 - Implementation `69b4a00` makes release/provider reconciliation

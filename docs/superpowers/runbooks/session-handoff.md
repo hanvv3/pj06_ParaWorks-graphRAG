@@ -2,6 +2,32 @@
 
 Updated: 2026-09-14
 
+## 2026-09-14 Task25 provider-incident independent-review round 3 correction
+
+- Implementation `64a414b` supersedes `69b4a00` for fresh independent review.
+  It permits the two existing case-null terminal contracts omitted in Round 2:
+  `authorization_abort_corpus_drift -> aborted_corpus_drift /
+  live_corpus_snapshot_changed` and `authorization_abort_execution_crash ->
+  aborted_execution_crash / abandoned_unknown`, even when unrelated reviewed
+  provider drift changed the current valid digest.
+- The barrier exception remains exact and internal. Its immutable binding includes
+  kind, terminal state/outcome, ledger/approval identity and predecessor/current
+  provider digests, and is created only after full existing transition/roster/
+  attestation/corpus/provider validation. Ordinary inspection receives no binding
+  and still rejects the mixed state. Tampered provider authority, wrong payload
+  digest/kind and terminal replay all refuse before DML.
+- RED: saved R2 reviewer probe `2 failed, 1 passed`; permanent required-success/
+  replay selection `4 failed`, with six negative controls already green. Frozen
+  GREEN: new permanent `10 passed`; saved R2 probe `3 passed`; complete focused
+  prior/saved probe set `195 passed`; affected release state/schema `80 passed`;
+  broad release/provider `1268 passed, 15 skipped`; direct impact `221 passed,
+  14 skipped`; credential `3 passed`; Ruff/format/compile/diff green.
+- PostgreSQL URL is absent, legacy v1 rebind remains fail-closed pending reviewed
+  migration/rebootstrap, and independent CLEAN Round-3 review is pending. Do not
+  start Task25 composite/evaluator work or authorize/execute a release. No
+  external/provider/paid call, push, merge or deployment ran. Full evidence is in
+  ignored `.tmp/task25-r3-provider-incident-carryover.md`.
+
 ## 2026-09-14 Task25 provider-incident independent-review round 2 correction
 
 - Implementation `69b4a00` supersedes `cb6b99f` for fresh independent rereview.
