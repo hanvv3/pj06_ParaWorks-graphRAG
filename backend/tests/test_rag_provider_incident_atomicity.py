@@ -1027,3 +1027,281 @@ def test_incident_preparation_authenticates_history_through_supersession(
         assert database_image(connection) == before
     assert plan.component == 'answer_generation'
     assert plan.category == 'provider_usage_overrun'
+
+
+_UNRELATED_PROVIDER_DRIFT_ABORTS = (
+    (
+        'authorization_abort_corpus_drift',
+        'aborted_corpus_drift',
+        'live_corpus_snapshot_changed',
+        {'current_corpus_snapshot_hmac': '9' * 64},
+    ),
+    (
+        'authorization_abort_execution_crash',
+        'aborted_execution_crash',
+        'abandoned_unknown',
+        {'execution_crash_attestation_hmac': 'a' * 64},
+    ),
+)
+
+
+def _prepare_charged_terminal_case_with_reviewed_provider_change(h):
+    from backend.tests.test_rag_v2_provider_safety import _reviewed_command
+
+    h.claim()
+    h.claim_generation()
+    h.generation_outcome()
+    h.fail_case(outcome='persistence_failed')
+    runtime = h.authority._provider_safety_release_peer._provider_safety
+    with h.engine.connect() as connection:
+        command = _reviewed_command(
+            runtime,
+            connection,
+            'answer_generation',
+            'mark_rebind_required',
+        )
+        runtime.mark_rebind_required(connection, command)
+    return runtime
+
+
+@pytest.mark.parametrize(
+    'kind,terminal_state,outcome,overrides', _UNRELATED_PROVIDER_DRIFT_ABORTS
+)
+def test_unrelated_reviewed_provider_change_allows_exact_case_null_abort(
+    tmp_path, monkeypatch, kind, terminal_state, outcome, overrides
+):
+    import json
+
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    h = incident_harness(tmp_path, monkeypatch)
+    runtime = _prepare_charged_terminal_case_with_reviewed_provider_change(h)
+    with h.engine.connect() as connection:
+        before = database_image(connection)
+        with pytest.raises(RagReleaseAuthorityError):
+            h.authority.inspect(connection, database_identity=h.database_identity)
+    authorization = before['rag_live_gate_authorizations'][0]
+    assert authorization['total_dispatch_count'] == 1
+    assert authorization['charged_cost_usd'] == 0.0004
+    assert len(before['rag_live_gate_dispatches']) == 1
+    assert before['rag_live_gate_cases'][0]['state'] == 'failed'
+    marker_before = h.authority.marker_path.read_bytes()
+    latch_before = runtime._latch_path.read_bytes()
+    dml = []
+
+    def observe(_connection, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+
+    event.listen(h.engine, 'before_cursor_execute', observe)
+    h.append(
+        kind,
+        [
+            (
+                'authorization',
+                authorization,
+                {**authorization, 'state': terminal_state},
+            )
+        ],
+        outcome=outcome,
+        payload_overrides=overrides,
+    )
+    with h.engine.connect() as connection:
+        after = database_image(connection)
+        h.authority.inspect(connection, database_identity=h.database_identity)
+
+    assert len(dml) == 3
+    assert h.authority.marker_path.read_bytes() != marker_before
+    assert runtime._latch_path.read_bytes() == latch_before
+    assert after['rag_live_gate_authorizations'][0] == {
+        **authorization,
+        'state': terminal_state,
+    }
+    transition = json.loads(
+        after['rag_live_gate_transitions'][-1]['payload_canonical_bytes']
+    )
+    assert transition['transition_kind'] == kind
+    assert transition['outcome'] == outcome
+    assert (
+        transition['provider_safety_envelope_digest']
+        == after['rag_provider_safety_authorities'][0]['envelope_digest']
+    )
+    for name in PROVIDER + (
+        'rag_live_gate_cases',
+        'rag_live_gate_dispatches',
+        'rag_live_gate_quality_reports',
+        'agent_runs',
+        'agent_run_cost_components',
+    ):
+        assert after[name] == before[name]
+    for field in (
+        'case_claim_count',
+        'embedding_dispatch_count',
+        'generation_dispatch_count',
+        'total_dispatch_count',
+        'reserved_cost_usd',
+        'charged_cost_usd',
+    ):
+        assert after['rag_live_gate_authorizations'][0][field] == authorization[field]
+
+
+@pytest.mark.parametrize(
+    'kind,terminal_state,outcome,overrides', _UNRELATED_PROVIDER_DRIFT_ABORTS
+)
+def test_unrelated_provider_drift_abort_refuses_invalid_current_authority(
+    tmp_path, monkeypatch, kind, terminal_state, outcome, overrides
+):
+    from backend.app.rag.release_authority import RagReleaseAuthorityError
+
+    h = incident_harness(tmp_path, monkeypatch)
+    runtime = _prepare_charged_terminal_case_with_reviewed_provider_change(h)
+    with h.engine.connect() as connection:
+        connection.execute(
+            text(
+                'UPDATE rag_provider_safety_authorities '
+                "SET designated_environment_id = 'tampered'"
+            )
+        )
+        connection.commit()
+        before = database_image(connection)
+    authorization = before['rag_live_gate_authorizations'][0]
+    marker_before = h.authority.marker_path.read_bytes()
+    latch_before = runtime._latch_path.read_bytes()
+    dml = []
+
+    def observe(_connection, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+
+    event.listen(h.engine, 'before_cursor_execute', observe)
+    with pytest.raises((RagProviderSafetyError, RagReleaseAuthorityError)):
+        h.append(
+            kind,
+            [
+                (
+                    'authorization',
+                    authorization,
+                    {**authorization, 'state': terminal_state},
+                )
+            ],
+            outcome=outcome,
+            payload_overrides=overrides,
+        )
+    with h.engine.connect() as connection:
+        assert database_image(connection) == before
+    assert dml == []
+    assert h.authority.marker_path.read_bytes() == marker_before
+    assert runtime._latch_path.read_bytes() == latch_before
+
+
+@pytest.mark.parametrize(
+    'kind,terminal_state,outcome,overrides', _UNRELATED_PROVIDER_DRIFT_ABORTS
+)
+@pytest.mark.parametrize('tamper', ['provider_digest', 'transition_kind'])
+def test_unrelated_provider_drift_abort_refuses_tampered_owned_plan(
+    tmp_path, monkeypatch, kind, terminal_state, outcome, overrides, tamper
+):
+    from unittest.mock import patch
+
+    from backend.app.rag.release_ledger import RagReleaseLedgerError
+
+    h = incident_harness(tmp_path, monkeypatch)
+    runtime = _prepare_charged_terminal_case_with_reviewed_provider_change(h)
+    authorization = h.records('authorization')[0]
+    marker_before = h.authority.marker_path.read_bytes()
+    latch_before = runtime._latch_path.read_bytes()
+    dml = []
+
+    def observe(_connection, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+
+    event.listen(h.engine, 'before_cursor_execute', observe)
+    with h.engine.connect() as connection:
+        payload, mutations = h.prepare(
+            connection,
+            kind,
+            [
+                (
+                    'authorization',
+                    authorization,
+                    {**authorization, 'state': terminal_state},
+                )
+            ],
+            outcome=outcome,
+            payload_overrides=overrides,
+        )
+        before = database_image(connection)
+        if tamper == 'provider_digest':
+            payload['provider_safety_envelope_digest'] = authorization[
+                'provider_safety_envelope_digest'
+            ]
+        else:
+            payload['transition_kind'] = 'authorization_abort_snapshot'
+        with (
+            patch(
+                'backend.app.rag.release_review.require_approved_case_source',
+                h.source_verifier,
+            ),
+            pytest.raises(RagReleaseLedgerError),
+        ):
+            h.ledger.append(
+                connection,
+                payload,
+                actual_mutations=mutations,
+                database_identity=h.database_identity,
+            )
+    with h.engine.connect() as connection:
+        assert database_image(connection) == before
+    assert dml == []
+    assert h.authority.marker_path.read_bytes() == marker_before
+    assert runtime._latch_path.read_bytes() == latch_before
+
+
+@pytest.mark.parametrize(
+    'kind,terminal_state,outcome,overrides', _UNRELATED_PROVIDER_DRIFT_ABORTS
+)
+def test_unrelated_provider_drift_abort_cannot_replay_terminal_authorization(
+    tmp_path, monkeypatch, kind, terminal_state, outcome, overrides
+):
+    from backend.app.rag.release_ledger import RagReleaseLedgerError
+
+    h = incident_harness(tmp_path, monkeypatch)
+    runtime = _prepare_charged_terminal_case_with_reviewed_provider_change(h)
+    authorization = h.records('authorization')[0]
+    h.append(
+        kind,
+        [
+            (
+                'authorization',
+                authorization,
+                {**authorization, 'state': terminal_state},
+            )
+        ],
+        outcome=outcome,
+        payload_overrides=overrides,
+    )
+    terminal = h.records('authorization')[0]
+    before_marker = h.authority.marker_path.read_bytes()
+    before_latch = runtime._latch_path.read_bytes()
+    with h.engine.connect() as connection:
+        before = database_image(connection)
+    dml = []
+
+    def observe(_connection, _cursor, sql, *_):
+        if sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE')):
+            dml.append(sql)
+
+    event.listen(h.engine, 'before_cursor_execute', observe)
+    with pytest.raises(RagReleaseLedgerError):
+        h.append(
+            kind,
+            [('authorization', terminal, terminal)],
+            outcome=outcome,
+            payload_overrides=overrides,
+        )
+    with h.engine.connect() as connection:
+        assert database_image(connection) == before
+    assert dml == []
+    assert h.authority.marker_path.read_bytes() == before_marker
+    assert runtime._latch_path.read_bytes() == before_latch

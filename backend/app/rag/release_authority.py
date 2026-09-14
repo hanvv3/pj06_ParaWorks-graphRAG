@@ -74,6 +74,8 @@ class RagReleaseAuthorityError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class _ProviderDriftAbort:
     transition_kind: str
+    terminal_state: str
+    terminal_outcome: str
     ledger_uuid: str
     ledger_epoch: int
     approval_id_hmac: str
@@ -200,12 +202,42 @@ def _release_barrier_boundary():
                     ]
                     allowed = (
                         type(drift_abort) is _ProviderDriftAbort
-                        and drift_abort.transition_kind
+                        and (
+                            drift_abort.transition_kind,
+                            drift_abort.terminal_state,
+                            drift_abort.terminal_outcome,
+                        )
                         in {
-                            'authorization_abort_control',
-                            'authorization_abort_component_snapshot',
-                            'authorization_abort_final',
-                            'authorization_abort_snapshot',
+                            (
+                                'authorization_abort_control',
+                                'aborted_provider_safety',
+                                'provider_safety_unavailable',
+                            ),
+                            (
+                                'authorization_abort_component_snapshot',
+                                'aborted_provider_safety',
+                                'provider_safety_unavailable',
+                            ),
+                            (
+                                'authorization_abort_final',
+                                'aborted_provider_safety',
+                                'provider_safety_unavailable',
+                            ),
+                            (
+                                'authorization_abort_snapshot',
+                                'aborted_provider_safety',
+                                'provider_safety_unavailable',
+                            ),
+                            (
+                                'authorization_abort_corpus_drift',
+                                'aborted_corpus_drift',
+                                'live_corpus_snapshot_changed',
+                            ),
+                            (
+                                'authorization_abort_execution_crash',
+                                'aborted_execution_crash',
+                                'abandoned_unknown',
+                            ),
                         }
                         and drift_abort.predecessor_digest != drift_abort.current_digest
                         and drift_abort.current_digest == provider_digest

@@ -1058,17 +1058,35 @@ class RagReleaseMutationSet:
 
     def _provider_drift_abort_binding(self, payload) -> _ProviderDriftAbort | None:
         """Own the one exact started predecessor allowed during drift abort."""
-        if (
-            payload['transition_kind']
-            not in {
-                'authorization_abort_control',
-                'authorization_abort_component_snapshot',
-                'authorization_abort_final',
-                'authorization_abort_snapshot',
-            }
-            or payload['authorization_state_before'] != 'started'
-        ):
+        expected = {
+            'authorization_abort_control': (
+                'aborted_provider_safety',
+                'provider_safety_unavailable',
+            ),
+            'authorization_abort_component_snapshot': (
+                'aborted_provider_safety',
+                'provider_safety_unavailable',
+            ),
+            'authorization_abort_final': (
+                'aborted_provider_safety',
+                'provider_safety_unavailable',
+            ),
+            'authorization_abort_snapshot': (
+                'aborted_provider_safety',
+                'provider_safety_unavailable',
+            ),
+            'authorization_abort_corpus_drift': (
+                'aborted_corpus_drift',
+                'live_corpus_snapshot_changed',
+            ),
+            'authorization_abort_execution_crash': (
+                'aborted_execution_crash',
+                'abandoned_unknown',
+            ),
+        }.get(payload['transition_kind'])
+        if expected is None or payload['authorization_state_before'] != 'started':
             return None
+        terminal_state, terminal_outcome = expected
         authorizations = [
             (row, before, after)
             for row, before, after in zip(
@@ -1091,7 +1109,9 @@ class RagReleaseMutationSet:
             before is None
             or row.primary_key != expected_key
             or before['state'] != 'started'
-            or after['state'] != 'aborted_provider_safety'
+            or payload['authorization_state_after'] != terminal_state
+            or payload['outcome'] != terminal_outcome
+            or after['state'] != terminal_state
             or before['provider_safety_envelope_digest']
             != after['provider_safety_envelope_digest']
         ):
@@ -1103,6 +1123,8 @@ class RagReleaseMutationSet:
             return None
         return _ProviderDriftAbort(
             transition_kind=payload['transition_kind'],
+            terminal_state=terminal_state,
+            terminal_outcome=terminal_outcome,
             ledger_uuid=payload['ledger_uuid'],
             ledger_epoch=payload['ledger_epoch'],
             approval_id_hmac=payload['approval_id_hmac'],
