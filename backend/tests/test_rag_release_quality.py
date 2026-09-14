@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from dataclasses import fields, replace
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import UUID
 
 import pytest
@@ -451,11 +453,31 @@ def quality_inputs():
     }
 
 
-def _evaluate(values):
-    return RagReleaseQualityEvaluator(
+def _evaluate(values, evaluator=None):
+    evaluator = evaluator or RagReleaseQualityEvaluator(
         identity_secret=SECRET,
         reviewer_subject_hmacs=SUBJECTS,
-    )._evaluate_approved(**values)
+    )
+    authority = SimpleNamespace(
+        manifest=values['manifest'],
+        corpus=values['corpus'],
+        authorization=values['approval'],
+    )
+    inputs = {
+        key: value
+        for key, value in values.items()
+        if key not in {'manifest', 'corpus', 'approval'}
+    }
+    with patch(
+        'backend.app.rag.live_gate._consume_approved_execution_capability',
+        return_value=authority,
+    ):
+        return evaluator.evaluate(
+            capability=object(),
+            connection=object(),
+            barrier_guard=object(),
+            **inputs,
+        )
 
 
 @pytest.mark.parametrize('ordinal', [True, -1, object()])
@@ -982,8 +1004,8 @@ def test_evaluator_rejects_a_mutated_internal_reviewer_map_and_resigned_takeover
         )
 
     with pytest.raises(RagReleaseQualityError, match='reviewer_roster_invalid'):
-        evaluator._evaluate_approved(
-            **(quality_inputs | {'signed_labels': tuple(labels)})
+        _evaluate(
+            quality_inputs | {'signed_labels': tuple(labels)}, evaluator=evaluator
         )
 
 
@@ -997,7 +1019,7 @@ def test_evaluator_defensively_copies_the_constructor_reviewer_map(
     )
     subjects['reviewer_a'] = f'{999_002:064x}'
 
-    report = evaluator._evaluate_approved(**quality_inputs)
+    report = _evaluate(quality_inputs, evaluator=evaluator)
 
     assert report.gate_outcome == 'green'
 
@@ -1481,7 +1503,7 @@ def test_evaluator_bounds_forced_malformed_frozen_reviewer_rosters(
     object.__setattr__(evaluator, '_frozen_reviewer_subjects', malformed)
 
     with pytest.raises(RagReleaseQualityError, match='reviewer_roster_invalid'):
-        evaluator._evaluate_approved(**quality_inputs)
+        _evaluate(quality_inputs, evaluator=evaluator)
 
 
 @pytest.mark.parametrize(
@@ -1513,7 +1535,7 @@ def test_evaluator_bounds_forced_missing_frozen_reviewer_roster(
     object.__delattr__(evaluator, '_frozen_reviewer_subjects')
 
     with pytest.raises(RagReleaseQualityError, match='reviewer_roster_invalid'):
-        evaluator._evaluate_approved(**quality_inputs)
+        _evaluate(quality_inputs, evaluator=evaluator)
 
 
 @pytest.mark.parametrize(

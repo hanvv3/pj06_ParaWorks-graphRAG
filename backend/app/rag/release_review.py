@@ -11,13 +11,14 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 from collections import Counter
 from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 from weakref import WeakKeyDictionary
@@ -837,13 +838,61 @@ def freeze_live_corpus(
     )
 
 
-def _git_read(repository, *arguments):
+_GIT_ENVIRONMENT_ALLOWLIST = frozenset(
+    {
+        'APPDATA',
+        'COMSPEC',
+        'HOME',
+        'HOMEDRIVE',
+        'HOMEPATH',
+        'LANG',
+        'LC_ALL',
+        'LOCALAPPDATA',
+        'PATH',
+        'PATHEXT',
+        'SYSTEMDRIVE',
+        'SYSTEMROOT',
+        'TEMP',
+        'TMP',
+        'TMPDIR',
+        'USERPROFILE',
+        'WINDIR',
+    }
+)
+
+
+def _git_environment():
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in _GIT_ENVIRONMENT_ALLOWLIST
+    }
+    environment.update(
+        {
+            'GIT_CONFIG_COUNT': '0',
+            'GIT_OPTIONAL_LOCKS': '0',
+            'GIT_TERMINAL_PROMPT': '0',
+        }
+    )
+    return environment
+
+
+def _git_read(repository, *arguments, input_bytes=None):
     try:
         result = subprocess.run(
-            ['git', '-C', str(repository), *arguments],
+            [
+                'git',
+                '--no-replace-objects',
+                '-c',
+                f'core.hooksPath={os.devnull}',
+                '-C',
+                str(repository),
+                *arguments,
+            ],
             capture_output=True,
+            input=input_bytes,
             timeout=15,
-            env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'},
+            env=_git_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         raise LiveGatePreviewError('git_unavailable') from None
@@ -858,6 +907,13 @@ def _clean_commit(repository, expected_commit):
         'commit_invalid',
     )
     _live_require(
+        Path(
+            _git_read(repository, 'rev-parse', '--show-toplevel').decode().strip()
+        ).resolve(strict=True)
+        == Path(repository).resolve(strict=True),
+        'committed_source_unavailable',
+    )
+    _live_require(
         _git_read(repository, 'rev-parse', 'HEAD').decode().strip() == expected_commit,
         'commit_changed',
     )
@@ -867,34 +923,147 @@ def _clean_commit(repository, expected_commit):
     )
 
 
-def _committed_bytes(repository, commit, path):
-    target = repository / path
-    _live_require(
-        target.is_file()
-        and not any(item.is_symlink() for item in (target, *target.parents)),
+def _bound_source_target(repository, path):
+    unavailable = (
         'evaluator_unavailable'
         if path == LIVE_EVALUATOR_PATH
-        else 'committed_source_unavailable',
+        else 'committed_source_unavailable'
     )
-    committed = _git_read(repository, 'show', f'{commit}:{path}')
-    # Git's clean filter, rather than platform-specific checkout bytes, is the
-    # authority for deciding whether a tracked file differs.  `_clean_commit`
-    # fences the read on both sides; the blob returned here is the exact byte
-    # identity bound into the approval regardless of CRLF checkout conversion.
-    return committed
+    allowed = (LIVE_EVALUATOR_PATH, LIVE_FIXTURE_PATH, *LIVE_RETRIEVER_SOURCE_PATHS)
+    _live_require(type(path) is str and path in allowed, unavailable)
+    relative = PurePosixPath(path)
+    _live_require(
+        not relative.is_absolute()
+        and relative.as_posix() == path
+        and all(part not in ('', '.', '..') for part in relative.parts),
+        unavailable,
+    )
+    root = Path(repository).resolve(strict=True)
+    target = root.joinpath(*relative.parts)
+    try:
+        _live_require(
+            target.resolve(strict=True) == target.absolute(),
+            unavailable,
+        )
+        current = target
+        while True:
+            metadata = os.lstat(current)
+            reparse = getattr(metadata, 'st_file_attributes', 0) & getattr(
+                stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0
+            )
+            _live_require(
+                not stat.S_ISLNK(metadata.st_mode) and not reparse,
+                unavailable,
+            )
+            if current == root:
+                break
+            current = current.parent
+        _live_require(stat.S_ISREG(os.lstat(target).st_mode), unavailable)
+    except (OSError, RuntimeError):
+        raise LiveGatePreviewError(unavailable) from None
+    return target
+
+
+def _committed_source_bytes(repository, commit, paths):
+    targets = [_bound_source_target(repository, path) for path in paths]
+    commit_objects = (
+        _git_read(repository, 'rev-parse', *(f'{commit}:{path}' for path in paths))
+        .decode()
+        .splitlines()
+    )
+    _live_require(
+        len(commit_objects) == len(paths)
+        and all(
+            re.fullmatch(r'[0-9a-f]{40,64}', item) is not None
+            for item in commit_objects
+        ),
+        'committed_source_unavailable',
+    )
+    object_types = (
+        _git_read(
+            repository,
+            'cat-file',
+            '--batch-check',
+            input_bytes=('\n'.join(commit_objects) + '\n').encode(),
+        )
+        .decode()
+        .splitlines()
+    )
+    _live_require(
+        len(object_types) == len(paths)
+        and all(
+            re.fullmatch(rf'{object_id} blob [0-9]+', item) is not None
+            for object_id, item in zip(commit_objects, object_types, strict=True)
+        ),
+        'committed_source_unavailable',
+    )
+    index_flags = (
+        _git_read(repository, 'ls-files', '-v', '--', *paths).decode().splitlines()
+    )
+    _live_require(
+        set(index_flags) == {f'H {path}' for path in paths}
+        and len(index_flags) == len(paths),
+        'worktree_dirty',
+    )
+    index_entries = (
+        _git_read(repository, 'ls-files', '--stage', '--', *paths).decode().splitlines()
+    )
+    parsed_index = {}
+    for entry in index_entries:
+        match = re.fullmatch(r'(100644|100755) ([0-9a-f]{40,64}) 0\t(.+)', entry)
+        _live_require(
+            match is not None and match.group(3) not in parsed_index,
+            'worktree_dirty',
+        )
+        parsed_index[match.group(3)] = match.group(2)
+    _live_require(
+        parsed_index == dict(zip(paths, commit_objects, strict=True)),
+        'worktree_dirty',
+    )
+    attributes = _git_read(
+        repository,
+        'check-attr',
+        'filter',
+        'working-tree-encoding',
+        'ident',
+        '--',
+        *paths,
+    ).decode()
+    _live_require(
+        attributes
+        == ''.join(
+            f'{path}: {name}: unspecified\n'
+            for path in paths
+            for name in ('filter', 'working-tree-encoding', 'ident')
+        ),
+        'committed_source_unavailable',
+    )
+    worktree_objects = (
+        _git_read(
+            repository,
+            'hash-object',
+            '--stdin-paths',
+            input_bytes=('\n'.join(paths) + '\n').encode(),
+        )
+        .decode()
+        .splitlines()
+    )
+    _live_require(worktree_objects == commit_objects, 'worktree_dirty')
+    return {
+        path: _git_read(repository, 'show', f'{commit}:{path}')
+        for path, _target in zip(paths, targets, strict=True)
+    }
+
+
+def _committed_bytes(repository, commit, path):
+    return _committed_source_bytes(repository, commit, (path,))[path]
 
 
 def _source_snapshot(repository, expected_commit):
     repository = Path(repository).resolve()
     _clean_commit(repository, expected_commit)
-    files = {
-        path: _committed_bytes(repository, expected_commit, path)
-        for path in (
-            LIVE_EVALUATOR_PATH,
-            LIVE_FIXTURE_PATH,
-            *LIVE_RETRIEVER_SOURCE_PATHS,
-        )
-    }
+    paths = (LIVE_EVALUATOR_PATH, LIVE_FIXTURE_PATH, *LIVE_RETRIEVER_SOURCE_PATHS)
+    files = _committed_source_bytes(repository, expected_commit, paths)
     _clean_commit(repository, expected_commit)
     return files
 

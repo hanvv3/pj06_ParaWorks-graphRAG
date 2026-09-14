@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import pickle
+import shutil
 import subprocess
 from copy import copy, deepcopy
 from dataclasses import replace
 from uuid import UUID
 
 import pytest
+from sqlalchemy import select, update
 
 from backend.app.rag import release_review as review
 from backend.app.rag.release_quality import (
@@ -17,6 +20,7 @@ from backend.app.rag.release_quality import (
     SignedReviewLabel,
     build_review_signature_hmac,
 )
+from backend.app.rag.release_schema import build_rag_release_metadata, release_tables
 from backend.tests.test_rag_live_gate_authorization import runtime_source_harness
 from backend.tests.test_rag_live_gate_preview import committed_repo
 from backend.tests.test_rag_release_ledger import (
@@ -57,24 +61,57 @@ def test_clean_crlf_checkout_uses_committed_blob_identity(
         *review.LIVE_RETRIEVER_SOURCE_PATHS,
     )
     committed = {}
-    for path in source_paths:
+    object_ids = {}
+    for ordinal, path in enumerate(source_paths, 1):
         target = repo / path
         target.parent.mkdir(parents=True, exist_ok=True)
         committed[path] = f'# committed LF blob: {path}\n'.encode()
+        object_ids[path] = f'{ordinal:040x}'
         target.write_bytes(committed[path].replace(b'\n', b'\r\n'))
 
     calls = []
 
-    def fake_git_read(repository, *arguments):
+    def fake_git_read(repository, *arguments, input_bytes=None):
         calls.append((repository, arguments))
+        if arguments == ('rev-parse', '--show-toplevel'):
+            return f'{repo.resolve()}\n'.encode()
         if arguments == ('rev-parse', 'HEAD'):
             return (commit + '\n').encode()
         if arguments == ('status', '--porcelain=v1', '--untracked-files=all'):
             return b''
-        assert arguments[0] == 'show'
-        selected_commit, path = arguments[1].split(':', 1)
-        assert selected_commit == commit
-        return committed[path]
+        if arguments[0] == 'rev-parse':
+            selected = []
+            for reference in arguments[1:]:
+                selected_commit, path = reference.split(':', 1)
+                assert selected_commit == commit
+                selected.append(object_ids[path])
+            return ('\n'.join(selected) + '\n').encode()
+        if arguments[:2] == ('cat-file', '--batch-check'):
+            selected = input_bytes.decode().splitlines()
+            return ''.join(f'{item} blob 1\n' for item in selected).encode()
+        if arguments[:3] == ('ls-files', '-v', '--'):
+            return ''.join(f'H {path}\n' for path in sorted(arguments[3:])).encode()
+        if arguments[:3] == ('ls-files', '--stage', '--'):
+            return ''.join(
+                f'100644 {object_ids[path]} 0\t{path}\n'
+                for path in sorted(arguments[3:])
+            ).encode()
+        if arguments[0] == 'check-attr':
+            selected_paths = arguments[5:]
+            return ''.join(
+                f'{path}: {name}: unspecified\n'
+                for path in selected_paths
+                for name in ('filter', 'working-tree-encoding', 'ident')
+            ).encode()
+        if arguments[:2] == ('hash-object', '--stdin-paths'):
+            return ''.join(
+                f'{object_ids[path]}\n' for path in input_bytes.decode().splitlines()
+            ).encode()
+        if arguments[0] == 'show':
+            selected_commit, path = arguments[1].split(':', 1)
+            assert selected_commit == commit
+            return committed[path]
+        raise AssertionError(arguments)
 
     monkeypatch.setattr(review, '_git_read', fake_git_read)
 
@@ -92,6 +129,118 @@ def test_true_dirty_source_still_refuses_before_blob_approval(tmp_path) -> None:
     assert _git(repo, 'status', '--porcelain=v1', '--untracked-files=all')
     with pytest.raises(review.LiveGatePreviewError, match='worktree_dirty'):
         review.require_live_preview_sources(repo)
+
+
+@pytest.mark.parametrize('index_flag', ['--assume-unchanged', '--skip-worktree'])
+def test_hidden_index_flag_cannot_mask_dirty_bound_source(tmp_path, index_flag) -> None:
+    """Index optimization flags cannot hide bytes executed by the live gate."""
+
+    repo, _commit = committed_repo(tmp_path)
+    path = review.LIVE_RETRIEVER_SOURCE_PATHS[0]
+    clear_flag = (
+        '--no-assume-unchanged'
+        if index_flag == '--assume-unchanged'
+        else '--no-skip-worktree'
+    )
+    try:
+        _git(repo, 'update-index', index_flag, path)
+        target = repo / path
+        target.write_bytes(target.read_bytes() + b'# hidden dirty execution change\n')
+        assert _git(repo, 'status', '--porcelain=v1', '--untracked-files=all') == b''
+
+        with pytest.raises(review.LiveGatePreviewError, match='worktree_dirty'):
+            review.require_live_preview_sources(repo)
+    finally:
+        _git(repo, 'update-index', clear_flag, path)
+
+
+@pytest.mark.parametrize('injection', ['work_tree', 'index', 'config'])
+def test_git_environment_cannot_redirect_bound_source_checks(
+    tmp_path, monkeypatch, injection
+) -> None:
+    """Inherited Git routing/configuration cannot select a benign alternate tree."""
+
+    repo, _commit = committed_repo(tmp_path)
+    alternate = tmp_path / 'alternate-clean-tree'
+    shutil.copytree(repo, alternate, ignore=shutil.ignore_patterns('.git'))
+    target = repo / review.LIVE_EVALUATOR_PATH
+    target.write_bytes(target.read_bytes() + b'# executable dirty bytes\n')
+    assert _git(repo, 'status', '--porcelain=v1', '--untracked-files=all')
+
+    if injection == 'work_tree':
+        monkeypatch.setenv('GIT_WORK_TREE', str(alternate))
+    elif injection == 'index':
+        index_path = _git(repo, 'rev-parse', '--git-path', 'index').decode().strip()
+        index_path = str((repo / index_path).resolve())
+        alternate_index = tmp_path / 'alternate.index'
+        shutil.copy2(index_path, alternate_index)
+        monkeypatch.setenv('GIT_INDEX_FILE', str(alternate_index))
+        monkeypatch.setenv('GIT_WORK_TREE', str(alternate))
+    else:
+        monkeypatch.setenv('GIT_CONFIG_COUNT', '1')
+        monkeypatch.setenv('GIT_CONFIG_KEY_0', 'core.worktree')
+        monkeypatch.setenv('GIT_CONFIG_VALUE_0', str(alternate))
+
+    with pytest.raises(review.LiveGatePreviewError, match='worktree_dirty'):
+        review.require_live_preview_sources(repo)
+
+
+def test_bound_source_path_alias_is_rejected(tmp_path) -> None:
+    """A lexical alias must not select an approved source through another name."""
+
+    repo, commit = committed_repo(tmp_path)
+    alias = 'backend/app/rag/../rag/release_quality.py'
+
+    with pytest.raises(
+        review.LiveGatePreviewError, match='committed_source_unavailable'
+    ):
+        review._committed_bytes(repo, commit, alias)
+
+
+@pytest.mark.parametrize(
+    'name',
+    [
+        'GIT_DIR',
+        'GIT_INDEX_FILE',
+        'GIT_OBJECT_DIRECTORY',
+        'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+        'GIT_REPLACE_REF_BASE',
+        'GIT_CONFIG_GLOBAL',
+        'GIT_CONFIG_KEY_0',
+    ],
+)
+def test_git_subprocess_environment_drops_repository_overrides(monkeypatch, name):
+    """Only module-owned neutral Git controls survive into subprocesses."""
+
+    monkeypatch.setenv(name, 'attacker-controlled')
+
+    environment = review._git_environment()
+
+    assert name not in environment
+    assert {key for key in environment if key.startswith('GIT_')} == {
+        'GIT_CONFIG_COUNT',
+        'GIT_OPTIONAL_LOCKS',
+        'GIT_TERMINAL_PROMPT',
+    }
+    assert environment['GIT_CONFIG_COUNT'] == '0'
+
+
+def test_symlinked_bound_source_is_rejected_when_supported(tmp_path) -> None:
+    """The executable source path must resolve to its own tracked regular file."""
+
+    repo, commit = committed_repo(tmp_path)
+    path = review.LIVE_EVALUATOR_PATH
+    target = repo / path
+    replacement = tmp_path / 'replacement.py'
+    replacement.write_bytes(target.read_bytes())
+    target.unlink()
+    try:
+        os.symlink(replacement, target)
+    except OSError:
+        pytest.skip('symlink creation is unavailable on this Windows host')
+
+    with pytest.raises(review.LiveGatePreviewError, match='evaluator_unavailable'):
+        review._committed_bytes(repo, commit, path)
 
 
 def _require_capability_api() -> None:
@@ -117,6 +266,22 @@ def _issue(h, *, authorization=None, authorization_row=None, source=None):
             source_binding=h.source if source is None else source,
             identity_secret=h.options['identity_secret'],
             barrier_guard=guard,
+        )
+
+
+def _evaluate_capability(h, evaluator, capability, quality):
+    from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
+
+    marker = DurableFileAuthority.open_runtime(h.reader.authority.marker_path)
+    with (
+        h.engine.connect() as connection,
+        h.reader.authority._authority_barrier(connection, marker=marker) as guard,
+    ):
+        return evaluator.evaluate(
+            capability=capability,
+            connection=connection,
+            barrier_guard=guard,
+            **quality,
         )
 
 
@@ -207,9 +372,11 @@ def test_evaluator_consumes_exact_approved_capability_once(tmp_path) -> None:
         reviewer_subject_hmacs=subjects,
     )
 
-    assert evaluator.evaluate(capability=capability, **quality).gate_outcome == 'green'
+    assert (
+        _evaluate_capability(h, evaluator, capability, quality).gate_outcome == 'green'
+    )
     with pytest.raises(RagReleaseQualityError, match='execution_capability_invalid'):
-        evaluator.evaluate(capability=capability, **quality)
+        _evaluate_capability(h, evaluator, capability, quality)
 
 
 def test_evaluator_rejects_caller_supplied_authority_without_capability() -> None:
@@ -230,6 +397,131 @@ def test_evaluator_rejects_caller_supplied_authority_without_capability() -> Non
 
     with pytest.raises(RagReleaseQualityError, match='execution_capability_required'):
         evaluator.evaluate(**values)
+
+
+def test_internal_dto_entry_is_only_a_bounded_refusal() -> None:
+    """An underscore method is not an execution authority boundary."""
+
+    from backend.tests.test_rag_release_quality import quality_inputs as _fixture
+
+    values = _fixture.__wrapped__()
+    evaluator = RagReleaseQualityEvaluator(
+        identity_secret=b'rag-release-quality-test-secret-v1',
+        reviewer_subject_hmacs={
+            role: f'{7000 + ordinal:064x}'
+            for ordinal, role in enumerate(
+                ('reviewer_a', 'reviewer_b', 'adjudicator_c'), 1
+            )
+        },
+    )
+
+    with pytest.raises(RagReleaseQualityError, match='execution_capability'):
+        evaluator._evaluate_approved(**values)
+
+
+def test_public_issuer_does_not_expose_registry_closure(tmp_path) -> None:
+    """A public mint function must not hand callers its registry via closure cells."""
+
+    h = runtime_source_harness(tmp_path)
+    capability = _issue(h)
+
+    assert issue_approved_execution_capability.__closure__ is None
+    forged = object.__new__(ApprovedRagExecutionCapability)
+    quality, subjects = _quality_inputs(h)
+    evaluator = RagReleaseQualityEvaluator(
+        identity_secret=h.options['identity_secret'],
+        reviewer_subject_hmacs=subjects,
+    )
+    with pytest.raises(RagReleaseQualityError, match='execution_capability'):
+        _evaluate_capability(h, evaluator, forged, quality)
+
+    # Keep the legitimate capability live for the current-context tests below.
+    assert repr(capability) == '<ApprovedRagExecutionCapability opaque>'
+
+
+@pytest.mark.parametrize('drift', ['generation', 'transition'])
+def test_release_identity_drift_refuses_and_burns_capability(tmp_path, drift) -> None:
+    """An issued capability cannot outlive its exact release generation/digest."""
+
+    h = runtime_source_harness(tmp_path)
+    capability = _issue(h)
+    quality, subjects = _quality_inputs(h)
+    ledger = release_tables(build_rag_release_metadata()).ledgers
+    with h.engine.begin() as connection:
+        before = (
+            connection.execute(
+                select(ledger).where(
+                    ledger.c.ledger_uuid == str(h.authorization.ledger_uuid),
+                    ledger.c.ledger_epoch == h.authorization.ledger_epoch,
+                )
+            )
+            .mappings()
+            .one()
+        )
+        values = (
+            {'generation': before['generation'] + 1}
+            if drift == 'generation'
+            else {'last_transition_digest': 'f' * 64}
+        )
+        connection.execute(
+            update(ledger)
+            .where(
+                ledger.c.ledger_uuid == str(h.authorization.ledger_uuid),
+                ledger.c.ledger_epoch == h.authorization.ledger_epoch,
+            )
+            .values(**values)
+        )
+
+    evaluator = RagReleaseQualityEvaluator(
+        identity_secret=h.options['identity_secret'],
+        reviewer_subject_hmacs=subjects,
+    )
+    from backend.app.agent_runtime.durable_file_authority import DurableFileAuthority
+
+    marker = DurableFileAuthority.open_runtime(h.reader.authority.marker_path)
+    with (
+        h.engine.connect() as connection,
+        h.reader.authority._authority_barrier(connection, marker=marker) as guard,
+    ):
+        for _ in range(2):
+            with pytest.raises(RagReleaseQualityError, match='execution_capability'):
+                evaluator.evaluate(
+                    capability=capability,
+                    connection=connection,
+                    barrier_guard=guard,
+                    **quality,
+                )
+
+
+@pytest.mark.parametrize('drift', ['source', 'corpus', 'provider'])
+def test_live_source_snapshot_drift_refuses_and_burns_capability(
+    tmp_path, drift
+) -> None:
+    """Consumption repeats source/corpus/provider validation under the barrier."""
+
+    h = runtime_source_harness(tmp_path)
+    capability = _issue(h)
+    quality, subjects = _quality_inputs(h)
+    if drift == 'source':
+        (h.repo / 'post-issue-source-drift').write_text('drift')
+    elif drift == 'corpus':
+        h.reader.value = replace(
+            h.reader.value,
+            corpus=replace(h.reader.value.corpus, corpus_generation=99),
+        )
+    else:
+        h.reader.value = replace(
+            h.reader.value,
+            approved_provider_safety_snapshot_hmac='e' * 64,
+        )
+    evaluator = RagReleaseQualityEvaluator(
+        identity_secret=h.options['identity_secret'],
+        reviewer_subject_hmacs=subjects,
+    )
+
+    for _ in range(2):
+        with pytest.raises(RagReleaseQualityError, match='execution_capability'):
+            _evaluate_capability(h, evaluator, capability, quality)
 
 
 def test_exact_approved_source_can_issue_only_one_capability(tmp_path) -> None:
@@ -351,7 +643,7 @@ def test_capability_is_opaque_noncopyable_nonserializable_and_unforgeable(
         reviewer_subject_hmacs=subjects,
     )
     with pytest.raises(RagReleaseQualityError, match='execution_capability_invalid'):
-        evaluator.evaluate(capability=forged, **quality)
+        _evaluate_capability(h, evaluator, forged, quality)
 
 
 def test_capability_refuses_post_issue_authorization_identity_mutation(
@@ -373,4 +665,4 @@ def test_capability_refuses_post_issue_authorization_identity_mutation(
     )
 
     with pytest.raises(RagReleaseQualityError, match='execution_capability_invalid'):
-        evaluator.evaluate(capability=capability, **quality)
+        _evaluate_capability(h, evaluator, capability, quality)

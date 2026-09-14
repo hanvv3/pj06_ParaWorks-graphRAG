@@ -416,6 +416,8 @@ class RagReleaseQualityEvaluator:
         self,
         *,
         capability=None,
+        connection=None,
+        barrier_guard=None,
         terminal_cases: Sequence[SanitizedLiveCaseResult],
         signed_labels: Sequence[SignedReviewLabel],
         baseline_metrics: FrozenLegacyBaselineMetrics,
@@ -437,29 +439,16 @@ class RagReleaseQualityEvaluator:
             )
 
             authority = _consume_approved_execution_capability(
-                capability, identity_secret=self._identity_secret
+                capability,
+                connection=connection,
+                barrier_guard=barrier_guard,
+                identity_secret=self._identity_secret,
             )
         except (RagLiveGateCapabilityError, AttributeError, TypeError, ValueError):
             raise RagReleaseQualityError('execution_capability_invalid') from None
-        return self._evaluate_approved(
-            terminal_cases=terminal_cases,
-            signed_labels=signed_labels,
-            baseline_metrics=baseline_metrics,
-            manifest=authority.manifest,
-            corpus=authority.corpus,
-            approval=authority.authorization,
-        )
-
-    def _evaluate_approved(
-        self,
-        *,
-        terminal_cases: Sequence[SanitizedLiveCaseResult],
-        signed_labels: Sequence[SignedReviewLabel],
-        baseline_metrics: FrozenLegacyBaselineMetrics,
-        manifest: FrozenLiveManifestSnapshot,
-        corpus: FrozenCorpusSnapshot,
-        approval: AuthorizedRagLiveGate,
-    ) -> RagQualityReport:
+        manifest = authority.manifest
+        corpus = authority.corpus
+        approval = authority.authorization
         _require(type(terminal_cases) is tuple, 'case_roster_invalid')
         _require(type(signed_labels) is tuple, 'review_labels_invalid')
         _require(
@@ -649,6 +638,11 @@ class RagReleaseQualityEvaluator:
             payload_canonical_bytes=canonical,
             quality_report_hmac=report_hmac,
         )
+
+    def _evaluate_approved(self, *args, **kwargs):
+        """Removed DTO-only seam; all quality evaluation requires a capability."""
+
+        raise RagReleaseQualityError('execution_capability_required')
 
     def _frozen_subject_map(self) -> dict[ReviewerRole, str]:
         try:

@@ -7,7 +7,6 @@ process-local capability while the existing release/provider barrier is held.
 
 from __future__ import annotations
 
-import hmac
 from copy import deepcopy
 from dataclasses import dataclass
 from threading import RLock
@@ -49,41 +48,78 @@ class _ApprovedQualityAuthority:
     release_generation: int
 
 
-def _capability_boundary():
-    capabilities = WeakKeyDictionary()
-    issued_sources = WeakKeyDictionary()
-    lock = RLock()
+class ApprovedRagExecutionCapability:
+    """One-use process identity; it deliberately exposes no payload."""
 
-    class ApprovedRagExecutionCapability:
-        """One-use process identity; it deliberately exposes no payload."""
+    __slots__ = ('__weakref__',)
 
-        __slots__ = ('__weakref__',)
+    def __init__(self):
+        raise TypeError('execution capabilities require approved issuance')
 
-        def __init__(self):
-            raise TypeError('execution capabilities require approved issuance')
+    def __copy__(self):
+        raise TypeError('execution capabilities cannot be copied')
 
-        def __copy__(self):
-            raise TypeError('execution capabilities cannot be copied')
+    def __deepcopy__(self, memo):
+        raise TypeError('execution capabilities cannot be copied')
 
-        def __deepcopy__(self, memo):
-            raise TypeError('execution capabilities cannot be copied')
+    def __reduce__(self):
+        raise TypeError('execution capabilities cannot be serialized')
 
-        def __reduce__(self):
-            raise TypeError('execution capabilities cannot be serialized')
+    def __reduce_ex__(self, protocol):
+        raise TypeError('execution capabilities cannot be serialized')
 
-        def __reduce_ex__(self, protocol):
-            raise TypeError('execution capabilities cannot be serialized')
+    def __getstate__(self):
+        raise TypeError('execution capabilities cannot be serialized')
 
-        def __getstate__(self):
-            raise TypeError('execution capabilities cannot be serialized')
+    def __repr__(self):
+        return '<ApprovedRagExecutionCapability opaque>'
 
-        def __repr__(self):
-            return '<ApprovedRagExecutionCapability opaque>'
 
-    def refuse(code='execution_capability_invalid'):
-        raise RagLiveGateCapabilityError(code)
+def _refuse(code='execution_capability_invalid'):
+    raise RagLiveGateCapabilityError(code)
+
+
+class _ExecutionCapabilityAuthority:
+    """Module-owned identity registry; public callables retain no closure state."""
+
+    __slots__ = ('__capabilities', '__issued_sources', '__lock')
+
+    def __init__(self):
+        self.__capabilities = WeakKeyDictionary()
+        self.__issued_sources = WeakKeyDictionary()
+        self.__lock = RLock()
+
+    @staticmethod
+    def _ledger(connection, authorization):
+        tables = release_tables(build_rag_release_metadata())
+        rows = (
+            connection.execute(
+                select(tables.ledgers)
+                .where(
+                    tables.ledgers.c.ledger_uuid == str(authorization.ledger_uuid),
+                    tables.ledgers.c.ledger_epoch == authorization.ledger_epoch,
+                )
+                .with_for_update()
+            )
+            .mappings()
+            .all()
+        )
+        if len(rows) != 1:
+            _refuse()
+        ledger = dict(rows[0])
+        generation = ledger.get('generation')
+        transition_digest = ledger.get('last_transition_digest')
+        if (
+            type(generation) is not int
+            or generation <= authorization.approval_base_generation
+            or type(transition_digest) is not str
+        ):
+            _refuse()
+        require_lower_hmac(transition_digest)
+        return generation, transition_digest
 
     def issue(
+        self,
         connection,
         *,
         authorization,
@@ -92,7 +128,7 @@ def _capability_boundary():
         identity_secret,
         barrier_guard,
     ):
-        with lock:
+        with self.__lock:
             try:
                 if (
                     type(authorization) is not AuthorizedRagLiveGate
@@ -107,12 +143,12 @@ def _capability_boundary():
                     or barrier_guard is None
                     or connection.engine is None
                 ):
-                    refuse()
+                    _refuse()
                 require_issued_live_authorization_identity(
                     source_binding, authorization
                 )
-                if source_binding in issued_sources:
-                    refuse('execution_capability_already_issued')
+                if source_binding in self.__issued_sources:
+                    _refuse('execution_capability_already_issued')
 
                 authorization_snapshot = deepcopy(authorization)
                 executable_bytes = canonical_json_bytes(
@@ -128,10 +164,8 @@ def _capability_boundary():
                     != authorization.approval_id_hmac
                     or row_snapshot.get('approval_hmac') != authorization.approval_hmac
                 ):
-                    refuse()
+                    _refuse()
 
-                # This is the existing Task24 source/corpus/provider/release
-                # verifier.  It also authenticates the supplied barrier guard.
                 require_approved_case_source(
                     connection,
                     manifest=authorization.manifest.executable,
@@ -140,33 +174,7 @@ def _capability_boundary():
                     identity_secret=identity_secret,
                     barrier_guard=barrier_guard,
                 )
-
-                tables = release_tables(build_rag_release_metadata())
-                rows = (
-                    connection.execute(
-                        select(tables.ledgers)
-                        .where(
-                            tables.ledgers.c.ledger_uuid
-                            == str(authorization.ledger_uuid),
-                            tables.ledgers.c.ledger_epoch == authorization.ledger_epoch,
-                        )
-                        .with_for_update()
-                    )
-                    .mappings()
-                    .all()
-                )
-                if len(rows) != 1:
-                    refuse()
-                ledger = dict(rows[0])
-                generation = ledger.get('generation')
-                transition_digest = ledger.get('last_transition_digest')
-                if (
-                    type(generation) is not int
-                    or generation <= authorization.approval_base_generation
-                    or type(transition_digest) is not str
-                ):
-                    refuse()
-                require_lower_hmac(transition_digest)
+                generation, transition_digest = self._ledger(connection, authorization)
                 if (
                     not _exact_frozen_equal(authorization, authorization_snapshot)
                     or canonical_json_bytes(
@@ -175,14 +183,15 @@ def _capability_boundary():
                     != executable_bytes
                     or row_snapshot != authorization_row
                 ):
-                    refuse()
+                    _refuse()
 
                 capability = object.__new__(ApprovedRagExecutionCapability)
-                capabilities[capability] = {
+                self.__capabilities[capability] = {
                     'used': False,
-                    'identity_secret': bytes(identity_secret),
+                    'engine': connection.engine,
                     'authorization_object': authorization,
                     'authorization': authorization_snapshot,
+                    'authorization_row': row_snapshot,
                     'source_binding': source_binding,
                     'ledger_uuid': authorization.ledger_uuid,
                     'ledger_epoch': authorization.ledger_epoch,
@@ -201,34 +210,42 @@ def _capability_boundary():
                         row_snapshot.get('provider_safety_envelope_digest'),
                     ),
                 }
-                issued_sources[source_binding] = capability
+                self.__issued_sources[source_binding] = capability
                 return capability
             except RagLiveGateCapabilityError:
                 raise
             except Exception:
-                refuse()
+                _refuse()
 
-    def consume(capability, *, identity_secret):
-        with lock:
+    def consume(
+        self,
+        capability,
+        *,
+        connection,
+        barrier_guard,
+        identity_secret,
+    ):
+        with self.__lock:
             if (
                 type(capability) is not ApprovedRagExecutionCapability
-                or capability not in capabilities
+                or capability not in self.__capabilities
             ):
-                refuse()
-            state = capabilities[capability]
+                _refuse()
+            state = self.__capabilities[capability]
             if state['used']:
-                refuse()
-            # The attempt itself consumes the authority.  Malformed quality
-            # inputs cannot be fixed and replayed after the approved run.
+                _refuse()
+            # Every attempt is terminal: authority drift cannot be repaired and
+            # replayed with the same approved execution identity.
             state['used'] = True
             try:
                 authorization = state['authorization_object']
                 snapshot = state['authorization']
                 if (
                     type(identity_secret) is not bytes
-                    or not hmac.compare_digest(
-                        identity_secret, state['identity_secret']
-                    )
+                    or len(identity_secret) < 32
+                    or connection is None
+                    or connection.engine is not state['engine']
+                    or barrier_guard is None
                     or type(authorization) is not AuthorizedRagLiveGate
                     or not _exact_frozen_equal(authorization, snapshot)
                     or type(authorization.ledger_uuid) is not UUID
@@ -250,30 +267,73 @@ def _capability_boundary():
                     != state['fixture_binding']
                     or authorization.approved_provider_safety_snapshot_hmac
                     != state['provider_binding'][0]
-                    or type(state['release_generation']) is not int
-                    or state['release_generation']
-                    <= authorization.approval_base_generation
                 ):
-                    refuse()
+                    _refuse()
+                require_issued_live_authorization_identity(
+                    state['source_binding'], authorization
+                )
+                require_approved_case_source(
+                    connection,
+                    manifest=authorization.manifest.executable,
+                    source_binding=state['source_binding'],
+                    authorization=deepcopy(state['authorization_row']),
+                    identity_secret=identity_secret,
+                    barrier_guard=barrier_guard,
+                )
+                generation, transition_digest = self._ledger(connection, authorization)
+                if (
+                    generation != state['release_generation']
+                    or transition_digest != state['last_transition_digest']
+                    or not _exact_frozen_equal(authorization, snapshot)
+                ):
+                    _refuse()
                 return _ApprovedQualityAuthority(
                     authorization=deepcopy(snapshot),
                     manifest=deepcopy(state['manifest']),
                     corpus=deepcopy(state['corpus']),
-                    release_generation=state['release_generation'],
+                    release_generation=generation,
                 )
             except RagLiveGateCapabilityError:
                 raise
             except Exception:
-                refuse()
-
-    return ApprovedRagExecutionCapability, issue, consume
+                _refuse()
 
 
-(
-    ApprovedRagExecutionCapability,
-    issue_approved_execution_capability,
-    _consume_approved_execution_capability,
-) = _capability_boundary()
+_CAPABILITY_AUTHORITY = _ExecutionCapabilityAuthority()
+
+
+def issue_approved_execution_capability(
+    connection,
+    *,
+    authorization,
+    authorization_row,
+    source_binding,
+    identity_secret,
+    barrier_guard,
+):
+    return _CAPABILITY_AUTHORITY.issue(
+        connection,
+        authorization=authorization,
+        authorization_row=authorization_row,
+        source_binding=source_binding,
+        identity_secret=identity_secret,
+        barrier_guard=barrier_guard,
+    )
+
+
+def _consume_approved_execution_capability(
+    capability,
+    *,
+    connection,
+    barrier_guard,
+    identity_secret,
+):
+    return _CAPABILITY_AUTHORITY.consume(
+        capability,
+        connection=connection,
+        barrier_guard=barrier_guard,
+        identity_secret=identity_secret,
+    )
 
 
 __all__ = [
