@@ -37,7 +37,13 @@ from backend.tests.graph_projection_fixtures import (
     vector,
 )
 from backend.tests.test_graph_projection_neo4j import canonical_pg  # noqa: F401
-from backend.tests.test_neo4j_retriever import adapter, request
+from backend.tests.test_neo4j_retriever import (
+    adapter,
+    request,
+)
+from backend.tests.test_neo4j_retriever import (
+    lexical_pg as lexical_pg,
+)
 
 
 def _driver():
@@ -135,9 +141,10 @@ def _pgvector_seed(db, request_value, case, *, populate=True):
         for row in rows
         if row.access.permission_visibility == 'visible'
     )[:5]
-    assert tuple(c.evidence.serving_document_id for c in visible) == CASES[case][
-        'baseline_ids'
-    ]
+    assert (
+        tuple(c.evidence.serving_document_id for c in visible)
+        == CASES[case]['baseline_ids']
+    )
     elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
     return RetrievalResult(
         configured_backend='pgvector',
@@ -182,11 +189,17 @@ def test_e3_fixed_corpus_compares_ordered_ids_and_public_source_coverage(
         from langchain_core.runnables import RunnableLambda
 
         graph_started = time.perf_counter_ns()
-        result = adapter(db, store, RunnableLambda(lambda _: baseline)).invoke(case_request)
-        graph_ms = (time.perf_counter_ns() - graph_started) / 1_000_000
+        result = adapter(db, store, RunnableLambda(lambda _: baseline)).invoke(
+            case_request
+        )
+        graph_enrichment_overhead_ms = (
+            time.perf_counter_ns() - graph_started
+        ) / 1_000_000
         print(
             f'E3_TIMING case={case} n=1 pgvector_ms={pgvector_ms:.3f} '
-            f'graph_ms={graph_ms:.3f} sync_ms={sync_ms:.3f} '
+            f'graph_enrichment_overhead_ms={graph_enrichment_overhead_ms:.3f} '
+            f'graph_total_ms={pgvector_ms + graph_enrichment_overhead_ms:.3f} '
+            f'sync_ms={sync_ms:.3f} '
             f'generation_lag={status.generation_lag}',
             flush=True,
         )
@@ -206,7 +219,8 @@ def test_e3_fixed_corpus_compares_ordered_ids_and_public_source_coverage(
             assert status.generation_lag == 0
             if os.getenv('PARAWORKS_TEST_NEO4J_RESTART_PAUSE') == '1':
                 print(
-                    f'E3_RESTART_READY scope={scope_id} ordered={ordered_ids}', flush=True
+                    f'E3_RESTART_READY scope={scope_id} ordered={ordered_ids}',
+                    flush=True,
                 )
                 input('Restart only disposable paraworks-e-neo4j, then press Enter: ')
                 # Recreate both driver boundary objects: this proves E-2
@@ -220,17 +234,23 @@ def test_e3_fixed_corpus_compares_ordered_ids_and_public_source_coverage(
                     recovered = adapter(
                         db, store, RunnableLambda(lambda _: baseline)
                     ).invoke(case_request)
-                    if tuple(
-                        candidate.evidence.serving_document_id
-                        for candidate in recovered.visible
-                    ) == ordered_ids:
+                    if (
+                        tuple(
+                            candidate.evidence.serving_document_id
+                            for candidate in recovered.visible
+                        )
+                        == ordered_ids
+                    ):
                         break
                     time.sleep(0.25)
                 assert recovered is not None
-                assert tuple(
-                    candidate.evidence.serving_document_id
-                    for candidate in recovered.visible
-                ) == ordered_ids
+                assert (
+                    tuple(
+                        candidate.evidence.serving_document_id
+                        for candidate in recovered.visible
+                    )
+                    == ordered_ids
+                )
                 assert _source_ids(recovered) == _source_ids(result)
             if os.getenv('PARAWORKS_TEST_POSTGRES_RESTART_PAUSE') == '1':
                 print(
@@ -240,7 +260,9 @@ def test_e3_fixed_corpus_compares_ordered_ids_and_public_source_coverage(
                 engine = db.get_bind()
                 db.close()
                 engine.dispose()
-                input('Restart only disposable paraworks-e-postgres, then press Enter: ')
+                input(
+                    'Restart only disposable paraworks-e-postgres, then press Enter: '
+                )
                 # This is explicit fresh-engine/session reconstruction after an
                 # outage, not a production transparent retry claim.
                 engine.dispose()
@@ -251,21 +273,29 @@ def test_e3_fixed_corpus_compares_ordered_ids_and_public_source_coverage(
                 recovered = adapter(
                     db, store, RunnableLambda(lambda _: recovered_baseline)
                 ).invoke(case_request)
-                assert tuple(
-                    candidate.evidence.serving_document_id
-                    for candidate in recovered_baseline.visible
-                ) == CASES[case]['baseline_ids']
-                assert tuple(
-                    candidate.evidence.serving_document_id
-                    for candidate in recovered.visible
-                ) == ordered_ids
+                assert (
+                    tuple(
+                        candidate.evidence.serving_document_id
+                        for candidate in recovered_baseline.visible
+                    )
+                    == CASES[case]['baseline_ids']
+                )
+                assert (
+                    tuple(
+                        candidate.evidence.serving_document_id
+                        for candidate in recovered.visible
+                    )
+                    == ordered_ids
+                )
         else:
             assert ordered_ids == CASES[case]['baseline_ids']
             assert _source_ids(result) == expected
             assert metrics.precision_at_k == metrics.recall_at_k == 1.0
     finally:
         with driver.session() as session:
-            session.run('MATCH (n {scope_id:$scope}) DETACH DELETE n', scope=scope_id).consume()
+            session.run(
+                'MATCH (n {scope_id:$scope}) DETACH DELETE n', scope=scope_id
+            ).consume()
         driver.close()
         db.close()
 
@@ -286,9 +316,16 @@ def test_e3_rollback_keeps_seed_path_and_embedding_receipt(lexical_pg, mode):
     evidence = _evidence(db, 'history_event:1', settings=SETTINGS, scope=SCOPE)
     assert evidence is not None
     original = RetrievalResult(
-        configured_backend='pgvector', effective_backend='pgvector',
-        visible=(RetrievalCandidate(evidence=evidence, relevance_score=1.0, matched_terms=()),),
-        hidden_match_count=0, hidden_count_capped=False, top_candidate_window_hmac='a' * 64,
+        configured_backend='pgvector',
+        effective_backend='pgvector',
+        visible=(
+            RetrievalCandidate(
+                evidence=evidence, relevance_score=1.0, matched_terms=()
+            ),
+        ),
+        hidden_match_count=0,
+        hidden_count_capped=False,
+        top_candidate_window_hmac='a' * 64,
         query_embedding_receipt=None,
         trace=SanitizedRetrievalTrace(1, 1, 0, 0, 0, None),
     )
@@ -307,9 +344,9 @@ def test_e3_rollback_keeps_seed_path_and_embedding_receipt(lexical_pg, mode):
                 raise GraphUnavailable('disposable graph unavailable')
             return ()
 
-    result = adapter(
-        db, Store(), RunnableLambda(lambda value: original)
-    ).invoke(request())
+    result = adapter(db, Store(), RunnableLambda(lambda value: original)).invoke(
+        request()
+    )
     assert result.visible == original.visible
     assert result.query_embedding_receipt is receipt
     assert result.top_candidate_window_hmac == original.top_candidate_window_hmac
