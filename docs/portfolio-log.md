@@ -30,6 +30,10 @@
   selector는 **1 passed in 4.09s**, 관련 graph/finalization 영향 명령은
   **95 passed, 1 skipped in 101.34s**, failure 0이었다. 기존 implementation은 이 계약을 만족해
   product code 변경은 없었다.
+- controller 최종 재검증 대상 revision `17e978193f9ccbf73903aecdfffee8a64561ab0f`에서
+  동일 provider-free 우선 명령은 새 회귀를 포함해 **347 passed in 199.09s**, 직접 영향 명령은
+  **156 passed, 1 skipped in 46.04s**였다. failure는 0이며 skip은 위와 같은 F-2 전용
+  disposable PostgreSQL projection-owner case다.
 - 이 기록은 provider-free F-1 증거만 뜻한다. 실제 PostgreSQL+pgvector/UI 통합은 F-2에서,
   actual-model 품질·30-case formal release와 capability P1/NOT CLEAN 해소는 보류된 D-0~D-5에서
   별도로 검증해야 하며, 이번 결과로 이를 통과라고 표시하지 않는다.
