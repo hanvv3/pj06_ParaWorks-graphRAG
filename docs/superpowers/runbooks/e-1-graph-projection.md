@@ -86,7 +86,9 @@ generations and out-of-order cursor writes are rejected. Sweeps delete at most
 count scans; generation lag uses the last fully swept generation and elapsed
 scan time is reported separately. Incomplete generations cannot serve E-2.
 
-PG statements have a 5-second timeout and 2-second lock timeout; Neo4j transaction
+PG statements have a 5-second timeout and 2-second lock timeout, installed before
+the first corpus lock in both scan and sweep entry paths. Failed transactions are
+left for the caller to roll back; the job does not retry or commit them. Neo4j transaction
 callbacks have a 5-second timeout. Configure supplied official drivers with short
 connection/acquisition timeouts and bounded retry time for the hosting job. The
 step interface intentionally does not create a driver or manage credentials.

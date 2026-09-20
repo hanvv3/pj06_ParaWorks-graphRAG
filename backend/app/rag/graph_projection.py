@@ -192,6 +192,13 @@ def _trusted_within_bounds(db, kind, identifier):
     return True
 
 
+def _set_projection_transaction_limits(db):
+    """Bound every PG entry path without taking ownership of its transaction."""
+    if db.get_bind().dialect.name == 'postgresql':
+        db.execute(text("SET LOCAL statement_timeout = '5s'"))
+        db.execute(text("SET LOCAL lock_timeout = '2s'"))
+
+
 def read_projection_page(db, *, settings, scope, cursor=0, batch_size=50):
     if (
         type(batch_size) is not int
@@ -200,9 +207,7 @@ def read_projection_page(db, *, settings, scope, cursor=0, batch_size=50):
         or cursor < 0
     ):
         raise ValueError('projection batch/cursor outside bounds')
-    if db.get_bind().dialect.name == 'postgresql':
-        db.execute(text("SET LOCAL statement_timeout = '5s'"))
-        db.execute(text("SET LOCAL lock_timeout = '2s'"))
+    _set_projection_transaction_limits(db)
     generation = db.scalar(
         select(RagServingCorpusGeneration)
         .where(RagServingCorpusGeneration.id == 1)
@@ -330,6 +335,7 @@ def reconcile_graph_step(db, *, settings, scope, store, batch_size=50):
     """One bounded, restartable admin-job step; no runtime routing side effect."""
     scope_id = security_scope_fingerprint(scope, settings=settings)
     status = store.status(scope_id)
+    _set_projection_transaction_limits(db)
     generation = db.scalar(
         select(RagServingCorpusGeneration)
         .where(RagServingCorpusGeneration.id == 1)

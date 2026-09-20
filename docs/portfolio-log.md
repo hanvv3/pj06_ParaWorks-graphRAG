@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — E-1 canonical Neo4j projection
 
+- E-1 review R1: scan 진입의 첫 `FOR SHARE`가 timeout 설정보다 앞서고 sweep에는 설정이
+  없던 P2를 수정했다. 공통 transaction-local 제한을 첫 corpus 잠금 전에 적용하며
+  caller commit/rollback 책임과 예외 전파를 유지한다. 실제 PG의 별도 session이 corpus row를
+  `FOR UPDATE`로 잡은 scan/sweep 두 경로가 RED에서 4초 watchdog `57014`로 실패했고,
+  수정 후 2초 lock timeout `55P03`로 종료됐다. 기존 순차 generation/cursor fence 검증과
+  이번 실제 PG lock contention 검증은 다른 증거다. 집중 projection/baseline/DB suite는
+  **18 passed in 12.39s**; 전체 suite 반복은 하지 않았다.
+
 - `349b7cd` 기준에서 최소 `SUPPORTED_BY` projection을 추가했다. 승인/원본 canonical
   resolver와 scope fingerprint를 재사용하며 원문/embedding은 graph에 저장하지 않는다.
   ordered node/edge provenance v1, 제한된 batch/cursor, atomic replay, generation fence,

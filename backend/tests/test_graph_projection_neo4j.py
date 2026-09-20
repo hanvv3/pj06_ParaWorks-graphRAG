@@ -1,9 +1,11 @@
 import os
 from dataclasses import replace
+from time import monotonic
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from backend.app.db.base import Base
@@ -59,6 +61,54 @@ def canonical_pg():
                 yield db
         finally:
             engine.dispose()
+
+
+@pytest.mark.parametrize('phase', ['scan', 'sweep'])
+def test_pg_generation_contention_is_bounded_before_first_lock(canonical_pg, phase):
+    from backend.app.models import RagServingCorpusGeneration
+    from backend.app.rag.graph_projection import reconcile_graph_step
+    from backend.app.rag.graph_store import GraphProjectionStatus
+
+    seed_corpus(canonical_pg)
+
+    class NoGraphWriteStore:
+        def status(self, scope_id):
+            return GraphProjectionStatus(generation=1, scanned=phase == 'sweep')
+
+        def apply_page(self, page):
+            pytest.fail('blocked canonical read must not reach graph writes')
+
+        def sweep(self, *args, **kwargs):
+            pytest.fail('blocked canonical read must not reach graph sweep')
+
+    engine = canonical_pg.get_bind()
+    with Session(engine) as blocker, Session(engine) as contender:
+        blocker.execute(
+            select(RagServingCorpusGeneration)
+            .where(RagServingCorpusGeneration.id == 1)
+            .with_for_update()
+        ).one()
+        # Independent watchdog makes pre-fix RED finite: production must replace
+        # it with its own 2-second lock timeout BEFORE attempting FOR SHARE.
+        contender.execute(text("SET LOCAL statement_timeout = '4s'"))
+        started = monotonic()
+        with pytest.raises(DBAPIError) as failure:
+            reconcile_graph_step(
+                contender, settings=SETTINGS, scope=SCOPE, store=NoGraphWriteStore()
+            )
+        elapsed = monotonic() - started
+        assert failure.value.orig.sqlstate == '55P03'  # lock_not_available
+        assert 1.5 <= elapsed < 3.5
+        # The caller still owns the failed transaction and explicitly rolls it
+        # back. No retry or hidden commit/rollback is introduced by the job.
+        assert contender.in_transaction()
+        contender.rollback()
+        assert not contender.in_transaction()
+        assert (
+            contender.scalar(select(RagServingCorpusGeneration.corpus_generation)) == 1
+        )
+        contender.rollback()
+        blocker.rollback()
 
 
 def test_disposable_neo4j_restart_delete_revoke_and_generation_fences(canonical_pg):
