@@ -985,8 +985,14 @@ def test_answer_graph_post_generation_unselected_influence_revoke_redacts_full_p
     assert result['model_influence'] == ()
     assert len(client.seen) == 1
     assert result['charged_cost_usd'] == captured['parent_cost_usd']
-    parent = context.services.db.get(AgentRun, 161)
+    parent = context.services.db.scalar(
+        select(AgentRun)
+        .where(AgentRun.id == 161)
+        .execution_options(populate_existing=True)
+    )
+    assert parent is not None
     assert parent.status == 'complete' and parent.run_record_phase == 'final'
+    assert parent.total_charged_cost_usd == captured['parent_cost_usd']
     answer_cost = context.services.db.query(AgentRunCostComponent).filter_by(
         agent_run_id=161, component='answer_generation'
     ).one()

@@ -23,11 +23,12 @@
 - 후속 리뷰가 지적한 unselected model influence의 생성 후 revoke 경계는 두 provider-visible slot을
   실제 graph에 넣어 E1만 선택하고 E2를 생성 뒤 `restricted`로 revoke하는 회귀로 보완했다:
   `test_answer_graph_post_generation_unselected_influence_revoke_redacts_full_product` →
-  review round 2에서 이 selector를 exact parent/component cost equality, actual 10/5 token usage,
-  `charge_basis=actual`, dispatch 1까지 강화해 **1 passed in 4.15s**를 확인했다. 전체 answer
-  product/citation/influence를 redaction하고 한 번만 dispatch하며, exact committed cost와
-  full-influence audit HMAC을 보존한다. 관련 graph/finalization 영향 명령은
-  **95 passed, 1 skipped in 102.58s**, failure 0이었다. 기존 implementation은 이 계약을 만족해
+  review round 3에서 phase 2 뒤 parent를 `populate_existing` query로 reload해, captured parent
+  total과 final persisted total의 exact equality까지 강화했다. component actual 10/5 token usage,
+  `charge_basis=actual`, dispatch 1도 유지한다. 전체 answer product/citation/influence를 redaction하고
+  한 번만 dispatch하며, exact committed parent/component cost와 full-influence audit HMAC을 보존한다.
+  selector는 **1 passed in 4.09s**, 관련 graph/finalization 영향 명령은
+  **95 passed, 1 skipped in 101.34s**, failure 0이었다. 기존 implementation은 이 계약을 만족해
   product code 변경은 없었다.
 - 이 기록은 provider-free F-1 증거만 뜻한다. 실제 PostgreSQL+pgvector/UI 통합은 F-2에서,
   actual-model 품질·30-case formal release와 capability P1/NOT CLEAN 해소는 보류된 D-0~D-5에서
