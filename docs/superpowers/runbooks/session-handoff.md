@@ -1,20 +1,31 @@
 # ParaWorks — 현재 인수인계
 
-갱신: 2026-09-21. 단계: **E-1 projection implemented/verified; E-2 next; formal release deferred and NOT CLEAN**.
+갱신: 2026-09-21. 단계: **E-2 relationship retrieval implemented; independent review/E-3 next; formal release deferred and NOT CLEAN**.
 
-## E-1 후속 진입
+## E-2 후속 진입
+
+- default-off `rag_graph_enrichment_enabled`로 기존 keyword/pgvector seed Runnable을
+  감싼다. paid embedding/receipt와 50 candidate·5 evidence 예산을 그대로 재사용한다.
+- ordered graph path v1을 retrieval→prepared influence v3→실제 provider-send C.5 검증→
+  최종 PG 검증으로 운반한다. edge만 바뀌어도 전송 전 0 call 차단 또는 전송 후 답변/citation
+  redaction으로 처리하며 실제 비용을 보존한다. 공개 응답/Review/권한 정책은 미변경이다.
+- [E-2 runbook](e-2-relationship-retrieval.md)에 config, 내부 fingerprint 소비자와 fake/real DB
+  검증 경계를 정리했다. keyword tuple-array 오류도 실제 PG에서 재현 후 SQL 경계만 수정했다.
+- 다음은 독립 리뷰와 E-3 동일 corpus 비교다. 자동 flag 활성화·유료 호출·cache는 하지 않았다.
+
+## E-1 기반 계약
 
 - projection 코드/고정 fixture/실제 DB 검증은 [E-1 runbook](e-1-graph-projection.md),
   fresh 수치는 [portfolio](../../portfolio-log.md)의 최신 E-1 항목에 있다.
-- 다음은 E-2다. `GraphPathDependency` v1 ordered node/edge와 canonical references를
+- E-2는 `GraphPathDependency` v1 ordered node/edge와 canonical references를
   RetrievalResult→graph state→모델 전송 전→최종 노출 PG 검증으로 운반한다.
   Neo4j scope는 principal까지 포함한 기존 scope fingerprint이며 complete/current generation만
   소비할 수 있다. endpoint-only 검증으로 edge 변경을 통과시키지 않는다.
-- GraphRouting/public API/Review/permission/cost 정책은 바뀌지 않았다. 실제 모델 품질·E-3
+- Public API/Review/permission/cost 정책은 바뀌지 않았다. 실제 모델 품질·E-3
   검색 효과·배포 최소권한 RBAC는 미검증이다. 공식 Neo4j driver 6.3.1이 lock에 추가됐다.
-- E-1 actual PG baseline의 배열 tuple 오류는 pgvector SQL 경계 3곳만 list로 수정했다.
-  기존 keyword `_postgresql_search`에도 tuple bind가 있으므로 E-2 fallback에서 실제 PG로
-  재현·수정해야 할 점검 항목이다. 유료 호출이나 fallback 안전장치를 우회하지 않는다.
+- E-1 actual PG baseline의 배열 tuple 오류는 pgvector SQL 경계 3곳을 수정했고,
+  E-2에서는 keyword `_postgresql_search`의 같은 오류를 실제 PG로 재현·수정했다.
+  유료 호출이나 fallback 안전장치를 우회하지 않는다.
 - 테스트는 fresh `.tmp` basetemp/cache와 `.venv-task4-r3-review/Scripts/python.exe`를 사용한다.
   기존 `.venv` launcher는 깨져 있어 uv는 `UV_PROJECT_ENVIRONMENT=.venv-task4-r3-review`와
   workspace cache를 명시한다. DB credentials는 프로세스 환경으로만 공급하고 저장하지 않는다.

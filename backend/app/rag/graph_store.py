@@ -7,7 +7,7 @@ test credentials do not demonstrate production least-privilege RBAC.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 
 from neo4j import unit_of_work
 
@@ -57,6 +57,69 @@ class Neo4jGraphStore:
             ).consume()
 
         self._transaction(provision)
+
+    def traverse(self, *, scope_id, generation, seeds, permissions, policy):
+        from backend.app.rag.graph_projection import (
+            GraphEdgeDependency,
+            GraphNodeDependency,
+            GraphPathDependency,
+            GraphTraversalPolicy,
+        )
+
+        if type(policy) is not GraphTraversalPolicy:
+            raise ValueError('graph traversal policy required')
+        policy.__post_init__()
+        if type(seeds) is not tuple or not 1 <= len(seeds) <= policy.seed_limit:
+            raise ValueError('graph seed window outside bounds')
+
+        def read(tx):
+            rows = tx.run(
+                """MATCH (s:PwProjection {scope_id:$scope})
+                WHERE s.complete = true AND s.generation = $generation
+                  AND s.completed_generation = $generation
+                UNWIND $seeds AS seed
+                MATCH (a:PwEvidence {scope_id:$scope, document_id:seed})
+                      -[r:SUPPORTED_BY]-(b:PwEvidence {scope_id:$scope})
+                WHERE r.scope_id = $scope AND a.generation = $generation
+                  AND b.generation = $generation AND r.generation = $generation
+                  AND a.permission IN $permissions AND b.permission IN $permissions
+                  AND r.permission IN $permissions
+                WITH DISTINCT startNode(r) AS left, r, endNode(r) AS right
+                RETURN properties(left) AS left, properties(r) AS edge, properties(right) AS right
+                LIMIT $limit""",
+                scope=scope_id,
+                generation=generation,
+                seeds=list(seeds),
+                permissions=list(permissions),
+                limit=policy.candidate_limit,
+            )
+
+            def build(cls, value):
+                return cls(**{f.name: value[f.name] for f in fields(cls)})
+
+            return tuple(
+                sorted(
+                    (
+                        GraphPathDependency(
+                            (
+                                build(GraphNodeDependency, r['left']),
+                                build(GraphNodeDependency, r['right']),
+                            ),
+                            (build(GraphEdgeDependency, r['edge']),),
+                        )
+                        for r in rows
+                    ),
+                    key=lambda p: p.edges[0].edge_id,
+                )
+            )
+
+        try:
+            with self.driver.session(database=self.database) as session:
+                return session.execute_read(
+                    unit_of_work(timeout=policy.timeout_seconds)(read)
+                )
+        except Exception:
+            raise GraphUnavailable('graph unavailable') from None
 
     def status(self, scope_id, *, canonical_generation=None):
         def read(tx):

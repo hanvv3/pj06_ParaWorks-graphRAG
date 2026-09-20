@@ -366,6 +366,7 @@ def _create_rag_cost_policy_type(
                 slots: object,
                 observations: object,
                 prepared_set: object = None,
+                db: object = None,
             ) -> None:
                 verify_answer_model_influence(
                     slots,
@@ -389,6 +390,13 @@ def _create_rag_cost_policy_type(
                         current_readiness_hmac=prepared_set.prepared_readiness_hmac)
                     if not _valid_prepared_influence_set(prepared_set, fence=fence, settings=influence_settings):
                         raise ValueError('prepared influence set is invalid')
+                    if db is not None and prepared_set.graph_paths:
+                        from backend.app.rag.neo4j_retriever import validate_graph_paths
+                        if prepared_set.graph_scope is None or not validate_graph_paths(
+                            db, prepared_set.graph_paths, settings=influence_settings,
+                            scope=prepared_set.graph_scope,
+                        ):
+                            raise ValueError('graph influence changed before send')
 
             def answer_artifact_signer(kind: str, payload: object) -> str:
                 domains = {
@@ -839,10 +847,11 @@ def _create_rag_cost_policy_type(
             slots: object,
             observations: object,
             *, prepared_set: object = None,
+            db: object = None,
         ) -> None:
             code = 'model_unavailable'
             state = get_state(self, code)
-            state.answer_influence_verifier(slots, observations, prepared_set)
+            state.answer_influence_verifier(slots, observations, prepared_set, db)
             invoke_hook('answer_influence_after_verify', self)
             require_same_state(self, state, code)
 

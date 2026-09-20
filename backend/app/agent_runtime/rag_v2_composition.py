@@ -266,6 +266,44 @@ def build_rag_provider_policy_snapshots(policy, settings):
 _policy_snapshots = build_rag_provider_policy_snapshots
 
 
+def _graph_enrichment(db, settings, seed):
+    if not settings.rag_graph_enrichment_enabled:
+        return seed
+    from neo4j import GraphDatabase
+
+    from backend.app.rag.graph_store import Neo4jGraphStore
+    from backend.app.rag.neo4j_retriever import Neo4jEvidenceRetriever
+
+    if (
+        not settings.rag_neo4j_uri
+        or not settings.rag_neo4j_username
+        or not settings.rag_neo4j_password
+    ):
+        raise RagApplicationError('retriever_not_configured')
+    # A short-lived driver per traversal has bounded retries and deterministic
+    # cleanup even when finalization creates a separate database session.
+    class RequestGraphStore:
+        def traverse(self, **kwargs):
+            from backend.app.rag.graph_store import GraphUnavailable
+
+            try:
+                with GraphDatabase.driver(
+                    settings.rag_neo4j_uri,
+                    auth=(settings.rag_neo4j_username, settings.rag_neo4j_password),
+                    connection_timeout=1.0,
+                    connection_acquisition_timeout=1.0,
+                    max_transaction_retry_time=0,
+                ) as driver:
+                    return Neo4jGraphStore(
+                        driver, database=settings.rag_neo4j_database
+                    ).traverse(**kwargs)
+            except Exception:
+                raise GraphUnavailable('graph unavailable') from None
+    return Neo4jEvidenceRetriever(
+        db=db, settings=settings, graph_store=RequestGraphStore(), seed_retriever=seed
+    )
+
+
 @contextmanager
 def _postgres_request_services(*, db, settings, session_factory):
     from types import SimpleNamespace
@@ -310,18 +348,21 @@ def _postgres_request_services(*, db, settings, session_factory):
     keyword = KeywordEvidenceRetriever(
         store=SqlAlchemyKeywordSearchStore(db=db, settings=settings), settings=settings
     )
-    retrievers.register('keyword', keyword)
+    retrievers.register('keyword', _graph_enrichment(db, settings, keyword))
     if backend == 'pgvector':
         store = build_rag_v2_pgvector_search_store(db=db, settings=settings)
         if store is None:
             raise RagApplicationError('retriever_not_configured')
         retrievers.register(
             'pgvector',
-            PgVectorEvidenceRetriever(
-                store=store,
-                readiness=SimpleNamespace(inspect=lambda: readiness.inspect(db=db)),
-                keyword_retriever=keyword,
-                settings=settings,
+            _graph_enrichment(
+                db, settings,
+                PgVectorEvidenceRetriever(
+                    store=store,
+                    readiness=SimpleNamespace(inspect=lambda: readiness.inspect(db=db)),
+                    keyword_retriever=keyword,
+                    settings=settings,
+                ),
             ),
         )
     model = (
@@ -581,6 +622,7 @@ def _postgres_finalizer(*, db, settings, assembly, pending, prepared):
                 keyword_retriever=keyword,
                 settings=settings,
             )
+        retriever = _graph_enrichment(db, settings, retriever)
         secret, key_version = fingerprint_secret_bytes(settings)
         writer = AssistantEvidenceWriter(
             fingerprint_secret=secret,

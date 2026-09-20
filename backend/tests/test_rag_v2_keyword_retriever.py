@@ -1180,16 +1180,16 @@ def test_postgresql_search_uses_single_typed_bind_spec_factory() -> None:
         (
             POSTGRES_KEYWORD_SEARCH_SQL,
             {
-                'query_terms': ('alpha', 'roadmap'),
+                'query_terms': ['alpha', 'roadmap'],
                 'phrase_lower': 'alpha roadmap',
                 'lexical_contract_version': 'rag-keyword-lexical-compat:v1',
                 'fingerprint_key_version': 'keyword-test-v1',
                 'key_material_verifier': (
                     '881dd0aac1d34d5412742640d9a75e64705a016327fb31cb19ed8853ff036f65'
                 ),
-                'project_keys': ('project-a',),
-                'source_ids': (7,),
-                'source_id_texts': ('7',),
+                'project_keys': ['project-a'],
+                'source_ids': [7],
+                'source_id_texts': ['7'],
                 'workspace_scope_id': 'workspace-1',
             },
         ),

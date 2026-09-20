@@ -1337,7 +1337,7 @@ class SqlAlchemyKeywordSearchStore:
             if spec.target is PostgresKeywordBindTarget.TIMEOUT
         }
         search_values = {
-            spec.name: bind_values[spec.name]
+            spec.name: (list(bind_values[spec.name]) if spec.sql_type.endswith('[]') else bind_values[spec.name])
             for spec in POSTGRES_KEYWORD_BIND_SPECS
             if spec.target is PostgresKeywordBindTarget.SEARCH
         }

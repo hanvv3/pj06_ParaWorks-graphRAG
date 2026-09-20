@@ -64,6 +64,9 @@ from backend.app.rag.retrieval import (
 from backend.app.rag.trusted_evidence import ServingEvidenceResolver
 
 RagFallbackCategory = Literal[
+    'graph_unavailable',
+    'graph_no_benefit',
+    'graph_invalid',
     'pgvector_storage_runtime_failure',
     'serving_corpus_changed_during_pgvector_query',
     'serving_corpus_changed_during_answer_revalidation',

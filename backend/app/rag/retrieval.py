@@ -31,6 +31,7 @@ RagPaidComponent = Literal['query_embedding', 'answer_generation']
 
 if TYPE_CHECKING:
     from backend.app.core.config import Settings
+    from backend.app.rag.graph_projection import GraphPathDependency
 
 
 QUERY_EMBEDDING_MODEL = 'text-embedding-3-small'
@@ -648,6 +649,8 @@ class RetrievalResult:
     top_candidate_window_hmac: str
     query_embedding_receipt: QueryEmbeddingReceipt | None
     trace: SanitizedRetrievalTrace
+    graph_paths: tuple[GraphPathDependency, ...] = ()
+    graph_policy_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

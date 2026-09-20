@@ -330,6 +330,8 @@ class RagCostLedger:
             tuple[int, str], PreparedPaidCallBudget
         ] = {}
         self._answer_reservations: dict[int, RagAnswerCeilingReservation] = {}
+        self._graph_answer_bindings: dict[str, tuple[PreparedModelInfluenceSet, str, int]] = {}
+        self._graph_answer_invocations: set[str] = set()
         self._answer_binding_lock = threading.RLock()
         self._grant_bindings: dict[
             tuple[int, str], RagProviderSafetyBinding
@@ -850,6 +852,11 @@ class RagCostLedger:
             ):
                 raise RagCostLedgerError('answer ceiling binding is unavailable')
             parent, rows = self._locked_run(run_id)
+            if model_influence is not None and model_influence.graph_paths and any(
+                node.scope_id != (parent.metadata_ or {}).get('security_scope_fingerprint')
+                for path in model_influence.graph_paths for node in path.nodes
+            ):
+                raise RagCostLedgerError('graph influence scope changed')
             if invocation is not None and (
                 invocation.retrieval_query_hmac != (parent.metadata_ or {}).get('retrieval_query_hmac')
                 or any((parent.metadata_ or {}).get(key) is not None for key in projection_identity)
@@ -893,6 +900,10 @@ class RagCostLedger:
             }
             self._commit()
             self._admission_budgets[(run_id, 'answer_generation')] = prepared
+            if model_influence is not None and model_influence.graph_paths:
+                key = invocation.prepared_invocation_hmac
+                self._graph_answer_bindings[key] = (model_influence, model_influence.aggregate_observation_hmac, run_id)
+                self._graph_answer_invocations.add(key)
 
     @_runtime_health_effect
     def claim_component(
@@ -1171,6 +1182,26 @@ class RagCostLedger:
                     'C.5 serving readiness changed before send'
                 )
             return
+        graph_key = prepared.prepared_invocation_hmac
+        if graph_key in self._graph_answer_invocations:
+            binding = self._graph_answer_bindings.get(graph_key)
+            if binding is None or binding[0].aggregate_observation_hmac != binding[1]:
+                raise RagServingEvidenceChangedError('graph influence binding unavailable')
+            parent = self._session.get(AgentRun, binding[2], populate_existing=True)
+            if parent is None or (
+                (parent.metadata_ or {}).get('prepared_model_influence_observation_hmac') != binding[1]
+                or (parent.metadata_ or {}).get('rendered_input_hmac') != prepared.rendered_input_hmac
+                or any(node.scope_id != (parent.metadata_ or {}).get('security_scope_fingerprint')
+                    for path in binding[0].graph_paths for node in path.nodes)
+            ):
+                raise RagServingEvidenceChangedError('graph influence durable binding changed')
+            try:
+                self._cost_policy.verify_answer_model_influence(
+                    prepared.evidence_slots, prepared.model_influence,
+                    prepared_set=binding[0], db=self._session,
+                )
+            except ValueError:
+                raise RagServingEvidenceChangedError('graph influence changed before send') from None
         observations = prepared.model_influence
         if (
             type(observations) is not tuple

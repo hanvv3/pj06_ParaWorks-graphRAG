@@ -30,7 +30,7 @@ def test_rag_v2_contract_literals_and_identities_are_frozen() -> None:
     assert get_args(RagMode) == ('disabled', 'shadow', 'enforce')
     assert get_args(RagCutoverStage) == ('none', 'ask', 'search', 'assistant')
     assert get_args(RagRetrievalBackend) == ('keyword', 'pgvector')
-    assert get_args(RagEffectiveBackend) == ('deterministic_lexical', 'pgvector')
+    assert get_args(RagEffectiveBackend) == ('deterministic_lexical', 'pgvector', 'neo4j')
     assert COMPANY_MEMORY_RAG_WORKFLOW == 'company-memory-rag-answer'
     assert COMPANY_MEMORY_RAG_GRAPH_VERSION == 'company-memory-rag-answer-v2.0'
     assert COMPANY_MEMORY_RAG_STATE_SCHEMA_VERSION == 'rag-graph-state:v2'

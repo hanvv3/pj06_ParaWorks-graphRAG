@@ -22,6 +22,8 @@ from backend.app.core.config import Settings
 from backend.app.knowledge.trusted_serving_eligibility import (
     canonical_knowledge_document_id,
 )
+from backend.app.rag.graph_projection import GraphPathDependency
+from backend.app.rag.neo4j_retriever import graph_path_payload, validate_graph_paths
 from backend.app.rag.retrieval import EvidenceSlot, EvidenceSlotId
 from backend.app.rag.serving_contracts import (
     CanonicalServingProjection,
@@ -172,6 +174,8 @@ class PreparedModelInfluenceSet:
     prepared_readiness_hmac: str | None
     rendered_input_hmac: str
     aggregate_observation_hmac: str
+    graph_paths: tuple[GraphPathDependency, ...] = ()
+    graph_scope: SecurityScope | None = None
 
     def __iter__(self):
         return iter(self.observations)
@@ -387,8 +391,11 @@ class CanonicalEvidenceProjector:
         prepared_index_generation: int | None,
         prepared_readiness_hmac: str | None,
         rendered_input_hmac: str,
+        graph_paths: tuple[GraphPathDependency, ...] = (),
     ) -> PreparedModelInfluenceSet:
         self._begin_transaction_fence()
+        if not validate_graph_paths(self._db, graph_paths, settings=self._settings, scope=scope):
+            return self._checked_prepared(_empty_prepared_influence_set())
         if type(slots) is not tuple or not 1 <= len(slots) <= 8:
             raise ValueError('prepared influence requires one to eight observations')
         try:
@@ -429,6 +436,7 @@ class CanonicalEvidenceProjector:
             prepared_readiness_hmac=prepared_readiness_hmac,
             rendered_input_hmac=rendered_input_hmac,
             settings=self._settings,
+            graph_paths=graph_paths,
         )
         return self._checked_prepared(
             PreparedModelInfluenceSet(
@@ -438,6 +446,8 @@ class CanonicalEvidenceProjector:
                 prepared_readiness_hmac=prepared_readiness_hmac,
                 rendered_input_hmac=rendered_input_hmac,
                 aggregate_observation_hmac=aggregate,
+                graph_paths=graph_paths,
+                graph_scope=scope if graph_paths else None,
             )
         )
 
@@ -455,6 +465,11 @@ class CanonicalEvidenceProjector:
         ):
             return self._checked_dependencies(())
         observations = prepared.observations
+        if prepared.graph_paths and (
+            prepared.graph_scope != scope
+            or not validate_graph_paths(self._db, prepared.graph_paths, settings=self._settings, scope=scope)
+        ):
+            return self._checked_dependencies(())
         if not _valid_prepared_influence_set(
             prepared, fence=fence, settings=self._settings
         ):
@@ -902,6 +917,7 @@ def _build_prepared_model_influence_set_hmac_v2(
     prepared_readiness_hmac: str | None,
     rendered_input_hmac: str,
     settings: Settings,
+    graph_paths: tuple[GraphPathDependency, ...] = (),
 ) -> str:
     require_nonnegative_int(prepared_corpus_generation)
     if prepared_index_generation is not None:
@@ -935,8 +951,9 @@ def _build_prepared_model_influence_set_hmac_v2(
             'prepared_index_generation': prepared_index_generation,
             'prepared_readiness_hmac': prepared_readiness_hmac,
             'rendered_input_hmac': rendered_input_hmac,
+            'graph_paths': graph_path_payload(graph_paths),
         },
-        schema='rag-prepared-model-influence-set:v2',
+        schema='rag-prepared-model-influence-set:v3',
         policy='rag-answer:v2',
         settings=settings,
     )
@@ -1691,6 +1708,7 @@ def _valid_prepared_influence_set(
             prepared_readiness_hmac=prepared.prepared_readiness_hmac,
             rendered_input_hmac=prepared.rendered_input_hmac,
             settings=settings,
+            graph_paths=prepared.graph_paths,
         )
         return prepared.aggregate_observation_hmac == expected_aggregate
     except (TypeError, UnicodeError, ValueError):

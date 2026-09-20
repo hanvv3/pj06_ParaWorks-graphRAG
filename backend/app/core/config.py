@@ -138,6 +138,11 @@ class Settings(BaseSettings):
         default='keyword', frozen=True
     )
     rag_use_pgvector_search: bool = Field(default=False, frozen=True)
+    rag_graph_enrichment_enabled: bool = Field(default=False, frozen=True)
+    rag_neo4j_uri: str = Field(default='', frozen=True)
+    rag_neo4j_username: str = Field(default='', frozen=True)
+    rag_neo4j_password: str = Field(default='', frozen=True, repr=False)
+    rag_neo4j_database: str = Field(default='neo4j', frozen=True)
     slack_bot_token: str | None = None
     slack_user_token: str | None = None
     slack_channel_ids: str = ''

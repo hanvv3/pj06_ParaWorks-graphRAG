@@ -199,7 +199,9 @@ def _set_projection_transaction_limits(db):
         db.execute(text("SET LOCAL lock_timeout = '2s'"))
 
 
-def read_projection_page(db, *, settings, scope, cursor=0, batch_size=50):
+def read_projection_page(
+    db, *, settings, scope, cursor=0, batch_size=50, document_ids=None
+):
     if (
         type(batch_size) is not int
         or not 1 <= batch_size <= 100
@@ -217,6 +219,10 @@ def read_projection_page(db, *, settings, scope, cursor=0, batch_size=50):
     if generation is None:
         raise RuntimeError('canonical corpus generation unavailable')
     scope_id = security_scope_fingerprint(scope, settings=settings)
+    if document_ids is not None and (
+        type(document_ids) is not tuple or not 1 <= len(document_ids) <= 50
+    ):
+        raise ValueError('canonical graph identity window outside bounds')
     rows = tuple(
         db.scalars(
             select(RagLexicalServingProjection)
@@ -224,6 +230,11 @@ def read_projection_page(db, *, settings, scope, cursor=0, batch_size=50):
                 RagLexicalServingProjection.corpus_generation
                 == generation.corpus_generation,
                 RagLexicalServingProjection.id > cursor,
+                (
+                    RagLexicalServingProjection.serving_document_id.in_(document_ids)
+                    if document_ids is not None
+                    else True
+                ),
             )
             .order_by(RagLexicalServingProjection.id)
             .limit(batch_size + 1)

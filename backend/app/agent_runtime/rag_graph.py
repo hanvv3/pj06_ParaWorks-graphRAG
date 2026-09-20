@@ -665,6 +665,7 @@ def prepare_and_preflight_answer_invocation(
         if state.get('query_embedding_result')
         else None,
         rendered_input_hmac=draft.rendered_input_hmac,
+        graph_paths=state['retrieval'].graph_paths,
     )
     if not influence.observations:
         return _safe_outcome(

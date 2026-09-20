@@ -1,5 +1,30 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — E-2 permission-preserving relationship retrieval
+
+- default-off graph enrichment Runnable을 실제 PostgreSQL request/finalizer 조립에
+  연결했다. 기존 keyword/pgvector seed와 embedding receipt를 재사용하고, 합계 candidate50 /
+  evidence5 예산 안에서 공식 Neo4j driver의 1-hop `SUPPORTED_BY`만 조회한다.
+- ordered graph path v1을 prepared influence v3에 바인딩하고 PostgreSQL에서 실제
+  provider-send 직전 및 최종 노출 직전 재구성한다. unselected edge hash 변경도 전송 전
+  0 call 차단 / 전송 후 1 call 실제 비용 유지 + 답변/citation redaction으로 검증했다.
+  공개 응답·Review trust·permission·budget 정책은 유지했다.
+- 실제 leased PG + Neo4j 조회·scope/stale fallback·canonical final dependency 검증과,
+  실제 LangGraph/production 조립 + fake provider의 전송·최종 결과 검증을 분리했다.
+  후자의 PG synchronization은 test port이며 actual PG end-to-end paid dispatch 증거가 아니다.
+- actual PG keyword fallback에서 tuple-array 오류를 RED로 확인하고 SQL 실행 bind만
+  list로 수정했다. E2+default runtime+기존 graph는 **79 passed in156.29s**;
+  최종 영향 suite(11개 파일)는 **318 passed in150.23s**. 상세 명령과 한계는
+  [E-2 runbook](superpowers/runbooks/e-2-relationship-retrieval.md) 및 로컬 E-2 report.
+  마지막 trace latency가 graph 조회 시간도 포함하도록 RED/GREEN으로 보완한 뒤
+  E-2 실제 DB 포함 집중 suite는 **20 passed in26.57s**였다.
+- 최초 영향 run의 7개 finalization fixture 실패는 E-1 `350a367`에서도 재현됐다.
+  fake authority의 shared-health transport 연결과 real PG schema lease만 보완한
+  별도 test-only commit `afda490` 후 **48 passed in3.01s**. 제품 recovery 안전장치는
+  바꾸지 않았다. 기존 `rag_finalization.py:125` Ruff SIM117은 미변경 baseline 경고다.
+- paid 호출·`.env`·push·rollout·cache 없음. E-3 비교와 독립 리뷰가 다음이며 실제 모델
+  품질과 배포 RBAC는 미평가, 정식 release는 **NOT CLEAN/deferred**다.
+
 ## 2026-09-21 — E-1 canonical Neo4j projection
 
 - E-1 review R1: scan 진입의 첫 `FOR SHARE`가 timeout 설정보다 앞서고 sweep에는 설정이

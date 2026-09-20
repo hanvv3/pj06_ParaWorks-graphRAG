@@ -9,7 +9,7 @@ RagSurface = Literal['search', 'ask', 'assistant']
 RagMode = Literal['disabled', 'shadow', 'enforce']
 RagCutoverStage = Literal['none', 'ask', 'search', 'assistant']
 RagRetrievalBackend = Literal['keyword', 'pgvector']
-RagEffectiveBackend = Literal['deterministic_lexical', 'pgvector']
+RagEffectiveBackend = Literal['deterministic_lexical', 'pgvector', 'neo4j']
 
 COMPANY_MEMORY_RAG_WORKFLOW = 'company-memory-rag-answer'
 COMPANY_MEMORY_RAG_GRAPH_VERSION = 'company-memory-rag-answer-v2.0'

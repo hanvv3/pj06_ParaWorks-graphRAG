@@ -6,7 +6,7 @@
 **Spec:** [E 설계](../specs/2026-09-20-e-graphrag-design.md).
 **Architecture:** PostgreSQL-derived projection → bounded graph retrieval → canonical evidence 검증 → 기존 answer graph.
 **Tech:** 기존 LangChain Runnable/LangGraph, PostgreSQL, 공식 Neo4j driver; 필요한 SDK만 착수 시 lock.
-**상태:** E-1 projection 구현/집중 검증 완료, E-2/E-3 미구현. 상세 계약과 재현은
+**상태:** E-1 projection 완료, E-2 구현/검증 후 독립 리뷰 대기, E-3 미구현. 상세 계약과 재현은
 [E-1 runbook](../runbooks/e-1-graph-projection.md)을 따른다.
 정식 D release green은 선행 조건이 아니다. 순서는 E → D.1 → Slack → 정식 릴리스 준비다.
 
@@ -49,18 +49,20 @@ Neo4j가 꺼져도 기존 RAG가 동작한다. outbox/CDC와 답변 캐시는 �
 `backend/app/rag/evidence_projection.py`와 graph registry/routing.
 backend union·내부 path carrier·state/fingerprint version 변경의 소비자를 함께 점검한다.
 
-- [ ] RED: relation 질의의 유효 provenance, restricted 중간 node/edge, scope 경계,
+- [x] RED: relation 질의의 유효 provenance, restricted 중간 node/edge, scope 경계,
   stale/deleted path, graph 장애, bounded hidden count와 중복 embedding 거부를 검증한다.
-- [ ] parameterized bounded traversal을 LangChain adapter로 구현하고 PostgreSQL canonical 근거를
+- [x] parameterized bounded traversal을 LangChain adapter로 구현하고 PostgreSQL canonical 근거를
   다시 확인한다. public citation이나 trusted status를 graph 응답에서 직접 만들지 않는다.
-- [ ] E-1의 versioned path dependency를 RetrievalResult → graph state → 모델 전송 전 PG 검증 →
+- [x] E-1의 versioned path dependency를 RetrievalResult → graph state → 모델 전송 전 PG 검증 →
   최종 노출 검증까지 연결한다. keyword/pgvector의 빈 dependency 호환과 fallback/disabled를 보존한다.
-- [ ] 캐시가 없는 경로에서 generation 도중 중간 edge revoke/version/permission 변경을 RED로 재현하고,
+- [x] 캐시가 없는 경로에서 generation 도중 중간 edge revoke/version/permission 변경을 RED로 재현하고,
   전체 relation dependency를 최종 PG 검증에 포함한다. endpoint 문서 검증만으로 통과시키지 않는다.
 - [ ] fake graph+실제 PG/Neo4j 계약, 기존 API/Assistant 회귀를 검증·리뷰하고 커밋한다.
   graph 장애 fallback도 seed/embedding을 재사용하고 동일 budget을 유지하며 authority 장애는 거부한다.
 
 **Acceptance:** 버전이 명시된 내부 결과가 전체 path 검증을 보존하고 공개 route/화면은 늘리지 않는다.
+구현·검증 범위와 fake/real DB 경계는 [E-2 runbook](../runbooks/e-2-relationship-retrieval.md).
+마지막 검증·리뷰 항목은 독립 리뷰까지 열린 상태로 둔다.
 지원하지 않는 질의와 권한/authority 오류를 graph text로 임의 보충하지 않는다.
 E-2의 dependency 계약을 후속 D.1에 넘기며 아직 캐시 저장소나 hit 경로를 구현하지 않는다.
 

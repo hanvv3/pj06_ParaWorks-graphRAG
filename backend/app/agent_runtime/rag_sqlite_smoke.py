@@ -114,6 +114,7 @@ class SQLiteRagSmokeCoordinator:
             or type(settings) is not Settings
             or settings.rag_retrieval_backend != 'keyword'
             or settings.rag_use_pgvector_search
+            or settings.rag_graph_enrichment_enabled
             or settings.paraworks_env == 'production'
         ):
             raise SQLiteRagSmokeUnavailable(

@@ -1073,6 +1073,7 @@ class PreparedRagFinalization:
             or type(self.prepared_model_influence) is not PreparedModelInfluenceSet
             or self.prepared_model_influence.observations
             != self.model_influence_observations
+            or self.prepared_model_influence.graph_paths != self.retrieval_result.graph_paths
             or self.prepared_model_influence.rendered_input_hmac
             != self.rendered_input_hmac
             or not _lower_hmac(
@@ -2059,9 +2060,10 @@ def _hidden_membership_hmac(result: RetrievalResult, *, secret: bytes) -> str:
             'hidden_count_capped': result.hidden_count_capped,
             'public_hidden_match_count': result.hidden_match_count,
             'top_candidate_window_hmac': result.top_candidate_window_hmac,
+            'graph_policy_version': result.graph_policy_version,
         },
         secret=secret,
-        schema_version='rag-hidden-membership:v1',
+        schema_version='rag-hidden-membership:v2',
         policy_version='rag-retrieval-bounds:v1',
     )
 
@@ -2077,6 +2079,8 @@ def _same_retrieval_authority(left: RetrievalResult, right: RetrievalResult) -> 
         and left.hidden_count_capped == right.hidden_count_capped
         and left.top_candidate_window_hmac == right.top_candidate_window_hmac
         and left.query_embedding_receipt == right.query_embedding_receipt
+        and left.graph_paths == right.graph_paths
+        and left.graph_policy_version == right.graph_policy_version
     )
 
 
@@ -2692,7 +2696,7 @@ def append_assistant_terminal_failure(
     configured_backend = parent.metadata_.get('configured_backend', 'keyword')
     effective_backend = effective_backend or parent.metadata_.get('effective_backend') or (
         'pgvector' if configured_backend == 'pgvector' else 'deterministic_lexical')
-    if effective_backend not in {'pgvector', 'deterministic_lexical'}:
+    if effective_backend not in {'pgvector', 'deterministic_lexical', 'neo4j'}:
         raise RagFinalizationError('terminal backend identity is unavailable')
     result_hmac = keyed_fingerprint({
         'answer_block_audit_set_hmac': None,
