@@ -1,6 +1,7 @@
 # ParaWorks — 현재 로드맵
 
-갱신: 2026-09-20. 코드 점검 기준: `3f6cb0f` / `codex/rag-orchestrator-agent`.
+갱신: 2026-09-20, 비상용 프로토타입 우선 순서 사용자 승인 반영.
+점검 기준: `116347d` (제품 코드 `61eb6d7`) / `codex/rag-orchestrator-agent`.
 이 파일은 제품 방향·문서 탐색·작업 순서의 source of truth다.
 
 ## 제품과 실행 순서
@@ -9,20 +10,22 @@
 권한에 맞게 검색하고, 같은 Assistant 화면에서 근거 있는 답변을 제공한다.
 3인 개발팀의 agent ownership·작은 shared contracts는 [AGENTS.md](AGENTS.md)를 따른다.
 
-`D Core 완료 → D.1 답변 캐시 → E Neo4j GraphRAG → Slack 복구`
+`D Core 기능 기준선 → E Neo4j GraphRAG → D.1 답변 캐시 → Slack → 정식 출시 준비`
 
-이번 요청으로 D.1/E의 방향 설계와 단계별 계획까지 미리 정리한다.
-구현 착수 순서와 각각의 독립 완료 게이트는 유지한다. 실제 유료 실행·rollout·push 승인은 별개다.
+현재 목표는 상용 출시가 아니라 관계 검색의 효과와 비용 최적화를 검증하는 것이다.
+정식 release runner·다중 reviewer/OAuth·30-case live 평가를 후속 출시 준비로 분리한다.
+기존 runtime의 권한·근거·비용 통제는 유지한다. 유료 실행·rollout·push 승인은 별개다.
 
 ## 현재 상태와 문서
 
 | 단계 | 현재 상태 | 설계 | 구현 계획 |
 |---|---|---|---|
 | A/B/C/C.5 | 과거 구현·검증 기록 있음. C.5 rollout disabled | [이력](docs/superpowers/archive/2026-09-20-product-plan-history.md) | 재구현하지 않음 |
-| D Core | Task25-B 부분 구현, 최신 리뷰 NOT CLEAN; 릴리스 미완료 | [마무리 spec](docs/superpowers/specs/2026-09-20-d-core-completion-design.md) | [D-0~D-5](docs/superpowers/plans/2026-09-20-d-core-completion.md) |
-| D.1 | 계획안, 미구현. D Core 완료 뒤 진입 | [캐시 spec](docs/superpowers/specs/2026-09-20-d1-answer-cache-design.md) | [C-1~C-3](docs/superpowers/plans/2026-09-20-d1-answer-cache.md) |
-| E | 계획안, 미구현. D.1 완료 뒤 진입 | [GraphRAG spec](docs/superpowers/specs/2026-09-20-e-graphrag-design.md) | [E-1~E-3](docs/superpowers/plans/2026-09-20-e-graphrag.md) |
-| Slack | 마지막 단계; 데이터 소스 선택 필요 | [공통 spec §후속 범위](docs/superpowers/specs/2026-09-20-remaining-deliverables-design.md#후속-범위) | 기존 10개 실패를 보이게 유지 |
+| D Core 기능 | 기존 코드 있음; F-1/F-2 fresh 검증 미실행 | [D spec](docs/superpowers/specs/2026-09-20-d-core-completion-design.md) | [F-1/F-2](docs/superpowers/plans/2026-09-20-d-core-completion.md) |
+| E | 미구현. D 기능 기준선 이후, 캐시 없이 시작 | [GraphRAG spec](docs/superpowers/specs/2026-09-20-e-graphrag-design.md) | [E-1~E-3](docs/superpowers/plans/2026-09-20-e-graphrag.md) |
+| D.1 | 미구현. E의 근거·관계 계약을 재사용 | [캐시 spec](docs/superpowers/specs/2026-09-20-d1-answer-cache-design.md) | [C-1~C-3](docs/superpowers/plans/2026-09-20-d1-answer-cache.md) |
+| Slack | 마지막 기능; 합성 검증과 실제 연동 분리 | [Slack spec](docs/superpowers/specs/2026-09-20-slack-recovery-design.md) | [S-1~S-3](docs/superpowers/plans/2026-09-20-slack-recovery.md) |
+| 정식 출시 준비 | 보류. D release NOT CLEAN/P1 미해결 | [D release 계약](docs/superpowers/specs/2026-09-20-d-core-completion-design.md#보류한-정식-release-계약) | [기존 D-0~D-5](docs/superpowers/plans/2026-09-20-d-core-completion.md#보류한-정식-release-작업) |
 
 ## 재개할 때 읽는 순서
 
@@ -31,8 +34,9 @@
 3. 선택한 단계의 spec과 **다음 작업 한 개**. [portfolio](docs/portfolio-log.md)의 최신 항목만 확인.
 4. 그 작업의 코드·테스트. 기존 긴 문서는 해당 계약이 필요할 때 지정된 절만 조회.
 
-당장 다음 작업은 **D-0: 권장 신뢰 모델·durable 단일 실행 계약 확정(planning)**이다.
-이 결정 뒤 D-1부터 실제 구현으로 이어간다. DB 테이블/마이그레이션을 먼저 추가하지 않는다.
+다음은 **F-1: 기존 RAG 기능 기준선 검증·필요한 보완(실제 개발·검증 단계)**이다.
+F-2의 실제 PG/pgvector 검증까지 통과하면 E로 간다. Tasks1~22를 다시 구현하지 않는다.
+현재 승인은 계획 수정에 대한 것이며 제품 구현·테스트·서비스 실행은 이 문서 변경에서 하지 않았다.
 
 ## 계획을 유지하는 방법
 
@@ -47,7 +51,8 @@
 ## 기존 문서와 우선순위
 
 현재 상태·다음 작업은 이 파일과 handoff가 우선한다. **미승인 계약 변경안은 기존 승인 계약을
-자동 대체하지 않는다.** D-0 결정 전 capability P1과 D Core NOT CLEAN 상태는 유지된다.
+자동 대체하지 않는다.** 이번 승인으로 바뀐 것은 순서와 완료 기준의 분리다.
+R1 threat-model 변경 자체는 보류된 D-0에서 확정한다. capability P1/정식 release NOT CLEAN은 유지된다.
 기존 [D 상세 spec](docs/superpowers/specs/2026-08-30-deliverable-d-core-rag-answer-graph-v2-design.md)과
 [27-task 계획](docs/superpowers/plans/2026-08-31-deliverable-d-core-rag-answer-graph-v2.md)은
 구현된 wire/storage/cost 계약의 상세 참조로 보존한다. 오래된 체크박스로 진행률을 판단하지 않는다.

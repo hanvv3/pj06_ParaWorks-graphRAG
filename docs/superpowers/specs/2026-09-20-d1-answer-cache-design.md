@@ -1,7 +1,11 @@
 # D.1 — PostgreSQL 답변 캐시 설계
 
-상태: **방향·계약 계획안, 미구현**. D Core release green 뒤 착수 시 코드와 대조한다.
+상태: **승인된 프로토타입 우선순위, 미구현**. D 기능 baseline과 E 최소 GraphRAG 뒤 착수한다.
 [공통 계약](2026-09-20-remaining-deliverables-design.md) / [계획](../plans/2026-09-20-d1-answer-cache.md).
+
+순서: `D 기능 baseline → E 최소 GraphRAG → D.1 캐시 → Slack → 정식 릴리스 준비`.
+E의 cache-off 검색·권한·최종 relation 검증을 재사용한다. D release green은 착수 선행 조건이 아니며,
+정식 live 평가와 남은 release gate는 계속 미완료로 추적한다. 제품 변경·유료 실행·flag 활성화는 별개다.
 
 ## 첫 버전의 목표
 
@@ -18,6 +22,9 @@ pgvector query embedding은 계속 발생할 수 있다. 초기 성과를 embedd
   실패/안전 canned/no-match 답변은 첫 버전 캐시 대상에서 제외한다.
 - value의 유효성 검증에는 모델이 본 **전체 ordered influence set**의 identity/version이 필요하다.
   citation으로 선택된 subset만 검증해서는 안 된다.
+- E에서 추가한 전체 path dependency도 포함한다. endpoint 문서가 같아도 node·edge·중간 근거의
+  canonical identity/version·승인·scope/permission이 바뀌면 hit가 유효하지 않다.
+  E의 내부 provenance carrier를 재사용하며 Neo4j projection generation만 비교하지 않는다.
 - exact principal/workspace/security/permission scope와 graph/prompt/model/output/retrieval/
   policy/key 버전, 준비된 전체 답변 입력 HMAC이 key/검증에 포함된다.
 - question·prompt·URL·snippet은 cache에 복제하지 않는다. identity/hash/dependency 참조만 둔다.
@@ -27,8 +34,9 @@ pgvector query embedding은 계속 발생할 수 있다. 초기 성과를 embedd
 
 ## hit/miss와 비용
 
-hit에서도 현재 권한/근거·전체 영향 집합을 검증하고 citation은 PostgreSQL에서 다시 만든다.
-읽기와 최종 노출 사이의 revoke/version 변경은 기존 finalization 검증으로 차단한다.
+hit에서도 현재 권한/근거·전체 영향 집합·E의 relation dependency를 검증하고 citation은
+PostgreSQL에서 다시 만든다. 읽기와 최종 노출 사이의 문서 또는 relation revoke/version/permission
+변경은 E에서 확장한 finalization 검증으로 차단한다. cache-off와 hit 모두 같은 현재성 기준을 따른다.
 cache 저장소만 실패하면 safe miss다. 권한/현재 근거의 authority를 읽지 못하면 fail-closed다.
 
 hit마다 새 AgentRun/Audit와 정확한 비용 기록이 필요하다. query embedding이 실행됐다면 그 실제
@@ -38,12 +46,16 @@ cache-hit 경로를 정의하는 것이 C-2의 핵심이다. 출처/권한/공�
 
 ## 검증과 rollout
 
-같은 fixture의 cold/warm generation 호출 수, 실제 비용과 절감량, p50/p95, hit-rate,
-DB 작업 수를 비교한다. 성능 목표는 측정 후 정하되 누출/잘못된 citation은 0이어야 한다.
+E에서 먼저 고정한 같은 fixture·principal·retrieval 예산·모델 설정으로 cold/warm generation
+호출 수, 실제 비용과 절감량, p50/p95, hit-rate, DB 작업 수를 비교한다. GraphRAG의 검색 개선은
+E의 cache-off pgvector/graph 비교로, 캐시 절감은 같은 backend의 cold/warm 비교로 각각 보고한다.
+fake 모델의 예상 비용과 실제 provider 비용을 구분하고 미실행 live 품질/비용을 추정값으로 통과시키지 않는다.
+성능 목표는 측정 후 정하되 누출/잘못된 citation은 0이어야 한다.
 다른 사용자, 같은 role의 다른 사용자, 권한 축소, 선택/비선택 근거 revoke, 새 관련 근거,
-입력 문맥·key/policy 변경, TTL, finalization 중 drift가 모두 miss/거부로 닫혀야 한다.
+relation 변경/철회, 입력 문맥·key/policy 변경, TTL, finalization 중 drift가 모두 miss/거부로 닫혀야 한다.
 
-flag off는 기존 D Core 경로로 복귀하며 과거 audit를 삭제하지 않는다.
+cache flag off는 E를 포함한 fresh retrieval·generation 경로로 복귀하며 과거 audit를 삭제하지 않는다.
+graph flag off는 기존 keyword/pgvector로 복귀하고 cache key/backend version을 분리한다.
 Redis L2·semantic similarity cache·embedding reuse·분산 stampede 제어는 초기 범위가 아니다.
 동시 miss는 각 요청의 기존 예산 안에서 처리하고 측정된 중복 비용이 있을 때 single-flight를 검토한다.
 

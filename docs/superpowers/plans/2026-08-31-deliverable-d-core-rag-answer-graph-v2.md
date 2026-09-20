@@ -1,7 +1,8 @@
 # Deliverable D Core RAG Answer Graph V2 Implementation Plan
 
 > 2026-09-20: 이 27-task 문서는 기존 계약/파일/검증의 상세 참조다. 남은 실행은
-> [D 마무리 계획](2026-09-20-d-core-completion.md)을 따른다. 과거 체크박자는 현재 진행률이 아니며
+> [D 마무리 계획](2026-09-20-d-core-completion.md)의 F-1/F-2부터 진행한다. 정식 release는 보류한다.
+> 과거 체크박스는 현재 진행률이 아니며
 > 처음의 승인 대기·마지막 Task1 시작 안내는 역사적 지시다. 아래 기록을 새 CLEAN 증거로 읽지 않는다.
 > 현재 Task25-B는 `3f6cb0f`에서 NOT CLEAN이며 공통 spec R1 변경은 미확정이다.
 
