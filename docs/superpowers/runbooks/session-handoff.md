@@ -1,16 +1,18 @@
 # Current session handoff
 
-2026-09-21: **E/D.1/S-1/S-2 CLEAN; S-3 implemented, independent review pending.
+2026-09-21: **E/D.1/S-1~S-3 implemented; task and whole-Slack reviews CLEAN.
 Formal release remains NOT CLEAN and capability P1 is unresolved.**
 
 ## Resume here
 
 - Worktree: `.worktrees/review-hitl-v2-design`, branch `codex/rag-orchestrator-agent`.
-  S3 base: `d91ed9df63e4bfdcdcf130db93fb04a12f378aab`. Inspect fresh HEAD/status.
+  Verified code: `9066d8a30f02e97058c37bdf6d77276ea2bd329f`. Later docs-only commits
+  do not rerun or replace this evidence. Inspect fresh HEAD/status.
 - Read [roadmap](../../../plan.md), [Slack spec](../specs/2026-09-20-slack-recovery-design.md),
   [S3 runbook](s-3-slack-integrated-demo.md), and latest [portfolio](../../portfolio-log.md).
-- Next decision after S3 independent review: plan formal release readiness. Do not
-  restart completed Tasks1–22, E/C1–C3, or S1/S2. Actual Slack source selection is a
+- Next is **planning**: decide formal release scope and R1 threat model before
+  implementing release changes. Do not
+  restart completed Tasks1–22, E/C1–C3, or S1–S3. Actual Slack source selection is a
   separate user choice, not a prerequisite for the completed synthetic scenario.
 - Keep six pre-existing stat-only D/E/common documents untouched. Root `main` is a
   separate checkout; no push, merge, paid run, `.env` or rollout was authorized.
@@ -38,6 +40,17 @@ Use `.venv-task4-r3-review/Scripts/python.exe` with explicit selectors and fresh
 provider settings. Actual DB runner requires process-only disposable PG/Neo4j
 locators; permits only its explicit loopback graph port and drops only leased
 schemas/unique graph scopes. Metadata/scorer bootstrap is not a full migration gate.
+
+Final whole-Slack P1 (distinct from formal capability P1) is fixed and re-reviewed:
+same-body legacy deliveries narrow source/chunk permissions without signing;
+Slack packets filter both levels before model input and retain the stricter label.
+Final affected 155 and historical ten passed, transport 0. Actual S3 DB demo seven
+passed before this separate legacy fix; no claim of rerunning it afterward.
+
+The task-created `paraworks-e-postgres` and `paraworks-e-neo4j` containers are now
+stopped, not removed; their data remains. Restart those exact containers for a
+new explicitly configured local DB run. Existing `paraworks-postgres` remained
+stopped and untouched. No credentials are recorded here.
 
 ## Prior evidence and limits
 

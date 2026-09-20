@@ -1,6 +1,7 @@
 # S-3 — synthetic Slack → Review → GraphRAG → answer cache
 
-2026-09-21: implementation complete; independent S3 review pending. Base
+2026-09-21: implementation and independent task/whole-Slack review CLEAN at
+`9066d8a30f02e97058c37bdf6d77276ea2bd329f`. S3 base
 `d91ed9df63e4bfdcdcf130db93fb04a12f378aab`. E/D1/S1/S2 are CLEAN. This is
 synthetic functional evidence, **not formal release approval**. Formal release
 remains NOT CLEAN; capability P1 and the deferred R1 threat-model decision remain.
@@ -120,7 +121,7 @@ hashing was not changed.
 
 ## Next decision and limits
 
-Complete independent S3/cross-slice review, then plan formal release readiness.
+Next is formal release readiness planning and the explicit R1 threat-model decision.
 Live Slack is a separate user-owned decision: owned workspace with consent,
 authorized export, or another approved source. Exports do not prove live API
 behavior. No live Slack/OAuth/provider call, production rollout, paid authority,
@@ -146,6 +147,7 @@ Final-fix affected tests: **155 passed in 20.09s**, historical ten **10 passed i
 1.31s**, external attempts **0**; changed-file Ruff/diff clean. The existing bridge
 fixture now explicitly allows restricted evidence, instead of relying on an admin
 role label with public/internal default permissions. Verification commands and raw
-logs are appended to the S3 task report. Independent
-final review remains pending; formal release/P1 status above is unchanged (this
-Slack finding is distinct from the deferred formal-release capability P1).
+logs are appended to the S3 task report. Independent scoped final review marked
+the finding ADDRESSED with no new breakage; the bounded Slack plan is CLEAN.
+Formal release/P1 status above is unchanged (this Slack finding is distinct from
+the deferred formal-release capability P1).

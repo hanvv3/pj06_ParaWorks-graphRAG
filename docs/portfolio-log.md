@@ -8,7 +8,8 @@
   Mixed stale labels retain strictest output permission; replay remains cheap.
   Fresh affected 155 passed/20.09s and historical ten 10 passed/1.31s, external 0;
   existing authorized bridge fixture now declares its restricted allowed level.
-  Final re-review is pending; the distinct formal-release capability P1 remains.
+  Fix `9066d8a` passed scoped final re-review: ADDRESSED, no new breakage.
+  The distinct formal-release capability P1 remains unresolved.
 - S1/S2 current signed ingestion and actual human Review now drive actual
   PG/pgvector and Neo4j into D1 cold/warm answers: four influencing slots,
   two incremental embedding skips, fresh run/cost/audit and zero warm generation.
@@ -23,8 +24,8 @@
   Final actual PG/pgvector/Neo4j lifecycle/path/cache-race demo: 7 passed in 228.41s,
   external attempts 0.
   [S3 runbook](superpowers/runbooks/s-3-slack-integrated-demo.md) records reproduction,
-  final demo artifact, boundaries and next decision. Independent review pending.
-- E/D1/S1/S2 are CLEAN; earlier entries below are historical. Formal release/P1
+  final demo artifact, boundaries and next decision. Whole-Slack review CLEAN.
+- E/D1/S1~S3 are CLEAN; earlier entries below are historical. Formal release/P1
   remain NOT CLEAN. Live source selection requires separate access/consent;
   no live APIs, paid run, rollout, `.env` or push.
 

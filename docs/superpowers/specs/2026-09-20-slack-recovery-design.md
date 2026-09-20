@@ -1,6 +1,6 @@
 # Slack — 합성 데이터 기반 복구 설계
 
-상태: **S-1/S-2 CLEAN; S-3 합성 통합 구현·독립 리뷰 대기** / 2026-09-21.
+상태: **S-1~S-3 합성 통합·전체 리뷰 CLEAN (`9066d8a`)** / 2026-09-21. 정식 release는 별도 NOT CLEAN.
 [공통 계약](2026-09-20-remaining-deliverables-design.md) / [구현 계획](../plans/2026-09-20-slack-recovery.md).
 순서: **D 기능 기준선 → E GraphRAG → D.1 캐시 → Slack → release readiness**.
 Slack은 마지막 기능 단계다. 실제 source 부재는 앞선 기능이나 합성 검증의 진입 조건이 아니다.

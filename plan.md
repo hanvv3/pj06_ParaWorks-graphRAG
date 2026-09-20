@@ -1,6 +1,6 @@
 # ParaWorks — 현재 로드맵
 
-갱신: 2026-09-21, E/D.1/S-1/S-2 CLEAN; Slack S-3 합성 통합 구현(독립 리뷰 대기).
+갱신: 2026-09-21, E/D.1/Slack S-1~S-3 구현·독립 리뷰 CLEAN. 정식 release는 NOT CLEAN.
 C-1 착수 기준: `c9c94e0` / `codex/rag-orchestrator-agent`.
 이 파일은 제품 방향·문서 탐색·작업 순서의 source of truth다.
 
@@ -24,7 +24,7 @@ C-1 착수 기준: `c9c94e0` / `codex/rag-orchestrator-agent`.
 | D Core 기능 | F-1/F-2 fresh 기능 기준선 통과; 정식 release는 NOT CLEAN으로 보류 | [D spec](docs/superpowers/specs/2026-09-20-d-core-completion-design.md) | [F-1/F-2](docs/superpowers/plans/2026-09-20-d-core-completion.md) |
 | E | 최소 GraphRAG prototype acceptance 완료. cache 없이 관계 검색/rollback 비교 확인 | [GraphRAG spec](docs/superpowers/specs/2026-09-20-e-graphrag-design.md) | [E-1~E-3](docs/superpowers/plans/2026-09-20-e-graphrag.md) |
 | D.1 | C-1~C-3 CLEAN; 생성 비용·rollback 비교 완료 | [캐시 spec](docs/superpowers/specs/2026-09-20-d1-answer-cache-design.md) | [C-1~C-3](docs/superpowers/plans/2026-09-20-d1-answer-cache.md) |
-| Slack | S-1/S-2 CLEAN; S-3 실제 로컬 DB 합성 통합 구현·독립 리뷰 대기 | [Slack spec](docs/superpowers/specs/2026-09-20-slack-recovery-design.md) | [S-1~S-3](docs/superpowers/plans/2026-09-20-slack-recovery.md) |
+| Slack | S-1~S-3 합성 통합·전체 리뷰 CLEAN; 실제 연결은 별도 | [Slack spec](docs/superpowers/specs/2026-09-20-slack-recovery-design.md) | [S-1~S-3](docs/superpowers/plans/2026-09-20-slack-recovery.md) |
 | 정식 출시 준비 | 보류. D release NOT CLEAN/P1 미해결 | [D release 계약](docs/superpowers/specs/2026-09-20-d-core-completion-design.md#보류한-정식-release-계약) | [기존 D-0~D-5](docs/superpowers/plans/2026-09-20-d-core-completion.md#보류한-정식-release-작업) |
 
 ## 재개할 때 읽는 순서
@@ -34,7 +34,7 @@ C-1 착수 기준: `c9c94e0` / `codex/rag-orchestrator-agent`.
 3. 선택한 단계의 spec과 **다음 작업 한 개**. [portfolio](docs/portfolio-log.md)의 최신 항목만 확인.
 4. 그 작업의 코드·테스트. 기존 긴 문서는 해당 계약이 필요할 때 지정된 절만 조회.
 
-다음은 **S-3 독립 리뷰 후 정식 출시 준비 범위·실행 계획 결정**이다.
+다음은 **정식 출시 준비 범위·R1 위협 모델 결정(planning)**이다. 아직 실제 release 구현 승인은 아니다.
 합성 통합과 실제 Slack source 선택은 구분한다. [S3 결과](docs/superpowers/runbooks/s-3-slack-integrated-demo.md)를 먼저 읽는다.
 F-1/F-2 기능 기준선은 통과했고 formal release는 NOT CLEAN으로 보류한다.
 Tasks1~22를 다시 구현하지 않는다.

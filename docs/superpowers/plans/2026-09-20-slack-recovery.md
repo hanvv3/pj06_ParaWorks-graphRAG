@@ -7,7 +7,7 @@
 **Spec:** [Slack 설계](../specs/2026-09-20-slack-recovery-design.md).
 **Architecture:** fake Slack → SourceEvent/registry/shared sync → pending Review → 현재 승인 → indexing/search.
 **Tech:** 기존 Python/pytest·LangChain/LangGraph·SQLite smoke·PostgreSQL/pgvector·E/D.1 경계.
-**상태:** S-1/S-2 CLEAN; S-3 합성 통합 구현·독립 리뷰 대기. 다음은 정식 출시 준비 계획 결정이다.
+**상태:** S-1~S-3 및 전체 Slack 리뷰 CLEAN (`9066d8a`). 다음은 정식 출시 준비 planning/계약 결정이다.
 
 ## 공통 제약과 리뷰 초점
 
@@ -65,7 +65,7 @@ SQLite 영향 215 passed/실제 PG·pgvector 3 passed, external 0. `d91ed9d` 독
   보여준다. SQLite smoke와 PostgreSQL/pgvector/Neo4j 증거를 구분하고 실제 외부 호출 0을 확인한다.
 - [x] 해결한 Slack node id만 검증 결과와 함께 baseline에서 갱신한다. 미해결 실패를 숨기지 않고
   backend 통합·관련 frontend 검증 결과를 release readiness로 넘긴다.
-- [ ] 합성 완료/남은 실패/live 준비 상태를 코드 revision과 함께 기록하고 리뷰·커밋한다.
+- [x] 합성 완료/남은 실패/live 준비 상태를 코드 revision과 함께 기록하고 리뷰·커밋한다.
 
 **완료:** 합성 end-to-end를 다시 실행할 수 있고 기존 권한·승인·근거·비용 경계가 유지된다.
 실제 workspace/export/대체 source와 접근 권한은 연결 단계의 사용자 결정이다. 미선택은 합성 완료를
