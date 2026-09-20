@@ -2,6 +2,7 @@ import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from time import sleep as default_sleep
 from typing import Protocol
 
@@ -20,6 +21,8 @@ SLACK_REQUIRED_SCOPES = (
     'mpim:read',
     'users:read',
 )
+SLACK_MAX_CHANNELS = 50
+SLACK_KNOWN_MESSAGE_WINDOW = 50
 
 
 class SlackApiClient(Protocol):
@@ -104,7 +107,7 @@ class SlackWebApiClient:
         items: list[dict] = []
         cursor: str | None = None
 
-        while True:
+        for _ in range(20):
             page_params = dict(params)
             if cursor:
                 page_params['cursor'] = cursor
@@ -116,9 +119,8 @@ class SlackWebApiClient:
             items.extend(payload.get(item_key, []))
             cursor = str(payload.get('response_metadata', {}).get('next_cursor') or '')
             if not cursor:
-                break
-
-        return items
+                return items
+        raise SlackApiError(f'Slack {method} failed: page_limit_exceeded')
 
     def _get_with_retries(self, method: str, params: dict[str, str]) -> httpx.Response:
         for attempt in range(self.max_retries + 1):
@@ -255,7 +257,15 @@ class SlackConnector:
                     )
         return events
 
-    def fetch_events_since(self, latest_timestamps_by_partition: dict[str, str]) -> list[SourceEvent]:
+    def fetch_events_since(
+        self, latest_timestamps_by_partition: dict[str, str], *,
+        known_messages_by_channel: dict[str, list[dict]] | None = None,
+    ) -> list[SourceEvent]:
+        """Optionally revisit bounded persisted observations, without granting trust.
+
+        Unknown old roots absent from upstream history cannot be discovered here.
+        Each known thread uses its own cursor, not another thread's newest event.
+        """
         events: list[SourceEvent] = []
         available_clients = [self.client]
         if self.user_client is not None:
@@ -272,11 +282,14 @@ class SlackConnector:
                     user_map[uid] = name
 
         channel_map: dict[str, str] = {}
+        restricted_channels: set[str] = set()
         accessible_channels: dict[str, SlackApiClient] = {}
         for client in available_clients:
             for channel in _safe_conversations_list(client):
                 cid = channel.get('id')
                 cname = channel.get('name')
+                if cid and any(channel.get(flag) for flag in ('is_private', 'is_im', 'is_mpim')):
+                    restricted_channels.add(cid)
                 if cid and cname:
                     channel_map[cid] = cname
                 if cid and (channel.get('is_member') or channel.get('is_im') or channel.get('is_mpim')):
@@ -284,6 +297,8 @@ class SlackConnector:
 
         configured_channel_ids = list(dict.fromkeys(self.config.channel_ids))
         target_channel_ids = configured_channel_ids if configured_channel_ids else list(accessible_channels)
+        if len(target_channel_ids) > SLACK_MAX_CHANNELS:
+            raise SlackApiError('Slack sync failed: channel_limit_exceeded')
 
         for channel_id in target_channel_ids:
             history_client = _client_for_channel(
@@ -303,24 +318,55 @@ class SlackConnector:
                 channel_id=channel_id,
                 oldest=oldest,
             )
+            permission = 'restricted' if channel_id in restricted_channels or channel_id.startswith('D') else 'internal'
+            threads: dict[str, dict] = {}
+            for metadata in (known_messages_by_channel or {}).get(channel_id, [])[:SLACK_KNOWN_MESSAGE_WINDOW]:
+                thread_ts = metadata.get('thread_ts') or metadata.get('ts')
+                ts = metadata.get('ts')
+                if not thread_ts or not ts:
+                    continue
+                previous = threads.get(thread_ts)
+                thread_permission = (
+                    'restricted' if metadata.get('permission_level') == 'restricted'
+                    or (previous and previous['permission'] == 'restricted') else permission
+                )
+                if previous:
+                    previous['permission'] = thread_permission
+                if previous is None or Decimal(ts) > Decimal(previous['cursor']):
+                    threads[thread_ts] = {
+                        'cursor': ts,
+                        'text': metadata.get('thread_parent_text') or metadata.get('raw_text'),
+                        'user': metadata.get('thread_parent_user_id') or metadata.get('slack_user_id'),
+                        'team': metadata.get('workspace_id'),
+                        'permission': thread_permission,
+                    }
             for message in messages:
                 if message.get('type') != 'message' or not message.get('text'):
                     continue
-                events.append(self._message_to_source_event(channel_id, message, user_map=user_map, channel_map=channel_map))
+                events.append(self._message_to_source_event(channel_id, message, user_map=user_map, channel_map=channel_map, permission_level=permission))
                 thread_ts = str(message.get('thread_ts') or message.get('ts') or '')
                 if not thread_ts or int(message.get('reply_count') or 0) <= 0:
                     continue
+                previous = threads.get(thread_ts)
+                threads[thread_ts] = {
+                    'cursor': previous['cursor'] if previous else oldest,
+                    'text': str(message.get('text') or ''),
+                    'user': message.get('user'), 'team': message.get('team'),
+                    'permission': previous['permission'] if previous else permission,
+                }
+            if len(threads) > SLACK_KNOWN_MESSAGE_WINDOW:
+                raise SlackApiError('Slack sync failed: thread_limit_exceeded')
+            for thread_ts, context in threads.items():
                 reply_index = 0
-                parent_text = str(message.get('text') or '')
                 replies = _conversation_replies_with_fallback(
                     primary_client=history_client,
                     fallback_client=self.client if history_client is self.user_client else None,
                     channel_id=channel_id,
                     thread_ts=thread_ts,
-                    oldest=oldest,
+                    oldest=context['cursor'],
                 )
                 for reply in replies:
-                    if reply.get('ts') == message.get('ts'):
+                    if reply.get('ts') == thread_ts:
                         continue
                     if reply.get('type') != 'message' or not reply.get('text'):
                         continue
@@ -330,13 +376,18 @@ class SlackConnector:
                             channel_id,
                             reply,
                             parent_ts=thread_ts,
-                            parent_text=parent_text,
+                            parent_text=context['text'],
+                            parent_user_id=context['user'],
+                            workspace_id=context['team'],
+                            permission_level=('restricted' if 'restricted' in
+                                              (permission, context['permission']) else permission),
                             reply_index=reply_index,
                             user_map=user_map,
                             channel_map=channel_map,
                         )
                     )
-        return events
+        # A thread-broadcast may occur in both history and replies. Keep context.
+        return list({event.source_id: event for event in events}.values())
 
     def _message_to_source_event(
         self,
@@ -348,6 +399,9 @@ class SlackConnector:
         parent_ts: str | None = None,
         parent_text: str | None = None,
         reply_index: int | None = None,
+        parent_user_id: str | None = None,
+        workspace_id: str | None = None,
+        permission_level: str = 'internal',
     ) -> SourceEvent:
         timestamp = str(message['ts'])
         user_id = message.get('user') or message.get('username')
@@ -381,10 +435,18 @@ class SlackConnector:
             title=f'Slack thread reply in {channel_id}' if is_thread_reply else f'Slack message in {channel_id}',
             body=body,
             author=author,
-            participants=[author] if author else [],
+            participants=list(dict.fromkeys(user_map.get(uid, uid) for uid in
+                                             (parent_user_id, user_id) if uid)),
             timestamp=event_dt,
-            permission_level='internal',
+            permission_level=permission_level,
+            semantic_timestamp_raw=timestamp,
             raw_metadata={
+                'workspace_id': message.get('team') or workspace_id,
+                'workspace_url': self.config.workspace_url.rstrip('/'),
+                'raw_text': raw_text,
+                'source_snippet': raw_text,
+                'slack_participant_ids': list(dict.fromkeys(uid for uid in (parent_user_id, user_id) if uid)),
+                'thread_parent_user_id': parent_user_id,
                 'channel_id': channel_id,
                 'channel_name': channel_name, # 보강된 태그
                 'author_name': author,        # 보강된 태그

@@ -4,13 +4,19 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import Numeric, cast, func, select
 from sqlalchemy.orm import Session
 
 from backend.app.connectors.base import Connector, SourceEvent
 from backend.app.connectors.google import (
     GOOGLE_CONNECTOR_SCOPES,
     GoogleConnector,
+)
+from backend.app.connectors.slack import (
+    SLACK_KNOWN_MESSAGE_WINDOW,
+    SLACK_MAX_CHANNELS,
+    SlackApiError,
+    SlackConnector,
 )
 from backend.app.core.config import Settings, get_settings
 from backend.app.ingestion.service import ingest_events_with_result
@@ -76,7 +82,10 @@ def sync_connector_events(
     db.refresh(job)
 
     try:
-        if hasattr(connector, 'fetch_events_since'):
+        if isinstance(connector, SlackConnector):
+            cursors, known_messages = _slack_sync_context(db, connector)
+            events = connector.fetch_events_since(cursors, known_messages_by_channel=known_messages)
+        elif hasattr(connector, 'fetch_events_since'):
             events = connector.fetch_events_since(_latest_cursors_by_partition(db, connector.source_type))
         else:
             events = connector.fetch_events()
@@ -179,6 +188,37 @@ def _mark_changed_sources_for_job(
                 mode=review_batch_mode,
                 sync_job_id=job_id,
             )
+
+
+def _slack_sync_context(db: Session, connector: SlackConnector) -> tuple[dict[str, str], dict[str, list[dict]]]:
+    """Bounded observations only; legacy unsigned sources gain no authority.
+
+    Revisit the newest 50 message observations per selected channel. Older/unknown
+    threads outside this window require a later explicit upstream discovery path.
+    """
+    channel = Source.raw_metadata['channel_id'].as_string()
+    ts = Source.raw_metadata['ts'].as_string()
+    scope = [Source.source_type == 'slack',
+             Source.raw_metadata['workspace_url'].as_string() == connector.config.workspace_url.rstrip('/')]
+    if connector.config.channel_ids:
+        if len(set(connector.config.channel_ids)) > SLACK_MAX_CHANNELS:
+            raise SlackApiError('Slack sync failed: channel_limit_exceeded')
+        scope.append(channel.in_(connector.config.channel_ids))
+    rows = db.execute(select(channel, func.max(cast(ts, Numeric(24, 6))))
+                      .where(*scope).group_by(channel).limit(SLACK_MAX_CHANNELS + 1)).all()
+    if len(rows) > SLACK_MAX_CHANNELS:
+        raise SlackApiError('Slack sync failed: channel_limit_exceeded')
+    cursors, known = {}, {}
+    for channel_id, cursor in rows:
+        if not channel_id or cursor is None:
+            continue
+        cursors[channel_id] = str(cursor)
+        observations = db.scalars(select(Source).where(*scope, channel == channel_id)
+                                  .order_by(cast(ts, Numeric(24, 6)).desc(), Source.id.desc())
+                                  .limit(SLACK_KNOWN_MESSAGE_WINDOW)).all()
+        known[channel_id] = [{**source.raw_metadata, 'permission_level': source.permission_level}
+                             for source in observations]
+    return cursors, known
 
 
 def _latest_cursors_by_partition(db: Session, source_type: str) -> dict[str, str]:
