@@ -18,6 +18,13 @@
   reserve/actual/unknown 비용 보존·no-redispatch, provider safety sidecar/disabled latch를 확인했다.
 - 실제 기능/coverage gap은 발견되지 않아 RED/GREEN 또는 product code 변경은 없었다. API/router의
   formal `live_gate`·provider readiness·permission/cost 제한을 변경하거나 우회하지 않았다.
+- 후속 리뷰가 지적한 unselected model influence의 생성 후 revoke 경계는 두 provider-visible slot을
+  실제 graph에 넣어 E1만 선택하고 E2를 생성 뒤 `restricted`로 revoke하는 회귀로 보완했다:
+  `test_answer_graph_post_generation_unselected_influence_revoke_redacts_full_product` →
+  **1 passed in 4.61s**. 전체 answer product/citation/influence를 redaction하고 한 번만 dispatch하며,
+  비용과 full-influence audit HMAC을 보존함을 확인했다. 관련 graph/finalization 영향 명령은
+  **95 passed, 1 skipped in 104.92s**, failure 0이었다. 기존 구현이 이미 계약을 만족해 새 test의
+  첫 실행도 GREEN이었고 product code 변경은 없었다.
 - 이 기록은 provider-free F-1 증거만 뜻한다. 실제 PostgreSQL+pgvector/UI 통합은 F-2에서,
   actual-model 품질·30-case formal release와 capability P1/NOT CLEAN 해소는 보류된 D-0~D-5에서
   별도로 검증해야 하며, 이번 결과로 이를 통과라고 표시하지 않는다.

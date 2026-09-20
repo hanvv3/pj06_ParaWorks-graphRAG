@@ -911,6 +911,73 @@ def test_answer_graph_permission_change_discards_product_and_never_retries(
     assert context.services.db.get(AgentRun, 161).run_record_phase == 'final'
 
 
+def test_answer_graph_post_generation_unselected_influence_revoke_redacts_full_product(
+    tmp_path, monkeypatch
+):
+    """Every provider-visible influence is revalidated, including non-citations."""
+    from sqlalchemy import select
+
+    from backend.app.agent_runtime.rag_graph import (
+        build_company_memory_rag_answer_v2_graph,
+    )
+    from backend.app.models import Source
+
+    context, client = _answer_context(tmp_path, mixed_sources=True)
+    captured = {}
+    finalizer_factory = context.services.finalizer_factory
+
+    def capture_full_influence(pending, prepared):
+        captured['slot_ids'] = tuple(
+            observation.slot_id
+            for observation in prepared.model_influence_observations
+        )
+        captured['observation_hmac'] = prepared.prepared_observation_hmac
+        return finalizer_factory(pending, prepared)
+
+    context = replace(
+        context,
+        services=replace(
+            context.services,
+            finalizer_factory=capture_full_influence,
+        ),
+    )
+    send = client.send
+
+    def revoke_unselected_after_generation(*args, **kwargs):
+        response = send(*args, **kwargs)
+        unselected = context.services.db.scalar(
+            select(Source).where(Source.source_type == 'drive')
+        )
+        assert unselected is not None
+        unselected.permission_level = 'restricted'
+        context.services.db.commit()
+        return response
+
+    monkeypatch.setattr(client, 'send', revoke_unselected_after_generation)
+    text = prepare_direct_request_text(
+        'observation', key=context.settings.agent_runtime_fingerprint_secret.encode()
+    )
+    result = build_company_memory_rag_answer_v2_graph().invoke(
+        {'prepared_text': text}, context=context
+    )
+
+    assert captured['slot_ids'] == ('E1', 'E2')
+    assert type(captured['observation_hmac']) is str
+    assert len(captured['observation_hmac']) == 64
+    assert result['outcome'] == 'evidence_unavailable'
+    assert result['answer_blocks'] is None and result['selected_slot_ids'] == ()
+    assert result['evidence_projection'].citations == ()
+    assert result['model_influence'] == ()
+    assert len(client.seen) == 1
+    assert result['charged_cost_usd'] > 0
+    parent = context.services.db.get(AgentRun, 161)
+    assert parent.status == 'complete' and parent.run_record_phase == 'final'
+    assert (
+        parent.metadata_['prepared_model_influence_observation_hmac']
+        == captured['observation_hmac']
+    )
+
+
 def test_lazy_provider_construction_failure_terminalizes_undispatched_parent(tmp_path):
     from backend.app.agent_runtime.rag_graph import (
         build_company_memory_rag_answer_v2_graph,
