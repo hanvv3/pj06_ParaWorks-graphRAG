@@ -1,5 +1,17 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — local demo startup/login recovery
+
+- Reproduced uvicorn startup refusal: sample ingestion created retained C.5 keyed
+  state before its runtime key identity existed. Initialize via the same existing
+  bootstrap before seeding; never adopt orphaned state or disable startup checks.
+- Regression RED: fresh seeded startup failed, orphaned initializer did not refuse.
+  GREEN: initialization/key-bootstrap/auth selection 34 passed, external calls 0.
+- Preserved original demo database and initialized a separate keyed demo database.
+  Actual backend health returned ok; frontend proxy admin login HTTP 200, session
+  cookies issued and authenticated `/auth/me` returned admin. No provider call,
+  production GraphRAG rollout, existing DB deletion or configuration-file change.
+
 ## 2026-09-21 — Slack S-3 integrated synthetic evidence
 
 - Final whole-Slack review found a legacy unsigned permission-only dedupe gap.

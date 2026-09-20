@@ -5,6 +5,15 @@ Formal release remains NOT CLEAN and capability P1 is unresolved.**
 
 ## Resume here
 
+- Local UI startup fix: demo seeding must bootstrap the runtime key identity
+  before ingesting keyed sample sources. `init_db` now uses the existing bootstrap
+  first; orphaned keyed DBs still fail closed. Original `.tmp/paraworks-smoke.db`
+  was preserved; the recovered local demo uses `.tmp/paraworks-smoke-keyed-20260921.db`.
+  Start via `scripts/start-smoke.ps1 -DatabasePath .tmp/paraworks-smoke-keyed-20260921.db`
+  after stopping existing servers, not by launching duplicate listeners. Keep
+  `UV_PROJECT_ENVIRONMENT=.venv-task4-r3-review` for this workstation.
+  This is SQLite UI smoke, not enabled production GraphRAG or release approval.
+
 - Worktree: `.worktrees/review-hitl-v2-design`, branch `codex/rag-orchestrator-agent`.
   Verified code: `9066d8a30f02e97058c37bdf6d77276ea2bd329f`. Later docs-only commits
   do not rerun or replace this evidence. Inspect fresh HEAD/status.
