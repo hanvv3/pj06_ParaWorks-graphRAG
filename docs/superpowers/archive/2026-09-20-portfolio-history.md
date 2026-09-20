@@ -1,0 +1,7688 @@
+# ParaWorks Portfolio Log — historical snapshot
+
+Archived on 2026-09-20 from code baseline `3f6cb0f`. Counts below are historical
+verification evidence, not fresh verification of a later commit. Current entries
+live in `docs/portfolio-log.md`; consult this archive only for a named checkpoint.
+
+## 2026-09-14 D Core Task25-B authority Round 1 correction
+
+- Initial independent specification and code reviews of `7299183` were **NOT
+  CLEAN**. P1 probes showed hidden-index/Git-environment source substitution, a
+  directly callable DTO-only evaluator path, stale capability use after release
+  drift, and registry cloning through the public issuer closure.
+- Correction `61eb6d7` binds each exact approved source across repository root,
+  lexical path, regular/non-reparse file, safe index flags, index/commit blob and
+  clean-filtered worktree object identity under a sanitized Git environment.
+  The evaluator no longer exposes a successful DTO-only path. Capability
+  consumption requires a fresh runner-owned DB connection/barrier and repeats
+  Task24 source, authorization, corpus, provider, generation and transition
+  validation; all attempts are terminal and the public issuer retains neither a
+  registry closure nor identity secret.
+- Evidence: initial saved spec `3 failed`; permanent RED `7 failed, 2 passed`;
+  final capability/quality `184 passed`; saved spec `3 passed`; clean-commit
+  adjacent `361 passed`; provider/secret `216 passed, 1 skipped`; Ruff, format,
+  compile and diff green. Four exploit-success probes now fail at the expected
+  refusal boundaries. Clean readiness stays at
+  `preview_snapshot_reader_unavailable` with no authorization or dispatch.
+- Fresh dual independent review is pending. Production readers, 30-case
+  dispatch, persistence, reviewer session, `run` CLI, PostgreSQL/live-release
+  proof and the remaining Task25-B work have not started. No provider/network/
+  paid call, push, merge, deployment or release occurred.
+
+## 2026-09-14 D Core Task25-B one-use execution authority
+
+- Commit `2b53f55` delivers the first Task25-B trust-boundary slice. A clean
+  Windows checkout now hashes the exact committed Git blob rather than comparing
+  platform-converted checkout bytes, while the Git-clean fence continues to
+  reject genuine source edits.
+- Task24's opaque approved source and exact issued authorization identity now
+  mint a one-use, process-memory-only capability under the existing DB/release/
+  provider barrier. It binds the native ledger UUID/epoch, full approved 30-case
+  executable image, fixture/manifest/corpus/provider snapshots and release
+  generation. The public quality evaluator requires and consumes it, preventing
+  a caller from turning co-mutated DTOs or recomputed HMACs into execution
+  authority. Copy, serialization, construction, cross-ledger use, mutation and
+  replay attacks are covered. Review-signature ordinals are now exact native
+  non-negative integers.
+- TDD evidence: the initial CRLF/dirty/ordinal selection was `4 failed, 1
+  passed`; capability tests first failed on the absent API. Final focused quality
+  and capability evidence is `163 passed`; the saved ordinal review probe is `3
+  passed`; adjacent Task24/25 authorization/source/schema/CLI is `234 passed`;
+  provider/secret hygiene is `216 passed, 1 skipped`; preview/r1 is `131 passed`.
+  Ruff, format, compile and diff checks are green. The clean-commit CLI advances
+  to the next honest unavailable boundary, `preview_snapshot_reader_unavailable`,
+  with zero provider dispatch and no authorization.
+- This is not Task25-B completion. Production readers, 30-case dispatch, quality
+  persistence, authenticated reviewer interaction, `run` CLI, PostgreSQL and
+  live-release evidence remain open, with fresh independent review required
+  before proceeding. No external/provider/paid call, push, merge, deploy or
+  release occurred.
+
+## 2026-09-14 D Core Task25-A independent-review Round 2 correction
+
+- Both fresh reviews of the Round-1 candidate `6d7353a` were **NOT CLEAN**.
+  Implementation `5affa36` closes only those Task25-A findings. The quality
+  manifest must now carry the complete Task24 `FrozenCaseClaimManifest`; the
+  evaluator reuses `_manifest_payload`, requires the exact 30 resolved cases in
+  annotation order, binds case/surface/backend and the
+  `query_bytes_hmac == retrieval_query_hmac` alias, validates provider/runtime/
+  config/input identities, and binds exact component reserves to each annotation.
+- Every monetary input must be a native finite, non-negative, unsigned
+  `Decimal` with exponent exactly `-6`. Scale aliases, signed zero, NaN,
+  infinity, bool/int aliases and over-reserve charge refuse before scoring.
+  Sanitized result primitives are type-checked before equality, hashing or
+  canonicalization. Baseline ratio corruption now reports `baseline_drift`.
+- Reviewer authority rejects ordinary deletion and converts forced missing or
+  malformed frozen-roster mutation to `reviewer_roster_invalid`; the exact
+  ordered role/subject tuple and its HMAC remain immutable and takeover cannot
+  be authorized by re-signing.
+- RED evidence: saved Round-1 probes `11 failed, 5 passed`; initial permanent
+  Round-2 matrix `26 failed, 92 passed`; type-before-comparison regression `2
+  failed, 11 passed`. GREEN: permanent evaluator `147 passed`; evaluator plus
+  both saved probe files and credential hygiene `170 passed`; Task24 preview/
+  corpus/reviewer validators `202 passed`; clean-commit adjacent release matrix
+  `514 passed in 1574.72s`. Ruff, format, compile and diff checks are green.
+  No provider/network/paid call, persistence, runner/CLI, release, push, merge
+  or deployment ran.
+- Fresh dual independent review of `5affa36` remains mandatory. Task25-B has not
+  started and is still actual implementation; it must begin with the documented
+  clean-Windows committed-source/CRLF RED. PostgreSQL and live-release gates
+  remain open.
+
+## 2026-09-14 D Core Task25-A independent-review Round 1 correction
+
+- Both initial Task25-A reviews were **NOT CLEAN**. Commit `2686306` corrects
+  their evaluator-boundary findings without beginning Task25-B: it reuses the
+  Task24 `_corpus_payload` validator and recomputes the exact frozen corpus HMAC,
+  accepts only the approved `pgvector-cosine-indexable:v1` corpus policy, and
+  binds every manifest relevant/required identity to the ordered non-empty
+  corpus member roster, including support-mode and pgvector-index eligibility.
+- Completed quality input now accepts only the six approved product outcomes.
+  Provider/runtime/overrun/safety/internal outcomes fail closed; Decimal values
+  must be finite, non-negative and exactly six-place, charged cost cannot exceed
+  the exact manifest reserve, and dispatch counts remain exact. Reviewer
+  authority is copied into an immutable ordered tuple, its attributes are
+  write-once, and a mutable compatibility mirror is revalidated against the
+  frozen roster/HMAC before any label is consumed. Nested malformed values are
+  type-checked before regex, set, Decimal or attribute operations and produce
+  bounded `RagReleaseQualityError` codes.
+- RED: the saved independent probe was `4 failed`; the legitimate Task24 corpus
+  fixture plus permanent attacks produced `52 failed, 19 passed`; the explicit
+  frozen-authority rebinding regression was `1 failed`. GREEN: permanent
+  evaluator `87 passed`; saved probe plus evaluator `91 passed`; evaluator,
+  probes and credential hygiene `94 passed`; existing Task24 corpus/preview/
+  reviewer validators `202 passed`; clean-commit broad adjacent release matrix
+  `454 passed in 1572.25s`. Ruff, format, compile and diff checks passed before
+  commit. No provider/network/paid call, DB write, runner/CLI, release, push,
+  merge or deployment ran.
+- Fresh dual independent review of `2686306` is required before Task25-A can be
+  called CLEAN or Task25-B may start. The previously documented Windows
+  committed-source/CRLF prerequisite, PostgreSQL and live-release gates remain
+  open.
+
+## 2026-09-14 D Core Task25-A provider-free quality adjudication
+
+- Implementation `5f0e605` adds only the provider-free
+  `RagReleaseQualityEvaluator` slice. Immutable sanitized case/block, frozen
+  legacy baseline, signed reviewer-label/adjudication and canonical report
+  contracts enforce the exact 30-case roster, 100% hard-negative accuracy,
+  100% positive/required-slot coverage, at least 95% faithfulness, retrieval
+  precision/recall parity with the frozen legacy baseline, and zero leak or
+  invalid-slot tolerance.
+- Reviewer A then reviewer B are mandatory; the distinct adjudicator is accepted
+  only on disagreement. Exact role/subject/order/signature HMACs, manifest,
+  approval, corpus and baseline bindings fail closed on missing, duplicate,
+  takeover or drift. The constructor receives the exact immutable role-to-subject
+  map so the roster and every signature can be recomputed without changing the
+  approved `evaluate(...)` interface. Raw answer/evidence blocks are ephemeral,
+  absent from sanitized rows and reports, and cannot be inferred from them.
+- TDD evidence: the initial test collection failed because
+  `backend.app.rag.release_quality` did not exist; added policy-boundary tests also
+  failed before their minimal implementations. Final evaluator/credential tests
+  are `44 passed`, exact authorization refusal/evaluator nodes are `43 passed`,
+  and the broad adjacent release matrix is `408 passed`. Ruff, format, compile,
+  credential and diff checks are green. No provider, network, paid call, database
+  persistence, runner, CLI execution, release, push, merge or deployment ran.
+- Task25-B is still actual implementation work. Its mandatory first RED is the
+  clean-Windows `core.autocrlf=true` source-binding defect: the current raw
+  worktree-byte versus committed-blob comparison reports
+  `committed_source_changed` for `service.py`, `pgvector_store.py` and
+  `search_store.py` even when Git is clean. Fix it cross-platform without
+  weakening committed-source/baseline HMAC or fail-closed guarantees, then add
+  production readers, composite runner, live gate, schema and CLI integration.
+  PostgreSQL and live-release gates remain open.
+
+## 2026-09-14 D Core Task25 provider-incident independent-review round 3
+
+- Implementation `64a414b` corrects the remaining release/provider consistency
+  false refusal. A valid case-null `authorization_abort_corpus_drift` or
+  `authorization_abort_execution_crash` can now terminalize after an unrelated
+  reviewed provider change, preserving the existing terminal case, nonzero
+  charge/cost accounting, dispatch rows, provider rows and signed latch.
+- This is not a broad allowlist bypass. The private immutable drift binding now
+  carries an exact transition kind, terminal state, terminal outcome,
+  authorization identity, immutable predecessor digest and current provider
+  digest. It is constructed only after the existing kind-specific mutation,
+  attestation/corpus, roster and provider-snapshot checks. Ordinary `inspect()`
+  still rejects the pre-terminal mixed state; invalid authority, tampered
+  digest/kind and replay attempts remain zero-DML refusals.
+- RED: the saved reviewer matrix was `2 failed, 1 passed`; the permanent positive
+  and replay selection was `4 failed`, while six permanent negative controls
+  already passed. GREEN: all ten new permanent cases passed, the saved reviewer
+  matrix passed `3`, and the final all-probe focus passed `195`.
+- Final frozen evidence: affected release state/schema `80 passed`; broad
+  release/provider `1268 passed, 15 skipped`; direct impact `221 passed,
+  14 skipped` with 11 existing Alembic warnings; credential `3 passed`.
+  Ruff, format, compile and diff checks pass. PostgreSQL is unavailable and
+  independent CLEAN Round-3 review is pending. No public API, migration,
+  runner/evaluator, production reader, external/provider/live/release operation,
+  push, merge or deployment was performed.
+
+## 2026-09-14 D Core Task25 provider-incident independent-review round 2
+
+- Implementation `69b4a00` makes release/provider reconciliation
+  transition-aware. Exactly one fully validated, owned
+  `started -> aborted_provider_safety` authorization may consume the provider
+  predecessor/current drift during an allowlisted abort publication; ordinary
+  `inspect()` still refuses the same separately committed mixed state.
+- Provider-incident preparation now deterministically authenticates every
+  blocker incident-reference HMAC and reconciles the signed first-blocker run,
+  category and timestamp. Reverse digest authentication continues through
+  supersession to bootstrap. Legacy v1 rebind history cannot be reconstructed
+  because the predecessor policy snapshot was overwritten, so preparation fails
+  closed with an explicit reviewed-rebootstrap requirement rather than sealing
+  an unauthenticated prefix.
+- RED evidence included the four saved independent probes and permanent
+  regressions for drift abort, historical actor/run attribution, rebind and
+  supersession prefix corruption, and pristine legacy-rebind refusal. The first
+  combined run had eight intended safety failures plus one supersession fixture
+  setup error; after correcting only that fixture, its intended refusal failed
+  RED as well.
+- Final frozen GREEN: focused incident/reviewer probes `182 passed`; broad
+  release/provider `1258 passed, 15 skipped`; direct impact `221 passed,
+  14 skipped` with 11 existing Alembic warnings; credential hygiene `3 passed`.
+  Ruff, format, compile and diff checks pass. PostgreSQL is unavailable, so its
+  gates remain skipped. Independent CLEAN rereview is pending; no runner,
+  evaluator, migration, production reader, live/provider/release operation,
+  push, merge or deployment was performed.
+
+## 2026-09-14 D Core Task25 provider-incident independent-review round 1
+
+- Implementation `cb6b99f` closes the eight saved review regressions against
+  `e94bd96`: five provider-service callbacks reachable after incident DML and
+  three accepted physical/history-chain corruptions.
+- Incident preparation now HMAC-binds the complete private provider SQL image.
+  The authority-owned non-virtual commit path publishes the latch first, applies
+  private-schema SQL, and returns immutable exact latch plus complete
+  before/prospective/actual authority, readiness and history images. Release
+  publication no longer re-enters provider service overrides after DML.
+- Complete physical history order and the bootstrap/block/reset/rebind/
+  supersession state matrix are validated. Reconstructible signed-envelope
+  digests are authenticated in reverse, and a committed provider-only incident
+  is an explicit release/provider mismatch that `inspect()` refuses while the
+  authorization remains `started` on the predecessor digest.
+- RED: saved review probes `8 failed`; permanent focused selection `9 failed,
+  8 passed`. GREEN: focused incident `160 passed`; saved probes `8 passed`;
+  comprehensive release/provider `1594 passed, 15 skipped`; direct impact
+  `221 passed, 14 skipped` with 11 existing Alembic warnings; credential hygiene
+  `3 passed`. Ruff, format, compile and diff checks pass.
+- PostgreSQL is unavailable, so conditional skips remain open. Independent
+  CLEAN rereview is pending; composite/evaluator work, production readers and
+  actual release remain blocked. No provider/network/paid/release operation,
+  push, merge or deployment ran.
+
+## 2026-09-14 D Core Task25 provider-incident persistence candidate
+
+- Implementation `e94bd96` removes shared ORM Table/Column/Type objects from
+  sealed provider-incident writes and post-write reads. A private exact-schema
+  registry now owns authority, exact-two readiness and provider-history images;
+  before, prospective and actual after-images are checked inside one stable
+  transaction, without caller-overridable callbacks after DML.
+- The external-first fail-stop/recovery contract and one-use incident plans are
+  preserved. Release checkpoints now pin provider history as well as authority
+  and readiness, and repeated reviewed-reset incidents preserve immutable
+  first-blocker evidence.
+- Frozen focused evidence is `150 passed`; broader release/provider evidence is
+  `1010 passed, 14 skipped`; final affected evidence reconciles to `253 passed,
+  14 skipped`; credential hygiene is `3 passed`. PostgreSQL is unavailable, so
+  its skips remain an open gate. Ruff, format, compile and diff checks pass.
+- This is a narrow implementation candidate, not independent CLEAN. Task25
+  composite/evaluator work, production readers and actual release remain
+  blocked pending independent review. No external/live/paid/release operation
+  ran.
+
+## 2026-09-13 D Core Task21 staged retrieval-shadow candidate
+
+- Added deployment-static rollout execution across Ask, Search, and Assistant.
+  Keyword shadow is provider/cost/generation-free; pgvector shadow shares one
+  exact immutable query embedding with the unchanged legacy path and never runs
+  V2 answer generation.
+- Added a pure aggregate comparator with exactly five allowed delta classes.
+  Persisted shadow evidence is limited to counts, latency/cost values, and
+  domain-separated HMACs; raw queries, evidence bytes, public/internal run IDs,
+  and candidate tuples are not stored.
+- Assistant history containing a prior assistant response remains on one
+  standalone legacy path and records only the sanitized context-security delta.
+  User-only Assistant context now participates in both keyword and pgvector
+  retrieval comparison without changing public response bytes.
+- A retained provider-safety blocker now prevents D admission/shared embedding,
+  writes an aggregate advancement-blocked audit, and permits exactly the legacy
+  product path. Rollback does not clear the underlying latch. A crash after a
+  successful embedding-cost commit is owner-fenced, recoverable only as final
+  `persistence_failed`, retains actual cost, and cannot redispatch.
+- Provider-free evidence is `558 passed` plus Ruff clean. All exact 60 golden
+  cases execute the real LangChain keyword/pgvector Runnable boundaries with
+  deterministic fake transports and zero external provider/network calls.
+  The candidate remains **DONE_WITH_CONCERNS pending independent review**. No
+  rollout activation, live provider, network, push, merge, deploy, Slack, CDC,
+  Redis/D.1, or Deliverable E work occurred.
+
+## 2026-09-12 D Core Task18 CLEAN
+
+- Independent review found two uncommon schema spellings that d7 accepted but
+  could not safely pass through every generation layer: `$function$` could close
+  the fixed PL/pgSQL body delimiter and `:` could become a SQLAlchemy TextClause
+  bind. The unchanged reviewer probe reproduced both failures before the edit.
+- Because d7 remains an unpushed, undeployed, never-real-PG-applied pre-release
+  candidate, this closeout minimally tightens d7's `_trusted_schema`; frozen
+  b5/c6 remain unchanged. Upgrade and downgrade now reject any colon-containing
+  name or exact `$function$` substring before generated SQL, with a stable error
+  that does not echo the input. `public`, quoted names, spaces and Unicode remain
+  supported. This documented spelling limit replaces the earlier blanket claim
+  that every PostgreSQL-legal schema identifier is supported.
+- Independent cumulative review of `a693b091` is **CLEAN**: F1–F11 are addressed
+  with no open Critical, Important or Minor finding. The reviewer freshly passed
+  358 tests with no failures across v3/golden/d7, retained and new review probes,
+  the SQLite F6 matrix, and affected Assistant/Task18/migration suites.
+- CLEAN is bounded to code review, static PostgreSQL SQL, and SQLite execution.
+  Actual PostgreSQL parser/server, least-privileged role, TEMP/direct-execute,
+  deferred-commit, concurrency and deployment-role verification remain separate
+  unapproved release gates. Empty-v3 downgrade restores known-unsafe c6 only for
+  offline recovery and must be followed by re-upgrade before serving. No rollout,
+  deployment, push, provider, network or Docker action occurred. Task19 frontend
+  DTO/capability transport is the next implementation task.
+
+## 2026-09-12 D Core Task18 PostgreSQL authority hardening candidate
+
+- Independent round-4 review found that the c6 INSERT registration still left
+  privileged trigger routines publicly executable, trusted unqualified names
+  vulnerable to TEMP shadowing, and one shared deferred routine unsafe for its
+  parent row shape. Successor `d7a8b9c0d1e2` keeps b5/c6 frozen and replaces
+  those routines and triggers under the migration-selected application schema.
+- Every replacement SECURITY DEFINER routine has a fixed
+  `pg_catalog, <quoted-app-schema>, pg_temp` search path, schema-qualified
+  authority relations, and an exact real-table `TG_RELID` plus `TG_OP` guard
+  before reading row fields. Dropping and recreating the routines retires their
+  old ACLs; PUBLIC execute is revoked immediately. Parent and dependency stale-
+  registration checks are separate deferred functions, so the parent path
+  cannot prepare a dependency-only record field.
+- These controls assume a least-privileged runtime role that is not the database
+  or object owner and lacks superuser/BYPASSRLS, application-schema CREATE, and
+  staging-table DML authority. An owner or equivalent administrative role can
+  alter or bypass database policy and remains a trusted operational boundary;
+  deployment must separate it from the application runtime before claiming the
+  database guarantee. Downgrade without v3 rows restores the known-unsafe c6
+  intermediate and is suitable only for offline migration recovery, not
+  continued serving.
+- Fresh local evidence: 77 v3/golden/retained-probe tests, 363 affected
+  Assistant/Task18 tests, and 23 offline migration tests passed. The adjacent
+  Ask/RAG/search SQLite gate passed 1,085 tests with two skips and 40
+  deselections; seven backend-selection PG-static tests passed separately with
+  a non-connecting dummy PostgreSQL locator. No actual PostgreSQL/TEMP-role/
+  commit-time execution or concurrency test was run. This was the round-5
+  pre-review checkpoint; the final CLEAN entry above supersedes its status.
+
+## 2026-09-12 D Core Task18 legacy-v3 database hardening candidate
+
+- Independent round-3 review confirmed F1-F5 but found two database enforcement
+  gaps and an incomplete golden matrix. The retained reviewer probe first
+  reproduced both SQLite gaps with foreign keys off while its foreign-key-on
+  controls passed. Runtime and migration guards now reject deleting a published
+  v3 parent from its OLD state and validate a new evidence reference against
+  both its claimed owner and the dependency's actual signed owner/effect/link.
+- New successor migration `c6f7a8b9c0d1` leaves applied revision
+  `b5e6f7a8b9c0` unchanged. PostgreSQL emitted SQL replaces tuple-`xmin`
+  inference with parent/dependency INSERT-only, transaction-owned registration,
+  exact owner/count checks, and intended publish-time consumption. Later review
+  found its function ACL/caller/search-path and shared-deferred-row defects; the
+  d7 entry above supersedes its PostgreSQL guarantee. This was emitted-SQL/static
+  structural evidence only; no PostgreSQL server or concurrency execution was
+  claimed.
+- Seven independent fixed canonical-byte/HMAC vectors now cover raw, explicit
+  trusted, legacy-human, genuinely-unbound, uncited email, selected citation and
+  ordered multi-child inputs without using the production payload builder.
+  Fresh gates: 58 v3/reviewer-probe tests, 23 offline migration tests (94 real-
+  PostgreSQL-named tests deselected), and 359 affected Assistant/retained-probe
+  tests passed. An adjacent Ask/RAG/search SQLite gate passed 1,085 tests with
+  two skips and 33 PostgreSQL-named deselections; its seven PG-bootstrap static
+  cases were then isolated behind a non-connecting dummy PostgreSQL locator and
+  all passed. Existing Alembic configuration warnings remain. This remains a
+  historical round-4 candidate; the final CLEAN entry above supersedes it.
+
+## 2026-09-12 D Core Task18 approved legacy-integrity v3 candidate
+
+- The user approved F2's exact-provenance legacy-only schema on 2026-09-12.
+  Its frozen v3 HMAC contract now signs every new evidence-backed legacy answer
+  and uncited evidence-derived email. Raw lineage, the exact selected approval
+  and evidence references, legacy human authority, current permissions, ordered
+  citations/children and protected email recipient/subject/body/flag are bound.
+  Integrity still grants no D serving, retrieval or index eligibility.
+- A successor Alembic migration widens only the legacy integrity union and
+  adds published-state guards. Actual SQLite upgrade/downgrade tests preserve
+  historical rows and refuse downgrade with v3 rows. PostgreSQL emitted SQL is
+  checked, but independent review later showed its tuple-`xmin` staging proof
+  was not INSERT-specific. The hardening entry above supersedes that claim.
+  No applied migration is rewritten; no actual PostgreSQL claim is made.
+- Original F2 behavioral RED and retained probes now pass. Affected offline
+  gate: 583 passed, one opt-in PG skip, 120 `postgresql`-named deselections.
+  Follow-up gate including keyword/pgvector SQL tests, immutable readers and
+  all retained probes: 264 passed. Golden vectors use an independent standard-
+  library HMAC calculation for one production-built case; the hardening entry
+  above records the now-complete independent case matrix. Existing Alembic
+  configuration warnings remain.
+  Final API/email/local-migration gate: 193 passed; final marker-guard/
+  Task18/reader/writer gate: 204 passed. Ruff, compile and diff checks pass;
+  credential-pattern scans have zero matches.
+- This superseded the earlier unapproved/blocked F2 status at the round-3
+  checkpoint. The final CLEAN entry above supersedes that candidate status.
+  F1/F3/F4/F5 and deterministic contact/email branch isolation remain covered.
+  No live provider, network, Docker, real PG, push or merge occurred then.
+
+## 2026-09-12 D Core Task18 provider-ordering review fix
+
+- F4/F5 fixes add lazy, one-shot V2 ingress preflight before any ambiguous
+  provider-backed email classification, generated-email RAG, or source composer.
+  Exact built-in Noop composition can still produce a deterministic source-email
+  response; contact and recipient-only branches retain their independent path.
+- The composer builder accepts an optional preflight callback after its
+  deterministic early return and before provider import/construction. Injected
+  non-Noop composers are also gated before invocation. A later RAG fallthrough
+  reuses the prepared ingress; final invocation still authenticates current
+  evidence as required. Whitespace returns the frozen 422 `required` detail.
+- Unchanged reviewer probes first reproduced both provider calls and the wrong
+  detail. Focused GREEN: 73 passed; affected gate: 228 passed with only F2
+  deselected; final focused gate: 76 passed. Ruff, compile and diff checks passed.
+  At this historical checkpoint the separate F2 content-tamper probe still
+  failed and its schema proposal was unapproved/unimplemented. The approved v3
+  implementation and final CLEAN entry above supersede that blocked status. No
+  provider/network/PG/rollout claim was made for this round.
+
+## 2026-09-12 D Core Task18 review fixes; F2 blocks completion
+
+- Independent review found three Important issues. F1/F3 fixes now distinguish
+  proven preclaim failures from post-admission/commit exceptions, preserving
+  the original parent/message/cost/breaker identity and using unknown delivery
+  without a second write when the outcome is uncertain.
+- Full RAG prior-context gating now occurs at RAG fallthrough. Independent
+  contact, eligible recipient correction and email branches use immutable
+  eligible views without depending on stale unrelated RAG evidence. Enforce
+  RAG fallthrough still refuses before its new user or graph-provider mutation.
+- Affected verification: 237 passed, one opt-in PostgreSQL skip. Five retained
+  F1/F3 probes pass; the retained F2 new-write content-tamper probe still fails.
+  Adjacent graph/ask/email/reader/writer gate: 255 passed; final Task18 plus
+  unchanged F1/F3 probes: 54 passed, only F2 deselected. Static checks passed.
+  Task18 is INCOMPLETE/BLOCKED, not DONE or CLEAN, despite the earlier candidate
+  label below. No schema expansion or rollout is authorized by these fixes.
+- The proposed exact-provenance legacy scope/role/schema extension is recorded
+  in `docs/superpowers/specs/2026-09-12-task18-legacy-integrity-contract-proposal.md`
+  for human decision. It preserves selected-approval revocation and excludes D
+  eligibility; future explicit-approval and zero-citation evidence-email keyed
+  coverage remains unimplemented until that decision.
+
+## 2026-09-12 D Core Task18 Assistant sole-writer candidate
+
+- The Assistant V2 RAG path now prepares owner-bound, scanner-checked immutable
+  prior context before the user write and invokes the existing graph through the
+  facade. Only finalizers write V2 answers; the route maps typed delivery states
+  and reads an acknowledged committed message ID without a second append.
+- Provider-free and inter-component failures preserve one final parent, two cost
+  children and one exact Korean safe message. Unknown ACKs reconcile by GET;
+  failed-parent delivery requires a fresh read-only proof of message absence.
+- The ordinary writer now uses database-assigned IDs inside the finalizer's
+  transaction, with no reserved-ID or before-flush hook. Real SQLite constraints,
+  assembled/canned writes and rollback are exercised. PostgreSQL is not proven.
+- Raw V1 and genuinely pre-provenance knowledge answers now receive keyed
+  integrity-only legacy snapshots. Explicit approval-dependent legacy answers
+  retain their exact existing dependency path: the all-null legacy-unbound
+  schema cannot preserve selected-approval revocation authority. Full future
+  keyed coverage therefore remains a schema/spec decision, not a solved debt.
+- Candidate verification includes 514 passing affected tests and one opt-in
+  PostgreSQL skip, plus later focused delivery/backend/drift checks recorded in
+  the Task18 report. Status is DONE_WITH_CONCERNS, awaiting independent review;
+  no live providers, rollout activation, push, merge or production-PG claim.
+
+## 2026-09-12 D Core Task17 evidence reader independently CLEAN
+
+- Addressed independent findings F1–F5: context, summary, email and capability
+  consumers now retain immutable verified message snapshots. Role mutations
+  cannot bypass evidence checks; ordinary user input needs no evidence authority.
+- Current authority uses an isolated read identity map on the caller connection,
+  without autoflush, caller expiration or transaction ownership. Dirty caller
+  source fields cannot conceal committed revocation. Missing/expired rows and
+  read failures redact safely; RAG metadata accepts only bounded scalar values.
+- Fresh verification: 196 focused/Assistant API/email/capability tests passed;
+  243 affected tests passed with one opt-in PostgreSQL test skipped; five retained
+  independent review probes passed. Ruff, compile and diff checks passed.
+- Independent rereview at `acee98f` is CLEAN. The reviewer reran 202 focused
+  Assistant/API/email/recipient/capability tests, all five retained finding
+  probes, and three extra transaction/owner/query-count probes with no open or
+  new finding. The reader performs 43 fresh queries for one two-dependency
+  answer and 86 for two, while reuse of the same immutable view adds zero.
+- Task18 ordinary writer first-flush and keyed-legacy writer obligations remain
+  unchanged. No production PostgreSQL or release claim is made here.
+
+## 2026-09-12 D Core Task17 evidence reader candidate
+
+- Assistant serialization, summary/context selection and render-capability
+  liveness now share an evidence reader. It verifies exact content, linked final
+  result, current fingerprint key, every selected/unselected influence child,
+  whole-set HMAC, current source/version/approval/permission and citation bytes.
+  Any mismatch redacts the entire answer; valid hidden-only canned messages
+  retain their original bytes and permission notice.
+- Historical reads retain V1 behavior. Signed legacy-only snapshots revalidate
+  current V1 knowledge without gaining V2 eligibility. Public RAG metadata omits
+  question, backend/graph/fallback/IDs and raw diagnostics, retaining safe agent
+  identity and the existing failure classification triple.
+- Candidate verification: focused 133 passed; affected resolver/writer/API/
+  finalization group 279 passed, 1 opt-in real-PostgreSQL test skipped; final
+  Assistant/privacy group 170 passed. Ruff, compile and diff checks passed.
+- Candidate awaits independent review; not CLEAN. Task13's ordinary writer
+  first-flush CHECK issue and missing keyed legacy production writer remain
+  Task18 cutover obligations. Tests reuse the existing SQLite reserved-ID bridge.
+  No live providers, rollout activation, push/merge or PostgreSQL proof.
+
+## 2026-09-12 D Core Assistant capability boundary reviewed
+
+- Task16 is independently CLEAN at `a9da2eb`. Assistant clients must declare
+  the exact render capability before V2 content is written or returned, while
+  authentication, input validation and owner concealment keep precedence.
+- GET and serialization share one structural-liveness decision: stale/orphan
+  V2 content is redacted without leakage, and valid hidden-only canned answers
+  remain available to capable clients. Errors carry private/no-store cache
+  headers without hiding failures from dependency cleanup or server telemetry.
+- Final affected verification:208 passed; controller unwind regression:2 passed.
+  No rollout activation, live-provider use, PostgreSQL proof or Task18 cutover.
+  D Core continues with Task17 evidence revalidation.
+
+## 2026-09-12 D Core Assistant delivery/capability candidate
+
+- Review fix round 2 moves unexpected-error delivery outside FastAPI's inner
+  dependency stacks. Yielding DB/session dependencies now see the original
+  exception and close once; production-like clients still receive one generic
+  500 with exact capability cache headers, while server error reporting retains
+  the original failure. Expected HTTP/validation unwinding and email-send are
+  unchanged. Final affected gate: 208 passed; candidate awaits rereview.
+- Independent review round 1 found and fixed four route-boundary gaps. The two
+  capability-sensitive Assistant POSTs now authenticate before malformed JSON
+  using one dependency-overridden DB/user lifecycle, and all their configured
+  success/error outcomes carry exact no-store/Vary headers. Validation details
+  remain FastAPI-compatible and safely serialize escaped surrogates; email-send
+  is unchanged.
+- GET guards and serializers now share one minimal projection-liveness
+  decision, so structurally invalid parents redact without leaking V2 bytes
+  while valid hidden-only canned rows remain live: missing capability refuses,
+  and capable reads retain the original content, bounded count, notice, and
+  contributing summary. Final proportional review-fix gate is recorded in the
+  Task16 report. The result remains a candidate awaiting rereview, not CLEAN.
+- Task16 adds a frozen, construction-validated `AssistantDeliveryResult`
+  algebra and the permanent refusal-only Assistant render-capability guard.
+  The header cannot activate a stage, authenticate a client, select legacy,
+  or change rollout ownership.
+- Enforced Assistant POSTs now preserve authentication/validation/owner lookup
+  precedence before the exact capability 409, then scan caller input before
+  conversation, message, AgentRun, retrieval, or provider mutation. GET guards
+  are projection-sensitive: only live V2 rows returned as messages or
+  contributing to a conversation summary require the capability.
+- Assistant message DTOs recursively reuse the shared exact seven-key citation
+  contract with a required non-null URL. Capability-dependent responses carry
+  exact private/no-store and Vary headers. Focused and adjacent SQLite/fake
+  gates are green; final verification is recorded in the Task16 report.
+- Candidate awaits controller-owned independent review and is not a CLEAN or
+  D Core release claim. Task17 evidence revalidation and Task18 V2 sole-writer
+  cutover remain separate; no rollout, live provider, PostgreSQL, remote push,
+  Slack, D.1, Redis, CDC, or E work is claimed.
+
+## 2026-09-12 D Core direct API integration reviewed and complete
+
+- Task15 cumulative independent review is CLEAN at `d678552`. Ask/Search use
+  the common application facade while retaining exact V1 response shape and
+  legacy rollout behavior. Committed evidence, strictest influence permission,
+  actual costs and typed failure delivery survive the API boundary unchanged.
+- Final relevant gate:79 passed without warnings/skips. Controller final
+  low-level I/O regression:10 passed in18.08s. Earlier broad gates retain their
+  documented PostgreSQL skip and known Slack failures; no real PostgreSQL or
+  whole-repository release proof is claimed.
+- Task14/15 are complete; next is approved Task16 implementation for Assistant
+  delivery/capability protection. D Core overall remains in progress, with no
+  rollout activation, paid provider execution or remote push.
+
+## 2026-09-12 D Core low-level safety inspection provenance
+
+- Task15 round3 separates operational authority-file read/stat/close errors
+  from malformed-content safety refusals. Real low-level fault regressions
+  passed10 cases across Ask/Search; relevant regression gate79 passed, no
+  warnings/skips. Static, compilation and staged hygiene checks pass.
+- No barrier, accounting policy, public schema or rollout changes. Scoped
+  rereview is still required; no PostgreSQL/live-provider proof is claimed.
+
+## 2026-09-12 D Core preclaim refusal accounting correction
+
+- Task15 round2 preserves authentic preclaim safety refusal through the graph
+  and acknowledges503 only after failed/final accounting. Operational SQL/I/O
+  errors remain distinct. Already-paid embedding cost and exact row identity
+  survive; undispatched work remains zero-call/zero-charge.
+- A failure-only authority barrier permits accounting after legitimate safety
+  drift without relaxing any successful serving/pending gate or refreshing a
+  paid binding. Invalid receipts, authority corruption and uncertain completion
+  return persistence500. Core215 cases passed. Read-lock release also guards
+  pending writes and rollback uncertainty; six focused cases and the final
+  150-test affected gate passed (no warnings/skips). Static/hygiene gates pass.
+  PostgreSQL lock-order behavior is not proven by these SQLite/fake tests.
+- Internal error-accounting correction only; scoped rereview required. No
+  rollout, live providers, PG proof or deferred Assistant/shadow work claimed.
+
+## 2026-09-12 D Core direct API error-delivery review fixes
+
+- Task15 round1 fixes three independently identified real-path gaps: exact
+  readiness503, acknowledged safety-refusal503, and commit-failure500 delivery.
+  Generic exceptions remain distinct; no uncommitted result is published.
+- Real graph/facade/HTTP regressions use durable fake safety transitions and
+  actual ledger commit/ACK injection. They verify retained paid charges and
+  no retry/resend after uncertain persistence. Affected gate:524 passed,1 absent
+  PostgreSQL skip,2 known Slack failures and2 obsolete raw-error assertions.
+  After assertion-only adaptation, final46-case supplement passed. No state or
+  no-resend assertions were weakened. Static/hygiene checks pass; scoped
+  rereview required.
+- No policy/rollout changes, live providers, PostgreSQL proof or deferred
+  Assistant/shadow work is claimed.
+
+## 2026-09-12 D Core direct API delivery candidate
+
+- Task15 routes Ask/Search through the request-owned facade with frozen exact
+  V1 DTOs, recursive nullable-field preservation and an allowlisted HTTP error
+  contract. Enforce delivery copies committed evidence, run identity and actual
+  usage/cost; legacy and non-cutover values remain unchanged.
+- Real graph-to-HTTP tests cover evidence loss before/after paid generation,
+  embedding-only safe answers, fallback, strict output permissions, scanner
+  outage with zero mutation, and Unicode validation. The two safe canned
+  literals now match the approved spec before identity hashing and commit.
+- Focused gate: 88 passed. Broader affected gate: 380 passed, one absent
+  PostgreSQL URL skip and two exact deferred Slack baseline failures; zero new
+  non-Slack failures and no warnings. Final legacy classifier supplement:
+  32 passed, 45 deselected. Ruff, compilation and whitespace checks passed.
+- Candidate awaits independent review. No rollout activation, paid provider,
+  real PostgreSQL proof, Assistant delivery algebra, terminal-error persistence
+  or shadow executor is claimed.
+
+## 2026-09-12 D Core answer graph review complete
+
+- Task14 integration and scoped corrections are independently CLEAN at
+  `298b80d`: evidence-selected citations, safe pre-send drift handling and
+  hash-only audit retention preserve permissions and exact provider charges.
+- Controller regression: seven pre-send drift/audit cases passed in 24.94s.
+  Affected gate: 179 passed, one missing PostgreSQL URL skip; real database
+  locking/concurrency and remaining D Core delivery/release gates are not proven.
+- Next approved implementation: Task15 direct API facade with exact V1 response
+  contracts. No public API cutover or full D Core completion is claimed yet.
+
+## 2026-09-12 D Core pre-send audit-retention correction
+
+- Scoped review identified that an unsent prepared answer still needs its
+  audit identities. Safe evidence-changed results now retain exact prepared
+  observation, rendered-input and model-configuration HMACs through pending and
+  final commits, without exposing old evidence or granting it serving authority.
+- Real fake-provider regressions verify preserved costs, empty public output,
+  exact audit matching and forged-identity rejection. No new DB/public fields,
+  raw content persistence or provider calls. Awaiting scoped rereview.
+- Fresh affected verification: `179 passed, 1 PostgreSQL URL skip` in 149.95s,
+  no warnings; static, compile and diff checks passed.
+
+## 2026-09-12 D Core Task14 evidence-boundary review fixes
+
+- Independent review found three integration gaps: filtered model slots could
+  cite a different source, real pre-send evidence drift failed instead of
+  returning a safe product, and missing embedding setup produced untyped or
+  generation-specific errors. Scoped fixes preserve model-selected canonical
+  identity, exact paid embedding cost and zero unsent-answer cost.
+- Mixed unsafe/safe source tests reload the actual SQLite Assistant citations;
+  real fake-provider graph tests cover post-prepare drift, replay rejection,
+  failed/unknown pending commit and distinct key/provider failures. No live API,
+  DB/public schema or budget-policy changes. Candidate awaits scoped rereview,
+  not release approval; real PostgreSQL remains an unexecuted release gate.
+- Fresh affected verification: `254 passed, 1 PostgreSQL URL skip` in 217.14s,
+  no warnings; static/compile/diff checks passed. No paid providers were called.
+
+## 2026-09-12 D Core request-owned answer graph candidate
+
+- The actual LangGraph now composes permission-aware Runnable retrieval,
+  bounded answer generation, exact costs and fresh canonical finalization.
+  Concurrent graph invocations keep actors, sessions, models and billing state
+  separate. Evidence changes remove unsupported output without another call.
+- Concrete default SQLite flows exercise search, deterministic Ask and same-screen
+  Assistant product persistence with zero external charge. Durable citation JSON
+  reloads preserve source links, Korean snippets and strict permissions.
+- Default app startup registers the graph and sealed facade in every rollout
+  mode without paid client construction. PostgreSQL factories split request-owned
+  cost authority from lazy clients and fresh finalizer ownership. Existing legacy
+  behavior is untouched; shadow execution and terminal Assistant error persistence
+  remain their planned later tasks, not hidden background work.
+- Broad affected evidence: `661 passed, 1 PostgreSQL URL skip, 3 expected
+  rollback-fault warnings` in 264.53s; exact-final scoped supplement `195 passed`
+  in 152.01s. No live providers or database services were started. Candidate
+  awaits independent review; real PostgreSQL remains an unexecuted release gate.
+
+## 2026-09-12 D Core embedding-finalizer bridge candidate
+
+- Bound a validated embedding result to its exact committed paid dispatch using
+  a transient authenticated receipt. Request-query, embedding-preparation,
+  dispatch-fence and cost-policy identities retain their separate meanings.
+- Added a read-only request-owned pending-projection carrier for searches whose
+  costs were already finalized. It does not renew ownership or charge again.
+- A fake-provider integration test now reaches the fresh production finalizer
+  and commits the search product; another dispatch's same-query result is
+  rejected without losing the paid charge. Public/DB schemas and budgets are
+  unchanged. PostgreSQL synchronization remains explicitly faked in this gate;
+  full graph/facade implementation and independent review are still pending.
+- Fresh affected verification: `245 passed, 1 PostgreSQL URL skip` in 136.74s;
+  14 focused bridge cases passed, and Ruff/compile/import/diff checks passed.
+
+## 2026-09-12 D Core staged-cost integration candidate
+
+- Added conservative answer reservation followed by one-time concrete prompt
+  budget binding, plus true zero reserves for keyword search. Added provider-free
+  and embedding-only cost-pending transitions for the existing fresh finalizer.
+- Regression cases cover stale costs, duplicate/concurrent binding, foreign
+  request ownership, commit failures and blocked provider families. The candidate
+  keeps prices and dispatch limits unchanged and awaits independent review;
+  complete graph/facade integration remains unfinished.
+- Fresh affected verification: `194 passed, 1 PostgreSQL URL skip`, including
+  20 new staged/pending cases; static and import checks passed.
+
+## 2026-09-12 D Core Task 14 prerequisite candidate
+
+- Added exhaustive cumulative rollout routing and a single-dispatch provider
+  result path that releases only validated output after durable cost finalization.
+  Invalid provider payload/citation and failed cost commit release no output.
+- Test-first evidence: 39 rollout and five delivery failures before implementation;
+  current slice plus existing transport/cost regression is `102 passed`.
+- Candidate awaits independent review. Actual LangGraph/facade wiring and staged
+  billing integration remain unfinished; no graph-readiness claim or live API call.
+
+Last updated: 2026-09-01
+
+This document records ParaWorks work in a portfolio-friendly format. Keep adding
+short entries here whenever the product, architecture, UX, verification, or
+demo story changes.
+
+## 2026-09-01 Deliverable D provider dispatch and accounting authority
+
+- Replaced caller-supplied RAG pricing/safety callbacks with the frozen cost
+  policy and concrete durable provider-safety authority. The exact outcome
+  matrix now controls actual versus reserve charge, remediation/overrun, zero-
+  charge pre-send refusal, sibling closure, pending projection, and crash
+  recovery without redispatch.
+- Provider request bytes are canonical and server-built. A store-owned client
+  capability and opaque one-use dispatch bind target/config/query/evidence,
+  rendered input, dispatch fence, and provider safety. Preparation or pre-send
+  refusal atomically closes the committed claim; retries/tracing are disabled
+  and sensitive bodies or provider exceptions do not cross the boundary.
+- The executable lock-order capabilities are now required by every real
+  safety, projection, evidence/C.5, cost, and client acquisition. Provider
+  sidecar and database safety authority remain continuously locked through the
+  send and post-response recheck. Reviewed crash recovery requires a signed
+  dead-process attestation and preserves any prior actual charge.
+- The paid dispatch composition root is PostgreSQL-only and refuses assembly
+  before creating provider or safety artifacts unless all five committed
+  static lock capabilities are present. SQLite has a separate explicit
+  deterministic provider-free smoke assembly and cannot expose dispatch.
+  A two-session PostgreSQL gate now interleaves recovery and sender row-lock
+  acquisition instead of simulating the race sequentially.
+- Added the reversible `a4d5e6f7b8c9` lifecycle revision, closed cumulative
+  stage/surface/context routing, typed identity goldens, and disposable-
+  PostgreSQL gates. Fresh affected verification is `638 passed, 12 skipped`;
+  PostgreSQL was not configured, so those gates were not claimed. No paid/
+  provider/network/Docker/`.env` access occurred.
+
+## 2026-08-31 Deliverable D Core implementation plan
+
+- Converted the approved RAG V2 design into 26 bounded TDD implementation
+  tasks plus one final provider-free evidence task across five phases:
+  contracts/storage, canonical retrieval, structured generation and cost
+  authority, V1 API/Assistant UX, and rollout/release proof. The plan
+  requires actual LangChain `Runnable` retrievers and an actual compiled
+  LangGraph `StateGraph`; API routes may only use the application facade.
+- Split persistence into two ordered additive Alembic revisions so serving
+  projection schema lands before runtime safety/cost/Assistant integrity.
+  Live-release exact-six tables use separate validation-only SQLAlchemy
+  metadata and are intentionally absent from application metadata and Alembic.
+- Kept D Core free of answer reuse, Redis, Neo4j, CDC, and Slack recovery.
+  Provider-free fake/deterministic gates cover implementation. Paid calls
+  remain zero; the first live gate is still a separately approved clean-commit
+  preview capped at 30 cases, 30 generations, 10 embeddings, 40 dispatches,
+  and USD `0.360000`. The available USD 100 balance does not enlarge it.
+- This entry records a planning artifact only. After separate plan approval,
+  the next step is actual implementation Task 1 with RED/GREEN verification
+  and one independently green commit per task.
+
+## 2026-08-30 Deliverable D Core RAG V2 design
+
+- Recorded the section-level approved direction for the Retriever Port and RAG
+  Answer Graph V2 boundary before Neo4j GraphRAG. The consolidated written spec
+  is now approved. `/ask`, `/search`, and Assistant will share an
+  actual LangChain `Runnable` retriever contract and an actual request-scoped
+  LangGraph conditional graph without a durable checkpointer.
+- Separated backend-independent `serving_document_id` from the existing V1
+  public `source_id`. The model sees only bounded `E1`-style evidence slots;
+  the server revalidates current permission/version/provenance and projects
+  selected canonical evidence back to the unchanged V1 citation shape.
+- Frozen trusted-knowledge-first retrieval with canonical Gmail, Drive, and
+  Calendar raw evidence (`gmail | gmail_attachment | drive | calendar`) as
+  `source_observation`; pending AI candidates and
+  Slack remain excluded. D Core explicitly includes the incremental
+  raw-observation indexing lane needed for keyword/pgvector parity, but a live
+  production reindex or embedding spend requires separate operational
+  approval. V2-only raw eligibility/read guards keep legacy disabled behavior
+  unchanged. A `chunk:*` remains `source_observation` in V2 even when a legacy
+  human ReviewItem is approved; only the four promoted canonical knowledge
+  types can enter the trusted branch, preventing duplicate-tier laundering.
+  Typed workspace/project/source constraints and every-child authorization
+  make multi-provenance citation selection executable and fail closed.
+  Candidate, result, hidden-count, model-input, generation-token,
+  and USD `0.012` request ceilings are explicit; pgvector embedding has one
+  immutable request-local usage/cost receipt. Direct `/ask` and `/search`
+  preserve their V1 character-count and lexical-term semantics, with no new
+  4,000-character or 1,000-term refusal; only Assistant retains its existing
+  4,000-character current-message bound and the 1,000-term contextual-query
+  ceiling. Exact model/config/policy HMACs,
+  strict no-coercion usage parsing, and canonical finite nonzero float32 vector
+  validation prevent metadata drift or a pgvector cosine-unindexable zero vector
+  from appearing ready. Corpus writer and DB readiness both enforce the same
+  cosine-indexability rule. The answer boundary freezes a hand-authored OpenAI-
+  subset JSON Schema, exact LangChain strict wrapper, prompt renderer bytes,
+  two-message JSON framing, and `"\n\n"` block joiner. Server validation adds
+  XOR/slot/trust/size checks rather than relying on generated Pydantic schemas.
+  Caller strings reject surrogates and U+0000 before DB/provider work; DB evidence
+  is rejected after canonical resolution but before serving/provider projection,
+  and model output is rejected after the provider response but before persistence
+  or public projection. Valid non-BMP bytes remain unchanged. Raw and trusted evidence
+  also require nonblank canonical text, URL, and snippet proof, including the
+  parser's versioned whitespace-compressed 240-character snippet rule.
+  Query-derived score bits, term order, nullable citation fields, and selected
+  source arrays are covered by exact V1 projection HMACs. D V2 rejects pre-provenance `legacy_unbound`
+  knowledge with neither a valid explicit approval link nor a linked ReviewItem;
+  only an exact approved human ReviewItem with matching nonempty
+  link/snippet evidence can use the legacy trusted branch, while disabled legacy
+  responses remain unchanged.
+- Split delivery into D Core, D.1 PostgreSQL answer cache, then E Neo4j
+  GraphRAG. Redis L2, CDC/streaming, Slack recovery, and answer reuse are not
+  part of D Core.
+- Approved `disabled | shadow | enforce` rollout with `/ask -> /search ->
+  Assistant` cutover and immediate rollback. Automated gates use fake models;
+  shadow classifies five intentional V2 deltas—including the user-only Assistant
+  context security delta—and fails every unclassified
+  permission, identity, rank, or projection mismatch.
+  The user approved a 30-case, USD `0.36` reserve envelope. Exact paid execution
+  remains unauthorized until implementation and provider-free gates are green,
+  a clean runner/fixture commit is frozen, and the user confirms its zero-call
+  preview. A partial/crashed restart, rerun, expansion, production traffic,
+  raw reindex, D.1, or E spend requires new approval. Later availability of a
+  USD `100` balance does not expand this frozen first gate. No paid call was made
+  during design work. The single-use release ledger is protected by a
+  PostgreSQL-external monotonic HMAC marker so database restore cannot revive
+  an old approval. It admits only 30 case claims, 30 generation and 10 pgvector
+  embedding component permits, each with a pre-call reserve. Known usage
+  overruns abort the whole gate and durably trip a stable-family external/DB
+  provider breaker before any Assistant message write. Returned-response strict
+  usage violations and invalid vectors abort for remediation; response-less
+  transport failures remain ordinary reserved failures. A response-less query-
+  embedding failure preserves its full reserve but immediately closes
+  `retriever_unavailable`; keyword fallback, safe 200, downstream answer
+  preparation, and generation calls are all zero. The deployment latch is a
+  whole-family-set, HMAC-bound envelope with one global lock/generation, so
+  simultaneous embedding and generation incidents cannot overwrite each
+  other. Provider and release data files each use a distinct never-replaced,
+  ACL-checked sidecar lock; only signed data files are atomically replaced, so
+  Windows/POSIX pathname replacement cannot split the lock. Live-release
+  processes use a four-path global validator that rejects data/lock equality,
+  hardlink, symlink, reparse, and case-fold aliases. Disabled/non-cutover startup
+  requires no D authority artifacts. Provider-free `provider-safety-init` is the
+  sole provider-authority bootstrap; every non-bootstrap provider admin mutation,
+  actual D paid admission, and privileged release init/recovery/preview/
+  authorization/runner requires the initialized provider authority. Every runtime
+  paid call durably claims its full reserve before
+  dispatch; pgvector shadow keeps the public legacy run while a separate
+  internal exact-two-component run owns the single shared embedding cost. The
+  live gate combines that runtime claim and its release claim into one permit
+  and one validation-PostgreSQL transaction; safety blocks are external-first.
+  Exact signed external envelopes, file/transition digests, and the validation
+  database identity HMAC prevent same-generation or restored-state reuse.
+  Provider safety can be initialized only by a zero-call, file-first bootstrap
+  with exact two active families and zero prior D paid attempts. Release history
+  is epoch-scoped and append-only; reviewed restore recovery advances to a new
+  epoch, preserves old rows, and always requires a fresh preview and user
+  approval. A final readiness race has a dedicated case-null abort rather than
+  fabricating a case mutation. After all 30 frozen cases are terminal, an
+  ordinary case failure or a shortfall in the exact component/distribution
+  counts closes the single-use authorization as terminal `finished_failed`,
+  retaining the actual lower dispatch count instead of leaving it started or
+  mislabeling it as a safety abort. One authorization-scoped singleton runner
+  owns all 30 cases through scoring, adjudication, and finalization. Reviewed
+  proof that it died or was drained closes the authorization as terminal
+  `aborted_execution_crash`/`abandoned_unknown`, preserves committed aggregates
+  and reserves, and permits no partial resume, retry, or same-approval reuse.
+  Any live current-corpus snapshot drift instead immediately closes it as
+  `aborted_corpus_drift`, preserving committed and in-flight actual-or-reserve
+  cost and permitting no remaining call, scoring, report, retry, or resume
+  before a fresh preview and user approval.
+  Transition digests list only rows actually mutated, not locked read-only cost
+  siblings. A provider breaker blocks every D-managed admission and later D
+  re-enable until reviewed reset, while disabled/non-cutover legacy behavior
+  remains unchanged after rollback.
+  Full trusted+raw index generations prevent pgvector from silently omitting
+  newly promoted knowledge. First-turn credential scanning, owner-hidden 404s,
+  and race-safe Assistant 500/502 reconciliation preserve the current one-screen
+  UX without leaking raw provider errors.
+- Paid-call accounting and evidence publication use a two-phase boundary:
+  exact component costs become durable first while the parent is explicitly
+  `cost_finalized_pending_projection`; then a C.5-compatible corpus-generation
+  lock transaction revalidates every model-visible influence, the selected
+  citation subset, and hidden membership, and atomically
+  finalizes the direct response projection or Assistant message/dependencies.
+  Paid admission stores `rag-admission-identity:v1` over configured surface/
+  backend plus query/security/config HMACs and retains admission sentinels
+  through phase 1; it is never an answer-cache lookup key. Only a substantive,
+  search, or safe terminal product projection writes `run_record_phase=final`,
+  the effective source-window/permission/actual-model fields, and
+  `rag-final-product-identity:v1` over admission identity, result HMAC, and
+  surface. Projectionless errors and complete shadow-only cost owners use
+  separate explicit D.1-ineligible final-error/final-shadow sentinels, and none
+  of these identities enables D Core reuse.
+  Provider-free zero-cost-parent finalization is valid only before any paid claim.
+  If Assistant pgvector has already claimed query embedding, a later
+  inter-component refusal is eligible only after a validated successful vector;
+  it reuses that run, preserves the embedding actual cost and dispatch,
+  terminalizes only the answer child at zero, and makes no generation call.
+  A dedicated pre-send evidence fence keeps canonical mutation writers out from
+  final recheck through immutable transport-body handoff. Provider safety is also
+  reacquired in phase 2, so a new breaker cannot race a stale-ready output commit.
+  Concurrent source revocation cannot slip between recheck and message commit,
+  and a product-write failure cannot erase spend or retry the provider.
+- Production OpenAI calls are pinned to the direct standard global endpoint;
+  answer generation requires returned `service_tier=default`, while embedding
+  has no service-tier request field. D charged cost is a conservative standard
+  list-rate bound, not an invoice reconstruction. Assistant V2 retrieval uses
+  current/prior user messages only, while generation receives the current turn
+  only. V2 content is exact-byte/plain-text, the facade is the sole assistant-row
+  writer, and all model-influence identities are HMAC-bound even when only a
+  citation subset is displayed.
+- The plan-required SQLite path remains a deterministic, provider-free,
+  single-process smoke oracle. A process-local mutex serializes writers and a
+  never-replaced process-lifetime OS lock rejects a second file-backed smoke
+  process. Neither is live, release, or paid-call authority; second-process,
+  pgvector, live, and paid modes refuse before any call. Production vector
+  writes remain PostgreSQL+pgvector-only, and D Core has no SQLite answer cache.
+- The live gate uses a provider-free pinned baseline definition, three pairwise-
+  distinct authenticated human review roles, and no paid LLM judge. Component
+  accounting finalizes before one atomic case/AgentRun projection. The terminal
+  authorization outcome distinguishes `ordinary_execution_failed`,
+  `execution_contract_failed`, and the all-executed rubric-red
+  `quality_gate_failed`; an append-only quality report is optional for the first
+  two when adjudication was not reached, but required for rubric-red and green
+  completion. No paid D call has occurred.
+- This entry records planning/spec work only. The written design is approved;
+  the next task is a separate TDD implementation plan, which is still planning
+  and must be separately approved before production code changes.
+
+## 2026-08-30 Single-root local environment contract
+
+- Consolidated local runtime configuration into one ignored root `.env`; the
+  existing OpenAI key was migrated locally without printing or committing it,
+  and the redundant `.env.local` file was removed only after verification.
+- Reorganized `.env.example` by runtime, LangGraph/Review, providers, auth,
+  Google, and deferred Slack concerns. Removed unused API host/port and MinIO
+  variables, blanked tracked signing secrets, and added the active C.5
+  rollout/cost controls while preserving `AUTO_REVIEW_MODE=disabled`.
+- Added a safe, idempotent local bootstrap that creates `.env` when missing,
+  generates five independent signer/fingerprint secrets, preserves provider
+  keys, and satisfies the PostgreSQL durable-key preflight without enabling C.5.
+- Next.js now parses the root file with `dotenv` but copies only the explicit
+  `NEXT_PUBLIC_API_BASE_URL` and `NEXT_DIST_DIR` allowlist. Node tests cover
+  secret exclusion, process-environment precedence, and a missing root file.
+- Fresh verification: backend/config/bootstrap/secret gates `76 passed`,
+  frontend env `3 passed`, Ruff and ESLint clean, and Next.js production build
+  complete. Independent final review reported no unresolved findings and
+  readiness `Yes`; no live provider call was made.
+- This is an operational refactor before Deliverable D planning; it does not
+  enable paid providers, C.5 rollout, Deliverable D/E implementation, or Slack.
+
+## 2026-08-30 C.5 live release gates complete
+
+- After billing was restored, the separately authorized aggregate-only Terra
+  and Mini gates both passed against sanitized fixtures through the production
+  LangChain structured-output paths. No raw prompt, evidence, model output,
+  credential, URL, or source id was persisted or printed.
+- Terra initially failed closed when the last batch cited another candidate's
+  synthetic evidence slot. TDD added candidate-local evidence allowlists and
+  bumped the validator prompt to `auto-review-validation:v2`. The final 18-case
+  report passed with precision `1.0`, every prohibited count `0`, queue
+  reduction `0.055556`, recall `0.333333`, tokens `3726/2554`, and estimated
+  cost USD `0.038100`.
+- Mini exposed two production-contract gaps that fake clients could not reveal:
+  item-type-specific field bindings were not explicit in the canonical prompt,
+  and the parser incorrectly required different fields to cite different source
+  slots. The c5-v2 prompt/output contracts now require exactly one binding for
+  every required or populated optional field, permit one valid source slot to
+  support multiple different fields, and still reject duplicate field keys or
+  unknown slots. The final five-route/ten-case report passed `5/5` routes and
+  `9/9` checks with tokens `9439/954` and estimated cost USD `0.011372`.
+- Fresh verification includes the official compatibility release profile:
+  `1,599 collected = 1,595 passed + 4 approved Slack deselections`, with zero
+  errors/skips/xfails, balanced leases `91/91`, no live provider during tests,
+  and disposable database/role residue `0/0`. Focused gates passed `119`, `226`,
+  and `23` tests; whole-tree Ruff, lock, and secret hygiene are green.
+- Deliverable C.5 is complete. Operational mode remains `disabled`; the next
+  activity is Deliverable D planning. Deliverable E follows D and Slack remains
+  last.
+
+## 2026-08-30 C.5 live provider compatibility hardening
+
+- Separately authorized aggregate-only Terra and Mini gates uncovered real
+  Responses strict-schema incompatibilities that deterministic fake models
+  could not expose. OpenAI rejected Pydantic Decimal unions in both paths and a
+  discriminated `oneOf` in the five extraction schemas.
+- Added provider-compatible schema freezing while preserving the real
+  LangChain `with_structured_output(..., method='json_schema', strict=True)`
+  path. Terra keeps its Pydantic/Decimal domain contract but sends a bounded
+  JSON number. Mini reuses OpenAI SDK `pydantic_function_tool()` for strict
+  conversion, then normalizes only the unsupported Decimal and discriminated
+  union artifacts before LangChain invocation.
+- TDD/verification evidence is `96 passed` across validator, dependency
+  compatibility, evaluation CLIs, and V2.1 extraction, plus green touched-file
+  Ruff. Post-fix calls passed schema validation but the API account returned
+  `credit_balance_exhausted` / `insufficient_quota` (HTTP 429), so neither paid
+  quality gate is recorded as passed and rollout remains `disabled`.
+
+## 2026-08-30 C.5 Task 16 release proof
+
+- Added Korean-first frozen validation cases covering supported facts,
+  proposal/completion confusion, negation, uncertainty, identity/date mismatch,
+  conflicts, supersession, permission loss, partial support, prompt injection,
+  duplicate/collision, Decision/Todo, and restricted evidence. The deterministic
+  gate reports precision `1.0`, recall `1.0`, queue reduction `0.166667`, and
+  zero hard-negative, permission/version, duplicate, cross-item revoke,
+  malformed-output, or replay violations. These are fixture metrics, not Terra
+  quality claims.
+- Added aggregate-only paid-gate CLIs. After dual authorization, validation
+  reuses the production Terra renderer/schema/model-router and extraction reuses
+  the exact five Mini route renderers and singular schemas. Automated tests
+  inject LangChain fake models, prove exact model/options and privacy, and make
+  no network call. The later separately authorized attempts are recorded above;
+  the initial attempts were blocked by exhausted API credit. The completed
+  reruns and live metrics are recorded in the newer entry above; rollout still
+  remains `disabled`.
+- Added a hermetic release controller with guarded child environments, exact
+  node/event sidecars, module schema leases, disposable PostgreSQL+pgvector
+  role/database ownership, cleanup precedence, and high-confidence tracked plus
+  untracked secret scanning. Task 16 implementation commit is `4b9132a`.
+- Fresh official backend evidence: settings `6/6`; PostgreSQL `394/394`;
+  compatibility `1,595 = 1,591 passed + 4 approved Slack deselections`;
+  non-Slack `2,036 = 2,026 passed + 10 approved Slack deselections`; full
+  `2,026 passed + exactly 10 approved Slack failures`. Errors, skips, xfails,
+  and unexpected nodes are zero. Leases are balanced (`2/2`, `10/10`, `91/91`,
+  `150/150`, `150/150`) and every temporary database/role cleanup is `0/0`.
+- Frontend lint/build passed. Managed-server Playwright passed desktop `58`,
+  mobile `48`, and legacy desktop `9`; port 3000 was closed after every run.
+  Lock, Ruff, diff, symbol, and secret/privacy gates passed. Slack recovery is
+  still last after Deliverables D and E.
+
+## 2026-08-30 C.5 Task 15 same-screen trust review
+
+- Review now opens in `검토 대기` and offers an inline `자동 승인` view that
+  preserves workflow scope while requesting only visible approved auto-policy
+  items. Human bulk/edit/approve actions are absent from the automatic view.
+- Added bounded automatic validation/audit badges and inline audit/strict-reason
+  revoke controls. Server state is reloaded after every action, including a
+  remediation conflict; no optimistic trusted-state update is made.
+- Knowledge, History, and project Timeline responses now expose only the
+  permission-filtered `resolution_source`; shared UI renders `사람 승인` or
+  `자동 검증` separately from operational approval/completion status.
+- Verification: backend Knowledge/Project tests `30 passed`; frontend lint and
+  build pass; desktop focused Playwright `31 passed`, mobile `26 passed`.
+
+## 2026-08-30 C.5 Task 14 one-click V2.1 cost preview
+
+- Added exact TypeScript V2.0/V2.1 dry-run, status-count, status, and launch
+  unions. V2.0 request bytes remain unchanged; only V2.1 sends the signed
+  launch confirmation token.
+- The existing Integrations panel now shows extraction, automatic-validation,
+  and total maximum costs/tokens plus bounded mode/model/version information.
+  It adds no route, modal, wizard, selector, or second normal-path click.
+- A changed-cost conflict discards the stale preview/token, fetches a new
+  zero-call preview, and requires a new press of the same button. It never
+  automatically starts a paid run.
+- Verification: frontend lint and production build pass; focused desktop
+  Playwright `27 passed`, mobile `22 passed`; port 3000 was closed afterward.
+
+## 2026-08-30 C.5 Task 13 bounded operator API
+
+- Added permission-concealed `approved + auto_policy` Review filtering while
+  keeping the pending queue default and exact V2.0/V2.1 workflow filtering.
+- Review responses now expose only allowlisted validator identity, two-field
+  support summary, policy reasons, timestamp, and effective audit state. Raw
+  validation, correction, evidence, provenance, vector, and reason data remain
+  private and malformed legacy rows fail closed to a null summary.
+- Added strict audit and revoke routes. Business withdrawal follows the normal
+  audit gate; every quality reason uses the breaker-first coordinator, and a
+  committed quarantine with incomplete physical revoke returns only
+  `remediation_required`.
+- Verification: focused Review API suite `69 passed`; adjacent audit, quality
+  revoke, provenance, and Review regression `184 passed, 58 skipped`; Ruff and
+  diff checks pass. No paid provider call or rollout enablement occurred.
+
+## 2026-08-30 C.5 Task 12 immutable dual-version LangGraph lifecycle
+
+- Compiled a separate LangGraph 1.x V2.1 review graph with an exact safe
+  checkpoint schema, five review counts including `revoked`, server-owned
+  owner permission re-resolution, and pending-first HITL routing. Zero
+  candidates and auto-resolved candidates terminate through distinct nodes.
+- Added immutable V2.0/V2.1 registry dispatch and a dedicated V2.1 lifecycle
+  behind the workflow facade. Existing V2.0 response keys remain unchanged;
+  V2.1 dry-run/status responses are graph-version discriminated and expose
+  only bounded counts and policy metadata.
+- Added fail-closed checkpoint/live database reconciliation and an
+  aggregate-only recovery command for abandoned extraction/validation calls.
+  Recovery never retries a provider and never prints raw provider output.
+- Verification: `157 passed` across new V2.1 graph/service/API/recovery and
+  adjacent V2.0 tests; isolated PostgreSQL V2.0 checkpoint verification
+  `9 passed`; Ruff and whitespace checks pass. No paid model or live connector
+  was called, and rollout remains disabled.
+
+## 2026-08-30 C.5 Task 6 revocable trusted serving completed
+
+- Task 6 is code-complete and independently approved at implementation head
+  `a74cfeb`. Exact server-owned source signatures, parser/chunk policy, and
+  relational current-version pointers now govern ingestion, reconciliation,
+  trusted retrieval, Assistant dependencies, and vector indexing.
+- Relational reconciliation is bounded and paginated, so more than 100 stale
+  rows cannot starve later evidence. Legacy `decision` links are canonicalized
+  to `decision_record` for trust decisions while their stored dependency key is
+  preserved for replay and composite-FK integrity.
+- All trusted knowledge types now share one canonical serving-text builder
+  across indexing, deterministic/keyword retrieval, pgvector snapshots, and
+  Assistant liveness. Permission-only vector fast paths advance content hashes
+  only when the prior state proves the exact pre-narrow document; unproven or
+  legacy states remain stale and are reindexed once.
+- Fresh isolated PostgreSQL + pgvector verification produced `432 passed, 4
+  failed` for the raw comparison, with exactly the four approved deferred Slack
+  orchestration nodes, and `432 passed, 4 deselected` for the non-Slack gate.
+  Standalone gates added pgvector `28 passed`, Review V2.1 PostgreSQL `48
+  passed`, and Review V2 PostgreSQL `9 passed`. Ruff, lockfile, and diff checks
+  pass; the disposable database and role were removed with catalog counts
+  `0/0`.
+- The final independent review is Spec PASS and Quality APPROVED with zero open
+  Critical or Important findings. No live connector, LLM, embedding provider,
+  rollout, push, merge, or PR action occurred. C.5 Task 7 is the next actual
+  implementation slice; Slack reconstruction remains last after D and E.
+
+## 2026-08-29 Whole-suite PostgreSQL isolation spec approved; implementation plan drafted
+
+- A final non-Slack comparison run preserved `1453 passed`, `1 skipped`, the
+  exact ten approved Slack deselections, `12 failed`, and `144 errors`; owned
+  database/role cleanup still completed at `0:0:0:0`.
+- The 144 errors are two fresh-empty PostgreSQL fixture refusals fanning out
+  after earlier modules populated the shared `public` schema. Six direct
+  failures came from controller-wide database/fingerprint environment
+  contamination. Static code inspection suggests the remaining six may be a
+  legacy Review V2 fake-draft provenance gap, but the retained run lacks the
+  assertion trace; a clean targeted RED must confirm that diagnosis before any
+  fixture change.
+- The selected design keeps one controller-owned `_test` database/role while
+  assigning PostgreSQL modules unique serial schema leases. Ordinary app tests
+  use a separate temporary SQLite database. An allowlisted child environment,
+  an early test-only dotenv guard, effective-state probe, explicit pytest plugin
+  list, and exact node/lease sidecar prevent `.env`, fingerprint, rollout,
+  paid-provider, connector, or pytest-control inheritance.
+- The design preserves the single backend collection, exact ten Slack
+  exclusions, production triggers, permissions, trust boundaries, and
+  controller cleanup. It adds no product behavior and makes no provider call.
+- Written spec:
+  `docs/superpowers/specs/2026-08-29-whole-suite-postgresql-isolation-design.md`.
+  It passed independent Spec/Quality review and is user-approved. The detailed
+  RED/GREEN plan is
+  `docs/superpowers/plans/2026-08-29-whole-suite-postgresql-isolation.md` and
+  awaits user review; no test/helper/controller implementation has started.
+- The plan freezes five controller profiles, exact multi-child node-union
+  evidence, guarded SQLite bootstrap, privacy-safe pytest sidecars, serial
+  schema leases for eight PostgreSQL modules, exact cleanup precedence, and a
+  conditional Review V2 test-fixture correction only after the clean
+  provenance RED. It also replaces C.5 Task 16's raw backend pytest commands
+  with controller-owned profile calls and reviewed slice commits.
+- At this 2026-08-29 checkpoint, the remaining product order was C.5 Tasks
+  6–15, Task 16 isolation/release, D, E, then Slack recovery last. This entry
+  records planning only; no Docker/service,
+  test suite, provider, product-code, push, merge, or PR action was performed.
+
+## 2026-08-29 C.5 Tasks 1–5 verified and typed database boundary accepted
+
+- Deliverable C.5 Auto-Review Trust Promotion product Tasks 1–5 are now
+  implemented and independently verified. Product Task 6, Tasks 7–16,
+  Deliverable D/E, frontend C.5 work, and Slack recovery remain unstarted.
+- Product Task 5 exposed a real storage-boundary problem: importing the shared
+  application session module mixed Settings resolution, SQLAlchemy/DBAPI
+  initialization, and CLI failure classification. The accepted design puts URL
+  -> engine/sessionmaker construction in the DB-owned leaf module
+  `backend.app.db.initialization` and leaves `backend.app.db.session` as the
+  process-global compatibility adapter.
+- The public storage contracts are `DatabaseRuntime`,
+  `initialize_database_runtime(database_url)`, `DatabaseConfigurationError`,
+  and `DatabaseInitializationError`. Engine/session options remain
+  `pool_pre_ping=True`, `autoflush=False`, `autocommit=False`, and
+  `expire_on_commit=True`; initialization remains connection-lazy.
+- Application consumers retain `engine`, `SessionLocal`, and `get_db`, including
+  bind identity and request-session close behavior. The key-admin CLI instead
+  owns a separate runtime and attempts disposal exactly once on success or any
+  bounded failure. Partial initialization cleanup follows the same availability
+  classifier and never retries a failed disposal.
+- Configuration failures map to bounded `configuration_refused`/exit 2;
+  proven DB/driver availability failures map to `storage_unavailable`/exit 3;
+  programmer or non-availability SQLAlchemy failures map to
+  `operation_failed`/exit 3. Output is emitted only after cleanup and is one
+  allowlisted stdout JSON line with empty stderr. Typed errors do not preserve
+  the URL, driver/module name, original message, cause, or initializer-captured
+  context; Python may still attach an unrelated caller's already-active context.
+- The six boundary commits have distinct roles: `cedd546` adds the typed
+  runtime; `cc5faa5` completes lifecycle, privacy, and error precedence;
+  `4177f80` gives key-admin independent runtime ownership; `149ea23` moves the
+  shared application adapter onto the initializer; `4018ddd` seeds a real
+  approved projection in the fresh-readiness regression; and `4d31aaf` commits
+  that seed before a separately owned CLI runtime reads it.
+- Fresh PostgreSQL + pgvector acceptance at HEAD `4d31aaf` ran six ordered
+  zero-skip gates: migration/bootstrap/lock `115 passed`, initializer
+  `58 passed`, CLI/import `23 passed` (`137 deselected`), C.5 product Task 5
+  union `204 passed`, product Task 4 union `70 passed`, and representative
+  application consumers `81 passed`. Total: `551 passed, 0 skipped`.
+- Ruff, Python `compileall`, `uv lock --check`, and `git diff --check` passed.
+  The controller created only
+  `paraworks_c5t5_dbinit_20260829_database_test` and
+  `paraworks_c5t5_dbinit_20260829_role_test`, then independent exact/run-prefix
+  catalog inspection confirmed cleanup `0:0:0:0`. The shared healthy Postgres
+  container was left running.
+- Verification used fake/deterministic non-database integrations and made no
+  live LLM, embedding, Slack, Gmail, Drive, Calendar, OAuth, connector, or
+  other provider call. It did not run or claim frontend, rollout, release,
+  push, merge, or PR work.
+
+## 2026-08-28 Auto-Review Trust Promotion finalized plan and frozen profile
+
+- Recorded user approval of the C.5 design and converted it into the sixteen
+  ordered TDD/commit checkpoints in
+  `docs/superpowers/plans/2026-08-28-auto-review-trust-promotion.md`.
+- Mapped the current V2.0 schemas, graph, lifecycle service, Review transition,
+  promotion, indexing, API, and same-screen frontend surfaces before assigning
+  implementation ownership. V2.0 remains an immutable compatibility surface;
+  V2.1 uses separate state, graph, service, and response models.
+- Split work into contracts/persistence, immutable evidence refs, resolution
+  actors, exact provenance/reaffirmation, revoke/tombstones, deterministic
+  eligibility/policy, real LangChain Terra validation, validation leases/cache,
+  audit/rollout breaker, signed one-click launch, dual-version LangGraph/API,
+  existing-screen UX, and PostgreSQL/golden release gates.
+- The finalized plan freezes two implementation details: one approval-effect
+  row with many canonical evidence-link rows, and
+  a bounded public audit-state projection so `감사 필요` and `조치 필요` remain
+  truthful after reload. No hidden provenance identity/count or raw reason is
+  exposed.
+- Froze the exact five-route extraction profile on OpenAI
+  `gpt-5.4-mini-2026-03-17`, reasoning `none`, at 10,000 input/2,048 total
+  output tokens and USD 0.75/M input plus USD 4.50/M output. Each selected agent
+  returns zero or one candidate; all five routes reserve at most USD 0.083580.
+- Froze validation on OpenAI `gpt-5.6-terra`, reasoning `medium`, at 6,000
+  input/3,072 total output tokens, four candidates per batch and at most two
+  batches/five candidates per workflow. Two batches reserve USD 0.097728, so
+  the maximum profile is USD 0.181308 with USD 0.018692 headroom below the
+  immutable USD 0.20 limit. Deployment values may only confirm exact registry
+  equality.
+- Three independent read-only plan audits found and closed pre-implementation
+  gaps: V2.0 human provenance, workflow-owner permission drift, provider-call
+  transaction boundaries, exact generator identity, hidden-collision storage,
+  batch cost multiplication, revoke/reindex MVCC races, audit crash recovery,
+  rollout auto-promotion, and post-completion revoke reconciliation.
+- The revised plan uses one authoritative no-retry validation-call ledger with
+  atomic cost reservation, a complete keyed trusted-fingerprint projection,
+  common per-document PostgreSQL transaction locks plus active tombstone search
+  filtering, and a persistent `0 -> 10 -> 100` operator authorization latch.
+  Two-percent audits begin only for newly authorized full-enforce workflows.
+- Persisted Assistant messages now have a planned complete evidence-dependency
+  contract; incomplete, stale, revoked, quarantined, permission-incompatible,
+  or unavailable bindings fail closed across list, context, summary, email, and
+  RAG projections without leaking partial citations.
+- Source authority is planned around the server-owned content signature, exact
+  parser policy/run, and relational current-document-version pointer. Connector
+  signatures, display labels, timestamps guessed with `now()`, and `MAX(id)`
+  repairs cannot authorize C.5 serving.
+- Provider and rollout changes use append-only control events with atomic
+  aggregate backpointers. Quality revoke uses an immutable assessment and
+  audit-or-correction, commits breaker/quarantine first, and never rewrites a
+  confirmed audit; a correction permanently requires a new reviewed policy.
+- New V2.0 and V2.1 candidates both receive immutable evidence provenance, but
+  only V2.1 is auto-review eligible. Stored V2.1 threads remain resumable with
+  global disabled or a missing provider key and fall back safely to the human
+  queue rather than changing graph version.
+- Deterministic CI does not claim model quality. A separately authorized,
+  sanitized paid Terra aggregate benchmark is required before shadow rollout;
+  otherwise the feature stays disabled.
+- This remains planning only. No product code, migration, model/provider call,
+  paid-mode enablement, push, merge, or PR was performed. Planning/specification
+  is finalized. The next unapproved action is execution-mode selection plus
+  explicit product-code authorization, and that next action begins actual
+  implementation.
+
+## 2026-08-28 Auto-Review Trust Promotion design
+
+- Wrote the proposed Deliverable C.5 design between Review Queue HITL V2 and
+  the RAG retriever migration. This is planning/specification only; no product
+  code, database schema, provider call, feature enablement, push, or merge was
+  performed.
+- Reframed trust as three layers: canonical source evidence, pending AI
+  knowledge, and trusted knowledge. Raw evidence may support answers later but
+  does not become an official Decision, Timeline, History, or Todo by itself.
+- Kept AI candidates pending first. Only public/internal direct-fact Timeline
+  and narrowly extractive History candidates can enter the initial auto-review
+  allowlist; Decision, Todo, restricted, inferred, conflicting, and uncertain
+  candidates remain human-reviewed.
+- Separated an independent OpenAI `gpt-5.6-terra` medium-reasoning structured
+  validator from the final deterministic policy authority. Validator failure,
+  malformed output, source drift, permission drift, or budget overflow falls
+  back to human review and never silently changes models.
+- Preserved the existing locked exactly-once Review transition and promotion
+  boundary. Auto-policy approval cannot insert trusted knowledge directly, and
+  tests continue to use fake models rather than live provider APIs.
+- Designed post-migration approval provenance so exact duplicate
+  reaffirmations reuse a canonical knowledge row without letting one revoke
+  remove another active human/auto approval. The last active provenance alone
+  can revoke the shared knowledge, companion Timeline, and exact vector state.
+- Kept UX depth unchanged: existing Review surfaces gain bounded counts,
+  auto-validation badges, filtering, audit details, and an authorized revoke
+  action instead of a new page or wizard.
+- Proposed disabled/shadow/enforce rollout with default disabled, 10% stable
+  canary, zero hard-negative/permission/version violations, at least 500 shadow
+  comparisons, and at least 99% precision before enforce.
+- A read-only architecture audit caught durable-graph, shared-revoke, raw-index,
+  and post-audit gaps before implementation. The revised design keeps V2.0
+  immutable, adds V2.1-only state, blocks inaccessible collision buckets without
+  leaking them, and persists sampled human audits plus an enforce-to-shadow
+  breaker.
+- The written design was subsequently approved and converted into the separate
+  TDD implementation plan above. Sequence remains C.5 -> D Retriever/RAG
+  Answer Graph V2 -> E Neo4j GraphRAG -> Slack recovery last.
+
+## 2026-08-27 Review Queue HITL V2 release verification
+
+- Completed the two-screen user journey without adding navigation depth:
+  `Integrations -> 검토 후보 만들기 -> Review -> 검토 완료`. Review actions
+  update authoritative database state but never auto-resume; the explicit
+  completion action resumes the same workflow thread.
+- Production extraction continues through the existing LangChain structured
+  adapters, while the review workflow uses actual LangGraph `interrupt()` and
+  same-thread `Command(resume=...)`. Tests and smoke runs used deterministic
+  models/fake connector clients and made no live provider calls.
+- Verified PostgreSQL restart/recovery, commit/checkpoint reconciliation,
+  shared-scope exact-batch launch, exactly-once decision/history/todo promotion
+  and companion Timeline provenance, concurrent resume, terminal races, root
+  checkpoint namespace, privacy scanning, and generated-id-only cleanup:
+  `14 passed, 0 skipped` on a disposable PostgreSQL 16 + pgvector test target.
+- A real RED privacy check found that checkpoint state still serialized an
+  unused, always-empty `review_item_ids` key. The minimal correction removed
+  that checkpoint-only field without changing ReviewItem rows, graph nodes,
+  API payloads, permissions, or promotion behavior; its focused RED was
+  `3 failed, 4 passed` and GREEN was `7 passed`.
+- Final review caught that a normal approval changed the live ReviewItem
+  distribution and was incorrectly classified as checkpoint corruption. A
+  focused RED (`3 failed`) and real PostgreSQL RED (`2 failed`) proved the UI's
+  explicit completion path was rotating/repairing the checkpoint and consuming
+  five state versions. The corrected validator treats current PostgreSQL
+  ReviewItem resolution as authoritative while the paused tuple must retain
+  exact identity, schema, and total count. Normal completion now preserves the
+  checkpoint thread, never invokes repair/rotation, and uses the contractual
+  `+2` state-version path with no duplicate AgentRun, ReviewItem, knowledge, or
+  Timeline effects.
+- Strengthened restart evidence so application A and B own different
+  SQLAlchemy engines/pools/sessionmakers in addition to different checkpoint
+  runtimes/pools/savers. A is fully closed and disposed before B is created.
+- Fresh release evidence: touched-module regression `199 passed`; Deliverable C
+  `333 passed` with its one known deferred Slack failure still visible;
+  Deliverable B `229 passed`; non-Slack backend `989 passed, 1 skipped,
+  10 deselected`; full backend `989 passed, 1 skipped` with exactly the ten
+  user-deferred Slack failures and no new failure.
+- Cleared the whole-tree legacy Ruff baseline from 32 findings using 23 safe
+  automatic fixes and nine minimal behavior-preserving B008/N806/F841 edits.
+  Slack files received import/mode cleanup only. Whole-tree Ruff, lock, and
+  `git diff --check` are green.
+- Frontend lint/build passed with 18 generated pages. Deterministic Playwright
+  passed desktop V2 `48`, mobile V2 `44`, and adjacent UX `9`; deterministic
+  backend two-screen smoke passed `9`.
+- V2 remains disabled by default and Slack recovery remains last. This
+  historical next boundary was superseded on 2026-08-28 by the separately
+  proposed Deliverable C.5 trust-promotion design before Deliverable D.
+
+## 2026-08-27 Review Queue HITL V2 implementation plan
+
+- Converted the approved Deliverable C design into eleven independently
+  reviewable TDD commits covering truthful V1 metadata, canonical source refs,
+  V1/V2 waterlines, locked Review transitions, real LangChain adapters, actual
+  LangGraph interrupt/resume, lifecycle APIs, the two-screen UX, and PostgreSQL
+  recovery/concurrency evidence.
+- Proposed exact additive diagnostic, dry-run, lifecycle-status, error-code,
+  source-ref, and Review replay/promotion contracts for human approval so later
+  implementation cannot silently change a gated output or trust boundary.
+- Kept the no-migration decision: scoped batch ownership uses the existing
+  workflow/request/evidence tables plus a PostgreSQL advisory transaction lock,
+  while async sync recovery and cutover waterlines use `Source.raw_metadata`.
+- Required configured production model paths to use the existing LangChain
+  structured-output adapters and the workflow to use LangGraph 1.2
+  `interrupt()` / same-thread `Command(resume=...)`; deterministic models remain
+  limited to dry-run, local/demo, and tests.
+- Added explicit verification gates for exact-once Review promotion, checkpoint
+  mode matching, restart/resume, frontend desktop/mobile behavior, the full
+  non-Slack suite, and an unchanged visible ten-test Slack deferral baseline.
+- No product code was changed. The next step is human review of the plan and an
+  explicit choice between subagent-driven or inline implementation.
+
+## 2026-08-27 Review Queue HITL V2 product design
+
+- Approved a focused Deliverable C design that connects the completed
+  LangGraph checkpoint primitives to the real Review Queue without adding RAG,
+  Neo4j, or Slack work.
+- Kept the user journey within the existing Integrations and Review screens:
+  sync evidence, explicitly create review candidates, inspect/resolve them in
+  Review, then explicitly complete the review workflow.
+- Defined a real `interrupt()` / same-thread `Command(resume=...)` graph whose
+  resume acknowledgement never carries approval data; current PostgreSQL
+  ReviewItem state and permission checks remain authoritative.
+- Defined one locked Review transition service for single, bulk, and
+  agent-candidate actions, with `source_review_item_id` provenance preventing
+  duplicate knowledge and companion Timeline records after retries or races.
+- Chose company/workspace-level ownership for an exact canonical source-version
+  batch, so authorized users converge on one workflow instead of creating
+  owner-specific duplicate candidates and knowledge effects.
+- Added a V2-mode sync waterline so historical source versions already handled
+  by the legacy path are not regenerated during the V1/V2 transition.
+- Preserved disabled-by-default V2 routes and legacy rollback compatibility,
+  while requiring legacy status to identify its checkpoint as metadata-only.
+- Deferred CDC, transactional outbox, brokers, and streaming projection until
+  measured scale or latency bottlenecks justify a separate design. The next
+  step is an implementation plan and review, not product-code implementation.
+
+## 2026-08-26 LangGraph runtime and checkpoint primitives
+
+- Added JSON-safe, HMAC-keyed runtime contracts and application-owned workflow
+  schema without exposing a new public workflow route.
+- Separated explicit PostgreSQL checkpoint bootstrap from startup readiness;
+  application startup never calls checkpointer setup.
+- Defined SQLite/demo checkpoints as process-local memory mode and PostgreSQL
+  checkpoints as durable mode, with fail-closed production behavior instead
+  of memory fallback.
+- Verified a real PostgreSQL interrupt, pool shutdown, independent pool
+  restart, and same-thread `Command(resume=...)` at root checkpoint namespace
+  on an isolated disposable test database.
+- Hardened the proof with a fail-before-mutation test database identity guard,
+  direct inspection of every stored/decoded checkpoint payload shape for
+  relationship paths, LLM prompts, and raw connector payloads, and independent
+  best-effort cleanup of the generated thread and every database resource.
+- Locked the Review graph contract at `company-memory-review-v2.0` and the
+  application migration at `2f6a8b9c0d1e`.
+- Hardened saver confirmation to compare the exact ordered returned and
+  persisted interrupt ids/JSON-safe values, while translating resume saver
+  connection or deserialization failures to the bounded
+  `checkpoint_unavailable` category.
+- Bounded cyclic and excessively deep interrupt normalization to the opaque
+  `checkpoint interrupt state mismatch` category, preventing raw recursion
+  failures from escaping the runtime boundary.
+- Verification recorded zero new non-Slack backend failures. The focused suite
+  passed 224 tests, the non-Slack gate passed 717 tests with one existing
+  optional pgvector skip, and the full suite retained exactly the ten visible
+  user-deferred Slack failures.
+- Deliverable C remains a separate, unimplemented Review Queue HITL V2 slice
+  that requires review of its own plan before coding begins.
+
+## 2026-08-26 LangChain·LangGraph dependency compatibility
+
+- Upgraded and locked the approved dependency lines: LangChain 1.3.17,
+  LangGraph 1.2.11, langchain-openai 1.6.0,
+  langchain-google-genai 4.3.5, and
+  langgraph-checkpoint-postgres 3.1.2.
+- Added no-network compatibility coverage for the current OpenAI/Gemini
+  constructors, LangChain structured output and `create_agent`, typed LangGraph
+  runtime context, `interrupt()` / `Command(resume=...)`, and PostgreSQL saver
+  imports.
+- The focused AI integration suite passed. Complete backend comparison recorded
+  old lock `506 passed, 11 failed, 1 skipped` and accepted lock `518 passed,
+  11 failed, 1 skipped`; the 11 failures are identical pre-existing failures,
+  so this deliverable introduced zero new backend failures. This deliverable
+  changes no production route, graph topology, Review Queue behavior, or RAG
+  behavior.
+
+## 2026-08-26 LangChain·LangGraph runtime foundation design
+
+- Audited the installed architecture and confirmed that ParaWorks calls real
+  LangChain and LangGraph APIs, while identifying that its current graph is
+  still a linear wrapper without durable checkpointing or true HITL resume.
+- Chose a focused runtime refactor before Neo4j GraphRAG so keyword, pgvector,
+  and the future Neo4j retriever share typed LangGraph routing and the same
+  permission/evidence contracts.
+- Defined real Review Queue interruption with `interrupt()`, PostgreSQL-backed
+  checkpoints, `Command(resume=...)`, and fail-closed permission/citation
+  validation.
+- Kept Neo4j, graph projection, and `neo4j-graphrag` implementation out of this
+  first slice so the runtime foundation remains independently testable and
+  reversible.
+- Re-reviewed the design against current LangGraph persistence semantics and
+  the ParaWorks trust boundary, then split delivery into four independently
+  verifiable stages instead of one broad refactor.
+- Added explicit thread ownership, DB-enforced idempotency, checkpoint failure
+  reconciliation, strict checkpoint serialization, graph versioning, legacy
+  route compatibility, bounded hidden-match semantics, and server-derived
+  citation rules.
+- A final adversarial review corrected the checkpointer contract: application
+  graph versions no longer misuse `checkpoint_ns`, initial/resume invokes use
+  synchronous durability, and application status changes only after the saved
+  tuple is confirmed.
+- Hardened the trust boundary with canonical source/version-only Review inputs,
+  keyed fingerprints, short claim leases around out-of-transaction model work,
+  payload-safe idempotency keys, and DB-unique promotion provenance on every
+  knowledge table including generated Timeline rows.
+- Replaced "cite the whole evidence window" with structured answer blocks that
+  reference server-issued evidence slots. Only selected, revalidated canonical
+  records become public citations, and RAG V2 remains shadow-only until its
+  faithfulness evaluation matches or exceeds the legacy baseline.
+- After user approval of the revised trust-boundary contract, converted the
+  first green slice into a separate execution plan for dependency
+  compatibility. It fixes exact supported minor lines, a targeted uv lock
+  refresh, no-network provider/structured-output/agent tests, LangGraph
+  runtime-context and interrupt smoke coverage, and a hard stop before any
+  runtime behavior change.
+
+## 2026-05-16 Docker Postgres port fallback
+
+- Fixed the production-like Docker helper so a non-ParaWorks listener on
+  `127.0.0.1:5432` now falls back to the next available host port starting at
+  `5433` instead of retrying the same occupied port.
+- Aligned the pgvector dev helper and runbook with the same available-port
+  behavior, preserving the compose `PARAWORKS_POSTGRES_PORT` override path.
+- Repeated helper runs now reuse an existing ParaWorks Postgres host port
+  instead of drifting from `5433` to higher ports.
+- Verification: regression checks failed before the script fix, then passed
+  through direct static test execution; PowerShell parser checks passed for both
+  helper scripts; the Docker database path and full backend/frontend startup
+  were verified locally.
+
+## 2026-05-16 Dashboard SaaS responsive polish
+
+- Reworked the Dashboard hero into a compact AI workspace card with separate
+  text and right-side collaboration mock illustration areas, preserving the
+  existing Korean copy and dashboard data flow.
+- Changed the Dashboard content layout so the right utility column sits beside
+  the main content only on wide screens, then flows below the main stack on
+  laptop/tablet widths without squeezing the hero or KPI cards.
+- Hardened the Calendar card hover popover and selected-date behavior so
+  current date and event-bearing selected date can diverge safely.
+- Verification: Dashboard Playwright workflow passed, frontend lint passed with
+  existing timeline warnings only, frontend production build passed, and
+  viewport measurements passed for 2560, 1920, 1440, 1366, 1024, and 768 widths.
+
+## 2026-05-16 Dashboard calendar week order polish
+
+- Changed the Dashboard calendar from Monday-start weeks to Sunday-start weeks
+  so the grid reads Sunday through Saturday.
+- Split today's visual state from the selected date state: today stays visible
+  with a softer highlight when another date is selected, while the selected date
+  keeps the stronger gradient emphasis.
+- Verification: Dashboard Playwright workflow passed, frontend lint passed with
+  existing timeline warnings only, and frontend production build passed.
+
+## 2026-05-16 Dashboard calendar sync and Review bulk actions
+
+- Extended the Dashboard API with `calendar_events` so synced Google Calendar
+  events outside today can appear in the calendar grid, while `today_events`
+  continues to drive the "today schedule" KPI.
+- Made the Dashboard listen to the shared Review Queue update event so the
+  review badge count shown in dashboard content refreshes with the sidebar.
+- Hardened connector sync so duplicate source events with unchanged content
+  signatures are not passed into ingestion or downstream review extraction.
+- Added Review Queue bulk selection with a Gmail-style top checkbox, project
+  selection before bulk processing, duplicate/similar bulk actions, right-click
+  approve/reject actions, and an in-app confirmation modal.
+- Verification: backend dashboard/ingestion/review tests passed with 33 tests,
+  ruff passed for touched backend files, Review/Dashboard Playwright tests
+  passed with 3 tests, frontend lint passed with existing timeline warnings
+  only, and frontend production build passed.
+
+## 2026-05-16 Review bulk action UX follow-up
+
+- Moved group-level selection into the former expand-chevron position and
+  removed the visible chevron affordance from review group headers.
+- Scoped duplicate/similar approve and reject actions to each duplicate group,
+  placing those actions beside the group confidence summary instead of in the
+  global toolbar.
+- Rendered review context menus and bulk confirmation dialogs through a body
+  portal so modal backdrops cover the full viewport.
+- Fixed the bulk approval failure warning copy so skipped project-unclassified
+  items show readable Korean guidance.
+- Verification: Review bulk Playwright coverage passed with 2 tests, frontend
+  lint passed with existing timeline warnings only, and frontend production
+  build passed.
+
+## 2026-05-16 Timeline calendar status and filter cleanup
+
+- Calendar-backed timeline items whose event time is already in the past now
+  render as completed in the Timeline page, matching user expectations for
+  historical schedule entries.
+- Removed the unavailable `reviewing` status filter and the generic `Source`
+  source filter option from the Timeline filter controls.
+- Cleaned up unused Timeline icon imports so frontend lint is quiet.
+- Verification: Timeline Playwright coverage passed with 3 tests, frontend
+  lint passed with no warnings, and frontend production build passed.
+
+## 2026-05-16 Review Mail Docs Calendar source labels
+
+- Improved `/review` so Mail/Docs agent candidates show source-family badges
+  (`Mail`, `Docs`, `Calendar`, or combined labels such as `Mail + Docs`) in
+  the card header instead of always showing `Mail/Docs Agent`.
+- Hardened Review API source-evidence fallback so Mail/Docs/Calendar rows keep
+  indexed `source_types` and source-id evidence summary metadata instead of
+  defaulting missing source type data to Slack.
+- Verification: added backend regression coverage for indexed source-type
+  fallback and Playwright coverage for the card-level source badges.
+
+## 2026-05-15 Google Calendar updatedMin fallback
+
+- Fixed Google Calendar sync recovery when Google rejects an old per-calendar
+  `updatedMin` cursor with `The requested minimum modification time lies too far
+  in the past`.
+- The connector now refetches only the affected calendar through the existing
+  initial window instead of failing the whole Calendar sync, preserving
+  evidence-first ingestion and duplicate-skip cost controls.
+- Verification: Calendar connector regression test was observed failing before
+  the fix, then `test_google_connector.py` passed with 30 tests; connector
+  ingestion plus Google connector tests passed with 41 tests; ruff passed on the
+  touched connector/test files.
+
+## 2026-05-15 Dashboard Calendar today events visibility
+
+- Connected synced Google Calendar `Source` rows to the Dashboard `today_events`
+  API response so today's events appear in the existing "today schedule" panel
+  without waiting for Review Queue promotion.
+- Kept the trust boundary intact: raw Calendar events are shown only as schedule
+  visibility, while Calendar-derived todos still appear in today's work list
+  only after approval into trusted `Todo` rows.
+- Updated the dashboard UI and API type contract so the top schedule metric and
+  right-side schedule panel use real Calendar event data.
+- Verification: dashboard backend tests passed with 4 tests, ruff passed for
+  touched backend files, dashboard Playwright passed, frontend lint completed
+  with existing timeline warnings only, and frontend production build passed.
+
+## 2026-05-15 대시보드 오늘 할 일 및 담당 프로젝트 개선
+
+- 대시보드의 `오늘 해야 할 업무`가 검토 대기 todo 후보가 아니라, 승인된 todo ReviewItem 중 오늘(Asia/Seoul 기준) 이후 마감인 항목을 가까운 마감일 순으로 표시하도록 수정했다.
+- 완료 버튼은 서버의 trusted knowledge를 변경하지 않고, 현재 대시보드 화면에서만 해당 항목을 숨긴다.
+- `내 담당 프로젝트`가 빈 배열로 고정되어 있던 문제를 고쳐, 등록 프로젝트의 근거 수, 활동 수, 검토 대기 수가 대시보드에 표시되도록 연결했다.
+- 검증: 대시보드 backend 테스트 3개 통과, ruff 통과, frontend lint/build 통과, Playwright 대시보드 업무 흐름 1개 통과.
+
+포트폴리오 관점:
+
+- Review에서 승인된 업무가 오늘의 실행 목록으로 연결되고, 프로젝트별 활동 상태가 첫 화면에 드러나도록 하여 “검토된 회사 기억이 실제 업무 홈으로 이어지는” 흐름을 강화했다.
+
+## 2026-05-15 Google Calendar all-calendars project memory path
+
+- Google Calendar sync now covers every accessible calendar instead of only the
+  primary calendar, with per-calendar cursors and collision-safe Calendar source
+  ids.
+- Calendar evidence now flows through the same evidence-first path as
+  Slack/Gmail/Drive: sync, Source evidence, AgentRun, ReviewItem, approval,
+  Projects/Timeline, and approval-gated RAG indexing.
+- Approved Calendar timeline entries now use the actual event start time for
+  project activity and timeline grouping.
+
+Portfolio angle:
+
+- Shows the company-memory platform handling schedules as first-class reviewed
+  evidence across all user calendars, while keeping Calendar inside the
+  Mail/Docs ownership lane and preserving the human review boundary.
+
+## 2026-05-15 프로젝트 근거 기본 선택 및 Slack 원문 시각 보강
+
+- 프로젝트/타임라인 탭이 최신 생성 프로젝트를 무조건 기본 선택해, 승인 근거가 있는 프로젝트가 있어도 빈 프로젝트가 먼저 보이던 문제를 수정했다.
+- 프로젝트 탭은 승인된 원본 근거, 활동, 타임라인이 있는 첫 프로젝트를 기본 선택하고, 타임라인 탭은 승인된 타임라인 항목이 있는 첫 프로젝트를 기본 선택한다.
+- Slack source URL이 Source에 매칭되더라도 `raw_metadata.ts`가 비어 있으면 `Source.created_at`보다 Slack permalink의 `p...` timestamp를 먼저 사용한다.
+- 실제 Docker DB에서 `project-paraworks-mvp`가 원본 근거 12건과 타임라인 6건을 계산하고, 승인 시각(`created_at`)과 원문 시각(`occurred_at`)이 분리되는 것을 확인했다.
+- 검증: 프로젝트 메모리/Review backend 47개 통과, ruff 통과, frontend lint/build 통과, 핵심 Playwright 6개 통과.
+
+포트폴리오 관점:
+
+- 사용자가 만든 빈 프로젝트와 승인 데이터가 쌓인 프로젝트가 함께 있어도, 데모 첫 화면에서 실제 가치가 있는 프로젝트 근거와 활동이 바로 보이도록 개선했다.
+
+## 2026-05-15 Gmail/Drive 프로젝트 라우팅 승인 연결
+
+- `backend/app/agent_runtime/project_routing.py`에 Gmail, Drive, Slack이 함께 쓸 수 있는 공용 프로젝트 라우팅 계약을 추가했다.
+- Mail/Document Agent가 만든 `llm_tool` 기반 ReviewItem은 프로젝트가 확정되지 않았거나 사용자 선택이 필요한 상태이면 승인할 수 없도록 Review 승인 정책을 강화했다.
+- Review 화면에서 프로젝트 미선택 Gmail/Drive 후보는 "프로젝트 선택 후 승인 가능" 안내와 함께 승인 버튼이 비활성화되고, 등록 프로젝트를 선택하면 같은 ReviewItem을 승인할 수 있다.
+- 승인된 Gmail/Drive 후보는 기존 Review Queue 신뢰 경계를 거쳐 Timeline/Projects에 프로젝트별 활동으로 표시되고, 승인된 source chunk와 approved knowledge는 RAG indexing 대상에 포함된다.
+- approved knowledge의 벡터 문서 메타데이터에 `project_key`를 보존해 프로젝트 기반 검색/분석으로 이어질 수 있게 했다.
+- 검증: 공용 라우팅/Review/Project/RAG 백엔드 테스트 74개 통과, ruff 통과, 프론트 lint/build 통과, Gmail/Drive Review -> Timeline -> Projects Playwright desktop/mobile 2개 통과, 기존 Review project routing Playwright desktop/mobile 2개 통과.
+
+Portfolio angle:
+
+- Gmail/Drive 증거가 AI 후보에서 끝나지 않고, 프로젝트 선택과 사람 승인 후 회사 기억, 프로젝트 활동, 타임라인, RAG 색인까지 이어지는 제품 루프를 보여준다.
+## 2026-05-15 Slack 프로젝트 Tool Routing 승인 경계 완성
+
+- Slack 신규 sync에서 규칙 기반 `project_assignment` 생성을 중단하고, Slack Agent의 LangChain tool routing 결과만 프로젝트 지정 근거로 사용하게 했다.
+- `topic_tag` fallback으로 프로젝트가 자동 지정되던 경로를 제거해, LLM router가 프로젝트를 확정하지 못한 후보는 사용자가 직접 프로젝트를 선택해야 승인할 수 있게 했다.
+- Review Queue의 promotion preview와 approve API가 Slack Agent `llm_tool` 후보의 `project_key` 누락을 승인 불가로 반환한다.
+- Review 화면에 `프로젝트 선택 후 승인 가능` 안내를 추가하고, Timeline은 날짜 단위 그룹으로, Projects metric은 모바일 겹침 없이 표시되도록 보강했다.
+- 검증: backend targeted 65 passed, ruff 통과, frontend TypeScript/lint/build 통과, Playwright 4개 시나리오 desktop/mobile 총 8 passed.
+
+포트폴리오 관점:
+
+- Slack 원본 수집, LLM 기반 프로젝트 판단, Human Review 승인 경계, 프로젝트별 타임라인 표시가 하나의 신뢰 가능한 제품 흐름으로 연결되었다.
+
+## 2026-05-15 Slack 프로젝트 Router Tool Agent 추가
+
+- 기존 `agent_slack` LangGraph 흐름에 `project_route` 노드를 추가했다.
+- Slack Agent는 업무 후보를 추출한 뒤 LangChain tool-calling 기반 프로젝트 router를 실행해, 등록 프로젝트 중 연결 후보를 고르고 프로젝트 활동 요약과 근거를 생성한다.
+- Router는 `list_registered_projects`, `score_project_candidates` tool을 사용하며, 결과는 승인 전 trusted knowledge가 아니라 `ReviewItem.payload`에 `project_assignment_method=llm_tool`, 요약, 근거, 확신도, 대체 후보로 보존된다.
+- Slack LLM project routing으로 후보가 생성된 sync에서는 기존 deterministic `project_assignment` 중복 생성을 건너뛰되, Agent 후보가 새로 생성되지 않은 no-op sync에서는 fallback 분류를 막지 않도록 조건을 좁혔다.
+- Review 화면은 LLM 프로젝트 분류 요약과 연결 근거를 표시하고, 사용자가 등록 프로젝트 select에서 프로젝트를 바꾼 뒤 승인할 수 있는 흐름을 유지한다.
+- 현재 Slack Agent LangGraph 문서를 `agent_slack/slack_agent_langgraph.md`에 추가했다.
+- 검증: 관련 백엔드 회귀 테스트 60개 통과, ruff 통과, 프론트엔드 TypeScript/lint/build 통과, Playwright review project routing desktop/mobile 2개 통과.
+
+포트폴리오 관점:
+
+- Slack 원본 대화가 “업무 후보 추출”에서 끝나지 않고, 등록 프로젝트 맥락에 맞게 요약/근거와 함께 human-in-the-loop 검토로 넘어가는 흐름을 보여준다.
+- 규칙 기반 매칭의 오탐을 줄이면서도 LLM 제안을 사용자가 검토하고 수정할 수 있어, 프로젝트별 활동 타임라인의 신뢰도를 높인다.
+
+## 2026-05-15 Slack 장시간 동기화 실패 오인 수정
+
+- 실제 Playwright로 `/integrations` Slack 동기화를 눌러 네트워크 응답과 runtime-status를 확인했다.
+- 확인 결과 최신 job은 `complete`, `last_error=null`이었고, 과거 대량 sync는 약 153초가 걸려 프론트 polling 한도 135초를 넘길 수 있었다.
+- 프론트가 이 timeout을 실제 backend failure와 같은 `동기화 실패` 모달로 표시하던 문제를 수정했다.
+- 120초 이상 진행 중이거나 polling 한도를 넘긴 정상 running job은 `백그라운드에서 계속 진행 중입니다` 안내로 표시하고, 실패 상태로 오인하지 않게 했다.
+- 검증: Playwright 동기화 모달 회귀 desktop/mobile 6개 통과, TypeScript/lint/build 통과.
+
+## 2026-05-14 사용자 정의 프로젝트 동기화 검토사항 수정
+
+- 사용자가 프로젝트를 생성하면 기존 Slack/Gmail/Drive/Calendar source를 즉시
+  해당 프로젝트 기준으로 분류하고, 근거가 매칭될 때 `project_assignment`
+  ReviewItem을 `pending_review` 상태로 생성하도록 수정했다.
+- connector sync 이후에도 같은 프로젝트 분류기를 실행해 새로 동기화된 source와
+  이미 동기화되어 skipped 처리된 기존 source가 별도 재분류 호출 없이 프로젝트
+  연결 검토사항으로 들어오도록 했다.
+- 프로젝트 요약, 근거 사유, 승인 타임라인 사유, source 라벨에 남아 있던 깨진
+  한글 fallback 문구를 읽을 수 있는 한국어 문장으로 교체했다.
+- 검증: 프로젝트/동기화/검토 관련 백엔드 테스트 37개 통과, ruff 통과,
+  프론트엔드 TypeScript 검사와 프로덕션 빌드 통과.
+
+포트폴리오 관점:
+
+- 사용자 생성 프로젝트, connector 근거, Agent 제안, 수동 승인이 Review Queue에서
+  만나는 흐름을 구현해 프로젝트 탭이 실제 human-in-the-loop 라우팅 화면으로
+  작동하도록 만들었다.
+
+## 2026-05-14 Approved Project Timeline and RAG Visibility Fix
+
+- Fixed the approved Review Queue to Project/Timeline display path so promoted
+  Decision, History, Timeline, and Todo records preserve `project_key` through
+  the shared `/api/v1/projects` response.
+- Updated the project workspace to show approved workflow items alongside
+  connector assignment evidence, while keeping Review Queue approval as the
+  trust boundary.
+- Repaired the approval-based RAG source chunk path by preserving Mail/Document
+  `source_ids`, `source_types`, `source_urls`, and `source_authors` in ReviewItem
+  payloads.
+- Aligned RAG indexing tests with the approval-only policy: approved knowledge
+  records are indexed, and original email/document chunks enter RAG only when
+  their external `Source.source_id` appears in an approved ReviewItem payload.
+- Verification: targeted project/review/mail-document/RAG backend tests passed
+  with 44 passed; frontend TypeScript check and production build passed.
+
+Portfolio angle:
+
+- Shows the human-review loop becoming product-visible and retrieval-ready:
+  approved evidence-backed work history now appears in project workflow,
+  timeline views, and RAG indexing without indexing unapproved synced content.
+
+## 2026-05-14 Project Recognition and Timeline Workflow Boundary
+
+- Replaced loose `/projects` source grouping with two canonical company
+  projects: `K테크 파일럿` and `시드 투자 IR`.
+- Added deterministic, zero-token project classification that creates
+  `project_assignment` Review Queue candidates from Slack, Gmail, Drive, and
+  Calendar source evidence.
+- Changed `/projects` to show only approved project assignments, so legacy
+  smoke/demo labels such as `Project Newbiegenie`, `프로젝트 결과`, and
+  `미분류 프로젝트` no longer appear as business projects.
+- Updated `/timeline` to consume project-scoped workflow data from `/projects`
+  instead of showing one generic `Company Memory` timeline.
+- Stopped using raw connector titles like `Slack message in C0AUJDZUKA8` as
+  task titles and moved project evidence reasons into the UI data model.
+- Removed the deterministic RAG Redis canned-answer branch so local fallback
+  answers now summarize retrieved evidence snippets instead of returning a
+  fixed Redis/PostgreSQL response.
+- Added a local/dev reset utility for connector-derived data that preserves
+  auth users and integration connections while clearing sources, review items,
+  approved knowledge, vector state, AgentRuns, and assistant conversations.
+
+Portfolio angle:
+
+- Shows ParaWorks moving from connector-data display toward evidence-backed
+  project understanding and evidence-grounded assistant answers with human
+  review as the trust boundary.
+  project understanding with human review as the trust boundary.
+
+## 2026-05-12 Smoke-Only Demo Data Boundary
+
+- Changed the default runtime posture so demo/mock content is not seeded unless
+  `PARAWORKS_SEED_DEMO_DATA=true`.
+- Kept `scripts/start-smoke.ps1` as the smoke/demo entrypoint that explicitly
+  enables demo mode and demo seed data.
+- Updated the pgvector Docker-backed dev startup path to run with
+  `PARAWORKS_DEMO_MODE=false` and `PARAWORKS_SEED_DEMO_DATA=false`, so an empty
+  database remains empty until Slack or Google connectors are installed and
+  synced.
+- Stopped the Review page from showing local fallback review items when the API
+  cannot return real items.
+- Changed Dashboard, Projects, and Timeline sample-only surfaces to render empty
+  states in production-like mode instead of hard-coded ORION/Nova/Atlas data.
+- Verification: `uv run pytest backend/tests -v` passed with 297 passed and 1
+  skipped; `npm run build` passed from `frontend`.
+
+## 2026-05-12 AI Assistant Conversation Memory
+
+- Added database-backed, per-user AI assistant conversations for the `AI 비서`
+  surface.
+- Persisted user and assistant messages with citations, source snippets,
+  permission notices, hidden-source counts, and linked AgentRun ids.
+- Kept token, cache, and cost details out of the user-facing assistant flow so
+  cost observability remains in `Agent Runs`.
+- Added regression coverage for user-scoped assistant conversations and the
+  `/search` assistant UX.
+
+Portfolio angle:
+
+- Shows ParaWorks evolving from one-shot RAG search into a product-like
+  evidence-backed AI assistant with memory, permission safety, and operator
+  observability.
+
+## 2026-05-12 AI Assistant Chat UX and Sincere-mode RAG LLM
+
+- Reworked `/search` into a more natural chat surface with compact conversation
+  history, duplicate empty-chat prevention, bottom composer, and folded
+  evidence/source panels inside each assistant response.
+- Continued the chat polish on 2026-05-13 by keeping history ordered by latest
+  updated conversation rather than selected conversation, constraining scrolling
+  to the transcript pane, removing message badges, rendering assistant markdown,
+  adding copy actions, and adding one-click suggested prompts.
+- Shortened chat history titles from the first user message so the history list
+  behaves like a conversation list instead of a document summary list.
+- Added a RAG LLM adapter for non-demo 진심모드:
+  - OpenAI primary model: `gpt-5.4-mini`;
+  - `.env` `AGENT_LLM_OPENAI_MODEL` as the OpenAI fallback model;
+  - provider fallback through the configured provider order.
+- Kept demo mode deterministic so tests and cheap demos do not call live LLMs.
+- Updated the session handoff runbook with the active branch and local
+  continuation notes.
+
+Portfolio angle:
+
+- Shows ParaWorks moving from a technical RAG answer page toward a credible
+  AI assistant product surface while preserving evidence, permissions, and
+  operator cost observability.
+
+## 2026-05-11 Sidebar and Workspace Navigation Update
+
+- Simplified the main sidebar by removing separate Decision, History, and
+  Knowledge Map entries.
+- Added a Project page where users can switch between assigned projects from a
+  top project menu and review progress, risk, pending review count, Gantt-style
+  planning, calendar scheduling, board status, and task lists.
+- Kept the Timeline entry as `타임라인` and made the page project-scoped, with
+  history summaries tied back to source Slack/Gmail/Drive/Calendar evidence.
+- Updated the global top search so the left search icon acts as the submit
+  button and routes to `AI 비서` with the query prefilled.
+- Renamed the assistant surface to `AI 비서` in navigation and page copy.
+- Restored Dashboard review visibility with a `검토사항` section and renamed the
+  Review page heading from `검토 큐` to `검토사항`; when the backend is not
+  reachable, demo review items remain visible instead of leaving the page in a
+  loading state.
+- Updated Timeline history interactions so the history icon opens a source-
+  specific history panel only on demand, then collapses back to a full-width
+  timeline when closed.
+- Rebuilt the Dashboard as a personalized work home focused on today's assigned
+  tasks, review items, meetings, mentions, assigned projects, and suggested Ask
+  prompts instead of workspace-wide ingestion metrics.
+- Moved source collection status into Integrations, where connector operations
+  and source health belong.
+- Verification: `npm run build` passed from `frontend`.
+
+Portfolio angle:
+
+- Shows ParaWorks moving from many knowledge-category pages toward an
+  operator-friendly workspace organized around projects, timelines, source
+  history, and evidence-backed Ask.
+
+## Portfolio Positioning
+
+ParaWorks is a Korean-first, multi-agentic Slack-style collaboration and
+knowledge review workspace for business users. The MVP demonstrates how work
+messages, SaaS connector events, and review workflows can become searchable,
+permission-aware organizational knowledge.
+
+## Current Narrative
+
+The project started as an Adapter-First Demo Harness and evolved into a more
+product-shaped MVP:
+
+- A Korean-first business UX with English switching for international-ready use.
+- A Slack-like Messenger surface for team conversation and collaboration.
+- A review queue that turns selected messages and connector evidence into
+  human-confirmed knowledge candidates.
+- A Docker-free SQLite smoke mode so the product can be run and demonstrated
+  quickly even when Postgres, Redis, and MinIO are unavailable.
+- A Slack connector boundary prepared for future real Slack Web API ingestion.
+
+## Work Completed
+
+### Korean-First UX and Messenger MVP
+
+- Added Korean default shell copy and a Korean/English language switch.
+- Added `/messages` as a Slack-like messenger screen with channels, timeline,
+  and message composer.
+- Added backend message APIs for listing channels, listing messages, and
+  posting messages.
+- Fixed SSE completion behavior so successful sync completion is not shown as
+  a stream error.
+
+Portfolio angle:
+
+- Shows product localization for the first target market: Korean business users.
+- Demonstrates moving beyond a technical harness into a familiar collaboration
+  experience.
+
+### SQLite Smoke Mode
+
+- Added `scripts/start-smoke.ps1` for Docker-free local demos.
+- Added a smoke runbook and updated local development and verification docs.
+- Smoke mode starts FastAPI and Next.js against a temporary SQLite database.
+
+Portfolio angle:
+
+- Shows practical engineering for demo reliability and onboarding speed.
+- Reduces environment friction, which matters for stakeholder demos and hiring
+  portfolio walkthroughs.
+
+### Messenger Persistence
+
+- Added SQLAlchemy models for `message_channels` and `messages`.
+- Changed message service behavior from process memory to database-backed
+  persistence.
+- Seeded demo channels and messages on first use against an empty database.
+
+Portfolio angle:
+
+- Shows the transition from UI prototype to stateful MVP infrastructure.
+- Establishes a foundation for analytics, search, review, and audit history.
+
+### Messenger to Review Queue
+
+- Added `POST /api/v1/messages/messages/{message_id}/send-to-review`.
+- Added UI action to send a message into the review workflow.
+- Created review items with message snippets and `paraworks://messages/...`
+  source links.
+
+Portfolio angle:
+
+- Connects the Slack-like messenger directly to ParaWorks' knowledge workflow.
+- Shows a concrete "conversation to organizational knowledge" product loop.
+
+### Slack Connector Preparation
+
+- Added `backend/app/connectors/slack.py` with a testable `SlackApiClient`
+  protocol boundary.
+- Added tests for Slack message payload mapping into ParaWorks `SourceEvent`
+  records.
+- Added Slack integration runbook and environment placeholders:
+  `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_IDS`, `SLACK_WORKSPACE_URL`.
+
+Portfolio angle:
+
+- Shows adapter-first architecture: real SaaS APIs can be connected without
+  coupling product logic to vendor SDK details.
+- Sets up future real Slack ingestion with pagination, rate limits, OAuth, and
+  permission mapping.
+
+## Verification Evidence
+
+Latest known verified state:
+
+- Backend tests: `uv run pytest backend/tests -v` -> 27 passed.
+- Frontend build: `npm.cmd run build` -> passed.
+- Smoke runtime:
+  - `http://127.0.0.1:3000/messages`
+  - `http://127.0.0.1:3000/dashboard`
+  - `http://127.0.0.1:3000/review`
+- Browser smoke covered message posting, language switching, sending a message
+  to review, and confirming the created review item on `/review`.
+
+## Portfolio Demo Script
+
+1. Start the SQLite smoke environment with `.\scripts\start-smoke.ps1`.
+2. Open `/dashboard` to show the product overview.
+3. Open `/messages` to show Korean-first Slack-like collaboration.
+4. Post or select a message and send it to the review queue.
+5. Open `/review` to show the message as a knowledge review candidate.
+6. Explain that connector data and messenger data share the same review/search
+   architecture.
+7. Point to the Slack connector boundary as the next real-world integration
+   step.
+
+## Next Portfolio-Worthy Milestones
+
+- Implement `RealSlackApiClient` with Slack Web API cursor pagination and
+  rate-limit handling.
+- Add Slack OAuth install flow and token storage decisions.
+- Map Slack channel/private-message permissions into ParaWorks review/search
+  access rules.
+- Add message-to-knowledge actions such as "create decision record" and
+  "create todo".
+- Add focused frontend regression tests for Messenger and review actions.
+
+## Product North Star Update: Multi-Agent Knowledge Automation
+
+Recorded on 2026-05-01.
+
+ParaWorks' final target is an AI-agentic company memory platform. The agent
+system will use multi-agent orchestration with LangChain 1.x and LangGraph 1.x
+to automate:
+
+- Email summarization, review, timeline creation, and history creation.
+- Slack channel/message summarization, review, timeline creation, and history
+  creation.
+- RAG over generated timelines/history and internal company documents.
+- Permission-aware answers for Korean business users.
+
+The first recommended vertical slice is:
+
+Slack channel/messages -> agentic summary and review -> timeline/history
+candidates -> Review Queue.
+
+Portfolio angle:
+
+- Shows the transition from MVP collaboration surface to AI orchestration
+  platform.
+- Makes token cost optimization a product and architecture requirement from the
+  start, not a late performance cleanup.
+- Supports a three-developer split across agent runtime, data/RAG, and product
+  UX.
+
+## Collaboration Guide Update: Equal Agent Ownership
+
+Recorded on 2026-05-01.
+
+Added `AGENTS.md` as the repo-level collaboration guide for human developers
+and coding assistants. The guide changes the team split from technical layers
+to equal agent ownership:
+
+- Slack Agent.
+- Mail and Document Agent.
+- RAG and Orchestrator Agent.
+
+It also codifies evidence-first AI output, Review Queue as the trust boundary,
+permission propagation, token-cost accounting, fake-LLM testing, and assistant
+behavior rules for Codex, Claude Code, Gemini, and similar tools.
+
+Portfolio angle:
+
+- Shows that ParaWorks is being developed as a serious multi-agent system with
+  team-scale engineering discipline.
+- Makes AI safety, cost optimization, permissions, and human review explicit
+  development compliance requirements.
+
+## Integration Pipeline Update: Assistant-Safe Merging
+
+Recorded on 2026-05-01.
+
+Updated `AGENTS.md` with a development pipeline for three independent agent
+tracks and coding assistants:
+
+- shared contract branch first;
+- feature branch per agent;
+- integration branch for frequent green merges;
+- contract tests as the merge gate;
+- human decision points for schema, permission, cost, trust-boundary, and
+  duplicate-resolution policy changes.
+
+Portfolio angle:
+
+- Demonstrates that ParaWorks is designed for AI-assisted team development, not
+  only AI-powered product features.
+- Shows awareness that Codex can help resolve conflicts, but stable contracts,
+  registry-based integration, and verification gates must exist before the
+  merge.
+
+## UX Direction Update: Slack-Like Workspace
+
+Recorded on 2026-05-01.
+
+Started a frontend UX pass to make ParaWorks feel like a Korean-first
+Slack-like business workspace rather than a plain demo harness.
+
+Planned scope:
+
+- darker workspace navigation rail;
+- top command/search entry for future AI/RAG usage;
+- richer Messages channel surface;
+- Tools/Apps-style Integrations page;
+- cleaner Korean-first operational copy.
+
+Implemented scope:
+
+- redesigned the shared app shell into a Slack-like workspace rail;
+- added a top command/search bar and agent readiness affordance;
+- upgraded Messages with denser channel navigation, timeline styling, review
+  actions, and an anchored composer;
+- upgraded Integrations into a Tools/Apps surface with connector readiness and
+  sync activity panel.
+
+Verification evidence:
+
+- `npm.cmd run build` from `frontend` passed without warnings.
+- HTTP smoke returned 200 for `/integrations`, `/messages`, and `/dashboard`
+  on `http://127.0.0.1:3000`.
+
+Portfolio angle:
+
+- Shows product sense and UX architecture, not only backend AI engineering.
+- Prepares the interface for Slack Agent, Review Inbox, and RAG Orchestrator
+  experiences without a later full layout rewrite.
+
+## Agent Development Update: Slack Agent Skeleton
+
+Recorded on 2026-05-01.
+
+Started the first functional agent track after the shared runtime and registry
+contracts. The Slack Agent skeleton is scoped to:
+
+- accept shared `EvidencePacket` input;
+- use a fake/model client boundary instead of live LLM calls;
+- return `AgentRunResult`;
+- preserve source links, snippets, and strictest permission level;
+- record token/cost metadata.
+
+Portfolio angle:
+
+- Shows the project moving from architecture contracts into actual agent
+  implementation.
+- Keeps the work merge-friendly because Slack Agent lives in its own owned
+  package and integrates only through shared runtime contracts.
+
+## Agent Development Update: Slack Agent Review Bridge
+
+Recorded on 2026-05-01.
+
+Started the bridge that turns persisted Slack source chunks into shared
+`EvidencePacket` input, runs the Slack Agent, and persists agent output as
+`ReviewItem(status="pending_review")`.
+
+Portfolio angle:
+
+- Shows the first real product loop for agentic Slack knowledge extraction:
+  source evidence -> agent runtime -> human review.
+- Preserves the project compliance story by carrying source links, snippets,
+  permission level, prompt version, cache key, and token/cost metadata into the
+  Review Queue.
+
+## Agent Development Update: Slack Agent API and UI
+
+Recorded on 2026-05-01.
+
+Next milestone is exposing the Slack Agent Review bridge through the product:
+
+- backend endpoint for Slack Agent Review generation;
+- deterministic demo model instead of live LLM calls;
+- frontend Tools action to run the Slack Agent after mock Slack sync;
+- activity panel result showing how many Review Queue items were created.
+
+Portfolio angle:
+
+- Turns agent architecture into a user-visible workflow.
+- Demonstrates cost-safe AI development by using a deterministic local model
+  boundary before enabling paid LLM provider calls.
+
+## UX Update: Agent-Aware Review Inbox
+
+Recorded on 2026-05-01.
+
+Next UI milestone is upgrading `/review` from a generic review list into an
+agent-aware activity inbox:
+
+- AI Agent-generated candidates are visibly labeled.
+- Prompt version, token usage, estimated cost, cache key, permission, and
+  confidence become inspectable from the Review UI.
+- Source Evidence Drawer gets clean Korean copy and clearer evidence links.
+
+Portfolio angle:
+
+- Makes the human-review trust boundary visible to users and interviewers.
+- Connects the token-cost optimization requirement to a concrete product
+  surface instead of keeping it hidden in backend metadata.
+
+Implemented scope:
+
+- Reworked `/review` into an Activity Inbox-style review queue.
+- Replaced corrupted Korean UI copy.
+- Added AI Agent badges for agent-generated Review Items.
+- Exposed prompt version, token count, estimated cost, cache key, confidence,
+  permission, and source evidence in the UI.
+- Cleaned up the Source Evidence Drawer copy and layout.
+
+Verification evidence:
+
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted after build to clear stale Next.js cache.
+- HTTP smoke returned 200 for `/review`, `/integrations`, and `/health`.
+
+## Agent Runtime Update: AgentRun Cost Audit Model
+
+Recorded on 2026-05-01.
+
+Next backend milestone is persisting every agent execution as an `AgentRun` row
+so token usage, estimated cost, prompt version, cache key, permission level, and
+run status can be audited beyond the ReviewItem payload.
+
+Portfolio angle:
+
+- Shows that token-cost optimization is backed by durable observability, not
+  only UI labels.
+- Creates the shared audit foundation needed by Slack Agent, Mail/Document
+  Agent, and RAG/Orchestrator Agent.
+
+Implemented scope:
+
+- Added the `agent_runs` table and `AgentRun` model.
+- Persisted one `AgentRun` row for each Slack Agent Review execution.
+- Linked generated Review Items back to the originating agent run through
+  `payload.agent_run_id`.
+- Stored prompt version, cache key, model name, token usage, estimated cost,
+  source window, permission level, and run metadata.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_agent_run_model.py backend/tests/test_db_init.py -v`
+  passed.
+- `uv run pytest backend/tests -v` passed with 40 backend tests.
+
+## Agent Development Update: Mail/Document Agent Slice
+
+Recorded on 2026-05-01.
+
+Next agent-track milestone is giving Developer B an independently owned agent
+slice for Gmail and Drive evidence while preserving the same shared runtime
+contract used by Slack Agent.
+
+Portfolio angle:
+
+- Demonstrates that ParaWorks is not a single hard-coded Slack demo; it now has
+  a repeatable multi-agent backend pattern across communication and document
+  sources.
+- Shows practical 3-person division of labor: Slack Agent, Mail/Document Agent,
+  and RAG/Orchestrator Agent can evolve with the same `EvidencePacket`,
+  `AgentRunResult`, `AgentRun`, and Review Queue boundaries.
+
+Implemented scope:
+
+- Added `mail_document_agent` with manifest, model protocol, deterministic
+  local model, and `MailDocumentAgent`.
+- Added a bridge that builds evidence packets from Gmail and Drive chunks,
+  excludes Slack chunks, persists `AgentRun`, and links Review Items through
+  `payload.agent_run_id`.
+- Added `POST /api/v1/integrations/mail-docs/agent-review` for deterministic
+  MVP smoke testing without paid LLM calls.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_mail_document_agent.py backend/tests/test_mail_document_agent_review_bridge.py backend/tests/test_mail_document_agent_api.py -v`
+  passed.
+- `uv run pytest backend/tests -v` passed with 44 backend tests.
+
+## UX Update: Integrations Multi-Agent Actions
+
+Recorded on 2026-05-01.
+
+Next product milestone is making the second backend agent visible from the
+same Integrations surface users already use for mock connector smoke testing.
+
+Portfolio angle:
+
+- Shows that the product can expose multiple independently owned agents without
+  duplicating UI state or endpoint-specific response types.
+- Makes the 3-person agent split tangible in the app: Slack Agent and
+  Mail/Docs Agent can both be run from the Korean business-user workflow.
+
+Implemented scope:
+
+- Generalized the frontend agent-review response type to `AgentReviewResponse`.
+- Replaced Slack-only action state with reusable agent action descriptors.
+- Added Mail/Docs Agent buttons to Gmail and Drive cards.
+- Kept Korean UX copy intact and displayed completed agent names in friendly
+  labels.
+
+Verification evidence:
+
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted with `.tmp/paraworks-mail-docs-ui.db`.
+- HTTP smoke returned 200 for `/health`, `/integrations`, and `/dashboard`.
+- Gmail sync, Drive sync, and `POST /api/v1/integrations/mail-docs/agent-review`
+  returned `agentName=mail_document_agent` and `created=1`.
+
+## Agent Development Update: RAG Orchestrator Agent
+
+Recorded on 2026-05-01.
+
+Next core-product milestone is giving users a question-answering endpoint over
+the company memory evidence that Slack, Gmail, Drive, and review workflows have
+already collected.
+
+Portfolio angle:
+
+- Completes the three-track agent split: Slack Agent, Mail/Document Agent, and
+  RAG/Orchestrator Agent now each have an independently testable backend slice.
+- Shows a cost-safe RAG migration path: deterministic keyword retrieval now,
+  vector DB and LangGraph orchestration later without changing the public answer
+  contract.
+- Demonstrates permission-aware RAG behavior by hiding restricted sources for
+  viewer users while reporting hidden matches.
+
+Implemented scope:
+
+- Added `rag_orchestrator_agent` with manifest, deterministic model, answer
+  dataclasses, and cost metadata.
+- Added permission-aware retrieval over existing `DocumentChunk` evidence.
+- Added `POST /api/v1/ask` returning answer text, source links, snippets,
+  permission notices, cache key, model name, token usage, and estimated cost.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_rag_orchestrator_agent.py backend/tests/test_rag_orchestrator_service.py backend/tests/test_ask_api.py -v`
+  passed.
+- `uv run pytest backend/tests -v` passed with 50 backend tests.
+
+## UX Update: Company Memory Ask Workbench
+
+Recorded on 2026-05-01.
+
+Next product milestone is making the RAG Orchestrator visible to Korean
+business users through the existing Search surface.
+
+Portfolio angle:
+
+- Turns the backend `/api/v1/ask` contract into an inspectable product workflow:
+  question, AI answer, citations, raw matching evidence, permission notice, and
+  cost metadata are visible together.
+- Shows that ParaWorks treats RAG answers as auditable outputs, not opaque chat
+  bubbles.
+- Keeps the demo cost-safe by using the deterministic orchestrator while still
+  exposing token and estimated-cost fields.
+
+Implemented scope:
+
+- Added frontend `AskResponse` type.
+- Reworked `/search` into a Company Memory workbench.
+- One query now calls both `/api/v1/ask` and `/api/v1/search` using viewer
+  permissions.
+- Rendered answer text, source links, token count, estimated cost, hidden
+  match count, permission notice, cache key, model name, and raw evidence.
+
+Verification evidence:
+
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted with `.tmp/paraworks-ask-ui.db`.
+- HTTP smoke returned 200 for `/health`, `/search`, and `/dashboard`.
+- Gmail sync, Drive sync, and `POST /api/v1/ask` returned
+  `agentName=rag_orchestrator_agent`, `sources=2`, `hidden=0`, and `tokens=100`.
+
+## Observability Update: Agent Run Cost Dashboard
+
+Recorded on 2026-05-01.
+
+Next operations milestone is making AI execution cost and token usage visible
+from the product, not only stored in the database.
+
+Portfolio angle:
+
+- Shows AI cost governance as a first-class product feature.
+- Gives the three-agent split a shared observability surface: Slack Agent,
+  Mail/Docs Agent, and future RAG runs can be compared through one audit table.
+- Demonstrates a production-minded pattern where every agent run has prompt,
+  model, token, cost, permission, and cache metadata.
+
+Implemented scope:
+
+- Added read-only `GET /api/v1/agent-runs`.
+- Returned aggregate run count, total tokens, estimated total cost, and recent
+  run details.
+- Added frontend `AgentRunsResponse` and `AgentRunSummaryItem` types.
+- Reworked `/dashboard` with Agent execution count, estimated cost, token total,
+  and recent Agent Runs panel.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_agent_runs_api.py -v` passed.
+- `uv run pytest backend/tests -v` passed with 51 backend tests.
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted with `.tmp/paraworks-agent-runs.db`.
+- Slack Agent and Mail/Docs Agent smoke run produced `totalRuns=2`,
+  `totalTokens=226`, and `estimatedCost=0.000063`.
+- HTTP smoke returned 200 for `/health`, `/dashboard`, and `/search`.
+
+## Observability Update: RAG AgentRun Persistence
+
+Recorded on 2026-05-01.
+
+Next observability milestone is ensuring the RAG Orchestrator participates in
+the same AgentRun audit trail as Slack Agent and Mail/Docs Agent.
+
+Portfolio angle:
+
+- Completes the shared three-agent audit story: Slack extraction, Mail/Docs
+  extraction, and RAG question answering all create durable cost records.
+- Shows that every user-facing AI answer can be traced to prompt version, model,
+  token usage, estimated cost, cache key, permission level, and source count.
+- Strengthens the token-cost optimization requirement by making RAG asks visible
+  in the same dashboard totals.
+
+Implemented scope:
+
+- Persisted one `AgentRun` for each `answer_question_with_rag` execution.
+- Stored question text, source count, hidden match count, source type, and cache
+  hit metadata.
+- Kept the public `/api/v1/ask` response shape unchanged while allowing
+  `/api/v1/agent-runs` and `/dashboard` to include RAG ask runs.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_rag_orchestrator_service.py -v` passed.
+- `uv run pytest backend/tests -v` passed with 52 backend tests.
+- Smoke server restarted with `.tmp/paraworks-rag-agent-run.db`.
+- Gmail sync, Drive sync, and `POST /api/v1/ask` produced
+  `askAgent=rag_orchestrator_agent`, `askTokens=100`, `totalRuns=1`,
+  `totalTokens=100`, and `latestQuestion=Redis job state`.
+- HTTP smoke returned 200 for `/health`, `/dashboard`, and `/search`.
+
+## Knowledge Update: Review Approval Promotion
+
+Recorded on 2026-05-01.
+
+Next product milestone is closing the human-review loop so approved agent
+candidates become durable company memory records.
+
+Portfolio angle:
+
+- Completes the source evidence -> agent candidate -> human approval -> company
+  memory loop.
+- Shows that ParaWorks keeps human approval as the trust boundary before
+  writing durable history, decision, and task records.
+- Preserves the audit story by carrying source links, source snippets,
+  confidence, permission level, and approved review status into knowledge
+  tables.
+
+Implemented scope:
+
+- Added `promote_review_item` in `backend/app/knowledge/promotion.py`.
+- Mapped `decision_record` Review Items into `DecisionRecord`.
+- Mapped `history_event` Review Items into `HistoryEvent`.
+- Mapped `todo` Review Items into `Todo`.
+- Called promotion from the existing Review approve endpoint.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_review_knowledge_promotion.py -v` passed.
+- `uv run pytest backend/tests -v` passed with 55 backend tests.
+- Smoke server restarted with `.tmp/paraworks-review-promotion.db`.
+- Slack sync produced 3 pending Review Items, approving one returned
+  `approvedStatus=approved` and `approvedType=todo`.
+- HTTP smoke returned 200 for `/health`, `/review`, and `/dashboard`.
+
+## Product Update: Knowledge Library
+
+Recorded on 2026-05-01.
+
+Next user-facing milestone is making approved company memory visible after
+Review Queue approval.
+
+Portfolio angle:
+
+- Turns durable knowledge rows into an inspectable product surface.
+- Shows the completed workflow from Slack evidence to Review approval to
+  approved decisions, history, and todos.
+- Provides a natural next step toward vectorizing approved company memory for
+  production RAG.
+
+Implemented scope:
+
+- Added read-only `GET /api/v1/knowledge`.
+- Returned approved decisions, history events, todos, counts, source evidence,
+  confidence, permission, and review status.
+- Added frontend `KnowledgeResponse` and `KnowledgeItem` types.
+- Added `/knowledge` page with summary cards and evidence-preserving records.
+- Added Knowledge navigation labels in Korean and English.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_knowledge_api.py -v` passed.
+- `uv run pytest backend/tests -v` passed with 56 backend tests.
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted with `.tmp/paraworks-knowledge-library.db`.
+- Slack sync and approving all 3 Review Items produced `decisions=1`,
+  `history=1`, and `todos=1` from `/api/v1/knowledge`.
+- HTTP smoke returned 200 for `/health`, `/knowledge`, `/review`, and
+  `/dashboard`.
+
+## RAG Update: Approved Knowledge Retrieval
+
+Recorded on 2026-05-01.
+
+Next retrieval milestone is allowing the RAG Orchestrator to answer from
+human-approved company memory, not only raw source chunks.
+
+Portfolio angle:
+
+- Connects Knowledge Library records back into the user-facing Ask workflow.
+- Shows the intended learning loop: raw evidence is reviewed, promoted into
+  company memory, then reused as trusted RAG context.
+- Keeps the permission story intact by applying hidden-match behavior to
+  approved knowledge records as well as raw document chunks.
+
+Implemented scope:
+
+- Added `RagEvidenceCandidate` as a common retrieval candidate for raw chunks
+  and approved knowledge.
+- Added approved `DecisionRecord`, `HistoryEvent`, and `Todo` retrieval to the
+  RAG Orchestrator service.
+- Preserved source links and source snippets from approved knowledge records in
+  `EvidencePacket`.
+- Kept `/api/v1/ask` response shape unchanged.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_rag_orchestrator_service.py backend/tests/test_ask_api.py -v`
+  passed.
+- `uv run pytest backend/tests -v` passed with 59 backend tests.
+- Smoke server restarted with `.tmp/paraworks-knowledge-rag.db`.
+- Slack sync and approving all 3 Review Items followed by `POST /api/v1/ask`
+  for `Redis queues` returned `askAgent=rag_orchestrator_agent`,
+  `sourceCount=2`, and `hidden=0`.
+- HTTP smoke returned 200 for `/health`, `/search`, `/knowledge`, and
+  `/dashboard`.
+
+## Observability Update: AgentRun Detail View
+
+Recorded on 2026-05-01.
+
+Next observability milestone is inspecting one AI execution from dashboard
+summary to prompt, model, token, cost, cache, permission, and metadata detail.
+
+Portfolio angle:
+
+- Makes AI orchestration cost and behavior auditable at the individual run
+  level.
+- Gives reviewers a concrete UI for explaining prompt versions, token usage,
+  cache keys, permission level, and runtime metadata.
+- Connects the executive dashboard to an engineer-facing trace view without
+  changing the agent execution contract.
+
+Implemented scope:
+
+- Added `GET /api/v1/agent-runs/{id}` with a shared AgentRun serializer.
+- Added `token_usage` to AgentRun API payloads while preserving flat token
+  fields for existing UI code.
+- Added `/agent-runs/[id]` frontend detail page.
+- Linked recent dashboard AgentRun rows to their detail pages.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_agent_runs_api.py -v` passed.
+- `uv run pytest backend/tests -v` passed with 61 backend tests.
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted with `.tmp/paraworks-agent-run-detail.db`.
+- Gmail and Drive sync followed by `POST /api/v1/ask` produced AgentRun `8`
+  with `agent=rag_orchestrator_agent`, `tokens=136`, and
+  `question=Redis job state` from `/api/v1/agent-runs/8`.
+- HTTP smoke returned 200 for `/health`, `/dashboard`, `/agent-runs/8`, and
+  `/review`.
+- Browser smoke opened `/agent-runs/8`, rendered the Rag Orchestrator run
+  details, and reported no console errors.
+
+## Harness Reliability: Isolated Frontend Smoke Cache
+
+Recorded on 2026-05-01.
+
+During browser retesting, the AgentRun detail page rendered without Tailwind
+styles because the running Next dev server and `npm run build` shared the same
+`.next` directory.
+
+Portfolio angle:
+
+- Shows debugging across browser rendering, CSS asset serving, Next build
+  artifacts, and local smoke scripts.
+- Turns a flaky local-demo failure into a repeatable regression test.
+- Protects future AI-assisted workflows where test/build commands may run
+  while the smoke UI remains open.
+
+Implemented scope:
+
+- Added `NEXT_DIST_DIR` support to `frontend/next.config.ts`.
+- Updated `scripts/start-smoke.ps1` so smoke dev uses `.next-smoke` instead of
+  the production build `.next` directory.
+- Added `backend/tests/test_smoke_frontend_cache.py` to guard the cache
+  isolation contract.
+
+Verification evidence:
+
+- Reproduced the broken page as a CSS 404 for
+  `/_next/static/css/app/layout.css`.
+- `uv run pytest backend/tests/test_smoke_frontend_cache.py -v` failed before
+  the fix and passed after the fix.
+- Restarted smoke with `.tmp/paraworks-agent-run-detail.db`.
+- Confirmed `/agent-runs/8` and its CSS file returned 200 before and after
+  `npm.cmd run build` while the smoke dev server stayed open.
+- Browser smoke reloaded `/agent-runs/8` and rendered the styled AgentRun cards.
+
+## Observability Update: AgentRun Operations Summary
+
+Recorded on 2026-05-01.
+
+Next operations milestone is moving from single-run inspection to an overview
+that compares cost, token usage, cache behavior, and status across all agent
+tracks.
+
+Portfolio angle:
+
+- Shows AI cost governance at both detail and aggregate levels.
+- Gives the three-developer agent split a shared operational dashboard:
+  Slack Agent, Mail/Docs Agent, and RAG Orchestrator can be compared without
+  coupling their internals.
+- Turns token-cost optimization into a visible product workflow instead of a
+  hidden backend concern.
+
+Implemented scope:
+
+- Added `GET /api/v1/agent-runs/summary`.
+- Returned total runs, token totals, estimated cost, average cost, average
+  tokens per run, cache hits, cache hit rate, status counts, and per-agent
+  cost/token breakdowns.
+- Added frontend `AgentRunSummaryResponse` and `AgentRunAgentSummary` types.
+- Added `/agent-runs` as an operations summary page with cards, per-agent
+  table, status distribution, and links to run detail pages.
+- Added `AI 실행` / `AI Runs` navigation labels and linked the dashboard
+  AgentRun panel to the full operations page.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_agent_runs_api.py -v` passed.
+- `npm.cmd run build` from `frontend` passed and included `/agent-runs`.
+- Smoke server restarted with `.tmp/paraworks-agent-run-detail.db`.
+- HTTP smoke returned 200 for `/health`, `/agent-runs`, `/dashboard`, and
+  `/api/v1/agent-runs/summary`.
+- Summary smoke returned `totalRuns=8`, `totalTokens=666`,
+  `cacheHitRate=0.0`, and `agents=2`.
+- Browser smoke opened `/agent-runs` and confirmed the `AI 실행 관측`,
+  `Agent별 비용과 토큰`, `상태 분포`, and `최근 실행 로그` sections.
+
+## Agent Platform Update: Review, Vector, and Orchestration Foundations
+
+Recorded on 2026-05-01.
+
+Next platform milestone is preparing the product loop for real multi-agent
+implementation: stricter human review, vector-ready retrieval, and a
+LangGraph-ready workflow contract.
+
+Portfolio angle:
+
+- Shows the core AI safety boundary: generated candidates cannot be approved
+  into company memory until required fields and evidence are present.
+- Introduces a vector-store abstraction without forcing paid embeddings or a
+  production Vector DB during MVP development.
+- Makes the future LangGraph migration concrete by fixing state and node names
+  before adding the dependency.
+
+Implemented scope:
+
+- Added Review promotion preview and approval validation for decision,
+  history, and todo review item types.
+- Added frontend Review Queue preview cards showing the exact normalized record
+  shape that will be promoted on approval.
+- Added a permission-aware `InMemoryVectorStore` with hidden-match counting and
+  exportable document shape for future pgvector, Chroma, or Qdrant adapters.
+- Added a RAG candidate to `VectorDocument` projection bridge.
+- Added a local company-memory workflow skeleton with append-only audit state
+  and LangGraph-ready node order: collect evidence, draft review candidates,
+  retrieve company memory, answer with RAG.
+
+Verification evidence:
+
+- Review preview and promotion tests passed.
+- Vector store and existing RAG service tests passed.
+- Agent orchestration skeleton tests passed.
+- Frontend build passed after Review Queue preview UI changes.
+- Full backend suite passed with 70 tests.
+- Smoke server restarted with `.tmp/paraworks-review-vector-langgraph.db`.
+- Slack sync created 3 pending review items; promotion preview returned
+  `canApprove=true` and `target=todo`.
+- HTTP smoke returned 200 for `/health`, `/review`, `/search`, and
+  `/agent-runs`.
+- Browser smoke opened `/review` and confirmed approval preview cards for
+  todo, history, and decision records.
+
+## RAG Infrastructure Update: PostgreSQL + pgvector Adapter
+
+Recorded on 2026-05-01.
+
+Confirmed PostgreSQL + pgvector as the production RAG storage direction while
+preserving SQLite smoke mode for fast demos.
+
+Portfolio angle:
+
+- Shows a practical RAG infrastructure choice instead of leaving vector storage
+  vague.
+- Keeps company memory, permissions, source evidence, and vector search close
+  to the same transactional Postgres boundary.
+- Avoids extra operational complexity from a separate vector database during
+  MVP development.
+
+Implemented scope:
+
+- Added `PgVectorStore` with schema SQL, upsert SQL, permission-filtered search
+  SQL, and hidden-match accounting.
+- Added `PgVectorConfig` with table-name and embedding-dimension validation.
+- Added Docker init SQL for `rag_vector_documents`, `embedding vector(1536)`,
+  ivfflat cosine index, and permission index.
+- Documented PostgreSQL + pgvector as the default RAG storage path in
+  `AGENTS.md` and `README.md`.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_pgvector_store.py -v` passed.
+- `uv run pytest backend/tests -v` passed with 74 backend tests.
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted with `.tmp/paraworks-pgvector-adapter.db`.
+- HTTP smoke returned 200 for `/health`, `/dashboard`, `/review`, `/search`,
+  and `/agent-runs`.
+- Browser smoke opened `/search` and confirmed the Company Memory/Search
+  surface still rendered under SQLite smoke mode.
+
+## RAG Infrastructure Update: Vector Indexing Pipeline
+
+Recorded on 2026-05-01.
+
+Added the first indexing pipeline that turns current company memory into
+embeddable vector documents while keeping local MVP smoke mode independent from
+live Postgres.
+
+Portfolio angle:
+
+- Shows how ParaWorks bridges Slack/Gmail/Drive evidence and approved company
+  knowledge into a single RAG serving corpus.
+- Demonstrates production-minded design: deterministic test embeddings locally,
+  a writer protocol for pgvector, and permission metadata carried through every
+  indexed document.
+- Keeps token cost under control by making indexing explicit and testable
+  before introducing paid embedding providers.
+
+Implemented scope:
+
+- Added `DeterministicHashEmbeddingModel` for stable local embedding tests and
+  smoke previews.
+- Added `index_vector_documents` and `VectorIndexWriter` so the same pipeline
+  can target the existing `PgVectorStore` adapter.
+- Added `build_rag_index_documents` to collect all source chunks plus approved
+  decision, history, and todo records.
+- Added `POST /api/v1/rag/reindex` dry-run preview for validating indexing
+  coverage without requiring live PostgreSQL in SQLite smoke mode.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_rag_indexing.py -v` passed with 4 tests.
+- `uv run pytest backend/tests -v` passed with 78 backend tests.
+- `uv run ruff check backend/app/rag/embeddings.py backend/app/rag/indexing.py backend/app/api/v1/rag.py backend/tests/test_rag_indexing.py` passed.
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted with `.tmp/paraworks-rag-vector-indexing.db`.
+- Slack and Gmail mock sync created 3 source chunks; `POST /api/v1/rag/reindex`
+  returned `dry_run=true`, `indexed_count=3`, `embedding_dimensions=16`, and
+  `storage_backend=preview`.
+- HTTP smoke returned 200 for `/dashboard`, `/review`, and `/search`.
+
+## RAG Cost Optimization Update: Incremental Vector Indexing
+
+Recorded on 2026-05-01.
+
+Added the first explicit cost-control layer for paid embedding providers before
+connecting OpenAI embeddings.
+
+Portfolio angle:
+
+- Shows product-aware AI engineering: the system avoids repeated embedding
+  calls when Slack/Gmail/Drive sync runs over unchanged content.
+- Makes cost savings observable through `skipped_count` and
+  `saved_embedding_calls`, not just an internal implementation detail.
+- Keeps future provider integration safer because the expensive boundary is
+  already guarded by content hashing and index state.
+
+Implemented scope:
+
+- Added `VectorIndexState` and the `vector_index_states` table to track
+  `document_id + embedding_model + content_hash`.
+- Added stable `VectorDocument` content hashing.
+- Added `index_changed_vector_documents` to skip unchanged documents, reindex
+  changed documents, and persist successful index state.
+- Extended `POST /api/v1/rag/reindex` dry-run responses with incremental cost
+  signals: `skipped_count`, `skipped_document_ids`, and
+  `saved_embedding_calls`.
+- Documented that full-corpus re-embedding must not be the default path.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_rag_indexing.py backend/tests/test_db_init.py -v`
+  passed with 9 focused tests.
+- `uv run pytest backend/tests -v` passed with 82 backend tests.
+- `uv run ruff check backend/app/models/vector_index.py backend/app/rag/indexing.py backend/app/api/v1/rag.py backend/tests/test_rag_indexing.py`
+  passed after Ruff import cleanup.
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted with `.tmp/paraworks-incremental-vector-indexing.db`.
+- Slack and Gmail mock sync created 3 source chunks; `POST /api/v1/rag/reindex`
+  returned `incremental=true`, `indexed_count=3`, `skipped_count=0`, and
+  `saved_embedding_calls=0` on a fresh index.
+- HTTP smoke returned 200 for `/dashboard`, `/review`, and `/search`.
+
+## RAG Infrastructure Update: Embedding Provider, pgvector Writes, Jobs, and Vector Retrieval
+
+Recorded on 2026-05-01.
+
+Completed the next RAG slice in the agreed order: provider boundary, pgvector
+write mode, indexing job contract, and vector-capable retrieval.
+
+Portfolio angle:
+
+- Shows the expensive OpenAI embedding boundary is isolated, batch-oriented,
+  usage-aware, and tested without live API calls.
+- Demonstrates production safety: SQLite smoke mode cannot accidentally perform
+  pgvector writes, while PostgreSQL mode requires an API key and explicit
+  `dry_run=false`.
+- Adds an operator-friendly job contract so indexing can move to Celery/Redis
+  later without changing the product API.
+- Makes the RAG answer path vector-ready while keeping local demos stable.
+
+Implemented scope:
+
+- Added `OpenAIEmbeddingModel` and `OpenAIEmbeddingConfig` using batched
+  `/v1/embeddings` requests, `encoding_format=float`, optional dimensions, and
+  usage tracking.
+- Updated incremental indexing to batch only changed documents after content
+  hash skip checks.
+- Added OpenAI embedding settings and pgvector production write mode for
+  `/api/v1/rag/reindex?dry_run=false`.
+- Added `POST /api/v1/rag/reindex/jobs` backed by `SyncJob` for indexing job
+  status and cost counters.
+- Added optional vector-store retrieval in `answer_question_with_rag` and a
+  guarded pgvector search adapter for Ask API.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_embedding_provider.py backend/tests/test_rag_indexing.py -v`
+  passed with provider and batch indexing tests.
+- `uv run pytest backend/tests/test_rag_indexing.py::test_reindex_job_endpoint_records_indexing_job -v`
+  passed.
+- `uv run pytest backend/tests/test_rag_orchestrator_service.py::test_rag_service_can_answer_from_vector_store_matches -v`
+  passed.
+- `uv run pytest backend/tests -v` passed with 87 backend tests.
+- `uv run ruff check backend/app/rag/embeddings.py backend/app/rag/indexing.py backend/app/api/v1/rag.py backend/app/api/v1/ask.py backend/app/agents/rag_orchestrator_agent/service.py backend/tests/test_embedding_provider.py backend/tests/test_rag_indexing.py backend/tests/test_rag_orchestrator_service.py`
+  passed after Ruff import cleanup.
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted with
+  `.tmp/paraworks-embedding-pgvector-job-retrieval.db`.
+- Slack and Gmail mock sync created 3 source chunks; `POST /api/v1/rag/reindex/jobs`
+  returned a `rag-index-*` job with `status=complete`, `indexed_count=3`,
+  `embedding_request_count=1`, and `storage_backend=preview`.
+- HTTP smoke returned 200 for `/dashboard`, `/review`, and `/search`.
+
+## Product Observability Update: RAG Indexing Admin Panel
+
+Recorded on 2026-05-01.
+
+Moved RAG indexing cost-control signals into the Agent Operations/Admin surface
+instead of the end-user Search screen.
+
+Portfolio angle:
+
+- Shows the cost optimization work in a demo-friendly way without polluting the
+  final business-user product flow.
+- Demonstrates product judgment: technical counters belong in admin
+  observability, while Search remains focused on retrieval and evidence.
+- Makes `indexed`, `skipped`, and `saved embedding calls` visible for operators
+  so the team can prove incremental indexing is reducing provider calls.
+
+Implemented scope:
+
+- Added `GET /api/v1/rag/indexing/summary` with vector index state counts and
+  latest `rag-index` jobs.
+- Added RAG indexing types to the frontend API contract.
+- Added a RAG indexing operations panel to `/agent-runs` with admin-only
+  positioning and latest job counters.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_rag_indexing.py::test_rag_indexing_summary_returns_latest_jobs_and_state_counts -v`
+  passed.
+- `uv run ruff check backend/app/api/v1/rag.py backend/tests/test_rag_indexing.py`
+  passed.
+- `uv run pytest backend/tests -v` passed with 88 backend tests.
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted with `.tmp/paraworks-rag-indexing-observability.db`.
+- Slack and Gmail mock sync created source chunks; `POST /api/v1/rag/reindex/jobs`
+  returned `indexed_count=3`, `embedding_request_count=1`, and
+  `status=complete`.
+- `GET /api/v1/rag/indexing/summary` returned the latest `rag-index` job.
+- HTTP smoke returned 200 for `/agent-runs`, `/search`, and `/dashboard`.
+
+## RAG Infrastructure Update: pgvector Dev Path and Fake Embedding Integration Test
+
+Recorded on 2026-05-01.
+
+Added a safe developer path for validating real PostgreSQL + pgvector behavior
+without putting live OpenAI calls in automated tests.
+
+Portfolio angle:
+
+- Shows production-readiness work beyond app code: runbooks, scripts,
+  environment boundaries, and integration-test gates.
+- Keeps provider cost and secret safety explicit by separating live manual
+  checks from automated fake-embedding tests.
+- Documents a real local blocker found during validation: Docker Postgres could
+  not bind `127.0.0.1:5432` on this machine, and cleanup was handled with
+  `docker compose down`.
+
+Implemented scope:
+
+- Added `docs/superpowers/runbooks/pgvector-dev.md` with startup, env,
+  `dry_run=false`, fake integration test, port-conflict, and cost-policy notes.
+- Added `scripts/start-pgvector-dev.ps1` for Postgres/Redis-backed local app
+  startup without embedding secrets in the script.
+- Added OpenAI embedding and pgvector search settings to `.env.example`.
+- Added runbook/script tests and a skipped-by-default real pgvector integration
+  test using `DeterministicHashEmbeddingModel`.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_pgvector_dev_runbook.py backend/tests/test_pgvector_integration.py -v`
+  passed with 2 tests and skipped the real pgvector integration when
+  `PARAWORKS_PGVECTOR_TEST_DATABASE_URL` was unset.
+- `uv run ruff check backend/tests/test_pgvector_dev_runbook.py backend/tests/test_pgvector_integration.py`
+  passed.
+- `uv run pytest backend/tests -v` passed with 90 backend tests and 1 skipped
+  opt-in pgvector integration test.
+- `npm.cmd run build` from `frontend` passed.
+- `docker compose up -d postgres redis` pulled required images but failed to
+  bind `127.0.0.1:5432`; partial containers were cleaned up with
+  `docker compose down`.
+
+## RAG Operations Update: Celery/Redis Indexing Job Contract
+
+Recorded on 2026-05-01.
+
+Moved RAG reindex jobs behind a Celery/Redis worker contract while preserving
+deterministic eager execution for local smoke and tests.
+
+Portfolio angle:
+
+- Shows the difference between an API that does work synchronously and an
+  operational job pipeline with queue, polling, and worker boundaries.
+- Keeps cost controls intact: the worker executes the same incremental
+  hash-skip pipeline before any embedding provider call.
+- Demonstrates pragmatic local development: eager mode keeps SQLite smoke fast,
+  while `CELERY_TASK_ALWAYS_EAGER=false` enables real Redis worker validation.
+
+Implemented scope:
+
+- Added Celery app construction with Redis broker/result backend and eager-mode
+  settings.
+- Added `rag.reindex` task plus `execute_rag_reindex_job` for testable job
+  status transitions.
+- Moved reindex execution logic out of the API route into
+  `backend/app/rag/reindexing.py`.
+- Updated `POST /api/v1/rag/reindex/jobs` to create a queued job first, then
+  execute eagerly in local/test mode or enqueue for Celery in worker mode.
+- Added `GET /api/v1/rag/reindex/jobs/{job_id}` for polling.
+- Added `scripts/start-celery-worker.ps1` and documented worker mode in the
+  pgvector runbook.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_rag_indexing_tasks.py backend/tests/test_rag_indexing.py -v`
+  passed with 17 focused tests.
+- `uv run ruff check backend/app/tasks/celery_app.py backend/app/tasks/rag_indexing.py backend/app/rag/reindexing.py backend/app/api/v1/rag.py backend/tests/test_rag_indexing_tasks.py backend/tests/test_rag_indexing.py`
+  passed.
+- `uv run pytest backend/tests -v` passed with 95 backend tests and 1 skipped
+  opt-in pgvector integration test.
+- `npm.cmd run build` from `frontend` passed.
+- Smoke server restarted with `.tmp/paraworks-celery-rag-indexing.db`.
+- Slack and Gmail mock sync followed by `POST /api/v1/rag/reindex/jobs`
+  returned `status=complete`; `GET /api/v1/rag/reindex/jobs/{job_id}` returned
+  `indexed_count=3`; summary API returned one latest job.
+- HTTP smoke returned 200 for `/agent-runs`, `/dashboard`, and `/search`.
+
+## RAG Operations UX And Dev Path Hardening
+
+Recorded on 2026-05-01.
+
+Implemented the next recommended ParaWorks steps: Admin-facing async job UX,
+normal-user search freshness UX, Celery queue-mode contract tests, and a
+resilient pgvector local development path.
+
+Portfolio angle:
+
+- Shows product judgment around cost visibility: normal business users see
+  company-memory freshness and evidence quality, while Admin/Ops users see
+  embedding calls avoided, skipped documents, and job status details.
+- Demonstrates operational maturity: RAG reindexing now has clearer
+  `queued/running/complete/failed` UX, failure reason surfacing, and polling
+  contracts.
+- Shows practical backend discipline: queue mode is tested separately from eager
+  local mode, so the API boundary stays safe when Redis/Celery is enabled.
+- Reduces onboarding friction for collaborators by making pgvector host ports
+  configurable instead of requiring tracked compose edits when `5432` is busy.
+
+Implemented scope:
+
+- Added `failure_reason` to RAG indexing job summaries for failed jobs.
+- Added tests for failed-job detail responses and non-eager queue behavior.
+- Updated `/agent-runs` with Korean operations copy, progress/status display,
+  failure reason display, latest RAG jobs, and Admin-only cost counters.
+- Updated `/search` with a non-technical company-memory freshness panel and
+  removed token/cost/cache details from the normal user answer area.
+- Added `PARAWORKS_POSTGRES_PORT` and `PARAWORKS_REDIS_PORT` compose defaults.
+- Added `-PostgresPort` and `-RedisPort` to `scripts/start-pgvector-dev.ps1`.
+- Documented alternate-port pgvector startup in the runbook.
+
+Cost policy reinforced:
+
+- Keep paid embedding and token-cost details in Admin/Ops screens.
+- Give end users confidence signals without encouraging them to reason about
+  provider internals.
+- Preserve incremental indexing as the first cost gate before provider calls.
+
+Verification evidence:
+
+- Focused RAG/Celery tests passed with 20 tests.
+- Focused Ruff passed for changed backend files.
+- Full backend tests passed with 98 tests and 1 skipped pgvector integration
+  test.
+- Frontend production build passed.
+- HTTP smoke confirmed health, RAG job creation/detail/summary, `/agent-runs`,
+  and `/search`.
+- HTML smoke confirmed the new Korean titles render and replacement characters
+  are absent.
+- Real Redis/Celery worker-mode smoke confirmed `queued -> complete` with
+  `CELERY_TASK_ALWAYS_EAGER=false`.
+
+## Connector Ingestion Contract
+
+Recorded on 2026-05-01.
+
+Started the real connector ingestion phase by defining the shared contract that
+Slack, Gmail, Drive, Calendar, and future internal-document adapters must use.
+Mock connectors now follow the same metadata shape expected from live OAuth
+adapters.
+
+Portfolio angle:
+
+- Shows integration architecture beyond mock demos: external data sources enter
+  through a stable `SourceEvent` + `ConnectorManifest` boundary.
+- Supports 3-developer parallel work because Slack, Mail/Docs, and RAG workers
+  can rely on one ingestion result shape instead of importing each other's code.
+- Adds operational sync accounting with fetched, created, and skipped counts.
+- Reinforces cost control before LLM/RAG work: duplicate source events are
+  skipped before review extraction and before any downstream embedding.
+
+Implemented scope:
+
+- Added `ConnectorManifest` for connector type, display name, mode, auth type,
+  OAuth scopes, sync strategy, and cost policy.
+- Added a connector registry for integration metadata.
+- Added `sync_connector_events` to centralize `SyncJob` creation, connector
+  fetch, ingestion, duplicate skip counts, completion, and failure handling.
+- Updated the integrations API to list manifest metadata and use the shared
+  sync boundary.
+- Updated `/integrations` to show connector manifest metadata, OAuth scope
+  summaries, sync strategy, cost policy, fetched counts, and skipped counts in
+  Korean.
+- Updated `AGENTS.md` with connector ingestion rules for coding assistants.
+
+Verification evidence:
+
+- Focused connector tests passed with 12 tests.
+- Focused Ruff passed for changed connector, ingestion, API, and test files.
+- Full backend tests passed with 102 tests and 1 skipped pgvector integration
+  test.
+- Frontend production build passed.
+- Smoke confirmed `/api/v1/integrations` returns 4 connector manifests,
+  Slack history scopes, successful Slack sync with fetched/created/skipped
+  counts, and `/integrations` renders Korean copy without replacement
+  characters.
+
+## Playwright Visual Smoke And RAG Permission Audit
+
+Recorded on 2026-05-01.
+
+Made frontend visual checking repeatable with Playwright and started the next
+RAG permission/security hardening slice.
+
+Portfolio angle:
+
+- Adds a real visual regression workflow across desktop and mobile, not only
+  HTTP smoke checks.
+- Turns the previous Korean mojibake issue into an automated guardrail by
+  checking key pages for Korean headings and broken replacement text.
+- Strengthens RAG auditability without leaking hidden source content:
+  end-users can see hidden match counts, while restricted source details remain
+  filtered.
+- Preserves connector ACL metadata on chunks so downstream RAG, review, and
+  portfolio explanations can trace why content was visible or hidden.
+
+Implemented scope:
+
+- Installed `@playwright/test` and Chromium for local visual smoke.
+- Added `frontend/playwright.config.ts`, `frontend/e2e/visual-smoke.spec.ts`,
+  and `scripts/run-visual-smoke.ps1`.
+- Added `npm run test:visual`.
+- Rewrote `/dashboard` Korean copy to remove mojibake.
+- Added `hidden_match_count` to search responses and `source_id` to visible
+  search results.
+- Added `source_ids` to Ask/RAG answers so visible answer citations are
+  auditable by stable source identifiers.
+- Preserved source id, permission level, participants, and connector raw
+  metadata in `DocumentChunk.metadata_`.
+- Updated `/search` to show hidden match counts without exposing hidden
+  snippets or links.
+
+Verification evidence:
+
+- Focused permission/connector/Ask tests passed with 15 tests.
+- Focused Ruff passed for changed backend search, ingestion, and tests.
+- Full backend tests passed with 102 tests and 1 skipped pgvector integration
+  test.
+- Frontend production build passed.
+- Playwright visual smoke passed with 10 Chromium desktop/mobile tests.
+- Playwright initially failed because browser binaries were missing; installing
+  Chromium made the check executable for future runs.
+
+## Slack Live API Client Boundary
+
+Recorded on 2026-05-01.
+
+Started the real OAuth connector phase with a Slack Web API client boundary
+while keeping mock mode as the default for demos and tests.
+
+Portfolio angle:
+
+- Shows the transition from mock connector harness to a live API-ready
+  integration without leaking or requiring real workspace tokens.
+- Keeps the connector architecture testable: Slack API behavior is verified
+  with `httpx.MockTransport` and fake clients, never by calling Slack in tests.
+- Preserves the ingestion contract: live Slack payloads still become
+  `SourceEvent` records and flow through the same `sync_connector_events`
+  pipeline as mock data.
+- Reinforces cost and security discipline before LLM work: source deltas are
+  fetched first, duplicates are skipped, and review/RAG boundaries remain
+  evidence-driven.
+
+Implemented scope:
+
+- Added `SlackWebApiClient` for `conversations.history` bearer-token calls.
+- Added cursor pagination and clear `SlackApiError` handling.
+- Added `get_configured_connector` so Slack settings build a live connector
+  only when token and channel ids are present.
+- Updated `/api/v1/integrations/{connector_type}/sync` to use the configured
+  connector factory while preserving mock fallback.
+- Updated the Slack integration runbook with live env settings, scope
+  requirements, no-secret policy, fake-client test policy, and cost/security
+  notes.
+
+Verification evidence:
+
+- Focused Slack connector/factory/mock sync tests passed with 7 tests.
+- Focused Ruff passed for the touched Slack connector, factory, integration
+  endpoint, and tests.
+- Full backend tests passed with 106 tests and 1 skipped pgvector integration
+  test.
+- Frontend production build passed.
+- Playwright visual smoke passed with 10 Chromium desktop/mobile tests.
+
+## Slack OAuth Installation Boundary
+
+Recorded on 2026-05-01.
+
+Added the first OAuth installation boundary for Slack while keeping real
+workspace access opt-in and mock/demo behavior safe by default.
+
+Portfolio angle:
+
+- Demonstrates secure integration design beyond mock data: install URLs use
+  signed state, OAuth code exchange is isolated behind a client boundary, and
+  database records never store raw bot tokens.
+- Shows production-minded defaults: `PARAWORKS_DEMO_MODE=true` keeps mock sync
+  active even when local Slack credentials exist, preventing accidental API
+  usage, private data ingestion, and surprise downstream indexing costs.
+- Keeps the implementation testable without external services through
+  `httpx.MockTransport`, fake access payloads, and a local token vault boundary.
+- Creates a clean handoff point for the next developer slice: replacing the
+  local vault with a managed secret store and wiring installed connections into
+  sync.
+
+Implemented scope:
+
+- Added Slack OAuth settings and `.env.example` placeholders.
+- Added `IntegrationConnection` to persist workspace metadata, scopes,
+  `token_ref`, masked token, status, and non-sensitive metadata.
+- Added `SlackOAuthStateSigner`, `SlackOAuthClient`, `LocalTokenVault`, install
+  URL builder, and callback completion service.
+- Added `/api/v1/integrations/slack/oauth/install-url` and callback endpoint.
+- Updated connector factory so live Slack sync requires demo mode to be
+  disabled as well as token/channel configuration.
+- Updated Slack runbook with OAuth env, testing, cost, and security rules.
+
+Verification evidence:
+
+- RED test first: `backend/tests/test_slack_oauth.py` initially failed because
+  `backend.app.connectors.slack_oauth` did not exist.
+- Focused OAuth tests passed with 5 tests.
+- Focused connector factory/mock/review/OAuth regression tests passed with 14
+  tests.
+- Focused Ruff passed for touched backend files and tests.
+- Full backend tests passed with 112 tests and 1 skipped pgvector integration
+  test.
+- Frontend production build passed.
+- Playwright visual smoke passed with 10 Chromium desktop/mobile tests.
+
+## Slack OAuth UI Status
+
+Recorded on 2026-05-01.
+
+Wired the Slack OAuth installation boundary into the Integrations experience so
+users can see whether Slack is connected, installable, or still waiting for
+environment configuration.
+
+Portfolio angle:
+
+- Shows full-stack integration maturity: backend exposes sanitized connection
+  state, and the frontend renders status/CTA without leaking raw tokens or
+  `token_ref` values.
+- Keeps the portfolio demo safe and cost-aware: mock sync remains usable when
+  OAuth is not configured, and the UI clearly separates setup readiness from
+  actual data ingestion.
+- Adds visual smoke coverage so future UI work catches broken OAuth status
+  cards on both desktop and mobile.
+
+Implemented scope:
+
+- Added `/api/v1/integrations/connections` to return connection status,
+  workspace metadata, scopes, and masked tokens only.
+- Added frontend API types for Slack OAuth install URLs and integration
+  connections.
+- Updated `/integrations` Slack card with connection status, setup guidance,
+  and a safe Slack install CTA.
+- Added Playwright coverage that the Slack OAuth status renders and does not
+  expose common secret markers.
+
+Verification evidence:
+
+- RED backend test first: `/api/v1/integrations/connections` returned 404
+  before implementation.
+- RED visual smoke first: `[data-testid="slack-oauth-status"]` was missing
+  before UI implementation.
+- Focused backend connection API test passed.
+- Python Ruff passed for touched backend files and tests.
+- Full backend tests passed with 113 tests and 1 skipped pgvector integration
+  test.
+- Frontend production build passed.
+- Playwright visual smoke passed with 12 Chromium desktop/mobile tests on fresh
+  alternate ports.
+
+## Installed Slack Sync Token Boundary
+
+Recorded on 2026-05-01.
+
+Connected installed Slack OAuth records to the sync connector factory without
+putting raw tokens in the database or API responses.
+
+Portfolio angle:
+
+- Shows the handoff from OAuth installation to live ingestion readiness: the
+  sync path can now build a `SlackConnector` from a stored connection record and
+  a vault-resolved bot token.
+- Preserves the cost guardrail: live Slack sync still requires
+  `PARAWORKS_DEMO_MODE=false`, configured channel ids, and a resolvable vault
+  token. Missing vault state falls back to mock instead of making unexpected
+  external calls.
+- Keeps the security story crisp for interviews: DB stores `token_ref` only,
+  the vault resolves the secret at runtime, and sync responses never expose raw
+  tokens or token references.
+
+Implemented scope:
+
+- Added `get_sync_connector` as the sync-time factory that can use installed
+  Slack connections.
+- Kept `get_configured_connector` as the legacy env-token path for local live
+  experiments.
+- Updated `/api/v1/integrations/{connector_type}/sync` to use the sync-time
+  factory with DB context.
+- Added tests for installed connection token resolution, missing-vault fallback,
+  and sync endpoint secret non-exposure.
+- Updated Slack runbook with installed sync selection and cost/security notes.
+
+Verification evidence:
+
+- RED factory test first failed because `get_sync_connector` did not exist.
+- Focused connector/OAuth/mock sync tests passed with 13 tests.
+- Python Ruff passed for touched backend files and tests.
+- Full backend tests passed with 116 tests and 1 skipped pgvector integration
+  test.
+- Frontend production build passed.
+- Playwright visual smoke passed with 12 Chromium desktop/mobile tests on fresh
+  alternate ports.
+
+## 2026-05-01 - Route Audit, Integrations Resilience, And Next 16 Upgrade
+
+Audited the frontend after Slack OAuth status UI caused the integrations page to
+degrade when optional status endpoints were unavailable on a stale backend.
+
+Portfolio angle:
+
+- Shows production-minded frontend hardening: core connector manifests now render
+  independently from optional Slack OAuth connection metadata.
+- Demonstrates end-to-end QA ownership: route coverage expanded from a narrow
+  dashboard check to desktop/mobile smoke checks across dashboard, messages,
+  review, knowledge, integrations, agent runs, and search.
+- Keeps the cost story explicit: missing optional integration status APIs fail
+  locally in UI state instead of triggering extra live connector, Slack, or
+  embedding calls.
+
+Implemented scope:
+
+- Upgraded frontend dependencies to Next.js 16.2.4 and aligned ESLint with the
+  ESLint 9 flat-config path.
+- Fixed `/integrations` loading so Gmail, Google Drive, and Google Calendar
+  modules stay visible when Slack OAuth status endpoints are not available.
+- Removed the disabled Slack setup button from the normal demo path so the
+  `Slack Agent 실행` action no longer wraps because of an unnecessary control.
+- Added Playwright assertions for route-level rendering, mojibake prevention,
+  missing application errors, and connector-card presence.
+
+Verification evidence:
+
+- Frontend lint passed with ESLint 9.
+- Frontend production build passed on Next.js 16.2.4.
+- Full backend tests passed with 116 tests and 1 skipped pgvector integration
+  test.
+- Playwright visual smoke passed with 22 Chromium desktop/mobile tests across
+  all current MVP pages.
+- `npm audit --audit-level=moderate` still reports a moderate advisory through
+  Next's bundled PostCSS range; the suggested forced fix would downgrade Next and
+  should not be applied.
+
+## 2026-05-01 - Google OAuth Boundary For Gmail, Drive, And Calendar
+
+Added a Google OAuth installation boundary for the three Google connector cards
+without enabling live Google sync yet.
+
+Portfolio angle:
+
+- Shows disciplined integration sequencing: OAuth security and connection
+  metadata land before live data ingestion.
+- Demonstrates multi-connector architecture: Gmail, Drive, and Calendar share a
+  signed-state OAuth boundary while preserving each connector's own scope set.
+- Keeps the cost story visible: OAuth readiness does not trigger Google sync,
+  LLM calls, or embedding work; future sync should fetch deltas and hash-check
+  content before downstream agent work.
+
+Implemented scope:
+
+- Added `google_oauth.py` with signed state, install URL generation, callback
+  completion, Google token exchange boundary, and sanitized persistence.
+- Added backend settings for Google client id, client secret, redirect URI, and
+  OAuth state secret.
+- Extended the local token vault with a generic token kind so Google stores
+  `local:<connector>:<account>:oauth` instead of a Slack-specific bot token ref.
+- Added generic Google OAuth install/callback API routes under
+  `/api/v1/integrations/{gmail|drive|calendar}/oauth/...`.
+- Updated the Integrations UI to show OAuth status boxes for Gmail, Drive, and
+  Calendar while keeping primary card actions focused on sync/agent execution.
+- Added a Google integration runbook and a plan note for the implementation
+  sequence.
+
+Verification evidence:
+
+- RED backend test first failed because `backend.app.connectors.google_oauth`
+  did not exist.
+- RED Playwright test first failed because `gmail-oauth-status` was missing.
+- Focused Google/Slack OAuth backend tests passed with 12 tests.
+- Frontend lint passed after the OAuth UI update.
+- Playwright visual smoke passed with 24 Chromium desktop/mobile tests after
+  Google OAuth readiness assertions were added.
+
+## 2026-05-01 - Google Installed Sync Boundary
+
+Connected installed Google OAuth records to the sync connector factory through a
+live connector skeleton.
+
+Portfolio angle:
+
+- Shows the integration handoff after OAuth: installed Gmail, Drive, and Calendar
+  connections can now become provider-specific sync connectors when demo mode is
+  disabled.
+- Demonstrates a merge-friendly split for three developers: each Google provider
+  can now evolve behind the same `GoogleConnector` and `SourceEvent` contract.
+- Keeps cost discipline explicit: demo mode remains mock-first, missing vault
+  tokens fall back to mock, and future provider work must add cursor/hash delta
+  checks before downstream agent or embedding calls.
+
+Implemented scope:
+
+- Added `backend/app/connectors/google.py` with Google API client skeletons and
+  Gmail/Drive/Calendar `SourceEvent` mapping.
+- Extended `get_sync_connector` to resolve installed Google connection tokens
+  from the local vault when `PARAWORKS_DEMO_MODE=false`.
+- Preserved mock fallback for demo mode and missing vault tokens.
+- Added connector and factory tests for provider mapping, bearer-token headers,
+  installed token resolution, demo fallback, and missing-vault fallback.
+- Updated the Google integration runbook and added an implementation plan note.
+
+Verification evidence:
+
+- RED tests first failed because `backend.app.connectors.google` did not exist.
+- Focused Google connector/factory tests passed with 13 tests.
+- Python Ruff passed for the new Google connector, factory, and tests.
+- Full backend tests passed with 129 tests and 1 skipped pgvector integration
+  test.
+- Frontend lint and production build passed.
+- Playwright visual smoke passed with 24 Chromium desktop/mobile tests.
+- The in-app browser showed Slack, Gmail, Drive, Calendar, and Google OAuth
+  status blocks on `http://127.0.0.1:3000/integrations`.
+
+## 2026-05-01 - Slack OAuth Callback UX And Redirect Audit
+
+Hardened the Slack OAuth install path after a real Slack authorization attempt
+failed with `redirect_uri did not match any configured URIs`.
+
+Portfolio angle:
+
+- Shows practical OAuth troubleshooting beyond mock integrations: local app
+  routes, backend install URL generation, and third-party console settings must
+  align exactly.
+- Adds a safer user-facing callback page so OAuth failures are explained in
+  Korean instead of surfacing a broken route or raw API response.
+- Reinforces the security story: the callback UI shows sanitized workspace
+  metadata only and regression tests block raw token, client secret, and
+  `token_ref` leakage.
+
+Implemented scope:
+
+- Added `/integrations/slack/callback` frontend route.
+- Forwarded Slack `code` and signed `state` to the backend callback endpoint.
+- Rendered safe success, loading, and failure states for Korean business users.
+- Documented that Slack App Redirect URLs must exactly match
+  `SLACK_OAUTH_REDIRECT_URI`, including the `localhost` vs `127.0.0.1`
+  distinction.
+
+Cost/security note:
+
+- OAuth installation itself does not sync Slack history, call an LLM, or create
+  embeddings. Live sync remains gated by demo mode, channel ids, and vault token
+  resolution so accidental installs do not create downstream token or embedding
+  costs.
+
+## 2026-05-02 - Slack OAuth Credential Status Guardrail
+
+Added a clearer boundary between stored Slack connection metadata and actual
+live-sync credential availability.
+
+Portfolio angle:
+
+- Shows a realistic integration hardening step: OAuth metadata in the database
+  is not the same as a usable secret in the runtime vault.
+- Prevents a misleading "connected" UI after local backend restarts, where the
+  development in-memory vault may no longer hold the bot token.
+- Keeps the secret boundary intact by exposing only `credential_status`, never
+  raw tokens or `token_ref` values.
+
+Implemented scope:
+
+- Added sanitized `credential_status` to `/api/v1/integrations/connections`.
+- Marked credentials as `available` only when the current backend process can
+  resolve the local vault token.
+- Updated the Integrations UI to show "재연결 필요" when connection metadata
+  exists but the local development token is missing.
+- Documented the local vault restart limitation in the Slack runbook.
+
+Cost/security note:
+
+- The UI now makes it harder to accidentally assume live Slack sync is ready.
+  Real Slack ingestion remains gated by `PARAWORKS_DEMO_MODE=false`, channel
+  ids, and a resolvable vault token before any downstream review, LLM, or
+  embedding work can run.
+
+## 2026-05-02 - Slack OAuth Reconnect UX
+
+Closed the follow-up UX gap after adding credential availability checks: users
+can now recover from local vault token loss directly from the Slack card.
+
+Portfolio angle:
+
+- Shows end-to-end product polish around real integration failure modes, not
+  only the happy OAuth path.
+- Keeps the primary sync/agent actions stable while placing the reconnect CTA
+  inside the OAuth status area where it belongs.
+- Adds desktop/mobile visual coverage for the `token missing -> Slack 재연결`
+  state so the workspace name remains a single-line title and the recovery
+  action stays readable.
+
+Implemented scope:
+
+- Added a `Slack 재연결` CTA when OAuth metadata exists but
+  `credential_status` is missing.
+- Kept the reconnect CTA out of the primary action row to avoid crowding
+  `동기화` and `Slack Agent 실행`.
+- Simplified the OAuth status title to the workspace name only.
+- Kept the workspace title on one line with truncation; reconnect state is
+  carried by the status pill, helper copy, and `Slack 재연결` CTA.
+
+Cost/security note:
+
+- Reconnection only refreshes the local credential boundary. It still does not
+  sync Slack history or trigger downstream LLM/embedding work while demo mode is
+  enabled.
+
+## 2026-05-02 - Slack Live Sync Error Handling
+
+Started the first real Slack sync verification with `PARAWORKS_DEMO_MODE=false`
+and confirmed the connector reaches Slack, but the configured channel is not
+readable by the bot yet.
+
+Portfolio angle:
+
+- Shows real integration debugging beyond OAuth success: app installation,
+  bot-channel membership, and channel ids are separate operational checks.
+- Improves API resilience by turning Slack Web API failures into explicit 502
+  responses instead of generic 500 errors.
+- Keeps privacy intact during live testing by checking channel access and
+  counts without printing Slack message bodies.
+
+Implemented scope:
+
+- Added a regression test for Slack API failure handling on the sync endpoint.
+- Mapped `SlackApiError` from sync to an HTTP 502 with a clear detail message.
+- Documented `channel_not_found` and `not_in_channel` troubleshooting in the
+  Slack runbook.
+
+Verification evidence:
+
+- Live sync reached Slack and returned
+  `Slack conversations.history failed: channel_not_found`.
+- Follow-up channel access probes returned `not_in_channel` for sampled public
+  channels, meaning the bot must be invited to a target channel or
+  `SLACK_CHANNEL_IDS` must point to a bot-readable channel.
+
+Cost/security note:
+
+- The failed live sync did not trigger LLM or embedding work. Connector access
+  is still the first cost gate; downstream review/RAG processing should only
+  run after source access is valid and duplicate checks have completed.
+
+## 2026-05-02 - Slack Live Sync Smoke Success
+
+Completed the first successful live Slack sync path after adding the ParaWorks
+bot to the configured Slack channel.
+
+Portfolio angle:
+
+- Demonstrates a real SaaS integration beyond mock data: OAuth, bot channel
+  membership, Slack Web API access, ingestion, duplicate skipping, and agent
+  review generation now work as one local smoke path.
+- Shows privacy-aware verification: live Slack messages were synced into the
+  local app, but terminal output only reported counts and status metadata, not
+  message bodies.
+- Reinforces cost discipline: source duplicate checks skipped unchanged Slack
+  events before downstream review/agent work.
+
+Verification evidence:
+
+- Backend ran with `PARAWORKS_DEMO_MODE=false`.
+- Slack `conversations.history` access check succeeded for the configured
+  channel.
+- `POST /api/v1/integrations/slack/sync` returned `status=complete`,
+  `fetched_events=194`, `skipped_events=194`, and `created_review_items=0`.
+- `POST /api/v1/integrations/slack/agent-review` returned
+  `created_review_items=1` with the deterministic local Slack Agent.
+- Agent run observability showed `total_runs=3`, `total_tokens=250`, and
+  `estimated_cost_usd=0.000081`.
+
+Next product step:
+
+- Add a live sync readiness/status surface so users can see the active mode,
+  configured channel id, last sync counts, and Slack API errors without opening
+  terminal logs.
+- Then continue with Review Queue promotion and RAG indexing over approved
+  Slack-derived timeline/history candidates.
+
+## 2026-05-02 - LangGraph Orchestrator Foundation
+
+Moved the company memory orchestration foundation from a local sequential
+runner to a real LangGraph `StateGraph` while keeping deterministic tests and
+the existing agent contracts intact.
+
+Portfolio angle:
+
+- Shows the core ParaWorks architecture moving toward a true multi-agent
+  orchestration layer instead of isolated demo agents.
+- Keeps the three-developer split clean: Slack Agent, Mail/Docs Agent, and RAG
+  Orchestrator can continue evolving behind shared `EvidencePacket` and
+  review/RAG contracts.
+- Adds a visible graph topology (`graph_mermaid`) that can later be reused in
+  documentation, operations screens, or portfolio diagrams.
+
+Implemented scope:
+
+- Added `langchain>=1.2.0,<2.0.0` and `langgraph>=1.1.6,<2.0.0` to the backend
+  dependencies. Local resolution installed `langchain==1.2.17` and
+  `langgraph==1.1.10`.
+- Replaced the local `AgentWorkflow.run()` loop with a compiled LangGraph
+  `StateGraph`.
+- Preserved append-only node audit behavior and exposed the graph as Mermaid.
+- Added a workflow output marker for the cost policy:
+  `delta_sync_hash_skip_evidence_budget`.
+
+Cost/security note:
+
+- This foundation still performs no paid LLM calls in tests. The next LLM
+  integration should keep deterministic model doubles for CI, use delta sync
+  and source-hash skips before agent calls, and persist `AgentRun` token/cost
+  metadata for every production model call.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_agent_orchestration.py -v` passed.
+- `uv run pytest backend/tests/test_agent_runtime_contracts.py backend/tests/test_agent_registry.py backend/tests/test_agent_orchestration.py backend/tests/test_slack_agent.py backend/tests/test_mail_document_agent.py backend/tests/test_rag_orchestrator_agent.py -v` passed with 17 tests.
+
+## 2026-05-02 - LangGraph Orchestration API
+
+Exposed the company memory LangGraph workflow through backend API endpoints so
+the frontend and operations screens can inspect orchestration status without
+calling paid models.
+
+Portfolio angle:
+
+- Turns the orchestration foundation into a product-visible capability:
+  backend clients can now read the active graph backend, node order, Mermaid
+  topology, and cost guardrails.
+- Adds a deterministic dry-run endpoint that proves the orchestration path
+  executes end-to-end without invoking Slack, embeddings, or paid LLM APIs.
+- Makes the architecture easier to explain in interviews: the graph can be
+  shown as an API-backed execution contract instead of only code internals.
+
+Implemented scope:
+
+- Added `GET /api/v1/orchestration/company-memory` for workflow status,
+  `node_names`, `graph_mermaid`, and cost policy flags.
+- Added `POST /api/v1/orchestration/company-memory/dry-run` for deterministic
+  execution over the same LangGraph workflow.
+- Registered the orchestration router in the v1 API router.
+- Added API tests for status and dry-run behavior.
+
+Cost/security note:
+
+- The status and dry-run endpoints report `paid_llm_calls_in_status_api=false`
+  and `token_cost_usd=0`. This keeps operational visibility separate from
+  model execution cost.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_orchestration_api.py backend/tests/test_agent_orchestration.py backend/tests/test_agent_runs_api.py -v` passed with 9 tests.
+- `uv run ruff check backend/app/api/v1/orchestration.py backend/app/api/v1/router.py backend/tests/test_orchestration_api.py backend/app/agent_runtime/orchestration.py backend/tests/test_agent_orchestration.py` passed.
+
+## 2026-05-02 - Agent Runs LangGraph Operations Card
+
+Connected the new LangGraph orchestration status API to the Agent Runs
+operations page.
+
+Portfolio angle:
+
+- Makes the multi-agent orchestration architecture visible in the product UI:
+  users can see the Company Memory graph backend, execution steps, and cost
+  guardrails from the same page that tracks agent runs and token cost.
+- Shows practical AI cost design in the interface: delta sync, source-hash
+  skipping, evidence token budgeting, and blocked paid calls are presented as
+  operational controls instead of buried implementation notes.
+- Improves interview/demo storytelling by tying backend LangGraph work to a
+  browser-verified admin experience.
+
+Implemented scope:
+
+- Added frontend API typing for `/api/v1/orchestration/company-memory`.
+- Fetched orchestration status on `/agent-runs`.
+- Added a LangGraph operations card with workflow steps and cost guardrails.
+- Rechecked the page with Playwright screenshot verification after restarting
+  the local smoke backend/frontend.
+
+Cost/security note:
+
+- The Agent Runs page only reads the status endpoint. It does not call the
+  dry-run endpoint during render and does not trigger Slack, embeddings, or
+  paid LLM calls.
+
+Verification evidence:
+
+- `npx eslint src/app/agent-runs/page.tsx src/lib/api/types.ts` passed.
+- `npm run build` passed.
+- `npx playwright screenshot --full-page http://127.0.0.1:3000/agent-runs ..\\.tmp\\agent-runs-langgraph-v2.png` completed.
+- `npx playwright test e2e/visual-smoke.spec.ts -g "/agent-runs renders" --project=chromium-desktop` passed.
+
+## 2026-05-02 - LangGraph Capture And Dry-Run UX
+
+Captured the Company Memory LangGraph as reusable portfolio documentation and
+added a zero-cost dry-run control to the Agent Runs operations page.
+
+Portfolio angle:
+
+- Adds a concrete architecture visual that can be used in the final portfolio:
+  `docs/assets/company-memory-langgraph.svg` and
+  `docs/assets/company-memory-langgraph.png`.
+- Demonstrates that the LangGraph orchestrator is not only backend plumbing:
+  the admin UI can now execute a deterministic dry-run and show the result.
+- Shows cost discipline in product behavior: dry-run confirms orchestration
+  order without Slack sync, embeddings, or paid LLM calls.
+
+Implemented scope:
+
+- Added a saved SVG graph and a Playwright-captured PNG for the Company Memory
+  workflow.
+- Added `OrchestrationDryRunResponse` frontend typing.
+- Added a client-side `OrchestrationDryRun` control on `/agent-runs`.
+- Added a Playwright regression test for the zero-cost dry-run UX.
+
+Cost/security note:
+
+- The dry-run calls `/api/v1/orchestration/company-memory/dry-run` and returns
+  `token_cost_usd=0`. It does not read Slack message bodies, call embedding
+  providers, or invoke external LLM APIs.
+
+Verification evidence:
+
+- `npx playwright screenshot --viewport-size=1280,720 file:///C:/Users/hanvv/Study/potenup3/pj04_ParaWorks/docs/assets/company-memory-langgraph.svg ..\\docs\\assets\\company-memory-langgraph.png` completed.
+- `npx eslint src/app/agent-runs/page.tsx src/app/agent-runs/OrchestrationDryRun.tsx src/lib/api/types.ts e2e/orchestration.spec.ts` passed.
+- `npm run build` passed.
+- `npx playwright test e2e/orchestration.spec.ts --project=chromium-desktop` passed.
+- `POST /api/v1/orchestration/company-memory/dry-run` returned four completed
+  nodes and `token_cost_usd=0`.
+
+## 2026-05-02 - LangGraph Agent Service Execution
+
+Connected the Company Memory LangGraph workflow to the existing Slack,
+Mail/Docs, and RAG agent services.
+
+Portfolio angle:
+
+- Moves the orchestrator from a visible dry-run foundation to a real execution
+  path: LangGraph nodes now call agent services that persist `AgentRun`
+  records and create review candidates.
+- Preserves the three-developer split: Slack Agent and Mail/Docs Agent produce
+  human-reviewable timeline/history candidates, while the RAG Orchestrator
+  answers from company memory evidence.
+- Demonstrates cost-aware orchestration: the real run endpoint is separate from
+  status/dry-run and marked with `requires_explicit_run=true` so UI rendering
+  never triggers hidden agent costs.
+
+Implemented scope:
+
+- Added `backend.app.agent_runtime.company_memory` for service-level Company
+  Memory orchestration.
+- Added reusable LangGraph workflow construction for custom node handlers.
+- Added `POST /api/v1/orchestration/company-memory/run` as the explicit agent
+  execution endpoint.
+- Added tests proving Slack/Mail/RAG agent services run through LangGraph and
+  persist the expected `AgentRun` and `ReviewItem` records.
+
+Cost/security note:
+
+- This run still uses deterministic local model implementations in tests. It
+  creates estimated `AgentRun` token/cost metadata, but does not call external
+  LLM providers unless a future production model adapter is explicitly wired.
+- The endpoint is an explicit POST action, not part of page render/status
+  polling, to avoid accidental token spend.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_company_memory_orchestration_service.py backend/tests/test_orchestration_api.py backend/tests/test_agent_orchestration.py backend/tests/test_slack_agent.py backend/tests/test_mail_document_agent.py backend/tests/test_rag_orchestrator_service.py -v` passed with 18 tests.
+- `uv run ruff check backend/app/agent_runtime/company_memory.py backend/app/agent_runtime/orchestration.py backend/app/agent_runtime/__init__.py backend/app/api/v1/orchestration.py backend/tests/test_company_memory_orchestration_service.py backend/tests/test_orchestration_api.py` passed.
+
+## 2026-05-02 - Agent Candidate Bulk Approval
+
+Added a safe Review Queue operation for approving agent-generated candidates
+into Knowledge records.
+
+Portfolio angle:
+
+- Strengthens the human-in-the-loop company memory workflow: agent outputs do
+  not enter durable Knowledge automatically, but reviewers can now approve
+  agent candidates as a deliberate batch operation.
+- Shows practical orchestration boundary design: Slack/Mail agents draft
+  candidates, Review Queue gates them, and approved items become Knowledge that
+  RAG can use.
+- Demonstrates cost-aware workflow design because approval does not call LLMs
+  or embeddings; it only promotes already-reviewed structured records.
+
+Implemented scope:
+
+- Added `POST /api/v1/review/approve-agent-candidates`.
+- The endpoint only approves pending items that include an agent marker
+  (`payload.agent_name`) and valid source evidence.
+- Manual reviewer-created pending items remain pending.
+- Added cost policy metadata indicating no paid LLM or embedding calls.
+
+Cost/security note:
+
+- The operation requires the human review state (`pending_review`) and skips
+  invalid or manual items. It does not read secrets, call connectors, or trigger
+  embedding/indexing work.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_review_knowledge_promotion.py backend/tests/test_review.py backend/tests/test_knowledge_api.py backend/tests/test_rag_orchestrator_service.py -v` passed with 17 tests.
+- `uv run ruff check backend/app/api/v1/review.py backend/tests/test_review_knowledge_promotion.py` passed.
+
+## 2026-05-02 - Slack Runtime Status Surface
+
+Added a Slack runtime status endpoint and connected it to the Integrations
+operations UI.
+
+Portfolio angle:
+
+- Gives operators a direct view of Slack sync readiness: mock/live mode,
+  configured channel ids, connection status, credential availability, and the
+  latest sync job.
+- Turns previous terminal-only Slack troubleshooting into product-visible
+  observability.
+- Reinforces cost discipline: the status lookup explicitly does not trigger
+  sync, embeddings, or LLM calls.
+
+Implemented scope:
+
+- Added `GET /api/v1/integrations/slack/runtime-status`.
+- The endpoint returns mode, configured channel ids, connection/credential
+  status, latest Slack sync job metadata, and cost-policy flags.
+- Added frontend `SlackRuntimeStatus` typing.
+- Added a Slack operations status panel to `/integrations`.
+- Extended Playwright smoke coverage to assert the runtime status panel is
+  visible and still does not expose secrets.
+
+Cost/security note:
+
+- Runtime status is read-only. It reports existing metadata and does not fetch
+  Slack messages, expose bot tokens, or invoke model/embedding work.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_integration_runtime_status.py backend/tests/test_slack_oauth.py backend/tests/test_connector_factory.py -v` passed with 18 tests.
+- `uv run ruff check backend/app/api/v1/integrations.py backend/tests/test_integration_runtime_status.py` passed.
+- `npx eslint src/app/integrations/page.tsx src/lib/api/types.ts e2e/visual-smoke.spec.ts` passed.
+- `npm run build` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts -g "integrations page shows Slack OAuth" --project=chromium-desktop` passed.
+
+## 2026-05-02 - Google Runtime Status Surface
+
+Extended connector runtime observability from Slack to Gmail, Google Drive, and
+Google Calendar.
+
+Portfolio angle:
+
+- Makes Google integration readiness inspectable in the product UI before the
+  team invests in deeper live connector work.
+- Aligns all major connectors around the same operational contract: mode,
+  connection state, credential state, account/channel context, latest sync, and
+  no-cost status lookup.
+- Reduces debugging dependence on terminal logs for OAuth and sync issues.
+
+Implemented scope:
+
+- Added `GET /api/v1/integrations/{gmail|drive|calendar}/runtime-status`.
+- Added backend tests for Google runtime status and unknown connector handling.
+- Added frontend `GoogleRuntimeStatus` typing.
+- Added a Google operations status panel to `/integrations`.
+- Extended Playwright smoke coverage to assert the Google runtime panel is
+  visible.
+
+Cost/security note:
+
+- Google runtime status is read-only. It does not call Google APIs, fetch mail
+  or documents, trigger embeddings, or invoke LLMs. It also avoids exposing raw
+  refresh tokens or token references.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_integration_runtime_status.py -v` passed.
+- `uv run ruff check backend/app/api/v1/integrations.py backend/tests/test_integration_runtime_status.py` passed.
+- `npx eslint src/app/integrations/page.tsx src/lib/api/types.ts e2e/visual-smoke.spec.ts` passed.
+- `npm run build` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts -g "Google connector cards" --project=chromium-desktop` passed.
+
+## 2026-05-02 - Execution Cost Plan And Skip Reasons
+
+Why it matters:
+
+- The company-memory graph should not call every agent just because a user
+  pressed run. Slack, mail/document, and RAG agents now receive an execution
+  cost plan before the graph enters the expensive service nodes.
+- The cost plan records each agent's `run` or `skip` decision, the reason, and
+  deterministic input/output token estimates. This keeps the demo portfolio
+  honest about API cost instead of hiding cost behind orchestration language.
+- Empty Slack evidence, empty mail/document evidence, and empty questions now
+  skip their agent calls and avoid creating misleading `AgentRun` records.
+
+Implemented scope:
+
+- Added a company-memory cost plan builder to the LangGraph runtime.
+- Threaded `cost_plan` through graph state and orchestration outputs.
+- Guarded Slack review drafting, mail/document review drafting, and RAG answer
+  generation with per-agent skip decisions.
+- Added regression coverage for both run and skip paths.
+
+Cost/security note:
+
+- This is a local deterministic estimate. It does not call an embedding model,
+  LLM, Slack, Google, or external API.
+- The skip path is intentionally conservative: if there is no evidence or no
+  user question, the runtime spends zero model tokens for that agent.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_company_memory_orchestration_service.py backend/tests/test_orchestration_api.py backend/tests/test_agent_runs_api.py -v` passed.
+- `uv run ruff check backend/app/agent_runtime/company_memory.py backend/tests/test_company_memory_orchestration_service.py` passed.
+
+## 2026-05-02 - Runtime Status Secret Redaction
+
+Why it matters:
+
+- Integration status pages are useful for debugging live Slack and Google
+  setup, but sync failure messages can accidentally include access tokens,
+  refresh tokens, token references, or OAuth client secrets.
+- Runtime status APIs now redact secret-like strings before returning
+  `latest_sync.message` to the frontend.
+- The original sync record is left intact for server-side diagnosis; redaction
+  happens at the API boundary where user-facing exposure risk exists.
+
+Implemented scope:
+
+- Added `redact_secret_text` for Slack token, token reference, refresh token,
+  and client secret patterns.
+- Applied redaction to integration runtime status sync messages.
+- Added regression tests for Slack and Google runtime status secret leakage.
+
+Cost/security note:
+
+- The redaction path is local string processing. It does not call connector
+  APIs or LLMs.
+- This reduces the risk of leaking sensitive operational values through the
+  Korean-first dashboard during live connector testing.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_integration_runtime_status.py -v` passed.
+- `uv run ruff check backend/app/api/v1/integrations.py backend/app/core/redaction.py backend/tests/test_integration_runtime_status.py` passed.
+
+## 2026-05-02 - Portfolio Case Study Draft
+
+Why it matters:
+
+- The project now has enough architecture and implementation evidence to be
+  presented as more than a UI clone or basic RAG demo.
+- A dedicated case study helps explain the engineering value: multi-agent
+  ownership, LangGraph orchestration, evidence-first review, pgvector-ready RAG,
+  cost controls, and connector security boundaries.
+
+Implemented scope:
+
+- Added `docs/portfolio-case-study.md`.
+- Structured the story around problem, architecture, agent ownership, cost
+  optimization, security/review boundaries, frontend experience, verification,
+  and a resume bullet draft.
+- Referenced the saved LangGraph graph capture assets.
+
+Verification evidence:
+
+- Documentation-only change reviewed against `AGENTS.md` and the current
+  implementation history.
+
+## 2026-05-02 - Playwright Sync Metric Selector Hardening
+
+Why it matters:
+
+- The integration smoke test failed because a broad `Fetched` text lookup also
+  matched lower-case `fetched=` text inside recent sync status messages.
+- The page itself rendered correctly, but the test selector was too fragile for
+  a screen that intentionally shows both metric labels and sync log summaries.
+
+Implemented scope:
+
+- Added `data-testid="sync-result-metrics"` to the integration sync result
+  metric grid.
+- Scoped Playwright metric assertions to that grid and used exact text
+  matching for `Fetched`, `Review items`, and `Skipped`.
+
+Verification evidence:
+
+- `npx eslint src/app/integrations/page.tsx e2e/visual-smoke.spec.ts` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop`
+  passed with 14/14 tests.
+
+## 2026-05-02 - Liquid Glass Frontend Refresh
+
+Why it matters:
+
+- ParaWorks needed a more memorable portfolio-facing visual identity without
+  losing its Slack-like business workspace ergonomics.
+- The refresh follows Apple Liquid Glass guidance by treating navigation,
+  search, and primary controls as a floating functional layer while keeping
+  content surfaces readable.
+
+Implemented scope:
+
+- Reworked global visual tokens for translucent panels, glass controls,
+  stronger depth shadows, subtle structured background light, and accessibility
+  fallbacks for reduced transparency or increased contrast.
+- Refreshed `AppShell` with a floating glass sidebar, mobile glass toolbar,
+  glass search command surface, and stained-glass primary agent action.
+- Applied global surface behavior so existing cards and panels inherit the new
+  material without rewriting every page.
+
+Cost/security note:
+
+- This is a frontend-only visual change. It does not trigger connector sync,
+  embeddings, or LLM calls.
+- Status colors and operational labels remain visible so the design stays
+  useful for business users and live connector debugging.
+
+Verification evidence:
+
+- `npm run build` passed.
+- `npx eslint src/components/layout/AppShell.tsx` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop`
+  passed with 14/14 tests.
+- In-app browser screenshot review checked `/dashboard` and `/integrations` at
+  the current viewport.
+
+## 2026-05-02 - Liquid Glass Intensity Pass
+
+Why it matters:
+
+- The first Liquid Glass refresh improved the theme, but still read closer to a
+  soft translucent dashboard than an iOS-style glass system.
+- This pass pushed the material closer to Liquid Glass by adding stronger
+  refraction edges, reflective highlights, deeper blur/saturation, and floating
+  dock-like navigation surfaces.
+
+Implemented scope:
+
+- Intensified global glass tokens, shadows, background light sheets, and
+  refractive edge overlays.
+- Added shared pseudo-element highlights to liquid surfaces, dark rails,
+  controls, and primary stained-glass actions.
+- Upgraded the mobile toolbar into a rounded glass slab and made the desktop
+  sidebar/top search feel more like floating system chrome.
+- Restored `--workspace-rail-active` to a readable text color after visual QA
+  showed page eyebrow labels becoming too faint.
+
+Verification evidence:
+
+- `npx eslint src/components/layout/AppShell.tsx` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop`
+  passed with 14/14 tests.
+- `npm run build` passed.
+- In-app browser screenshot review checked `/dashboard` after the intensity
+  pass and contrast fix.
+
+## 2026-05-02 - Dark Liquid Glass Mode
+
+Why it matters:
+
+- Browser QA showed the light Liquid Glass theme was still too bright for
+  dense business screens, reducing text readability.
+- ParaWorks now defaults to a darker, higher-contrast Liquid Glass experience
+  while preserving a light mode toggle for comparison and future demos.
+
+Implemented scope:
+
+- Added `data-theme` based dark/light glass modes with a pre-hydration script
+  to avoid a bright first paint.
+- Added persistent theme toggles in the sidebar and mobile toolbar.
+- Reworked dark-mode glass tokens, page background, panels, controls, status
+  surfaces, and hard-coded text/background overrides so existing pages remain
+  consistent.
+- Added Playwright coverage for switching between dark and light glass modes.
+
+Verification evidence:
+
+- `npx eslint src/app/layout.tsx src/components/layout/AppShell.tsx e2e/visual-smoke.spec.ts` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop`
+  passed with 15/15 tests.
+- `npm run build` passed.
+- In-app browser screenshot review checked `/dashboard` and `/integrations` in
+  dark Liquid Glass mode.
+
+## 2026-05-02 - Gray Purple Dark Glass Palette
+
+Why it matters:
+
+- User feedback clarified that the dark mode should not feel like a navy SaaS
+  dashboard. The target palette is charcoal gray first, with white glass glow
+  and a Slack-like deep purple accent group.
+- This keeps the Liquid Glass look vivid while making the workspace calmer,
+  more business-like, and more consistent.
+
+Implemented scope:
+
+- Replaced the dark-mode navy/blue/cyan token group with charcoal gray,
+  white-glow, and deep purple glass tokens.
+- Updated dark page background, glass controls, panels, primary actions,
+  shadows, and hard-coded color overrides to reduce blue cast.
+- Verified `/dashboard` and `/integrations` visually in the in-app browser,
+  including OAuth/status panel contrast.
+
+Verification evidence:
+
+- `npx eslint src/app/layout.tsx src/components/layout/AppShell.tsx e2e/visual-smoke.spec.ts` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop`
+  passed with 15/15 tests.
+- `npm run build` passed.
+
+## 2026-05-02 - Dark Glass Consistency QA Fix
+
+Why it matters:
+
+- Browser QA found that the integrations page still had inconsistent Liquid
+  Glass details: cards looked too milky, the language segment active state felt
+  flat, some OAuth text used old hard-coded colors, and sync buttons did not
+  belong to the same glass system.
+- The dark gray and deep purple palette needs consistent contrast and material
+  behavior across controls, cards, and status panels.
+
+Implemented scope:
+
+- Added a `liquid-segment-active` material for KO/EN and active mobile/sidebar
+  navigation states.
+- Added `integration-glass-card` to reduce unnatural white opacity on
+  integration cards and keep their glass tone closer to the primary purple
+  action.
+- Reworked integration sync and agent buttons to use `liquid-primary` and
+  `liquid-control` instead of flat dark/white button styles.
+- Replaced OAuth status hard-coded text colors with theme token colors so
+  contrast stays consistent in dark mode.
+
+Verification evidence:
+
+- In-app browser screenshot review checked `/integrations` in dark mode.
+- `npx eslint src/components/layout/AppShell.tsx src/app/integrations/page.tsx e2e/visual-smoke.spec.ts` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop`
+  passed with 15/15 tests.
+- `npm run build` passed.
+
+## 2026-05-02 - Integration Runtime Glass Consistency
+
+Implemented scope:
+
+- Unified the `/integrations` task stream panel with the same
+  `integration-glass-card` material used by the connector cards.
+- Replaced Slack/Google runtime status hard-coded text colors with
+  `--ink-strong` so dark-mode contrast follows the Liquid Glass token system.
+- Added a reusable `glass-row` surface for runtime rows and sync metrics,
+  keeping nested glass elements in the same gray-purple material family.
+- Changed runtime mode pills to `liquid-control` so they visually align with
+  the top floating controls and primary dark-mode button treatment.
+
+Verification evidence:
+
+- In-app browser screenshot review checked `/integrations` in dark mode.
+- `npx eslint src/app/integrations/page.tsx src/components/layout/AppShell.tsx e2e/visual-smoke.spec.ts` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop`
+  passed with 15/15 tests.
+- `npm run build` passed.
+
+## 2026-05-02 - Cross-Viewport Theme Token Audit
+
+Implemented scope:
+
+- Compared `/integrations` across desktop/mobile and dark/light modes with
+  Playwright computed-style checks.
+- Replaced desktop shell hard-coded `text-white/*`, `border-white/*`, and
+  white hover states with `--shell-*` theme tokens.
+- Added a `shell-rail` glass material so the desktop sidebar becomes a light
+  frosted rail in light mode and gray-purple glass in dark mode.
+- Aligned mobile language hover states with `--glass-control-strong` instead
+  of hard-coded white opacity.
+- Added a Playwright regression test that verifies shell chrome changes
+  tokens across desktop and mobile theme modes.
+
+Verification evidence:
+
+- Playwright computed-style audit confirmed desktop sidebar changes from
+  dark `rgba(18, 17, 21, 0.62)` to light `rgba(255, 255, 255, 0.54)`.
+- `npx eslint src/components/layout/AppShell.tsx e2e/visual-smoke.spec.ts` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop --project=chromium-mobile`
+  passed with 32/32 tests.
+- `npm run build` passed.
+
+## 2026-05-02 - Light Gray Deep Purple Palette
+
+Implemented scope:
+
+- Toned down the light-mode foundation from bright white glass to warm light
+  gray glass surfaces.
+- Shifted light-mode shell, active accents, primary controls, and outlines
+  toward ParaWorks deep purple (`#4a154b`) for stronger brand consistency.
+- Reduced mint/blue emphasis in the light-mode background, controls, cards,
+  and rows so the UI reads as one coherent gray-purple material system.
+- Kept dark-mode tokens unchanged while preserving the shared Liquid Glass
+  component structure.
+
+Verification evidence:
+
+- In-app browser screenshot review checked `/integrations` in light mode.
+- Playwright computed-style audit confirmed light shell `rgba(228, 225, 235, 0.74)`
+  and primary action `rgba(74, 21, 75, 0.9)`.
+- `npx eslint src/components/layout/AppShell.tsx e2e/visual-smoke.spec.ts` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop --project=chromium-mobile`
+  passed with 32/32 tests.
+- `npm run build` passed.
+
+## 2026-05-02 - Light Purple Palette Adjustment
+
+Implemented scope:
+
+- Shifted the light-mode accent system from deep purple to soft lavender and
+  light purple while keeping the gray glass foundation.
+- Separated active segment behavior so light mode uses dark text on lavender
+  glass and dark mode keeps the existing high-contrast deep purple treatment.
+- Updated light-mode shell, surface, control, card, and row tint gradients to
+  reduce heavy purple saturation and keep the UI calmer.
+
+Verification evidence:
+
+- In-app browser screenshot review checked `/integrations` in light mode.
+- Playwright computed-style audit confirmed light shell `rgba(232, 226, 241, 0.76)`
+  and primary action `rgba(183, 154, 221, 0.9)`.
+- `npx eslint src/components/layout/AppShell.tsx e2e/visual-smoke.spec.ts` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop --project=chromium-mobile`
+  passed with 32/32 tests.
+- `npm run build` passed.
+
+### Agent Cost Budget Guardrails
+
+- Added a reusable agent runtime cost decision that estimates input/output
+  token cost before execution and returns `run`, `skip`, or `use_cache`.
+- Connected the company memory LangGraph orchestration cost plan to a per-run
+  budget limit so large evidence windows can be skipped before calling an LLM.
+- Preserved explicit skip reasons such as `no_slack_evidence`,
+  `empty_question`, and `budget_exceeded` so the UI/API can explain why an
+  agent did or did not run.
+- Kept cache hits as a first-class policy outcome so future prompt/result cache
+  reuse can avoid paid calls even when the potential token window is large.
+
+Portfolio angle:
+
+- Demonstrates that ParaWorks treats LLM cost as an architecture concern, not a
+  post-hoc dashboard metric.
+- Gives the three-agent split a shared budget contract, making independently
+  developed Slack, Mail/Document, and RAG agents easier to merge safely.
+- Supports the final product goal of multi-agent orchestration while protecting
+  against expensive repeated sync and re-vectorization patterns.
+
+Verification evidence:
+
+- Added RED tests first for over-budget skip behavior and cache-first budget
+  decisions.
+- `uv run pytest backend/tests/test_agent_runtime_contracts.py backend/tests/test_company_memory_orchestration_service.py`
+  passed with 9/9 tests.
+- `uv run ruff check backend/app/agent_runtime backend/tests/test_agent_runtime_contracts.py backend/tests/test_company_memory_orchestration_service.py`
+  passed after applying automatic import cleanup.
+- `uv run pytest backend/tests/test_agent_runtime_contracts.py backend/tests/test_company_memory_orchestration_service.py backend/tests/test_agent_orchestration.py backend/tests/test_agent_runs_api.py`
+  passed with 16/16 tests.
+
+### Agent Budget Observability
+
+- Exposed the default per-run agent budget and the supported budget actions
+  (`run`, `skip`, `use_cache`) through the company memory orchestration status
+  and run APIs.
+- Updated the Agent Operations page so operators can see the active per-run
+  budget directly beside the LangGraph orchestration and cost guardrail status.
+- Added frontend fallback handling so the operations page stays renderable even
+  if a running backend still returns the older cost policy shape.
+- Kept status API calls free of paid LLM calls while still showing enough budget
+  metadata to explain cost behavior before a real run.
+
+Portfolio angle:
+
+- Shows an operator-facing cost control loop: policy, API contract, UI
+  visibility, and tests are aligned.
+- Makes cost optimization demonstrable during portfolio walkthroughs without
+  requiring real paid model calls.
+
+Verification evidence:
+
+- Added API tests first for budget metadata visibility.
+- `uv run pytest backend/tests/test_orchestration_api.py` passed with 3/3 tests.
+- `uv run ruff check backend/app/api/v1/orchestration.py backend/tests/test_orchestration_api.py`
+  passed.
+- `npx eslint src/app/agent-runs/page.tsx src/lib/api/types.ts` passed.
+- `npm run build` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop --project=chromium-mobile`
+  passed with 32/32 tests after adding the fallback.
+
+### Global Search Bar Activation
+
+- Converted the desktop sidebar search and floating top search from static
+  glass UI into real search forms.
+- Both search bars now submit to `/search?q=...`, preserving the Liquid Glass
+  visual treatment while making the controls keyboard-friendly.
+- Updated the Company Memory search page to read the `q` URL parameter, hydrate
+  the input with that query, and immediately run the existing RAG/search flow.
+- Added Korean and English placeholders to the shell dictionary so both locales
+  show natural search copy.
+
+Portfolio angle:
+
+- Turns visible UX affordances into working product paths without adding a new
+  backend surface.
+- Demonstrates integration between shell navigation, URL-driven state, and the
+  existing RAG/search agent flow.
+
+Verification evidence:
+
+- Added Playwright tests first for sidebar and top search submission.
+- Confirmed both new tests failed before implementation because the inputs did
+  not exist.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop -g "search submits"`
+  passed with 2/2 tests.
+- `npx eslint src/components/layout/AppShell.tsx src/app/search/page.tsx src/lib/i18n/dictionary.ts e2e/visual-smoke.spec.ts`
+  passed.
+- `npm run build` passed after wrapping `useSearchParams` usage in a Suspense
+  boundary.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop --project=chromium-mobile`
+  passed with 34/34 executed tests and 2 expected mobile skips.
+
+### Google OAuth Callback Activation
+
+- Added a generic backend Google OAuth callback route at
+  `/api/v1/integrations/google/oauth/callback` that reads the signed state to
+  determine whether the returning connection is Gmail, Google Drive, or
+  Calendar.
+- Added the frontend `/integrations/google/callback` route so Google Cloud's
+  shared redirect URI can complete OAuth installs and persist connection
+  metadata.
+- Kept raw Google access/refresh tokens and internal token refs out of the UI,
+  matching the Slack OAuth redaction pattern.
+- Added explicit visual coverage for Gmail and Google Drive connect CTAs when
+  OAuth is configured, while keeping those CTAs outside the primary sync/action
+  row.
+
+Portfolio angle:
+
+- Moves Google integration from a readiness boundary into a real OAuth install
+  loop for Gmail and Drive.
+- Shows secure connector UX: signed state routing, token redaction, safe local
+  error states, and post-callback connection metadata.
+
+Verification evidence:
+
+- Added RED tests first for missing generic Google callback API and missing
+  frontend callback route.
+- `uv run pytest backend/tests/test_google_oauth.py` passed with 6/6 tests.
+- `uv run ruff check backend/app/api/v1/integrations.py backend/tests/test_google_oauth.py`
+  passed.
+- `npx eslint src/app/integrations/google/callback/page.tsx src/app/integrations/google/callback/GoogleCallbackClient.tsx src/app/integrations/page.tsx e2e/visual-smoke.spec.ts`
+  passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop -g "Google"`
+  passed with 4/4 tests.
+- `npm run build` passed and listed `/integrations/google/callback`.
+- `uv run pytest backend/tests/test_google_oauth.py backend/tests/test_integration_runtime_status.py backend/tests/test_google_connector.py`
+  passed with 16/16 tests.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop --project=chromium-mobile`
+  passed with 40/40 executed tests and 2 expected mobile skips.
+
+### Light Deep Purple Theme Tuning
+
+- Replaced the light mode lavender palette with a brighter deep-purple family
+  while keeping the base surface tone in light gray.
+- Updated light-mode shell, primary action, active segment, glass control, card,
+  and row tint gradients so the theme reads closer to Slack-adjacent deep
+  purple rather than soft lavender.
+- Preserved dark mode tokens and the existing Liquid Glass structure.
+
+Portfolio angle:
+
+- Shows iterative product design judgment: visual direction was adjusted from
+  soft lavender to a more confident business-oriented light deep-purple tone
+  after browser review.
+- Keeps the design system tokenized so future UI changes can be made without
+  hardcoding page-by-page color fixes.
+
+Verification evidence:
+
+- `npm run build` passed.
+- `npx eslint src/components/layout/AppShell.tsx e2e/visual-smoke.spec.ts`
+  passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop --project=chromium-mobile`
+  passed with 40/40 executed tests and 2 expected mobile skips.
+
+## Demo Login And Admin Permission Foundation
+
+What changed:
+
+- Added a demo auth API with `admin@paraworks.com` plus three employee
+  accounts so portfolio demos can switch between admin, internal employee, and
+  public-only permission scopes.
+- Added `/login` for demo account switching and `/admin` for an admin-only
+  user/permission console.
+- Aligned the frontend API client with the selected demo user so search, ask,
+  and admin APIs use the same permission header instead of hardcoded admin or
+  viewer behavior.
+- Updated Playwright to use `http://localhost:3000` by default because Next dev
+  hydration failed on `127.0.0.1` in this local environment.
+
+Verification evidence:
+
+- `uv run pytest backend/tests/test_auth_api.py backend/tests/test_search_permissions.py backend/tests/test_ask_api.py backend/tests/test_agent_runs_api.py backend/tests/test_knowledge_api.py backend/tests/test_integration_runtime_status.py`
+  passed with 20 tests.
+- `npx eslint src/app/login/page.tsx src/app/admin/page.tsx src/app/search/page.tsx src/components/layout/AppShell.tsx src/lib/api/client.ts src/lib/api/types.ts src/lib/i18n/dictionary.ts e2e/visual-smoke.spec.ts playwright.config.ts`
+  passed.
+- `npm run build` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts` passed with 50 executed tests
+  and 2 expected mobile skips after starting the local smoke backend with a
+  SQLite dev DB because the local PostgreSQL password was rejected.
+
+## Workspace Glass Card Consistency
+
+What changed:
+
+- Promoted the integrations page glass-card treatment into shared
+  `--card-glass-*` and `--row-glass-*` design tokens.
+- Aligned `integration-glass-card`, `liquid-surface`, general `bg-white` cards,
+  and `glass-row` helper panels so dark and light modes use the same card
+  background, border, highlight, and shadow model.
+- Verified computed browser styles for integration, dashboard, and search cards
+  in both dark and light modes.
+
+Verification evidence:
+
+- `npm run build` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts` passed with 50 executed tests
+  and 2 expected mobile skips.
+
+## Pgvector Dev Environment Hardening
+
+What changed:
+
+- Added Postgres and Redis healthchecks to the local Docker stack and made the
+  pgvector helper detect an occupied host `5432` before falling back to `5432`.
+- Added `scripts/check_pgvector_dev.py` so developers can verify the vector
+  extension, vector table, and app indexing state table without guessing whether
+  the local DB is ready.
+- Added a `-SkipApp` path for DB-only setup, documented the `127.0.0.1` database
+  URL convention, and kept frontend dev URLs on `localhost` for stable Next.js
+  browser testing.
+- Fixed pgvector metadata writes by serializing metadata as JSON before casting
+  to `jsonb` in PostgreSQL.
+- Made the live pgvector integration test use unique document IDs so incremental
+  indexing state does not hide regressions between repeated runs.
+
+Portfolio angle:
+
+- Shows production-minded local infrastructure work: the vector DB path is now
+  reproducible, testable, and safer when another local PostgreSQL instance is
+  already running.
+- Strengthens the RAG story for interviews because ParaWorks can demonstrate
+  SQLite smoke mode for quick demos and PostgreSQL + pgvector for the real
+  retrieval architecture.
+- Keeps future embedding/token costs under control by preserving the incremental
+  indexing path while validating that only changed documents need to be written.
+
+Verification evidence:
+
+- `uv run python scripts/check_pgvector_dev.py --database-url postgresql+psycopg://paraworks:paraworks@127.0.0.1:5432/paraworks --expect-app-schema`
+  passed against the local pgvector container with vector extension `0.8.2`.
+- `uv run pytest backend/tests/test_pgvector_dev_runbook.py backend/tests/test_pgvector_integration.py backend/tests/test_pgvector_store.py backend/tests/test_rag_indexing.py backend/tests/test_rag_indexing_tasks.py backend/tests/test_rag_orchestrator_service.py backend/tests/test_vector_retriever.py -v`
+  passed with 37 tests.
+- `docker compose config` passed.
+- `uv run ruff check backend/app/rag/pgvector_store.py scripts/check_pgvector_dev.py backend/tests/test_pgvector_store.py backend/tests/test_pgvector_dev_runbook.py backend/tests/test_pgvector_integration.py backend/tests/test_rag_indexing_tasks.py`
+  passed.
+
+## Embedding Cost Preflight Guard
+
+What changed:
+
+- Added a preflight embedding budget gate before paid OpenAI embedding calls in
+  the RAG indexing path.
+- Added environment-controlled pricing and budget settings:
+  `OPENAI_EMBEDDING_INPUT_COST_PER_1M_TOKENS` and
+  `RAG_EMBEDDING_MAX_ESTIMATED_COST_USD`.
+- Exposed the active RAG indexing cost policy through
+  `/api/v1/rag/indexing/summary` and surfaced it in the company memory search
+  freshness panel.
+- Preserved incremental hash skip behavior so unchanged documents continue to
+  avoid embedding requests entirely.
+
+Portfolio angle:
+
+- Shows cost-aware AI engineering: ParaWorks estimates changed-document
+  embedding cost before a provider request can spend money.
+- Makes the system easier to operate in a three-developer workflow because the
+  active budget policy is visible through the API and frontend instead of living
+  only in `.env`.
+- Strengthens the product story that RAG quality and token-cost discipline are
+  designed together, not treated as separate cleanup work.
+
+Verification evidence:
+
+- Added a RED test that failed because the embedding budget exception did not
+  exist, then implemented the gate until the test passed.
+- Added a RED test for the missing indexing summary `cost_policy`, then exposed
+  the API field until the test passed.
+- `uv run pytest backend/tests/test_pgvector_dev_runbook.py backend/tests/test_pgvector_integration.py backend/tests/test_pgvector_store.py backend/tests/test_rag_indexing.py backend/tests/test_rag_indexing_tasks.py backend/tests/test_rag_orchestrator_service.py backend/tests/test_vector_retriever.py backend/tests/test_embedding_provider.py -v`
+  passed with 39 tests.
+- `uv run ruff check backend/app/rag/indexing.py backend/app/rag/reindexing.py backend/app/api/v1/rag.py backend/app/core/config.py backend/tests/test_rag_indexing.py`
+  passed.
+- `npx eslint src/app/search/page.tsx src/lib/api/types.ts` passed.
+- `npm run build` passed.
+
+## RAG Reindex Approval UX
+
+What changed:
+
+- Extended dry-run reindex responses with `embedding_budget`, including changed
+  document count, estimated input tokens, estimated cost, budget limit, and the
+  resulting budget action.
+- Kept dry-run free and non-blocking: over-budget dry-runs return a warning
+  preview instead of calling the embedding provider.
+- Added a RAG reindex approval panel to `/agent-runs` so operators can run a
+  cost preview before approving `dry_run=false` execution.
+- Added desktop and mobile Playwright coverage for the preview -> approved run
+  interaction.
+
+Portfolio angle:
+
+- Turns backend cost guardrails into an operator-facing workflow, which is more
+  compelling than a hidden environment variable.
+- Shows responsible AI product design: paid embedding work requires a visible
+  estimate and explicit approval.
+- Helps a three-developer team integrate safely because RAG indexing behavior is
+  observable and test-covered from API to browser.
+
+Verification evidence:
+
+- Added RED tests for missing dry-run `embedding_budget`, then implemented the
+  preview response until they passed.
+- `uv run pytest backend/tests/test_rag_indexing.py backend/tests/test_rag_indexing_tasks.py -v`
+  passed with 22 tests.
+- `uv run ruff check backend/app/rag/indexing.py backend/app/rag/reindexing.py backend/tests/test_rag_indexing.py`
+  passed.
+- `npx eslint src/app/agent-runs/page.tsx src/app/agent-runs/RagReindexControl.tsx src/lib/api/types.ts e2e/visual-smoke.spec.ts`
+  passed.
+- `npm run build` passed.
+- `npx playwright test e2e/visual-smoke.spec.ts --project=chromium-desktop --project=chromium-mobile -g "agent operations previews"`
+  passed with 2 tests.
+
+## Google Live Collection Hardening
+
+What changed:
+
+- Upgraded the live Google Web API client so Gmail and Google Drive collection
+  can read beyond the first API page.
+- Gmail now performs a lightweight list -> detail hydration flow: list message
+  ids first, then fetch metadata-only details for `Subject`, `From`, and
+  `Date`.
+- Google Drive file listing now requests `nextPageToken` and follows it while
+  preserving the existing compact fields selection.
+- Updated connector tests around bearer-token propagation, Gmail pagination,
+  Gmail metadata hydration, Drive pagination, and error handling.
+
+Portfolio angle:
+
+- Moves Gmail and Drive closer to real SaaS evidence ingestion instead of a
+  first-page skeleton.
+- Preserves the three-developer merge contract because provider pagination is
+  hidden behind the same `GoogleConnector` and `SourceEvent` boundary.
+- Keeps the cost story explicit: sync fetches only source metadata/content
+  needed for review candidates and still does not trigger embeddings or LLM
+  calls by itself.
+
+Cost/security note:
+
+- Gmail hydration uses `format=metadata` rather than full message bodies, which
+  reduces payload size while keeping timeline author/title/date quality.
+- Drive listing keeps a narrow fields projection and does not download file
+  contents during connector sync.
+
+Verification evidence:
+
+- Added focused regression tests for paginated Gmail and Drive collection.
+- `uv run pytest backend/tests/test_google_connector.py -v` passed with 7
+  tests.
+- `uv run pytest backend/tests/test_google_connector.py backend/tests/test_connector_factory.py backend/tests/test_google_oauth.py backend/tests/test_integration_runtime_status.py -v`
+  passed with 26 tests.
+- `uv run ruff check backend/app/connectors/google.py backend/tests/test_google_connector.py`
+  passed.
+
+## Slack Incremental Live Sync Cursor
+
+What changed:
+
+- Added a Slack live sync cursor path that derives the latest ingested
+  `channel_id` + `ts` per channel from existing source metadata.
+- `sync_connector_events` now passes that cursor to connectors that support
+  incremental fetching, while older/mock connectors still use `fetch_events()`.
+- `SlackConnector` forwards channel cursors to `SlackWebApiClient`, and the web
+  client sends Slack `conversations.history` an `oldest` timestamp.
+- Updated the Slack runbook with cursor behavior, test policy, and cost notes.
+
+Portfolio angle:
+
+- Shows ParaWorks moving from duplicate-skipping after collection to true
+  source-delta collection before downstream work.
+- Gives the Slack Agent track a safer merge contract: live Slack sync can evolve
+  behind `fetch_events_since(...)` without forcing schema changes or frontend
+  churn.
+- Strengthens the AI-cost story because fewer repeated source events reach
+  review generation, agent drafting, or later RAG indexing.
+
+Cost/security note:
+
+- The cursor lookup is local database metadata only. It does not call Slack,
+  LLMs, or embedding providers.
+- Slack message bodies still stay out of terminal logs; only channel/timestamp
+  metadata is used to narrow the next API window.
+
+Verification evidence:
+
+- Added RED tests for Slack `oldest` handling and ingestion cursor passing,
+  then implemented the minimal code until they passed.
+- `uv run pytest backend/tests/test_slack_connector.py backend/tests/test_connector_ingestion_contract.py backend/tests/test_connector_factory.py backend/tests/test_integration_runtime_status.py -v`
+  passed with 24 tests.
+- `uv run ruff check backend/app/connectors/slack.py backend/app/ingestion/sync.py backend/tests/test_slack_connector.py backend/tests/test_connector_ingestion_contract.py`
+  passed.
+
+## Slack Live Sync Retry Guardrails
+
+What changed:
+
+- Added bounded retry handling to `SlackWebApiClient` for Slack `429`
+  rate-limit responses and transient `5xx` history API failures.
+- Honored Slack `Retry-After` headers when present, with a safe default delay
+  for transient errors that do not include the header.
+- Converted exhausted retry paths into clear `SlackApiError` messages so sync
+  endpoints can keep returning controlled failure states.
+- Updated Slack runbook guidance and tests for retry behavior.
+
+Portfolio angle:
+
+- Makes the live Slack integration more production-like: API rate limits and
+  temporary provider failures are expected operating conditions, not demo-only
+  surprises.
+- Strengthens the three-developer integration contract because Slack connector
+  resilience stays behind the connector boundary and does not leak into agent
+  or frontend code.
+
+Cost/security note:
+
+- Retries are intentionally bounded. ParaWorks can recover from transient Slack
+  failures without creating unlimited provider calls or cascading into repeated
+  review/LLM/embedding work.
+- Retry handling does not log message bodies or expose bot tokens.
+
+Verification evidence:
+
+- Added RED tests for Slack rate-limit retry, retry exhaustion, and transient
+  server-error recovery.
+- Focused retry tests passed after implementation.
+- `uv run pytest backend/tests/test_slack_connector.py backend/tests/test_connector_ingestion_contract.py backend/tests/test_connector_factory.py backend/tests/test_integration_runtime_status.py -v`
+  passed with 27 tests.
+- `uv run ruff check backend/app/connectors/slack.py backend/tests/test_slack_connector.py`
+  passed after Ruff applied import/format cleanup.
+
+## LangGraph Evidence Cache Reuse
+
+What changed:
+
+- Added evidence cache planning to the Company Memory LangGraph orchestration
+  path.
+- The orchestration cost plan now builds Slack, Mail/Docs, and RAG evidence
+  packets before execution, computes their evidence cache keys, and checks for
+  completed matching `AgentRun` records.
+- Unchanged evidence now produces `use_cache` decisions and avoids creating
+  duplicate Slack/Mail review candidates or repeated RAG agent runs.
+- Exposed `evidence_cache_reuse=true` in the orchestration cost policy API.
+
+Portfolio angle:
+
+- Shows a realistic multi-agent orchestration concern: merging multiple agent
+  tracks safely means the orchestrator must decide when not to run agents.
+- Strengthens the cost-optimization story because repeated user clicks over
+  unchanged Slack/Gmail/Drive/RAG evidence no longer create duplicate agent
+  spend or noisy review work.
+- Keeps the split between three developers clean: each agent owns its packet
+  and cache key contract, while LangGraph owns the run/skip/cache decision.
+
+Cost/security note:
+
+- Cache planning is local database lookup plus deterministic evidence hashing.
+  It does not call Slack, Google, embeddings, or paid LLM APIs.
+- Cached decisions still preserve the explicit POST execution boundary; status
+  and dry-run endpoints remain zero-cost.
+
+Verification evidence:
+
+- Added a RED test proving a second identical Company Memory run should use
+  cache and create no new `AgentRun`/`ReviewItem` records.
+- Added a RED API test for `evidence_cache_reuse` in orchestration cost policy.
+- `uv run pytest backend/tests/test_company_memory_orchestration_service.py backend/tests/test_orchestration_api.py backend/tests/test_agent_runs_api.py -v`
+  passed with 11 tests.
+- `uv run pytest backend/tests/test_company_memory_orchestration_service.py backend/tests/test_orchestration_api.py -v`
+  passed with 7 tests after Ruff cleanup.
+- `uv run ruff check backend/app/agent_runtime/company_memory.py backend/app/api/v1/orchestration.py backend/app/agents/slack_agent/__init__.py backend/app/agents/rag_orchestrator_agent/__init__.py backend/tests/test_company_memory_orchestration_service.py backend/tests/test_orchestration_api.py`
+  passed.
+
+## Admin Audit Log Foundation
+
+What changed:
+
+- Added an `AuditLog` model and admin-only `/api/v1/admin/audit-logs` API.
+- Recorded audit events for review approval, bulk agent-candidate approval,
+  review reject/more-evidence actions, connector sync, agent review runs,
+  Company Memory LangGraph runs, and RAG reindex execution/job creation.
+- Added sanitized audit metadata so operational context is visible without
+  exposing tokens or secret references.
+- Extended `/admin` with a recent audit log panel using the same Liquid Glass
+  card system as the rest of the workspace.
+
+Portfolio angle:
+
+- Shows service maturity beyond feature demos: important operational actions
+  are now attributable to an actor, target, timestamp, and metadata.
+- Strengthens the three-developer workflow because merged AI-generated work can
+  be reviewed through a shared audit trail instead of scattered terminal logs.
+- Makes permission design more concrete: employees cannot read audit logs,
+  while admins can inspect workspace activity from the product UI.
+
+Cost/security note:
+
+- Audit writes are local database operations. They do not call Slack, Google,
+  embeddings, or LLM APIs.
+- Audit metadata is sanitized before persistence so token-like strings are not
+  rendered in the admin console.
+
+Verification evidence:
+
+- Added RED tests first for missing `AuditLog` model/API and key action audit
+  records.
+- `uv run pytest backend/tests/test_audit_logs.py backend/tests/test_auth_api.py backend/tests/test_review_knowledge_promotion.py backend/tests/test_orchestration_api.py backend/tests/test_integration_runtime_status.py -v`
+  passed with 23 tests.
+- `uv run pytest backend/tests/test_audit_logs.py -v` passed with 6 tests after
+  Ruff cleanup.
+- `uv run ruff check backend/app/models/audit.py backend/app/services/audit.py backend/app/api/v1/admin.py backend/app/api/v1/router.py backend/app/api/v1/review.py backend/app/api/v1/integrations.py backend/app/api/v1/orchestration.py backend/app/api/v1/rag.py backend/tests/test_audit_logs.py`
+  passed.
+- `npx eslint src/app/admin/page.tsx src/lib/api/types.ts` passed.
+- `npm run build` passed and included `/admin`.
+
+## RAG Ranked Citation Quality
+
+What changed:
+
+- Reworked keyword retrieval from exact full-query substring matching to
+  term-based candidate scoring.
+- Search and Ask responses now include ranked citations with source id, source
+  URL, source type, permission level, snippet, relevance score, and matched
+  query terms.
+- Ask keeps restricted evidence hidden while still reporting hidden match
+  counts and returning only visible citations to the current user.
+- Updated the Company Memory search UI to show citation scores and matched
+  terms beside answer/search evidence.
+
+Portfolio angle:
+
+- Makes the RAG layer explainable: users can see why evidence appeared, not
+  only that an answer was generated.
+- Demonstrates permission-aware retrieval quality, including visible citation
+  filtering and hidden-match disclosure.
+- Strengthens the final product story because Slack/Gmail/Drive/approved
+  knowledge can now flow into answerable, cited company memory.
+
+Cost/security note:
+
+- Ranking and citation generation are deterministic local scoring operations.
+  They do not call embedding providers or paid LLMs.
+- Permission checks still run before citations are returned, so restricted
+  source URLs/snippets are not exposed to employee viewers.
+
+Verification evidence:
+
+- Added RED tests for ranked search citations and Ask citations with hidden
+  restricted matches.
+- `uv run pytest backend/tests/test_rag_quality.py backend/tests/test_search_permissions.py backend/tests/test_ask_api.py backend/tests/test_rag_orchestrator_service.py backend/tests/test_vector_retriever.py -v`
+  passed with 16 tests.
+- `uv run ruff check backend/app/api/v1/search.py backend/app/api/v1/ask.py backend/app/agents/rag_orchestrator_agent/agent.py backend/app/agents/rag_orchestrator_agent/service.py backend/tests/test_rag_quality.py`
+  passed.
+- `npx eslint src/app/search/page.tsx src/lib/api/types.ts` passed.
+- `npm run build` passed and included `/search`.
+
+## Google Live Delta And Retry Guardrails
+
+What changed:
+
+- Added Gmail and Google Drive incremental cursor support to the live Google
+  connector.
+- Gmail collection now sends an `after:<unix_seconds>` query from the last
+  stored message `internalDate`.
+- Drive collection now sends a `modifiedTime > '<timestamp>'` query from the
+  last stored file modification time.
+- Google source events now persist common `sync_partition` and `sync_cursor`
+  metadata so ingestion can resume without connector-specific database logic.
+- Added bounded retry handling for Google API 429 and 5xx responses, including
+  `Retry-After` support.
+
+Portfolio angle:
+
+- Shows the project is moving from demo integration buttons toward production
+  ingestion behavior: delta fetch, retry, and observable failure boundaries.
+- Makes the Google track easier for another developer to own because the
+  ingestion cursor contract is shared with Slack rather than hidden in one
+  connector.
+
+Cost/security note:
+
+- The connector fetches only source deltas before review, agent execution, or
+  embedding work. This prevents every sync from reprocessing unchanged Gmail
+  and Drive content.
+- Retry is bounded, so rate limit or server-side failures do not create runaway
+  API usage.
+
+## Whole-App Playwright Regression Matrix
+
+What changed:
+
+- Added a route inventory guard that fails when a new `app/**/page.tsx` route is
+  not represented in Playwright coverage.
+- Added a whole-page regression matrix for desktop and mobile, dark and light
+  modes, including `/`, static pages, OAuth callback pages, and the dynamic
+  agent run detail page.
+- The matrix checks that each page mounts the workspace shell, avoids Next error
+  screens, has visible glass surfaces, stays nonblank, and does not introduce
+  horizontal viewport overflow.
+- Added an AppShell hydration marker so interaction tests wait for real React
+  handlers before clicking theme toggles or submitting global search.
+- Hardened existing smoke tests around hydration, route interception, and admin
+  audit-log text duplication.
+- Fixed Search page compatibility with older Ask responses that do not include
+  `citations`, and removed duplicate React keys in search evidence rendering.
+
+Portfolio angle:
+
+- Turns browser QA from manual spot checks into repeatable desktop/mobile
+  coverage for every current Next.js page.
+- Demonstrates integration discipline: new routes must be added to the
+  regression inventory instead of silently escaping visual smoke coverage.
+
+Cost/security note:
+
+- The new page regression matrix validates UI and local route health only; it
+  does not trigger paid LLM or embedding calls.
+- Existing cost-related smoke tests still mock dry-run and approval responses
+  so CI-style browser checks remain deterministic.
+
+## Google Source Quality And Calendar Delta Sync
+
+What changed:
+
+- Gmail live collection now hydrates messages with `format=full` and extracts
+  bounded `text/plain` payload content for review/RAG instead of relying only on
+  snippets.
+- Gmail source metadata now records thread id, labels, date header, body source,
+  and whether the extracted body was truncated for ingestion safety.
+- Google Drive source events now include description, owner, last modifier,
+  created time, modified time, and richer searchable body text.
+- Google Calendar live collection now paginates events and supports `updatedMin`
+  incremental sync through the shared `sync_partition` / `sync_cursor` contract.
+- Calendar source events now include description, location, start/end time,
+  attendee count, and reusable sync cursor metadata.
+
+Portfolio angle:
+
+- Moves Google integrations beyond "connected" status into useful business
+  memory ingestion: mail context, document metadata, and calendar timelines now
+  carry enough structure for review and RAG.
+- Shows cross-connector consistency because Gmail, Drive, and Calendar all share
+  the same incremental cursor pattern.
+
+Cost/security note:
+
+- Gmail body extraction is bounded before review and embedding stages, reducing
+  the risk of large messages driving unnecessary downstream token cost.
+- Calendar sync uses `updatedMin` so repeated syncs avoid full event history
+  collection.
+
+## Source Evidence Review Drawer
+
+What changed:
+
+- Review Queue responses now include structured `source_evidence` rows with
+  source URL, snippet, permission level, confidence score, rank, importance
+  score, source id, author/timestamp when available, and originating AgentRun.
+- The Review UI drawer now presents source evidence as reviewer-ready cards
+  instead of only raw links and snippets.
+- The "request more evidence" workflow now captures a reviewer note and stores
+  it in the ReviewItem payload before moving the item to
+  `needs_more_evidence`.
+
+Portfolio angle:
+
+- Makes the human-in-the-loop trust boundary more concrete: reviewers can see
+  exactly what evidence supports an AI-generated timeline, history, decision,
+  or todo candidate.
+- Shows practical product ownership for Track C because orchestration output is
+  now reviewable by Korean business users, not only visible in backend logs.
+
+Cost/security note:
+
+- Structured evidence is assembled from already persisted ReviewItem and
+  AgentRun metadata. It does not call Slack, Google, embeddings, or paid LLMs.
+- The Drawer preserves permission labels and source snippets so reviewers can
+  reject or request more evidence before any candidate becomes trusted
+  knowledge.
+
+## LangGraph HITL Checkpoint Strategy
+
+What changed:
+
+- Company Memory orchestration now emits a structured `hitl_checkpoint` output
+  from the `draft_review_candidates` node.
+- The checkpoint records the Review Queue as the current HITL store, the target
+  ReviewItem ids, required statuses, resume node, resume policy, and whether
+  trusted knowledge requires human approval.
+- The orchestration status cost policy now explicitly reports
+  `hitl_checkpointing`, `checkpoint_store=review_queue`, and
+  `trusted_knowledge_requires_approval`.
+
+Portfolio angle:
+
+- Shows that ParaWorks' LangGraph flow is not a black-box automation pipeline:
+  it has an explicit human review stop before generated memory becomes trusted
+  organizational knowledge.
+- Gives the three-developer team a stable integration contract for future
+  long-running checkpoint/resume work without changing each agent's local
+  implementation.
+
+Cost/security note:
+
+- HITL checkpoint metadata is generated from local ReviewItem ids and
+  orchestration state. It does not call paid LLMs, embeddings, Slack, or Google.
+- The checkpoint keeps the trust boundary visible: generated outputs can be
+  reviewed, rejected, or marked as needing more evidence before promotion.
+
+## Quality And Permission Regression Suite
+
+What changed:
+
+- Added a focused backend regression suite for ParaWorks' core trust promises.
+- The suite verifies that source-less Review Queue items cannot be approved.
+- It verifies that employee/viewer RAG responses report hidden restricted
+  matches without leaking restricted snippets or citations.
+- It verifies that Company Memory orchestration emits a Review Queue HITL
+  checkpoint without triggering paid calls.
+- It verifies that cache-hit orchestration runs do not duplicate AgentRun or
+  ReviewItem records.
+
+Portfolio angle:
+
+- Converts product principles into executable tests: evidence-first, permission
+  safe, cost-aware, and human-reviewed.
+- Gives the three-developer team a shared safety net before connector quality
+  and structured LangChain outputs become more complex.
+
+Cost/security note:
+
+- The regression suite uses deterministic local fixtures and fake harness
+  models. It does not call live Slack, Google, OpenAI, Gemini, embeddings, or
+  external APIs.
+- The tests make cost control observable by asserting cache reuse and no
+  duplicate review/agent records on unchanged evidence.
+
+## Cross-Agent Evidence Summary Metadata
+
+What changed:
+
+- Added a shared `build_evidence_summary` helper for turning `EvidencePacket`
+  messages into AgentRun evidence summary rows.
+- Mail/Document Agent runs now persist source id, URL, source type, timestamp,
+  author, permission, rank, importance score, and snippet metadata.
+- Track C Timeline/History/Decision/Todo extraction runs now persist the same
+  evidence summary metadata, so Review Drawer rows can become richer beyond
+  Slack-only candidates.
+
+Portfolio angle:
+
+- Strengthens the three-track architecture because Drawer evidence is no
+  longer a Slack-specific affordance; Mail/Docs and orchestration-owned memory
+  agents now expose the same review/debug metadata.
+- Makes future LangChain structured-output replacement safer because the
+  Review UI depends on shared EvidencePacket-derived metadata rather than each
+  agent inventing local evidence shapes.
+
+Cost/security note:
+
+- Evidence summaries are derived from already-selected evidence packets and
+  stored with AgentRun metadata. They do not trigger extra provider calls.
+- Permission labels remain attached to each evidence row for reviewer and RAG
+  safety checks.
+
+## Search Retrieval Backend Alignment
+
+What changed:
+
+- Verified that `/search` page calls both `/api/v1/ask` and `/api/v1/search`.
+- Before this update, `/api/v1/ask` could use pgvector behind the feature flag,
+  while `/api/v1/search` always used deterministic lexical ranking.
+- Added a shared pgvector search adapter builder and wired `/api/v1/search` to
+  use the same pgvector feature-flag path when PostgreSQL, pgvector search flag,
+  and an OpenAI embedding key are available.
+- Search responses now disclose `retrieval_backend` and cost policy metadata,
+  and the `/search` UI shows whether the current result used pgvector or the
+  zero-cost deterministic search path.
+
+Portfolio angle:
+
+- Makes RAG behavior explainable to users and interviewers: answer generation
+  and evidence search now report which retrieval path they used.
+- Shows cost-aware product design because query-time embedding calls are
+  explicit instead of hidden behind a generic search button.
+
+Cost/security note:
+
+- Default SQLite/demo mode remains `deterministic_lexical` with no embedding or
+  paid LLM call.
+- pgvector search performs a query embedding only when
+  `RAG_USE_PGVECTOR_SEARCH=true`, PostgreSQL is active, and `OPENAI_API_KEY` is
+  configured.
+- Permission filtering and hidden-match accounting remain enforced in both
+  retrieval paths.
+
+## Slack Thread Context-Aware Chunking
+
+What changed:
+
+- Slack thread replies now preserve parent-message context in the SourceEvent
+  body before ingestion creates the document chunk.
+- Reply metadata now records `thread_parent_text`, `thread_reply_index`, and
+  `thread_context_window=parent_plus_reply`.
+- The connector still fetches thread replies incrementally from the channel
+  cursor, so this quality improvement does not require re-fetching entire
+  channel history by default.
+
+Portfolio angle:
+
+- Improves evidence quality for real collaboration data: short replies such as
+  "동의합니다" or "좋아요" become useful to agents/RAG because the parent
+  decision context travels with the reply chunk.
+- Strengthens Track A ownership by making Slack ingestion more agent-ready,
+  not just API-connected.
+
+Cost/security note:
+
+- This is deterministic preprocessing over already fetched Slack events. It
+  does not call Slack more than the existing reply fetch, and it does not call
+  LLMs or embeddings.
+- Parent context is bounded to one parent message plus one reply, avoiding
+  whole-thread prompt inflation.
+
+## Gmail Thread And Domain Metadata Quality
+
+What changed:
+
+- Gmail SourceEvents now parse participants from From, To, and Cc headers.
+- Gmail metadata now records `thread_context_key`, `from_domain`,
+  `participant_domains`, `external_domains`, and
+  `has_external_participants`.
+- Existing body extraction, truncation, label ids, thread id, and delta cursor
+  behavior remain intact.
+
+Portfolio angle:
+
+- Makes Gmail evidence more useful for business review: agents can distinguish
+  internal-only messages from customer/vendor-involved threads.
+- Supports future permission and routing policies without hard-coding Gmail
+  parsing logic inside agent implementations.
+
+Cost/security note:
+
+- This is local header parsing over already fetched Gmail message payloads.
+  It does not add Google API calls, LLM calls, or embedding calls.
+- Domain metadata enables safer future filtering while keeping raw content
+  behind the existing Review/RAG permission checks.
+
+## Drive Parser Status And Version Metadata
+
+What changed:
+
+- Google Drive SourceEvents now preserve `parser_name`, `parser_status`,
+  `parser_status_reason`, `document_version`, `revision_id`, and
+  `content_signature`.
+- Drive API collection now requests `version` and `headRevisionId` so future
+  parser/indexing work can decide whether content actually changed.
+- The current parser status is explicit as `metadata_only`, matching the
+  harness stage before full file export/parsing is enabled.
+
+Portfolio angle:
+
+- Shows product-quality ingestion design: document evidence carries parser and
+  version provenance instead of appearing as anonymous text.
+- Supports later incremental parsing, embedding skip decisions, and reviewer
+  trust signals without changing agent contracts.
+
+Cost/security note:
+
+- This adds metadata fields to the existing Drive files list request; it does
+  not export document bodies, call LLMs, or call embedding APIs.
+- `content_signature` gives the future indexer a cheap guardrail for skipping
+  unchanged Drive files before paid embedding work.
+
+## Calendar Event Quality Metadata
+
+What changed:
+
+- Calendar SourceEvents now preserve `event_context_key`, `event_status`,
+  organizer/creator emails, `recurring_event_id`, attendee response counts,
+  attendee domains, external domains, and event duration.
+- Participants still come from attendee emails, but metadata now explains who
+  accepted, declined, or has not responded.
+- The connector keeps the same delta sync boundary through the event `updated`
+  cursor.
+
+Portfolio angle:
+
+- Makes calendar evidence more useful for Korean business review flows:
+  meetings can be understood as internal/external, confirmed/cancelled, and
+  time-bounded evidence.
+- Gives future Timeline/History agents better deterministic signals before
+  spending LLM tokens.
+
+Cost/security note:
+
+- This is local metadata derivation from already fetched Calendar event
+  payloads. It adds no Google calls, LLM calls, or embedding calls.
+- External-domain flags support safer future permission and disclosure
+  policies without leaking hidden event content.
+
+## Connector Golden Dataset Fixtures
+
+What changed:
+
+- Added `backend/tests/fixtures/connector_golden_payloads.json` covering
+  Slack, Gmail, Drive, and Calendar payloads.
+- Added a regression test that asserts each connector preserves agent-ready
+  metadata: Slack thread context, Gmail external domains, Drive parser/version
+  metadata, and Calendar RSVP/duration/external-domain metadata.
+- The fixture is intentionally deterministic and local, so it can run in every
+  developer and coding-assistant workflow.
+
+Portfolio angle:
+
+- Demonstrates team-scale AI-assisted development discipline: connector quality
+  is measured by stable examples, not only by manual UI inspection.
+- Gives three developer tracks a shared contract for evidence metadata before
+  they build more source-specific agents and RAG evaluation.
+
+Cost/security note:
+
+- Golden tests use static local payloads and make no Slack, Google, LLM, or
+  embedding calls.
+- The fixture protects future cost optimizations such as hash/signature skips
+  by keeping metadata expectations explicit.
+
+## RAG Precision Recall Smoke Metrics
+
+What changed:
+
+- Added `backend/app/rag/evaluation.py` with deterministic retrieval metrics:
+  precision@k, recall@k, hit rate, expected/retrieved counts, and matched
+  expected source ids.
+- Added `backend/tests/fixtures/rag_smoke_eval_cases.json` and a smoke test
+  that seeds known chunks, runs deterministic retrieval, and verifies the
+  expected sources are recovered.
+- The test complements `/search` backend disclosure by measuring whether the
+  zero-cost retrieval path still finds the right evidence.
+
+Portfolio angle:
+
+- Shows evaluation-minded RAG engineering: retrieval quality is tracked with a
+  repeatable smoke metric before adding more expensive model-based evaluation.
+- Gives interview/demo material for explaining why ParaWorks avoids blind LLM
+  calls and validates evidence selection first.
+
+Cost/security note:
+
+- The smoke metric uses local fixtures and deterministic retrieval only.
+  It makes no paid LLM, embedding, Slack, or Google calls.
+- This is the correct first guardrail before enabling broader pgvector or
+  model-judge evaluation.
+
+## Structured LangChain Memory Extraction Adapter
+
+What changed:
+
+- Added a Track C `LangChainMemoryExtractionModel` adapter that implements the
+  existing `MemoryExtractionModel` contract.
+- The adapter uses `chat_model.with_structured_output` with a Pydantic
+  `StructuredMemoryExtractionOutput` schema, keeping Timeline/History/Decision
+  Record/Todo extraction behind the same deterministic agent interface.
+- Added prompt rendering with bounded evidence windows and source metadata.
+
+Portfolio angle:
+
+- Shows the correct migration path from deterministic harness logic to real
+  LangChain structured-output agents without breaking shared contracts.
+- Demonstrates that agent implementation can evolve independently while Review
+  Queue, cost accounting, and evidence-first contracts remain stable.
+
+Cost/security note:
+
+- No live model provider is invoked by default. The adapter accepts an injected
+  chat model and is covered by fake-model tests.
+- Evidence rendering is bounded by `max_input_chars`, preserving the project
+  rule that full source sync does not mean full LLM input.
+
+## Product Memory Pages
+
+What changed:
+
+- Expanded `/api/v1/knowledge` to include approved Timeline records alongside
+  Decisions, History, and Todos.
+- Rebuilt `/knowledge` as an approved company-memory overview with collection
+  cards and latest approved records.
+- Added `/decisions`, `/timeline`, and `/history` pages backed by the same
+  Knowledge API and shared glass-card memory component.
+- Extended Playwright route inventory and clean-render checks to include the
+  new pages.
+
+Portfolio angle:
+
+- Makes the multi-agent result visible as a product, not only as backend
+  Review Queue rows: approved decisions, timelines, and history now have
+  browsable surfaces.
+- Shows the Review Queue trust boundary end-to-end: candidate -> approval ->
+  trusted knowledge -> product memory page -> RAG/search evidence.
+
+Cost/security note:
+
+- These pages are read-only API views and do not trigger LLMs, embeddings, or
+  sync jobs.
+- They reuse reviewed records and preserve permission/confidence/source
+  metadata for every card.
+
+## Production Auth Plan
+
+What changed:
+
+- Added `docs/superpowers/runbooks/production-auth.md`.
+- Documented the migration from demo `X-Demo-User` auth to httpOnly cookie
+  sessions with rotating refresh tokens.
+- Defined backend tables, auth endpoints, frontend API-client changes,
+  CSRF/rate-limit/audit guardrails, and permission-model alignment.
+
+Portfolio angle:
+
+- Shows that ParaWorks is being built toward a real company product, not a
+  demo-only harness.
+- Connects auth design to the core product promise: permission-safe company
+  memory and source evidence.
+
+Cost/security note:
+
+- Auth checks must remain cheap session/database reads and must never trigger
+  LLM calls, embeddings, connector sync, or RAG reindexing.
+
+## Deployment Runbook
+
+What changed:
+
+- Added `docs/superpowers/runbooks/deployment.md`.
+- Documented production components: Next.js, FastAPI, PostgreSQL + pgvector,
+  Redis, Celery worker, Slack/Google OAuth, and optional parser/object storage.
+- Added deployment order, verification commands, cost gates, rollback plan,
+  monitoring checklist, and production readiness checklist.
+
+Portfolio angle:
+
+- Shows that ParaWorks has a credible path from local harness to deployable
+  company-memory product.
+- Makes infrastructure choices explainable: Docker/Postgres/Redis are for
+  production parity, pgvector search, background indexing, and reliable sync.
+
+Cost/security note:
+
+- Deployment checklist keeps budget gates active and separates status/sync
+  endpoints from paid LLM or embedding work.
+- Secrets are explicitly kept out of git and moved to the deployment secret
+  manager.
+
+## Review And AgentRun Notifications
+
+What changed:
+
+- Added `/api/v1/notifications` as a derived alert API.
+- Notifications summarize pending Review Queue items, items needing more
+  evidence, and recent non-complete AgentRuns.
+- Added `/notifications` frontend page and sidebar navigation entry.
+- Added Playwright route inventory coverage for the new page.
+
+Portfolio angle:
+
+- Improves the operational product loop: users can see what needs attention
+  without opening every review or agent-run page manually.
+- Keeps notifications tied to the trust workflow rather than generic activity
+  noise.
+
+Cost/security note:
+
+- Notifications are read-only database summaries and do not call LLMs,
+  embeddings, Slack, Google, sync jobs, or reindex jobs.
+
+## Knowledge Map
+
+What changed:
+
+- Added `/api/v1/knowledge/map` as a read-only graph endpoint over approved
+  Decisions, Timeline, History, and Todo records.
+- The map creates memory nodes, source-evidence nodes, and `supported_by`
+  edges from stored source links.
+- Added `/knowledge-map` frontend page, sidebar navigation, and route
+  regression coverage.
+- The Knowledge Library now links to the map as a product-facing memory view.
+
+Portfolio angle:
+
+- Shows the core ParaWorks story visually: AI-generated memory is only useful
+  when users can inspect which evidence supports each decision, timeline, or
+  history record.
+- Reinforces the 3-track architecture because Track C can render trusted
+  company memory without importing source-specific agent internals.
+
+Cost/security note:
+
+- Knowledge Map only reads approved database records and source-link metadata.
+  It does not call LLMs, embeddings, Slack, Google, sync jobs, or reindex jobs.
+  Restricted memory nodes keep their restricted permission label, and shared
+  evidence nodes use the strictest connected permission level.
+
+## Production Auth Cookie Slice
+
+What changed:
+
+- Added persistent `auth_users` and `refresh_tokens` models.
+- `POST /api/v1/auth/login` now issues httpOnly `paraworks_session` and
+  `paraworks_refresh` cookies while preserving demo account selection.
+- `GET /api/v1/auth/me` now prefers the signed session cookie over
+  `X-Demo-User`; demo headers remain available only as a fallback in demo mode.
+- Added `POST /api/v1/auth/refresh` with refresh-token rotation and
+  `POST /api/v1/auth/logout` with refresh family revocation and cookie clearing.
+- Frontend API calls now include credentials so cookie-authenticated requests
+  work through the Next.js API rewrite.
+
+Portfolio angle:
+
+- Shows the migration path from a demo harness to production-style auth without
+  breaking the MVP flow.
+- Demonstrates security-conscious incremental delivery: httpOnly cookies,
+  hashed refresh tokens, rotation, revocation, and fail-closed production mode.
+
+Cost/security note:
+
+- Auth is a cheap database/session lookup path. It does not call LLMs,
+  embeddings, connector sync, RAG retrieval, or reindex jobs.
+
+## Portfolio Demo Script
+
+What changed:
+
+- Added `docs/superpowers/runbooks/portfolio-demo-script.md`.
+- The script walks through login, integrations, AgentRun observability, Review
+  Queue evidence inspection, approved knowledge pages, Knowledge Map, and
+  permission-aware RAG.
+- Added explicit cost and security talking points for portfolio recording.
+
+Portfolio angle:
+
+- Turns the implementation into a coherent story: evidence-first AI, human
+  review, company memory, permission safety, and cost-aware orchestration.
+
+Cost/security note:
+
+- The script instructs future demos to keep live provider calls behind
+  preflight and explicit confirmation, and to avoid exposing secrets.
+
+## Azure OpenAI-Compatible Provider Alias
+
+What changed:
+
+- Added an Azure integration design spec for Azure Container Apps,
+  PostgreSQL pgvector, Redis, Key Vault, Managed Identity, and provider rollout.
+- Added `azure_openai` as a valid Slack LLM provider-order alias.
+- The first `azure_openai` slice intentionally reuses the existing
+  `OPENAI_API_KEY` and OpenAI-compatible chat path so the user can swap keys
+  without code changes.
+- Added an OpenAI-compatible embedding config helper that also accepts the
+  `azure_openai` alias.
+- Updated the deployment runbook with the Azure target mapping and current
+  alias boundary.
+
+Portfolio angle:
+
+- Shows cloud-readiness without prematurely spending Azure budget or committing
+  secrets.
+- Keeps the model-provider boundary testable and replaceable before real Azure
+  endpoint/deployment variables are introduced.
+
+Cost/security note:
+
+- The Azure alias does not call providers during status/preflight checks.
+  Actual paid LLM runs still require preflight and explicit confirmation.
+  No Azure, OpenAI, Slack, Google, or database secrets are committed.
+
+## Commit Timeline
+
+- `091c21f feat: add Korean UX and messenger MVP`
+- `82e76d1 chore: add SQLite smoke mode`
+- `b68caaa feat: persist messenger data`
+- `53be213 feat: send messenger items to review`
+- `e90d4f9 feat: prepare Slack connector boundary`
+- `ce5c23e docs: define agentic Slack timeline slice`
+- `1667aba feat: add agent runtime contracts`
+- `8fe0190 feat: add agent registry contract`
+- `e15ad16 feat: refresh workspace UI`
+- `65b36ac feat: add slack agent skeleton`
+- `39f96c9 feat: connect slack agent to review queue`
+- `7b0a6f5 feat: expose slack agent review action`
+- `924f9d8 feat: improve agent-aware review UI`
+- `e7c6927 feat: persist agent run metadata`
+- `e53bec0 feat: add mail document agent slice`
+- `79e7bc7 feat: expose mail docs agent in integrations`
+- `af3c1f0 feat: add rag orchestrator agent`
+- `2b377fb feat: add company memory ask ui`
+- `15e1864 feat: add agent run observability`
+- `b90a709 feat: persist rag agent runs`
+- `870813c feat: promote approved review items`
+- `84707e2 feat: add knowledge library`
+- `6f6deab feat: use approved knowledge in rag`
+- `3161dff feat: add agent run detail view`
+- `9381bb1 fix: isolate smoke frontend cache`
+- `aee1e04 feat: add agent run operations summary`
+- `9f3a7b8 feat: add review vector orchestration foundations`
+- `9e397f4 feat: add pgvector rag adapter`
+- `feat: add rag vector indexing pipeline`
+- `feat: add incremental vector indexing`
+- `feat: add embedding provider and vector retrieval path`
+- `feat: show rag indexing observability`
+- `chore: document pgvector dev path`
+- `feat: queue rag indexing jobs with celery`
+- `feat: add slack live connector boundary`
+- `feat: add slack oauth installation boundary`
+- `feat: show slack oauth connection status`
+- `feat: wire installed slack connection sync`
+- `fix: harden frontend route smoke`
+- `feat: add google oauth boundary`
+- `feat: add google installed sync boundary`
+- `feat: add langgraph orchestration foundation`
+- `feat: expose langgraph orchestration api`
+- `feat: show langgraph orchestration status`
+- `feat: add langgraph dry-run operations ux`
+- `feat: run agents through langgraph`
+- `feat: bulk approve agent candidates`
+- `feat: show slack runtime status`
+- `feat: show google runtime status`
+- `feat: add execution cost plan`
+- `fix: redact runtime status secrets`
+- `docs: add portfolio case study`
+- `test: harden integration sync smoke selector`
+- `feat: add liquid glass frontend theme`
+- `feat: intensify liquid glass theme`
+- `feat: add dark liquid glass mode`
+- `style: tune dark glass gray purple palette`
+- `style: refine dark glass consistency`
+- `style: unify integration runtime glass`
+- `style: tokenize shell theme chrome`
+- `style: tune light gray purple palette`
+- `style: soften light purple palette`
+- `feat: add agent cost budget guardrails`
+- `feat: expose agent budget observability`
+- `feat: activate global search bars`
+- `feat: activate google oauth callback`
+- `style: tune light deep purple palette`
+- `feat: add demo login and admin console`
+- `style: unify workspace glass cards`
+- `chore: harden pgvector dev path`
+- `feat: gate paid embedding reindex cost`
+- `feat: add rag reindex approval ux`
+- `feat: harden google live collection`
+- `feat: add slack incremental sync cursor`
+- `feat: add slack live sync retry guardrails`
+- `feat: reuse cached langgraph evidence`
+- `feat: add admin audit logs`
+- `feat: improve rag citation ranking`
+- `feat: harden google live sync deltas`
+- `test: expand whole-app playwright regression`
+- `feat: enrich google live source quality`
+- `feat: strengthen slack live agent handoff`
+  - Slack sync can now receive selected channel IDs from the integrations UI while keeping `.env` channel IDs as the default safe fallback.
+  - Slack live collection now follows thread replies incrementally from the same channel cursor, avoiding full-thread re-vectorization/reprocessing on every sync.
+  - Slack runtime status exposes channel options, latest sync counts, actionable Slack error hints, and whether synced Slack sources are ready for agent testing.
+  - Verification: backend suite `185 passed, 1 skipped`; frontend lint/build passed; Playwright integrations desktop dark/light regression passed.
+- `test: validate slack live sync path`
+  - Switched local smoke mode to live, restarted backend/frontend, and verified backend health reported `demo_mode=False`.
+  - Executed Slack live sync for the configured selected channel; Slack API path completed successfully with no new delta events.
+  - Ran Slack Agent review on existing synced Slack sources; one review candidate was created and runtime status reported agent testing readiness.
+  - Verification: Playwright integrations desktop dark/light regression passed in live mode.
+- `feat: add slack real llm adapter guardrails`
+  - Added a LangChain-based Slack Agent adapter with OpenAI as the primary provider and Gemini as a fallback provider chain.
+  - Added paid-run preflight that reports provider availability, estimated tokens, estimated cost, budget status, and requires explicit confirmation before live LLM calls.
+  - Kept the deterministic Slack Agent as the default safe harness while exposing a separate real LLM test action in the integrations UI.
+  - Verification: backend suite `191 passed, 1 skipped` with demo-mode override; frontend lint/build passed; Playwright integrations desktop dark/light regression passed.
+- `fix: make slack llm preflight conservative`
+  - Ran one confirmed real Slack LLM test with OpenAI primary and Gemini fallback configured; it created one review candidate and persisted an AgentRun.
+  - Found the first preflight underestimated Korean/Slack JSON token usage, then tightened prompt caps and changed input-token estimation to a conservative character-count floor.
+  - After the fix, the same live Slack evidence window is blocked as `over_budget` instead of allowing another paid run under an optimistic estimate.
+  - Verification: backend suite `193 passed, 1 skipped` with demo-mode override; frontend lint passed; Playwright integrations desktop dark/light regression passed.
+- `feat: bound slack llm evidence window`
+  - Limited paid Slack LLM runs to a recent evidence window instead of sending every synced Slack message to the model.
+  - Added shared windowing for preflight and paid execution so the estimated input and actual prompt use the same bounded packet.
+  - Added UI visibility for evidence message count and kept the conservative budget cap, enabling a live run over 12 recent Slack messages within the configured budget.
+  - Verification: backend suite `195 passed, 1 skipped` with demo-mode override; frontend lint/build passed; Playwright integrations desktop dark/light regression passed.
+- `feat: rank slack llm evidence`
+  - Replaced the temporary recent-only paid Slack LLM window with deduped, importance-ranked evidence selection while keeping full Slack sync unchanged.
+  - Ranking now prioritizes decision, action, cost, technical, thread, and recency signals; duplicate message bodies collapse before top-k selection.
+  - Preflight and paid execution use the same ranked source window, and prompt rendering dynamically shrinks evidence text to stay inside the configured per-run cost budget.
+  - Verification: backend suite `197 passed, 1 skipped`; frontend build passed; Playwright integrations desktop dark/light regression passed; live preflight returned `slack:live:ranked:12` at `$0.000966 / $0.001`.
+- `feat: expose ranked evidence in orchestration`
+  - Ran a confirmed live ranked Slack LLM test; the persisted AgentRun used `slack:live:ranked:12` and actual usage was 2,525 tokens at about `$0.000435`.
+  - AgentRun records now store a compact ranked evidence summary, and the detail API/UI promote rank, score, source, permission, and snippet for review/debugging.
+  - LangGraph company-memory orchestration now uses the same ranked Slack evidence window and exposes source window, selection strategy, evidence count, and cost plan metadata.
+  - Verification: backend suite `199 passed, 1 skipped`; frontend build passed; AgentRun desktop/mobile Playwright regression passed; local orchestration API returned `orchestrated-slack:ranked:12` at `$0.000104 / $0.001`.
+- `feat: add track c extraction boundaries`
+  - Added deterministic Track C agents for Timeline, History, Decision Record, and Todo extraction plus a Validation gate before Review Queue persistence.
+  - Extended `ReviewCandidate` with structured payload fields so each candidate can preserve type-specific fields such as `decision_summary`, `result_summary`, `reason`, `priority`, and `priority_reason`.
+  - LangGraph company-memory orchestration now runs Track C extraction after source-specific agents create fresh review candidates, while cache-hit runs avoid duplicate candidate generation.
+  - Verification: backend suite `203 passed, 1 skipped`; Ruff passed; local orchestration API returned cache-safe `memory_review_items_created=0` when source agents reused cached evidence.
+- `feat: add review source evidence drawer`
+  - Review Queue API exposes structured source evidence and originating AgentRun metadata for Drawer rendering.
+  - Reviewers can request more evidence with a note, preserving why the candidate was not ready for approval.
+- `feat: add orchestration hitl checkpoint policy`
+  - Company Memory orchestration now emits Review Queue checkpoint metadata with resume policy and required review statuses.
+  - Orchestration status APIs expose HITL checkpointing as part of the cost/trust policy.
+- `test: add quality permission regression suite`
+  - Added focused guardrails for evidence-first approval, restricted RAG hiding, HITL checkpoint metadata, and cache dedupe.
+- `feat: add cross-agent evidence summaries`
+  - Mail/Docs and Track C memory extraction AgentRuns now persist source evidence summary metadata for richer Review Drawer inspection.
+- `feat: align search retrieval backend`
+  - `/api/v1/search` now reports its retrieval backend and can use the same pgvector feature-flag path as `/api/v1/ask`.
+- `feat: add slack thread context chunks`
+  - Slack reply chunks now include parent message context and thread metadata for better Review/RAG evidence quality.
+- `feat: enrich gmail thread domain metadata`
+  - Gmail events now preserve thread context keys, participants, participant domains, and external-domain flags.
+- `feat: add drive parser version metadata`
+  - Drive events now preserve parser status, document version, revision id, and content signatures for safer parsing/indexing.
+- `feat: add calendar event quality metadata`
+  - Calendar events now preserve event context, status, organizer, RSVP counts, duration, and external attendee domains.
+- `test: add connector golden dataset`
+  - Added static Slack/Gmail/Drive/Calendar golden payloads and metadata regression assertions.
+- `test: add rag retrieval smoke metrics`
+  - Added local precision/recall/hit-rate evaluation for deterministic RAG retrieval fixtures.
+- `feat: add structured memory extraction adapter`
+  - Added a LangChain structured-output adapter behind the existing Track C memory extraction contract.
+- `feat: add product memory pages`
+  - Added Decisions, Timeline, and History pages backed by approved Knowledge API records.
+- `docs: add production auth plan`
+  - Documented httpOnly cookie sessions, refresh token rotation, RBAC, audit, and demo-mode migration.
+- `docs: add deployment runbook`
+  - Documented production runtime components, verification, cost gates, monitoring, and rollback.
+- `feat: add review agent notifications`
+  - Added derived Review Queue and AgentRun notifications with a product page and route regression coverage.
+- `feat: add knowledge map`
+  - Added a zero-paid-call approved-memory graph endpoint and `/knowledge-map` product page.
+- `feat: add cookie auth session slice`
+  - Added httpOnly session/refresh cookies, refresh rotation, logout revoke, and frontend credentialed fetches.
+- `docs: add portfolio demo script`
+  - Added a recording-ready product walkthrough with cost and security talking points.
+- `feat: add azure openai compatible alias`
+  - Added `azure_openai` provider-order support backed by the existing OpenAI API key path.
+- `feat: add google identity rbac`
+  - Separated ParaWorks Google identity login from Gmail/Drive/Calendar data integration OAuth so sign-in uses only identity scopes while data connectors keep explicit read-only consent.
+  - Added seeded portfolio accounts: `hanvv3@gmail.com` as admin, `hanvv3@koreacu.ac.kr` as employee, plus reviewer/employee demo users for role comparison.
+  - Added RBAC helpers, admin user management APIs/UI, role-aware navigation filtering, Google account picker login URL, and Review Queue approval checks.
+  - Cost/security angle: login and role checks are zero-paid-call paths, unknown Google accounts are rejected, refresh tokens remain httpOnly/hashed, and role changes create audit logs.
+- `feat: expose google identity readiness`
+  - The login URL API now reports `redirect_uri` and exact missing Google identity configuration keys instead of treating a partial client id as ready.
+  - The login page surfaces the required redirect URI and missing settings so Google Cloud setup can be completed without guessing.
+  - Verification: backend suite `245 passed, 1 skipped`; frontend lint/build passed; targeted Playwright login/admin regression `14 passed`.
+- `feat: restrict cost observability to admins`
+  - Added backend admin guards to AgentRun cost/token APIs and RAG reindex/indexing observability APIs.
+  - Direct `/agent-runs` and AgentRun detail URLs now render an admin-required state instead of crashing when a non-admin context reaches the page.
+  - Verification: targeted admin-only API tests passed, backend suite `252 passed, 1 skipped`, and targeted Playwright AgentRun regression `10 passed`.
+- `feat: redesign review-centered frontend shell`
+  - Reworked the global frontend shell around a Korean-first company-memory console with a persistent Ask/search bar, review count, role-aware navigation, and operational status signals.
+  - Redesigned `/dashboard` as a Review Queue workbench instead of a generic widget dashboard, foregrounding evidence-backed candidates, trusted knowledge, AgentRun cost, permissions, and sync health.
+  - Visual direction shifted from purple glass styling to a quieter business-console palette with compact panels, status badges, and evidence-first calls to action.
+  - Verification: `npm.cmd exec tsc -- --noEmit` passed; `npm.cmd run build` passed after rerunning outside the sandbox because the sandboxed build hit a Windows `.next` rename `EPERM`.
+- `feat: redesign ui as macos sequoia productivity app`
+  - Rebuilt the global shell around translucent macOS-style sidebars, soft glass toolbars, native icon controls, dark/light material tokens, and Spotlight-style command search.
+  - Reframed `/dashboard` as a desktop productivity workspace for AI-detected decisions: center timeline, approval workflow, project history, and right-side source evidence inspector.
+  - Added reusable glass, native button, badge, inspector, sheet, sidebar, and motion utility classes in the global UI system for consistent follow-on pages.
+  - Verification: `npm.cmd run build` passed; local Next dev server returned HTTP 200 for `http://127.0.0.1:3000/dashboard`.
+- `feat: align dashboard with prody-style project workspace`
+  - Revised the previous glass-heavy direction into a cleaner desktop app frame inspired by the supplied reference: light gray sidebar, rounded white workspace, breadcrumb top bar, compact controls, project header, chart card, and spreadsheet-like decision table.
+  - Dashboard data now reads as an enterprise archive project with confidence trend, source score indicators, review actions, and rows for decision/evidence/source records.
+  - Verification: `npm.cmd run build` passed; `http://127.0.0.1:3000/dashboard` returned HTTP 200.
+- `feat: implement asset-referenced enterprise console frontend`
+  - Used the `data/assets/pages (*.png)` references to rebuild the global shell and dashboard around a white Korean business console: fixed sidebar, top search/actions, compact source cards, live activity stream, review-priority table, and right-side operations summary.
+  - Replaced mojibake Korean copy in the touched shell/dashboard surfaces and added compatibility CSS tokens for existing Liquid Glass pages so the broader frontend keeps rendering while the new console direction lands.
+  - Verification: `npm.cmd exec tsc -- --noEmit` passed; `npm.cmd run build` passed; local Next dev server returned HTTP 200 for `http://127.0.0.1:3000/dashboard`. Playwright screenshot capture could not run because the local Playwright browser binary is not installed.
+- `style: tighten frontend to supplied reference ratios`
+  - Rechecked the asset references and moved the shell/dashboard closer to the supplied console proportions: 216px left rail, narrower top search, 320px right rail, compact 8px panels, smaller 13px operational text, softer blue active states, and brighter off-white canvas.
+  - Rebuilt `/dashboard` around the reference dashboard composition: today's workflow cards, critical-action cards, review table rows, right-side live activity, agent summary, quick Ask, and bottom AI insight cards.
+  - Verification: `npm.cmd exec tsc -- --noEmit` passed; `npm.cmd run build` passed; local `/dashboard` returned HTTP 200.
+- `style: align dashboard with 0508 page references`
+  - Used `data/assets/0508-pages/0508 (2).png`, `0508 (3).png`, and `0508 (4).png` to tighten the ParaWorks shell and dashboard into a Korean enterprise operations console.
+  - Restored readable Korean labels in the touched shell/dashboard surfaces, matched the fixed 216px left rail, compact top search, source metric cards, real-time activity stream, review table, and 320px right operations panels.
+  - Verification: `npm.cmd exec tsc -- --noEmit` passed; `npm.cmd run build` passed; local `/dashboard` returned HTTP 200 on `http://127.0.0.1:3000/dashboard`.
+- `style: connect developed product pages to current console`
+  - Reworked Messages, Ask/Search, Knowledge Library, Decisions, Timeline, History, Knowledge Map, and Notifications around the existing backend API contracts instead of placeholder content.
+  - Added clear API-unavailable states for server-backed knowledge pages so users can distinguish developed features from a stopped backend.
+  - Verification: `npm.cmd exec tsc -- --noEmit` passed; `npm.cmd run build` passed; local HTTP smoke returned 200 for dashboard, messages, search, knowledge, decisions, timeline, history, knowledge map, notifications, review, agent-runs, integrations, admin, and login.
+- `feat: polish account-aware frontend shell`
+  - Connected the sidebar account card to the current `/api/v1/auth/me` user instead of a hard-coded placeholder, including role labels and profile image fallback from `frontend/public/profile`.
+  - Added a dedicated `/account` page so the account dropdown's "내 계정" action shows the current user's email, role, title, department, status, account id, permission levels, and profile image without logging out or returning to the login screen.
+  - Hid admin-only navigation entries from non-admin users, including Admin Console and AgentRun execution records, while keeping the existing backend/API authorization checks for direct URL access.
+  - Fixed escaped Korean text rendering in the account header and global search placeholder so users see readable Korean copy instead of raw `\u...` sequences.
+  - Verification: `npm.cmd exec tsc -- --noEmit` passed; targeted auth/admin/AgentRun backend tests passed; `npm.cmd run build` passed with `/account` included in the route manifest.
+- `feat: add mail document calendar project grouping`
+  - Added `docs/mail-doc-calendar-agent-status.md` to summarize the current Developer B agent state, gaps, and next work for Google Drive, Gmail, and Calendar evidence.
+  - Extended the Mail/Document Agent evidence packet to include Calendar chunks and preserve event context/status/organizer/duration metadata.
+  - Added `GET /api/v1/projects`, which groups Gmail, Gmail attachment, Drive, and Calendar evidence by `project_key`/`scenario` with permission-aware hidden project accounting.
+  - Updated backend test fixtures so CSRF cookies/headers and auth rate-limit state match the current production-like security middleware during tests.
+  - Verification: `uv run pytest backend/tests -v` passed with 287 tests and 1 skipped pgvector integration test.
+- `feat: add assistant optimistic turns and email approval drafts`
+  - AI 비서 now shows the user's message immediately while the assistant turn is still running, then reveals the assistant answer with a smooth typing-style stream effect.
+  - Added a modular assistant email action path that detects direct email-send requests without forcing RAG evidence, drafts a business-tone subject/body, and stores the draft as pending approval in assistant message metadata.
+  - Added a Gmail approval endpoint that sends only after explicit user approval and only when an installed Gmail connection already has send-capable OAuth scope.
+  - Verification: `uv run pytest backend/tests/test_assistant_api.py backend/tests/test_assistant_service.py -q`, `npm.cmd run lint`, `npm.cmd run test:visual -- assistant-memory.spec.ts --project=chromium-desktop`, and `npm.cmd run build` passed.
+- `feat: connect work data and harden assignment extraction`
+  - Fixed dashboard timeline data to use real `TimelineEvent` fields and connected `/projects` to the existing permission-aware project memory API instead of empty frontend state.
+  - Repaired future todo-to-timeline promotion copy so generated Korean timeline entries no longer contain mojibake.
+  - Preserved source snippets in Mail/Docs and Memory Extraction evidence packets, added richer Review evidence metadata, and expanded deterministic extraction for Korean/English work assignments from Gmail, Drive, and Calendar evidence.
+  - Added Mail/Docs and Memory Extraction LLM preflight responses that expose evidence counts and estimated cost while keeping live LLM execution closed for this slice.
+  - Verification: `uv run pytest backend/tests/test_dashboard_api.py backend/tests/test_knowledge_api.py backend/tests/test_review.py backend/tests/test_mail_document_agent.py backend/tests/test_mail_document_agent_review_bridge.py backend/tests/test_memory_extraction_agent.py backend/tests/test_memory_extraction_review_bridge.py backend/tests/test_agent_preflight.py -q` passed with 29 tests; `uv run ruff check ...` fixed and cleared touched backend files; `npm run lint` and `npm run build` passed.
+- `fix: scope sync-driven agent reviews`
+  - Collapsed connector sync and deterministic Agent review generation into one user action while keeping cost control at the ingestion boundary: unchanged source content now returns no changed source ids, so duplicate syncs do not rerun review extraction.
+  - Scoped Slack and Mail/Document evidence packets by changed source ids so Gmail, Drive, and Slack review candidates are generated only from the connector that just changed.
+  - Added a confidence-gated low-cost AI 비서 routing layer for email drafts and lightweight replies, preserving RAG for ambiguous/company-memory questions.
+  - Verification: targeted backend sync/assistant/review tests passed (`46`, `29`, and `17` tests); ruff passed; `npm.cmd run lint` and `npm.cmd run build` passed.
+- `fix: improve developer b google review ingestion`
+  - Updated the Mail/Document Agent sync path so changed Google Drive files create separate Review Queue candidates instead of one over-aggregated item, while Gmail keeps parent email and attachment evidence grouped together.
+  - Tightened live Gmail collection with a business-focused query window and spam/trash/social/promotions/forums exclusions, plus explicit Gmail message `content_signature` metadata for safer dedupe.
+  - Verification: 63 targeted Google/Mail-Document/connector runtime tests passed; ruff passed on touched backend files.
+
+- `feat: harden mail document operating mvp`
+  - Added permission-filtered Mail/Document evidence packets, grouped manual/orchestrated ReviewItem generation, and source-id preservation through review rejection so rejecting AI candidates no longer deletes connector evidence.
+  - Added Slack-style Mail/Docs live LLM preflight and explicit paid-run endpoint using existing `AGENT_LLM_*` settings; sync remains deterministic/cost-safe and live LLM is only user-triggered.
+  - Stored operational details in `AgentRun.metadata_`, `AuditLog.metadata_`, and API responses without adding log-path environment variables; legacy Slack sync now uses a module logger instead of `print()`.
+  - Hardened RAG indexing against malformed approved `payload.source_ids` and included approved `TimelineEvent` rows as knowledge documents.
+  - Verification: `63` targeted backend tests passed; ruff passed on touched backend paths; frontend TypeScript check and Next production build passed.
+
+- `fix: connect slack sync to agent_slack llm pipeline`
+  - Slack sync 후 `Redis 큐 관련 결정사항 추출됨` 1건만 생성되던 원인이 sync 경로의 결정론/fake Slack Agent 호출임을 확인했다.
+  - 운영형 local/prod 모드와 provider key가 있는 경우 `/api/v1/integrations/slack/sync`가 `agent_slack.process_daily_slack_sync()` 기반 분석 경로를 타도록 연결했다.
+  - `trigger_slack_agent_analysis()`가 변경된 Slack `Source.source_id`만 받아 분석하도록 좁혀, 최근 7일 전체 재분석으로 인한 중복 비용과 중복 ReviewItem 생성을 피했다.
+  - demo/test 모드와 provider key가 없는 환경은 기존 결정론 스모크 경로를 유지해 테스트가 live LLM을 호출하지 않도록 했다.
+  - Verification: targeted Slack sync/Agent API tests passed (`1`, `8`, and `23` tests); ruff passed.
+
+- `fix: upgrade assistant model and log tool calls`
+  - AI Assistant RAG answering now has a stronger primary OpenAI model setting:
+    `AGENT_LLM_OPENAI_PRIMARY_MODEL=gpt-5.4`, with
+    `AGENT_LLM_OPENAI_MODEL=gpt-5.4-mini` kept as the fallback.
+  - Added assistant tool-call trace logging through the Python
+    `AssistantTool` logger, using English lines such as
+    `[Tool: rag_retrieval] result backend=keyword source_count=...`; the
+    docker scripts surface these lines through the backend stderr log file.
+  - The trace covers email action routing, RAG retrieval backend selection, and
+    RAG answer model start/result/error events, making it easier to see whether
+    the assistant used a tool or company-memory retrieval.
+  - Verification: targeted model/logging tests passed, wider assistant/RAG
+    backend tests passed with 40 tests, and ruff passed on touched files.
+- `fix: split assistant email routing agents`
+  - Split the AI Assistant email path into an `email_intent_gate` that only
+    detects email intent and an `email_draft_composer` that only writes
+    approval-only drafts or clarification questions.
+  - Removed the active combined prompt that tried to classify email actions,
+    general replies, and company-memory RAG in one low-cost call; non-email
+    messages now naturally continue to the RAG answer path.
+  - Added orchestration for "RAG result to email" requests: when the intent gate
+    marks `requires_rag_result`, the assistant retrieves the company-memory
+    answer first and passes that answer/source context to the draft composer.
+  - Verification: targeted email-agent/API tests passed, wider assistant/RAG
+    backend tests passed with 43 tests, and ruff passed on touched files.
+- `fix: preserve assistant email continuation context`
+  - Fixed recipient-only email follow-ups by preserving complete recent
+    conversation JSON rows and passing recent assistant answers as explicit
+    draft source context to the email draft composer.
+  - This supports flows like "recent decisions only" -> "send this to
+    kjw4work@gmail.com" without asking for the same email content again.
+  - Adjusted `scripts/paraworks-docker.ps1` to wait for backend health before
+    starting the frontend, reducing startup `ECONNREFUSED` proxy noise.
+  - Verification: assistant/RAG/script tests passed with 47 tests; ruff and
+    PowerShell parser checks passed.
+- `fix: harden docker startup migrations`
+  - Added checked native-command execution and a Postgres readiness wait to
+    `scripts/paraworks-docker.ps1`, so Docker, Alembic, and schema failures no
+    longer scroll by before a misleading final ready message.
+  - Made the `project_key` Alembic migration idempotent for fresh databases
+    where the current-schema baseline already created those columns and
+    indexes.
+  - Kept pgvector `vector(1536)` dimension validation while suppressing the
+    expected SQLAlchemy reflection warning from the CLI schema check.
+  - Verification: Docker script tests, DB schema operation tests, pgvector
+    runbook tests, ruff, PowerShell parser check, real docker startup, backend
+    `/health`, and frontend `/login` smoke all passed.
+- `feat: resolve assistant email recipients`
+  - Added a deterministic AI Assistant recipient resolver between
+    `email_intent_gate` and `email_draft_composer` so natural-language
+    recipients can be mapped to known email addresses before draft generation.
+  - The resolver collects candidates from recent conversation contact pairs,
+    active `AuthUser` rows, `demo_auth.USERS`, and Google source metadata from
+    Gmail, Drive, and Calendar.
+  - The email draft prompt now receives `resolved_recipients`, while all actual
+    sends still require the existing pending approval and Gmail send endpoint.
+  - Verification: targeted recipient resolver/API tests passed, wider assistant
+    backend tests passed with 37 tests, and ruff passed on touched files.
+- `fix: upgrade email draft composer model`
+  - Split the email sub-agent model setting so the cheap intent gate remains on
+    `gpt-4.1-nano`, while the email draft composer defaults to
+    `gpt-5.4-mini`.
+  - Added `ASSISTANT_EMAIL_DRAFT_AGENT_MODEL` to `.env.example` and wired
+    `build_email_draft_composer()` to use the dedicated stronger model.
+  - Verification: targeted model-routing tests passed, wider assistant backend
+    tests passed with 39 tests, and ruff passed on touched files.
+- `fix: route assistant contact lookups`
+  - Added a dedicated contact lookup route before `email_intent_gate`, so
+    address lookup requests such as `김종우님 이메일 알려줘.` do not become email
+    draft clarification loops.
+  - Added Korean aliases for demo contacts and kept active `AuthUser` records
+    higher priority than demo fallback contacts.
+  - Verification: targeted contact lookup tests passed, wider assistant backend
+    tests passed with 47 tests, and ruff passed on touched files.
+- `fix: preserve referenced assistant content in email drafts`
+  - Added an explicit referenced-content email draft path so `이 내용으로
+보내줘` and draft correction complaints use the latest sendable assistant
+    answer or pending draft state before falling through to normal RAG chat.
+  - Added a guardrail that appends the selected source content when the draft
+    composer produces a generic body that omits the actual referenced answer.
+  - Verification: targeted referenced-email tests passed, wider assistant
+    backend tests passed with 49 tests, and ruff passed on touched files.
+- `fix: generate assistant content before email drafting`
+  - Added a generate-then-email path for requests like `ParaWorks 회사 소개서
+작성해서 용희님한테 메일 보내줘`, extracting the requested artifact question,
+    running RAG first, then using that generated answer as the draft body source.
+  - This keeps combined artifact creation plus email requests out of the
+    generic clarification loop that asks the user to provide the content.
+  - Verification: targeted generate-then-email test passed, wider assistant
+    backend tests passed with 50 tests, and ruff passed on touched files.
+- `fix: harden assistant recipient correction`
+  - Tightened recipient resolution so contacts only surface when the latest
+    message actually matches a name, alias, email, or title, preventing unknown
+    names from reusing previous draft recipients.
+  - Added pending-draft recipient correction handling for wrong-address feedback
+    and recipient-only follow-ups such as `SeungHun Han님한테 보내줘`.
+  - Verification: targeted recipient-correction tests passed, wider assistant
+    backend tests passed with 53 tests, and ruff passed on touched files.
+- `docs: define gmail drive project routing collaboration`
+  - Added a Korean collaboration guide for moving Gmail and Google Drive review
+    candidates to the same LangChain tool-based project routing contract as the
+    Slack Agent.
+  - The guide separates ownership: shared router contracts in
+    `backend/app/agent_runtime/`, Mail/Document work in
+    `backend/app/agents/mail_document_agent/`, Slack work in `agent_slack/`,
+    and Review/Timeline/Projects UI under an integration branch.
+  - It documents the shared ReviewItem payload fields, Gmail body plus
+    attachment grouping, Drive file-level grouping, AgentRun metadata, backend
+    tests, and Playwright responsibilities.
+- `fix: 프로젝트/타임라인 원본 링크 노출`
+  - 타임라인 상세 패널의 `Open source` 링크가 새 탭으로 열리도록
+    `target="_blank"`와 `rel="noopener noreferrer"`를 추가했다.
+  - 프로젝트 탭의 `연결된 원본 근거`와 `승인된 프로젝트 활동` 카드에서 원본
+    근거 링크를 바로 열 수 있게 했다.
+  - 검증: frontend lint/build 통과, Playwright 원본 링크 검증 2개 통과.
+- `fix: 타임라인 source time과 프로젝트 근거 UX 개선`
+  - 타임라인을 승인 시각이 아닌 실제 Slack 대화 시각 기준 `occurred_at`으로
+    정렬하고, 날짜 단위 compact/detail 토글을 추가했다.
+  - 타임라인 리스트는 기본적으로 title만 보이게 하여 스캔 속도를 높였다.
+  - 프로젝트 탭이 승인된 활동의 source evidence를 `연결된 원본 근거`로
+    표시하도록 바꿨다.
+  - 검증: backend 프로젝트/승인 테스트 44개 통과, ruff 통과, frontend
+    lint/build 통과, Playwright 타임라인/프로젝트/Slack 흐름 3개 통과.
+- `fix: 타임라인 날짜 accordion UX 조정`
+  - 타임라인 날짜 헤더를 직접 클릭하는 accordion으로 바꿔 모든 날짜를 항상
+    보이게 하고, 선택한 날짜의 타임라인만 펼쳐지게 했다.
+  - 펼쳐진 타임라인 카드에는 title과 source 시간, source type, 승인 상태,
+    summary를 함께 표시한다.
+  - 검증: frontend lint/build 통과, Playwright 타임라인/Slack 흐름 2개 통과.
+- `fix: 타임라인 목록 summary 노출 제거`
+  - 타임라인 목록 카드에서 `result_summary` 노출을 제거하고, 상세 내용은
+    Slack history 버튼을 눌렀을 때 오른쪽 상세 패널에서만 보이게 했다.
+  - 검증: frontend lint/build 통과, Playwright 타임라인/Slack 흐름 2개 통과.
+- `fix: 대시보드 todo 완료 상태 영구 저장`
+  - 대시보드의 완료 버튼이 로컬 숨김에 그치지 않도록 `Todo.completed_at`,
+    `completed_by`를 추가하고 `POST /api/v1/todos/{todo_id}/complete`로
+    완료 상태를 DB에 저장하게 했다.
+  - 대시보드 `today_todos`는 approved `ReviewItem` 대신 승인된 미완료
+    `Todo`를 기준으로 표시하며, Review 승인 시 담당자와 마감일도 `Todo`에
+    저장한다.
+  - 프로젝트/타임라인 응답에 완료 정보를 포함해 완료된 할 일이 프로젝트 활동과
+    타임라인에서 `완료`로 보이게 했다.
+  - 완료 API는 사용자가 접근할 수 없는 permission level의 todo를 403으로
+    거부한다.
+  - 검증: backend 관련 테스트 36개 통과, ruff 통과, frontend lint/build
+    통과, Playwright 대시보드/타임라인/프로젝트 5개 통과, Docker Postgres
+    migration 적용 확인.
+- `fix: 타임라인 날짜 탐색과 검토 카드 동기화 개선`
+  - 타임라인 상태 표시의 `approved`를 `승인됨`으로 한글화하고, 최근 7일은
+    기본 펼침, 이전 날짜는 접힘 상태로 시작하게 했다.
+  - 날짜가 많아질 때 스캔할 수 있도록 월별 sticky header, 좌측 날짜 인덱스,
+    `활동 있는 날짜만 보기 / 전체 날짜 보기` 토글을 추가했다.
+  - 검토사항 우클릭 메뉴를 항목 제목이 보이는 빠른 승인/반려 드롭다운으로
+    다듬고 화면 가장자리에서 잘리지 않게 위치를 보정했다.
+  - 대시보드 검토사항 카드는 Review Queue 정렬과 같은 pending item 3개만
+    표시하되 배지 숫자는 실제 pending review 총수를 사용하도록 맞췄다.
+  - 검증: `backend/tests/test_dashboard_api.py` 6개 통과, Python ruff 통과,
+    frontend lint/build 통과, Playwright 타임라인/대시보드/검토 bulk 테스트
+    8개 통과.
+- `fix: 대시보드 검토사항 카드 deep link와 표시 제목 정합성 개선`
+  - 대시보드 검토사항 카드의 각 항목 링크가 `/review?itemId=...`로 이동해
+    검토사항 페이지에서 해당 항목이 포함된 그룹을 자동으로 펼치고 스크롤한다.
+  - `ParaWorks source 연결`처럼 낮은 정보량의 payload title은 summary, reason,
+    task/source title 같은 실제 검토 큐 표시 텍스트로 대체하는 공용 display title
+    규칙을 추가했다.
+  - 대시보드 API와 Review API가 같은 display title 규칙을 사용해 목록 불일치를
+    줄였다.
+  - 검증: dashboard/review API 테스트 8개 통과, Python ruff 통과, frontend
+    lint/build 통과, Playwright 대시보드/검토 bulk 테스트 4개 통과.
+- `fix: 대시보드 검토사항 카드 중복 그룹 접기`
+  - 대시보드 검토사항 카드의 목록을 Review Queue와 같은 display title + item type
+    그룹 기준으로 dedupe해 같은 후보가 여러 개 있어도 카드에는 하나만 보이게 했다.
+  - `pending_review_count` 배지는 실제 검토 대기 총수를 그대로 유지한다.
+  - 검증: `backend/tests/test_dashboard_api.py` 8개 통과, Python ruff 통과,
+    Playwright 대시보드 테스트 2개 통과.
+- `style: 프로젝트 워크스페이스 UI 리디자인`
+  - 프로젝트 페이지를 대시보드와 같은 SaaS workspace 톤으로 재구성했다.
+  - 선택 프로젝트 overview hero, metric mini cards, 강조된 프로젝트 목록,
+    source filter tab이 있는 원본 근거 패널, timeline형 승인 활동 패널을 추가했다.
+  - 2XL에서는 3영역, 1440/1366급에서는 2영역+활동 하단, 태블릿 이하에서는
+    세로 stack으로 전환되게 했다.
+  - 기존 프로젝트 검색, 생성, 새로고침, 원본 근거 링크, source/type badge,
+    empty state 흐름은 유지했다.
+  - 검증: frontend lint/build 통과, Playwright 프로젝트 페이지 테스트 4개 통과.
+- `style: 프로젝트 워크스페이스 board UI 정교화`
+  - ParaWorks 사이드바와 전역 셸 동작은 그대로 두고 프로젝트 페이지 본문만 target
+    이미지의 calm kanban/workspace 톤으로 다듬었다.
+  - 페이지 헤더, 선택 프로젝트 summary, 프로젝트 목록 lane, 원본 근거 lane,
+    승인 활동 lane을 white/off-white glass surface, rounded board card, soft shadow,
+    pill chip 체계로 정리했다.
+  - Drive/Gmail/Slack/Calendar 원본 근거와 활동 유형별 카드에 아주 옅은 pastel
+    tint를 적용해 정보 구조는 유지하면서 workspace board 느낌을 강화했다.
+  - 기존 프로젝트 선택, 검색, 생성, 새로고침, source filter, 원본 근거 링크,
+    승인 활동 렌더링, responsive 3/2/1 column 흐름은 유지했다.
+  - 검증: frontend lint/build 통과, Playwright 프로젝트 페이지 테스트 4개 통과.
+- `style: 프로젝트 목록 sticky follow 적용`
+  - 프로젝트 페이지의 프로젝트 목록 lane을 `fixed`가 아닌 normal flow 기반
+    `sticky` 패널로 바꿔 스크롤 시 부드럽게 따라오도록 했다.
+  - 1280px 이상에서만 sticky를 적용하고, 목록 내부는 viewport 높이에 맞춰
+    스크롤되게 해 노트북 화면에서 패널이 잘리지 않도록 했다.
+  - 검증: sticky 회귀 Playwright 테스트 추가, frontend lint/build 통과.
+- `fix: 대시보드 업무/프로젝트 카드 링크 교체`
+  - 대시보드 `오늘 해야 할 업무` 카드의 우측 링크를 `타임라인 보기`로 바꾸고
+    `/timeline`으로 이동하게 했다.
+  - `담당 프로젝트` 카드의 우측 링크는 `프로젝트 보기`로 바꾸고 `/projects`로
+    이동하게 했다.
+  - 검증: 대시보드 Playwright 회귀 테스트에 두 링크의 라벨과 href를 고정하고
+    frontend lint/build 통과.
+- `fix: 검토사항 Agent 배지 source별 분리와 sticky action bar`
+  - Review item의 Agent 배지를 `agent_name`만 보지 않고 `payload.source_type`과
+    `source_evidence.source_type`을 함께 사용해 Slack, Mail, Google Drive,
+    Calendar Agent로 구분했다.
+  - 배지 색상은 프로젝트 페이지 source badge와 맞춰 Slack violet, Mail rose,
+    Drive blue, Calendar emerald 계열로 통일했다.
+  - 검토사항 상단 bulk action bar를 `fixed`가 아닌 sticky로 바꿔 스크롤 시
+    문서 흐름 안에서 따라오게 했다.
+  - 검증: Review Playwright 회귀 테스트에 source별 Agent label/color와 sticky
+    action bar를 고정하고 frontend lint/build 통과.
+- `style: 타임라인 Explorer UI 압축 리디자인`
+  - 타임라인 페이지 본문을 대시보드/프로젝트 페이지와 같은 soft SaaS workspace
+    톤으로 정리했다.
+  - summary strip, pill형 프로젝트 탭, compact filter toolbar, 월별 sticky header,
+    좌측 compact month navigator를 추가/정리했다.
+  - 기본 진입 시 최근 월과 최근 날짜만 펼치고 오래된 월/날짜는 접힘 상태로 두어
+    긴 로그 리스트 스크롤 압박을 줄였다.
+  - 날짜 그룹은 기본 3개 항목만 보여주고 `N건 더 보기`로 점진 확장하며, history
+    row는 source/status badge와 1줄 title/preview 중심 compact card로 정리했다.
+  - 기존 프로젝트 탭, 기간/소스/상태 필터, 전체 날짜 보기, 필터 초기화, 날짜
+    jump, source link detail panel, 더 보기 동작은 유지했다.
+  - 검증: 타임라인 Playwright 테스트 4개 통과, frontend lint/build 통과.
+- `fix: 타임라인 날짜 인덱스 sticky 동작 보정`
+  - 타임라인 날짜 인덱스가 `position: sticky`여도 상위 `overflow-hidden` 때문에
+    페이지 스크롤을 따라오지 못하던 문제를 보정했다.
+  - timeline list panel을 `overflow-visible`로 바꿔 인덱스가 fixed overlay 없이
+    normal flow 안에서 전역 top bar 아래로 자연스럽게 붙게 했다.
+  - 검증: 스크롤 후 날짜 인덱스가 sticky top 근처에 유지되는 Playwright 회귀
+    테스트 추가, frontend lint/build 통과.
+- `style: 유틸리티 워크스페이스 페이지 SaaS 톤 정리`
+  - AI 비서, 에이전트 실행 기록, 연동 관리, 알림, 관리자 콘솔 페이지를
+    `utility-workspace` 스코프로 묶고 대시보드/프로젝트/타임라인과 같은 soft SaaS
+    workspace surface 체계로 정리했다.
+  - 사이드바와 각 페이지의 API/data/동작은 유지하고, page header, summary badge,
+    panel/card, integration card, admin table, AI chat shell, action button 스타일만
+    white/off-white glass surface, rounded card, subtle shadow, pill control 톤으로
+    업그레이드했다.
+  - `frontend/e2e/utility-workspace-style.spec.ts`를 추가해 다섯 페이지가 공통
+    스타일 스코프를 유지하는지 회귀 검증한다.
+  - 검증: frontend lint/build 통과, Playwright utility workspace + integrations
+    sync modal 테스트 12개 통과.
+- `fix: AI 비서 채팅 히스토리 접기 컨트롤 복구`
+  - AI 비서 페이지에서 채팅 히스토리를 펼친 뒤 다시 접는 컨트롤을 명확히
+    복구했다.
+  - 기존 히스토리 패널 안의 작은 닫기 버튼은 명시적으로 `setSidebarCollapsed(true)`를
+    호출하도록 고정하고, 채팅 본문 좌상단에도 `히스토리 접기` 버튼을 추가했다.
+  - AI 비서 루트에 hydration 신호를 추가해 Playwright 상호작용 테스트가 실제
+    클라이언트 핸들러 연결 이후 실행되도록 했다.
+  - 검증: assistant memory + utility workspace Playwright 테스트 desktop/mobile
+    통과, frontend lint/build 통과.
+- `fix: 대시보드 캘린더 refresh 시 오늘 날짜 유지`
+  - 대시보드 캘린더가 선택 날짜에 일정이 없을 때 연동 일정 중 가장 빠른 날짜를
+    자동 선택하던 로직을 제거했다.
+  - 2026-05-17 새로고침 시 오늘 날짜를 유지하고, 2026-04-17 같은 과거 연동 일정은
+    해당 월로 이동했을 때 dot/목록으로만 확인되도록 했다.
+  - 회귀 테스트로 이전 월에만 연동 일정이 있어도 2026년 5월과 5월 17일 선택 상태를
+    유지하는 케이스를 추가했다.
+- `fix: 검토사항 프로젝트 연결 캘린더 raw metadata 표시 정리`
+  - Calendar source로 생성된 프로젝트 연결 후보가 `Description`, HTML 태그,
+    `Location`, `Start`, `End` 메타데이터를 제목처럼 노출하던 문제를 수정했다.
+  - 프로젝트 분류기 생성 단계에서 캘린더 후보 summary를 이벤트 제목 중심으로 정제하고,
+    Review API와 프론트 표시 단계도 기존 raw payload를 방어적으로 정리한다.
+  - 검증: 관련 backend Review/Project 테스트 45개 통과, Review Playwright 테스트 4개 통과,
+    frontend lint/build 통과, 수정 파일 ruff 통과.
+- `fix: 프로젝트 목록 설명에서 자동 연결 통계 문구 제거`
+  - 프로젝트 페이지 좌측 프로젝트 목록 카드의 설명란에서
+    `승인된 원본 근거 00건과 승인된 프로젝트 활동 00건이 연결되어 있습니다.` 자동 문구를
+    제거하고, 사용자가 입력한 프로젝트 설명만 보이도록 했다.
+  - 프로젝트 상세/metric 정보는 유지하고 목록 하단의 `근거 · 활동 · 검토 대기` 수치도 그대로 둔다.
+  - 검증: Projects Playwright 테스트 4개 통과, frontend lint/build 통과.
+- `fix: 검토사항 프로젝트 연결 메일/Drive metadata 표시 정리`
+  - Gmail 규칙 기반 프로젝트 연결 후보에서 `From`, `Date` 헤더와 깨진 발신자명이
+    제목/연결 내용에 붙어 보이던 문제를 캘린더 raw metadata 정리와 같은 경로로 해결했다.
+  - Drive와 Gmail 첨부의 `Mime type`, `Owner`, `Parent subject`, `Attachment size` 같은
+    metadata label도 프로젝트 연결 후보 표시와 생성 summary에서 제거한다.
+  - Calendar/메일/Drive/첨부 회귀 테스트를 추가했고, Slack은 metadata header를 붙이지 않는
+    connector 구조라 기존 메시지 본문/스레드 정리 흐름을 유지했다.
+  - 검증: 관련 backend Review/Project 테스트 47개 통과, Review Playwright 테스트 4개 통과,
+    frontend lint/build 통과, 수정 파일 ruff 통과.
+- `fix: 타임라인 완료 상태 병합 및 상태 한글화`
+  - 타임라인 상태 필터와 row chip을 `승인됨`, `완료`로 한글화했다.
+  - 완료된 todo를 타임라인에 새 항목으로 추가하지 않고, 같은 프로젝트/source link의
+    기존 `[할 일] ...` 타임라인 이벤트에 `completed_at`, `completed_by`를
+    병합해 화면에서 `완료`로 보이게 했다.
+  - 검증: backend 프로젝트/대시보드/todo 테스트 32개 통과, ruff 통과,
+    frontend lint/build 통과, Playwright 대시보드/타임라인 3개 통과.
+
+## 2026-08-28 Auto-review trust promotion persistence hardening
+
+- Added the additive C.5 persistence boundary at Alembic revision
+  `7c5a2e9f4b10`, preserving nullable V2.0 rows while storing exact V2.1
+  extraction/provider/model/reasoning/route snapshots.
+- PostgreSQL enforces same-owner identities, deferred validation completeness,
+  exact current Assistant evidence lineage, append-only provider/rollout/audit
+  ledgers, immutable trusted provenance, and source/parser/chunk authority.
+  Provider counters/cost/time/reason/gate/timestamps require the exact event
+  backpointer, and event kinds are semantic: an overrun cannot replace the
+  authorized estimator/framing/price authority, while only an operator clear
+  may replace it after an open breaker. Operator and call attribution are
+  explicitly non-null and mutually exclusive by event kind. Rollout
+  authorization, breaker open,
+  breaker close, and generation invalidation each have disjoint prior/new
+  control transitions, so a correctly backpointed event cannot use the wrong
+  kind. Metric-only updates still increment `state_version` while preserving
+  `control_epoch` and event sequence; cumulative correction counts cannot
+  decrease.
+- Bootstrap, connector reset, and empty-only downgrade share exhaustive,
+  fail-closed C.5 retained-state detection. Database bootstrap errors abort
+  startup before C.5 service construction, and populated schemas refuse
+  downgrade. Legacy parser/chunk rows remain eligible only as retained audit
+  data: null authority/lineage cannot be attached later by UPDATE.
+- Slack remains outside C.5 automatic eligibility. Verification uses local
+  SQLite and isolated PostgreSQL/pgvector only, with no live provider calls.
+- Round-4 verification used a pinned manual `2f6a8b9c0d1e` schema fixture,
+  exact Task 2 index assertions, and finally-dropped PostgreSQL schemas:
+  `176 passed` in the focused suite, including `87` PostgreSQL tests with zero
+  skips; the Task 1 compatibility suite remains `118 passed`.
+
+## 2026-08-28 C.5 Task 3 immutable V2.1 extraction hardening
+
+- Production preflight now dispatches V2.0 and V2.1 explicitly. V2.1 stores
+  its own graph/checkpoint identity and the complete immutable extraction
+  registry, provider/model/reasoning/route, estimator/price, cap, timing,
+  rollout, safety, and aggregate plan snapshots.
+- Paid extraction uses a PostgreSQL-authoritative E1/E2/E3 ledger. Owner,
+  permission, runtime key, source/version, cancellation, lease, signed budget,
+  and provider-safety state are rechecked under the prescribed locks. Known
+  usage is charged exactly; unknown post-marker usage charges the reserve;
+  overruns open the extraction breaker atomically.
+- The provider grant is a store-owned post-commit capability with no module
+  issuer/factory or caller-visible transport. The real store authenticates the
+  exact live grant and rechecks the locked attempt in a short transaction,
+  commits and releases all database/grant locks, then consumes the permit
+  before its one body-blind Task 1 HTTP-hook dispatch. Grants and permits are
+  non-copyable, non-pickleable, redacted and process-local; retry, fallback,
+  cache, callbacks and tracing stay disabled. Terminal, attempt-zero
+  cancellation, drift, corruption, recovery, and lease-expiry paths revoke
+  retained authority. Post-E2 cancellation is instead an output-discard latch:
+  its still-live permit may dispatch exactly once before expiry, then E3
+  discards and charges.
+- Candidate completion is callback-independent: E3 re-queries exactly one
+  same-workflow ReviewItem and its contiguous immutable evidence children,
+  recomputes the exact selected message-set HMAC from prepared slot identities
+  and current canonical refs, requires the ReviewItem permission to equal the
+  recomputed strictest selected-evidence permission, then re-derives
+  candidate/terminal HMACs. Completion or replay mismatch persists only
+  bounded `evidence_binding_mismatch` failure state with no candidate.
+- Alembic head `9d7f3a1c6e20` conditionally replaces the extraction lifecycle
+  constraint when the Task 2 table exists, so supported pinned legacy schemas
+  remain upgradeable. Real `7c -> 9d`, empty downgrade/cycle, retained-row
+  upgrade, and retained-state downgrade refusal are covered.
+- The product service keeps disabled mode on exact V2.0. Shadow/enforce
+  requires a supplied V2.1 launch authority, persists the exact V2.1 request,
+  and remains in `created` until Task 12 registers the V2.1 graph. Missing or
+  invalid authority fails bounded and performs no drafting/provider call.
+- Round-three verification used fake providers only: `147` core Task 3
+  unit/adapter tests, `47` real PostgreSQL lifecycle/authority/concurrency
+  cases, `220` proportional Task 1/2 regressions, `118`
+  service/API/integration tests, and `5` standalone migration tests, zero
+  skips. Barrier tests prove cancellation commits while success, failure, or
+  timeout provider I/O remains blocked, after which E3/failure accounting is
+  terminal and candidate-free.
+
+## 2026-08-29 C.5 Task 6 revocable trusted serving and source authority
+
+- Trusted GraphRAG serving is now revocable end to end. A source content,
+  permission, or parser-policy change synchronously reconciles its approved
+  knowledge effects, while tombstones and the shared PostgreSQL advisory-lock
+  order prevent stale vector writes from resurrecting revoked knowledge.
+- Knowledge, dashboard, projects, search, Ask, Assistant, and company-memory
+  projections share fail-closed serving eligibility. Review Queue evidence
+  remains separately visible only to authorized reviewers, so quarantined
+  evidence can be remediated without becoming trusted answer content.
+- Gmail, Gmail attachments, Drive, and Calendar now use server-computed
+  `server-source-content:v1` signatures, server-owned parser/chunk policy, an
+  exact current document-version pointer, and canonical `source_type:` ids.
+  Connector signatures and parser hints remain non-authoritative evidence.
+- Same-content permission changes narrow Source, chunk, and vector visibility
+  without another embedding call. Content/parser changes invalidate only the
+  affected current chunks and preserve incremental hash-skip accounting.
+- Mock/demo Google inputs now mirror the real adapter identity and semantic
+  timestamp contracts. Search and Ask tests consume the genuine ingestion
+  authority instead of installing synthetic hashes or parser identities.
+- Fresh isolated PostgreSQL + pgvector verification produced `432 passed, 4
+  deselected` for the exact non-Slack Task 6 gate. The raw comparison produced
+  `432 passed, 4 failed`, exactly the approved deferred Slack orchestration
+  nodes. Standalone pgvector, Review V2.1 PostgreSQL, and Review V2 PostgreSQL
+  gates produced `28 passed`, `48 passed`, and `9 passed`. Ruff, lockfile, and
+  diff checks passed; the disposable DB and role were removed with catalog
+  counts `0/0`. No live connector, LLM, or embedding provider was called.
+- The canonical Mail/Document resolver now consumes exact server authority;
+  all 12 focused Mail/Document endpoint tests and the expanded 328-test Review
+  V2/V2.1 suite pass. Bounded relational reconciliation, legacy decision-link
+  canonicalization, all-type serving text, and proof-based vector hash
+  transitions were independently re-reviewed and approved. Task 7 is the next
+  separate product slice. Slack remains deliberately last and
+  legacy-dedupe-only.
+
+## 2026-08-30 C.5 Task 7 deterministic auto-review authority
+
+- Added a pure, frozen `AutoReviewPolicyEngine` that permits only exact
+  Timeline/History candidates with public/internal permission, complete direct
+  claims, current evidence, supported generation/registry identity, available
+  budget, and a healthy trusted-fingerprint projection. Exact decimal
+  `0.9800`, slot integrity, batch integrity, uncertainty/conflict, and
+  post-provider drift are deterministic policy decisions rather than model
+  discretion.
+- Database eligibility now derives security scope from the stored workflow and
+  computes PostgreSQL projection readiness from runtime key identity,
+  projection generation/count/checksum, and the relational missing/extra-row
+  anti-join. Callers cannot assert scope or readiness. SQLite remains a
+  deterministic fail-closed smoke path.
+- Candidate keys, immutable evidence references, message-set HMACs, current
+  canonical source/version/permission, and strictest permission are
+  revalidated before creating an ephemeral validator request. Requests contain
+  only bounded `Cxx`/`Exx` aliases and normalized claim/evidence text—never
+  canonical ids, URLs, or permissions.
+- `credential-scan:v1` blocks reviewed provider patterns, assignments, and
+  bounded high-entropy values only in exact or delimiter-aware credential
+  labels. Fake values use an exact allowlist; real-looking
+  `sk-proj-example-*` strings are blocked, while normal fields such as
+  `token_estimator_version` and `secretary_notes` remain allowed.
+- Duplicate lookup reuses exactly one visible exact target only when no hidden
+  or legacy-unknown collision exists. Visible mismatch/multiplicity,
+  different-permission collision, lookup failure, or stale projection is
+  human-only and exposes no hidden metadata.
+- Verification used fake/deterministic inputs only: focused `54 passed`,
+  adjacent SQLite `230 passed, 58 skipped`, existing contracts `41 passed`,
+  and isolated PostgreSQL projection/collision `12 passed`. Ruff, compile,
+  lock, and diff checks passed; the disposable DB/role was removed (`0/0`).
+  Independent review returned Spec PASS / Quality APPROVED with no Critical or
+  Important findings. Task 8 is the next actual implementation slice and will
+  add the real LangChain Terra validator boundary without making a live call
+  during automated tests.
+
+## 2026-08-30 C.5 Task 8 real LangChain Terra validator boundary
+
+- Added an isolated OpenAI-only LangChain route fixed to
+  `gpt-5.6-terra`, medium reasoning, Responses API structured output, 60-second
+  timeout, `max_retries=0`, 3,072 total output tokens, and no provider-order or
+  model fallback. Every invocation builds a fresh model with explicit
+  `verbose=False` and `cache=False`.
+- The validator uses a two-phase immutable boundary: `prepare_many()` creates
+  bounded local candidate/evidence aliases, exact native JSON-schema framing,
+  token counts, and a keyed HMAC; `invoke_prepared()` accepts only a committed
+  dispatcher grant and allows one provider start. Task 9 still owns the
+  database attempt marker, lease, one-use transport, replay, and cost ledger.
+- Provider input contains only normalized claims and evidence under local
+  `Cxx`/`Exx` aliases. The serialized human JSON is capped at 12,000 characters,
+  the exact native request framing at 6,000 input tokens, and the batch at four
+  candidates/twelve evidence slots. Credential detection, unsafe debug/logging,
+  unapproved hooks, tracing, callbacks, and global cache access fail closed
+  before a provider call.
+- The exact prepared schema dict is reused at invoke time, so no post-claim
+  Pydantic schema render can diverge from the signed request. Returned batches
+  are reparsed and checked for exact candidate, claim-field, and evidence-slot
+  integrity. All simultaneous provider usage aliases must agree with bounded
+  authoritative usage before six-place cost recording; all errors are
+  sanitized and discard the whole batch.
+- Automated verification used fake models only: exact Task 8 and pinned
+  LangChain/OpenAI compatibility `46 passed`, adjacent provider-fence,
+  extraction, eligibility, policy, and memory-extraction regression `117
+  passed`, and shared contracts `41 passed`. Ruff, compile, lockfile, and diff
+  checks passed. Independent rereview returned Spec PASS / Quality APPROVED
+  with Critical `0`, Important `0`. No live LLM call or rollout enablement
+  occurred. Task 9 is the next actual implementation slice; Slack remains last.
+
+## 2026-08-30 C.5 Task 9 persistent validation coordination
+
+- Added restart-safe PostgreSQL validation calls with one committed provider
+  attempt, short database-clock leases, atomic per-workflow cost reservations,
+  deterministic cache replay, and exact six-place token/cost allocation.
+- Added fixed-order runtime-key, provider-safety, projection/rollout, source,
+  workflow, and call locking. Key, price/cost-policy, permission, source,
+  cancellation, or authority drift prevents promotion and preserves the human
+  Review Queue path; pre-send drift is zero-call/zero-charge.
+- Moved batch measurement onto a pure shared render/tokenizer frame so sizing
+  and final prepared invocation remain byte/token equivalent without producing
+  an extra prepared invocation. Candidate permutation yields the same batches,
+  aliases, fingerprints, and reservations.
+- Provider execution is outside database transactions and behind a committed,
+  one-use send permit. Crash/timeout/cancel recovery never retries; ambiguous
+  usage charges the signed reserve once. Actual overrun atomically opens the
+  validation provider-safety breaker and produces one bounded call-attributed
+  event.
+- Persisted validation rows contain no source URL, evidence plaintext, rendered
+  prompt, model rationale, provider exception, or secret. Task 9 records
+  validation observations only; Task 10 remains the sole planned rollout/audit
+  promotion authority.
+- Automated verification used only fake providers and a disposable PostgreSQL
+  schema: Task 9 unit/lifespan `63 passed`, PostgreSQL integration `13 passed`,
+  plus the existing provenance regression boundary. No live LLM, connector, or
+  embedding call and no rollout enablement occurred.
+
+## 2026-08-30 C.5 Task 10 rollout, audit, and remediation authority
+
+- Added fail-closed rollout resolution with a read-only missing-row sentinel,
+  explicit 0/10/100 authorization latch, control epochs/generations, stable
+  full-digest HMAC selection, and mandatory first-50 human audit slots.
+- Every automatic approval now reserves an immutable promotion decision and
+  any selected post-audit in its locked approval transaction. Shadow-mode
+  predictions are compared exactly once with later human outcomes only when
+  the evidence version is unchanged.
+- Critical audits and quality-coded revokes commit their breaker and serving
+  quarantine before exact revoke. Missing/pending/confirmed audit cases
+  converge on manual critical audit, critical completion, or immutable
+  correction respectively; failed revoke remains restart-recoverable.
+- The restricted rollout control plane authorizes only one stage at a time and
+  closes a breaker only after remediation, while keeping authorization at zero.
+  Corrected critical evidence permanently requires a separately reviewed new
+  policy.
+- Fresh deterministic verification passed `103` focused tests and `54`
+  PostgreSQL-backed tests. No live provider, connector, or embedding call was
+  made, and rollout remained disabled.
+
+## 2026-08-30 C.5 Task 11 signed zero-call launch
+
+- Added a compact, exact-field HMAC launch confirmation that binds one V2.1
+  preview to actor/scope/permission, canonical input/evidence, route and safety
+  digests, rollout authority, provider timings/caps/prices, and total budget.
+- The V2.1 preview performs no database write or provider call and reserves the
+  schema-enforced extraction plus validation maximum. Start re-resolves the
+  same identity and verifies the token before creating a workflow thread.
+- Existing threads now have a facade boundary that dispatches lifecycle work
+  by stored graph version, preventing current configuration from rewriting a
+  paused V2.0 or V2.1 execution.
+- Fresh deterministic Task 11/lifecycle verification passed `124` tests with
+  Ruff and diff checks green. Rollout and paid-provider gates remain disabled.
+
+## 2026-09-01 Deliverable D Core Task 13 atomic RAG finalization candidate
+
+- Added a two-phase finalization boundary that reopens a fresh PostgreSQL
+  transaction under a concrete provider-free or paid phase-2 authority. Paid
+  work retains the authenticated provider sidecar and fresh safety rows;
+  both branches nonblockingly reacquire the exact projection owner/fence before
+  the evidence/C.5 prefix, fresh canonical projection, AgentRun/cost tail, and
+  single final-product commit.
+- Assistant answers now preserve exact server-generated UTF-8 bytes and commit
+  the message, result/content identities, canonical evidence, and the complete
+  selected/unselected model-influence dependency set in the same transaction.
+  Public and legacy message helpers cannot opt into the V2 exact-write path.
+- Provider-free and paid-embedding-only safe closures retain their original cost
+  authority without retrying provider work. Prepared rendered-input, model
+  configuration, and the complete observation aggregate are bound to committed
+  phase-1 metadata. Projection-owner recovery is a concrete ledger authority
+  with retained safety, exact advisory-lock reacquisition, fence and runtime-cost
+  CAS; timeout, process probing, and arbitrary callbacks are not credentials.
+- SQLite remains an explicit provider-free smoke path: one process-lifetime OS
+  lock plus one never-replaced reentrant mutex guards `BEGIN IMMEDIATE`, and the
+  parent, exact-two terminal-zero costs, and immutable product commit together.
+  Path aliases, hardlinks, second processes, pgvector, paid, and release modes
+  fail before mutation.
+- A second independent review found remaining authority gaps. The current
+  rereview candidate binds paid safety snapshots to the exact attempted cost
+  rows, refuses mutex-only/wrong PostgreSQL advisory barriers, limits safe
+  finalization to exact successful/canned outcomes, and prevents a terminal
+  failure projection from completing the parent.
+- Final projection now holds the real C.5 shared generation/corpus prefix and
+  canonical sorted row-lock tail before AgentRun/cost. Recovery holds the same
+  prefix and an empty canonical tail before its cost CAS. SQLite refuses
+  caller-prebuilt substantive model output and uses the identical never-replaced
+  C.5 process RLock.
+- A third independent review identified two remaining lifecycle/cost gaps and
+  two recovery-proof gaps. The candidate now treats `insufficient_evidence` as
+  post-generation only, requires an actually attempted/charged answer child,
+  discards the raw model reason, and derives paid safety from the exact attempted
+  component set. Provider-free, embedding-only, and SQLite pre-generation paths
+  reject that outcome before mutation.
+- PostgreSQL recovery now carries a sealed exact Session/Engine authority shared
+  by provider-free and paid owner, evidence, and safety connections. Boundary
+  construction rejects a different Session, a mutex evidence barrier, a
+  different database authority, or an ordinary phase-2 authority outside the
+  recovery bundle.
+- The prior recovery/C.5 test was removed because a Python lock made it
+  tautological. Its replacement invokes the real recovery authority and cost CAS
+  in a second PostgreSQL session, observes a database `Lock` wait while a C.5
+  mutation transaction is live, then asserts one `persistence_failed` transition
+  with unchanged provider dispatch/token observations after release.
+- Current local verification is focused `95 passed, 6 skipped` and broad affected
+  `700 passed, 11 skipped, 2161 deselected`. The real PostgreSQL gate is
+  executable but unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent. This is
+  still a rereview candidate, not review `CLEAN`; Task 14 remains gated. No
+  provider, network, Docker, or paid call occurred.
+- A fourth rereview kept Task 13 open because the exact database authority was
+  recovery-only. The boundary now requires the same sealed authority for every
+  ordinary provider-free or paid phase-2 path, including calls without recovery;
+  legacy barrier factories and split application/phase-2 engines fail before a
+  lock or mutation.
+- That authority now snapshots `current_database()`, `current_schema()`, the
+  resolved and configured search path, and `current_user` from the exact bound
+  Session. It freshly compares every Session/owner/evidence/safety connection
+  before lock acquisition. Advisory connections come from an authority-owned
+  `NullPool` engine, so close is physical and never returns a session lock to the
+  application pool. Any unlock exception or unconfirmed result invalidates and
+  closes the connection.
+- Fourth-candidate verification is focused `116 passed, 8 skipped` and broad
+  affected `709 passed, 15 skipped, 2153 deselected`. Real PostgreSQL tests for
+  same-Engine search-path drift, dedicated-pool isolation, and the prior C.5
+  concurrency gate remain URL-gated and unrun locally. Independent rereview is
+  still required; Task 14 remains blocked.
+- A fifth rereview kept Task 13 open on direct-recovery binding and advisory
+  connection ownership. Recovery assembly now requires the exact non-null
+  PostgreSQL authority itself and revalidates its ledger Session, projection
+  coordinator, both phase-2 branches, and both evidence barriers before the
+  first pending snapshot, without relying on prior boundary construction.
+- The database authority no longer reconstructs credentials or transport
+  settings from `Engine.url`. A trusted bootstrap must inject a distinct
+  `NullPool` Engine plus the sealed static projection-owner registry capability.
+  Binding and every later Session/connection use freshly compare database,
+  schema, effective/configured search path, role, database OID, PostgreSQL
+  cluster system identifier, and the executable registry capability.
+- The authority now owns an explicit idempotent lifecycle: close first
+  invalidates and physically closes every outstanding advisory connection,
+  then disposes the injected dedicated Engine exactly once. Failed identity or
+  bootstrap validation disposes the transferred Engine, and use after close is
+  refused. URL-gated tests cover custom creator, connect args, schema split,
+  pool isolation, and direct recovery without boundary assembly.
+- Fifth-candidate verification is focused `114 passed, 11 skipped` and RAG-wide
+  `688 passed, 16 skipped`. PostgreSQL behavioral cases
+  remain collected but unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent.
+  This remains a rereview candidate, not `CLEAN`; Task 14 stays blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 sixth rereview candidate
+
+- The sixth rereview found that request-owned advisory transport could still be
+  closed while an ordinary finalization or direct recovery was between lock
+  acquisition and commit. `RagPostgresDatabaseAuthority` now grants one sealed
+  operation lease at a time, rejects new leases while active or draining, and
+  refuses concurrent close without invalidating any live advisory connection.
+  The finalization service and direct recovery own the lease across validation,
+  phase-2/C.5 locks, cost CAS, and application Session commit or rollback, then
+  close the authority in `finally`, including cancellation and commit-unknown
+  exits.
+- PostgreSQL advisory transport now comes from the database initialization
+  layer's trusted bootstrap. The application Engine and each request-scoped
+  `NullPool` Engine are created from the same snapshotted connection policy.
+  That sixth candidate still overstated support for mutable opaque TLS objects,
+  custom/dynamic creators, and Engine initialization hooks; the current
+  candidate below rejects those unsupported inputs instead of claiming to
+  freeze them. Binding accepts only the bootstrap-issued attestation and never
+  recreates credentials from `Engine.url`.
+- The identity probe no longer calls privileged `pg_control_system()`. It uses
+  database/schema/effective and configured search path/current role/database
+  OID plus the bootstrap policy capability and registered advisory identity.
+  The URL-gated intended-role test uses a `NOSUPERUSER` role with only database
+  `CONNECT`, schema `USAGE`, table `SELECT/INSERT/UPDATE/DELETE`, and sequence
+  `USAGE/SELECT` grants to assemble the ordinary finalization boundary.
+- Sixth-candidate verification is focused `111 passed, 11 skipped` and RAG-wide
+  `733 passed, 17 skipped, 2144 deselected`. The close-during-C.5 recovery and
+  intended non-superuser PostgreSQL cases are collected but unrun because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a rereview candidate, not
+  `CLEAN`; Task 14 remains blocked. No provider, network, Docker, paid, or
+  `.env` access occurred.
+
+## 2026-09-01 Deliverable D Core Task 13 eighth rereview candidate
+
+- The seventh independent review kept Task 13 open on four PostgreSQL
+  authority edges. The current candidate binds the application transaction and
+  every advisory connection to one fresh least-privilege writable-server
+  identity: backend address/port plus postmaster start time, with replica and
+  transaction-read-only sessions rejected before any usable authority exists.
+- The bootstrap now exposes an explicitly named random sealed policy capability
+  rather than claiming a configuration fingerprint. Construction inputs are
+  recursively frozen; mutable opaque TLS/configuration objects, custom creators,
+  and Engine initialization hooks are rejected. Issuance transfers ownership
+  atomically with revocation, and any rejected newly-created `NullPool` Engine
+  is disposed exactly once.
+- Request-authority cleanup produces only a sanitized transport fail-stop
+  record. Cancellation and commit-unknown remain the primary classification;
+  a known committed answer or recovery CAS remains deliverable and is marked
+  non-retryable even if advisory transport cleanup fails.
+- Fresh candidate verification is focused `150 passed, 10 skipped` and broad
+  affected `748 passed, 16 skipped, 2144 deselected`. All skips are executable
+  real-PostgreSQL gates left unrun because `PARAWORKS_TEST_POSTGRES_URL` is
+  absent.
+- This remains an independent-rereview candidate, not review `CLEAN`. Task 14
+  stays blocked. Real PostgreSQL acceptance tests are URL-gated; no provider,
+  network, Docker, paid call, or `.env` access occurred.
+
+## 2026-09-01 Deliverable D Core Task 13 ninth rereview candidate
+
+- The eighth independent review found that the earlier writable-server proof
+  was released before the product transaction acquired its physical
+  connection. The authority now checks out and pins the exact application
+  connection, starts its transaction, and fresh-validates that same connection
+  before any phase-2 advisory lock. It remains pinned through the C.5 lock
+  prefix/tail, mutation, commit or rollback, and authority cleanup. Direct
+  recovery uses the same boundary for its cost CAS.
+- The SQL proof rejects read-only/replica, restarted or different writable
+  servers, transaction-pooler drift, and a null server address. PostgreSQL RAG
+  finalization therefore has an explicit TCP-only contract; Unix-domain socket
+  deployments must provide an equally strong server-affinity proof before they
+  can be supported.
+- The trusted database runtime now owns one irreversible, sanitized health
+  latch. Advisory invalidate/close/dispose uncertainty poisons it before the
+  current call completes. Issuance, operation leases, finalization, recovery,
+  and paid lock admission all share its epoch guard, so an already-admitted
+  stale operation and every later request fail before provider or database
+  effects. A known committed product or recovery identity remains deliverable
+  once with retry disabled; cancellation and commit-unknown remain the primary
+  classification.
+- This is a rereview candidate only, not `CLEAN`; Task 14 remains blocked. Real
+  PostgreSQL acceptance remains URL-gated and was not run locally because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. Fresh verification is focused `155
+  passed, 10 skipped` and broad affected `753 passed, 16 skipped, 2144
+  deselected`. No provider, network, Docker, paid call, or `.env` access
+  occurred.
+
+## 2026-09-01 Deliverable D Core Task 13 tenth rereview candidate
+
+- The ninth independent review found that raw identity SQL started a
+  Connection-owned transaction before SQLAlchemy Session enlistment. The new
+  boundary refuses caller-prebound root/savepoint work, pins a clean physical
+  connection, starts the Session transaction, forces exact Session enlistment,
+  and only then performs identity/server/capability SQL. Session commit or
+  rollback must physically end both root and nested transaction state before
+  the original bind is restored or an owned connection is closed. Direct
+  recovery applies the same post-CAS proof.
+- The runtime health boundary is now a shared-effect/exclusive-poison gate, not
+  a process-wide mutex. Concurrent healthy finalizations may overlap. Cleanup
+  poisoning blocks new effects and waits for admitted compound effects; a
+  poison raised inside an effect is deferred only until the outer shared effect
+  exits, then is latched before control escapes.
+- One shared effect spans ordinary phase-2 safety/advisory/evidence work, C.5
+  locks, fresh retrieval/mutation, and commit; recovery spans its equivalent CAS
+  sequence. Cost-ledger paid admission/claim/consume/finalize and provider
+  prepare/dispatch require the same bootstrap health authority. If poison wins
+  before a prepared dispatch, the client send remains zero and the committed
+  claim closes once as `provider_safety_unavailable` with exact-two
+  terminal-zero cost rows.
+- This remains a rereview candidate, not `CLEAN`, and Task 14 stays blocked.
+  Actual PostgreSQL gates remain executable but locally unrun because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. No provider, network, Docker, paid,
+  or `.env` action occurred.
+- Fresh verification is focused `219 passed, 10 skipped` and broad affected
+  `762 passed, 16 skipped, 2144 deselected`. The skips are the executable real-
+  PostgreSQL gates left unrun because the URL is absent.
+
+## 2026-09-01 Deliverable D Core Task 13 eleventh rereview candidate
+
+- The tenth independent review kept Task 13 open on three paid-runtime edges:
+  production assembly recreated `Engine.connect` bound methods, provider
+  advisory locks could use pooled untracked connections, and cleanup/poison
+  waiters were neither cancellation-safe nor FIFO.
+- Production paid assembly now captures one exact factory and replaces it with
+  one sealed bootstrap-bound advisory transport. That transport issues a fresh
+  `NullPool` Engine per physical use, validates the exact database and writable
+  server, and is shared by provider safety, projection-owner, evidence, cost,
+  and dispatch authorities under the same runtime-health latch.
+- Unlock uncertainty in any of the three provider advisory families requests a
+  sanitized fail-stop before control escapes. Invalidate, close, and dispose
+  uncertainty cannot return a possibly locked connection to the application
+  pool. A pre-send failure closes exact-two cost children at terminal zero with
+  no client call; a failure after grant consumption preserves the attempted,
+  reserved, unknown-dispatch identity for recovery and never claims zero or
+  safe retry.
+- Cleanup and poison now share one FIFO ticket queue. Cancellation removes the
+  exact ticket and wakes all waiters; a same-owner nested cleanup cannot bypass
+  an older foreign waiter, while healthy shared effects remain concurrent.
+- Candidate verification is focused `202 passed`, PostgreSQL-gate collection
+  `50 passed, 13 skipped`, and broad affected `795 passed, 16 skipped, 2128
+  deselected`. `PARAWORKS_TEST_POSTGRES_URL` is absent, so real PostgreSQL
+  acceptance remains unrun. This is not `CLEAN`; Task 14 remains blocked. No
+  provider, network, Docker, paid call, or `.env` access occurred.
+
+## 2026-09-01 Deliverable D Core Task 13 twelfth rereview candidate
+
+- The eleventh independent review kept Task 13 open on one cleanup ownership
+  race: `owned_operation()` already held the outer FIFO cleanup gate but called
+  public `close()`, which attempted to acquire a second ticket. A foreign
+  cleanup or poison waiter could therefore turn a committed result or primary
+  failure into `cleanup reentrancy cannot bypass queued authority` and skip
+  request-owned advisory disposal.
+- The health gate now issues one sealed cleanup-owner capability for the exact
+  gate, thread, generation, active depth, and current owner token. The database
+  authority wraps it with its own sealed identity. Transaction release and
+  request transport disposal continue under that owner without a second queue
+  acquisition; public `close()` still obtains a fresh FIFO ticket.
+- Forged, expired, cross-thread, cross-gate, and wrong-authority cleanup owners
+  fail before cleanup. A queued foreign waiter proceeds only after the outer
+  compound cleanup releases. Dispose uncertainty poisons under the same owner
+  before result/exception escape without deadlock, while success,
+  `KeyboardInterrupt`, validation, and commit-unknown primaries are preserved.
+- Candidate verification is expanded focused `187 passed, 11 skipped` and
+  broad affected `802 passed, 16 skipped, 2128 deselected`.
+  `PARAWORKS_TEST_POSTGRES_URL` remains absent, so real PostgreSQL acceptance is
+  unrun. This is not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 thirteenth rereview candidate
+
+- The twelfth independent review kept Task 13 open because a `BaseException`
+  at any intermediate cleanup step could replace the durable result or body
+  primary and stop the remaining cleanup responsibility. That could leave the
+  operation lease, pinned Session bind, application/advisory connection, or
+  FIFO cleanup owner live.
+- Each owned operation now registers a sealed emergency cleanup state bound to
+  the exact database authority, pinned operation lease, runtime-health lease,
+  and owner thread. Normal FIFO enter, owner mint, transaction release,
+  transport close, and FIFO exit remain the primary path. Any cleanup
+  uncertainty records only the fixed sanitized failure code, fail-stops the
+  shared runtime before escape, and runs a bounded idempotent continuation.
+- The continuation releases the ContextVar and active lease, rolls back and
+  restores the Session bind, closes the pinned and advisory connections,
+  disposes the dedicated transport once, expires both cleanup capabilities,
+  and removes only the interrupted owner's ticket/gate state. A queued foreign
+  owner retains FIFO order. A durable result is returned once; validation,
+  `KeyboardInterrupt`, and commit-unknown remain the exact primary outcome.
+- RED was `36 failed` for the enter/mint/release/close/exit outcome matrix.
+  Targeted cleanup GREEN is `56 passed`; initialization plus binding is `168
+  passed`; expanded focused is `288 passed, 13 skipped`; broad affected is
+  `858 passed, 16 skipped, 2128 deselected`. The real PostgreSQL cases remain
+  URL-gated and were not run because `PARAWORKS_TEST_POSTGRES_URL` is absent.
+  This is a rereview candidate only, not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 fourteenth rereview candidate
+
+- The thirteenth independent review found a pre-machine gap: the physical app
+  connection and transaction were pinned before emergency cleanup
+  responsibility was registered. A sibling poison or capability/state setup
+  fault in that gap could leave the Session transaction and connection live.
+- Runtime health now registers the exact operation lease itself, then mints an
+  authority-bound emergency responsibility before application checkout, bind,
+  transaction, provider, or database effects. State installation precedes the
+  compound health effect; pin, body, and connection snapshot remain inside
+  that uninterrupted shared effect. Cleanup starts only after the effect exits.
+- The attestation binds the exact process-local operation object, seal, epoch,
+  purpose, authority, active registry entry, cleanup ticket, and ownership
+  generation. Copies, inactive/changed leases, wrong purpose/epoch/seal,
+  cross-operation replay, and revoked capabilities fail. Revocation removes
+  only the exact ticket/generation, never another same-thread or foreign owner.
+- Cleanup uncertainty has a sealed unconditional poison/revoke fallback.
+  Persistent faults in the normal fail-stop or finish hooks cannot leave health
+  usable or the capability registered. Durable results and original validation,
+  cancellation, or commit-unknown primaries remain authoritative.
+- RED was `5 failed`. New targeted GREEN is `15 passed`; the previous cleanup
+  matrix remains `56 passed`; initialization plus binding is `180 passed`;
+  expanded focused is `303 passed, 13 skipped`; broad affected is `873 passed,
+  16 skipped, 2128 deselected`. Real PostgreSQL remains URL-gated and unrun
+  because the URL is absent. Candidate only, not `CLEAN`; Task 14 is blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 fifteenth rereview candidate
+
+- The fourteenth independent rereview kept Task 13 open on three cleanup
+  publication/attestation edges. Physical checkout and lease publication had
+  separable state seams; the emergency capability itself carried mutable
+  cleanup targets; and a finish hook that raised after exact revocation could
+  replace an already-determined outcome when the runtime was already poisoned.
+- Checkout now publishes one frozen connection responsibility containing the
+  original bind, returned physical connection, and ownership bit. ContextVar,
+  active-count, and token publication is rollback-safe at every intermediate
+  boundary; no half-published lease can survive into cleanup.
+- The emergency capability is an opaque immutable identity with no ticket,
+  generation, authority, or operation fields. A private immutable registry
+  record is the sole source of those values and revocation clears only the
+  exact registered ticket/generation. Copies, mutation attempts, cross-thread,
+  cross-authority, and cross-operation replay cannot retarget cleanup.
+- An exact still-active operation attestation remains valid for idempotent
+  fail-stop after capability revocation even when an earlier cleanup fault has
+  already poisoned the health epoch. Cleanup/finish failures therefore remain
+  secondary to the durable result or original validation, cancellation, or
+  commit-unknown primary.
+- RED was `13 failed`. New target GREEN is `13 passed`; initialization plus
+  binding is `196 passed`; expanded focused is `316 passed, 13 skipped`; broad
+  affected is `886 passed, 16 skipped, 2128 deselected`. The skipped cases are
+  executable real-PostgreSQL gates left unrun because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a rereview candidate only,
+  not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 sixteenth rereview candidate
+
+- The fifteenth independent rereview kept Task 13 open on five cleanup
+  authority seams: caller-bytecode checkout ownership, FIFO ticket/registry
+  publication, a generic emergency-record updater, duplicated mutable runtime
+  lease state, and terminal helper faults that could interrupt the final drain.
+- The trusted bootstrap now installs permanent pool checkout/checkin/invalidate
+  listeners. An exact emergency capability is armed before `Engine.connect()`;
+  the pool callback captures the physical proxy before control can return to
+  caller bytecode. Successful publication transfers that responsibility, while
+  a return-to-caller fault invalidates and physically closes the captured proxy.
+- Emergency cleanup enqueue, immutable-record replacement, claim, and rollback
+  are typed sealed transitions under one health condition. The registry record
+  is the sole source of operation, authority, owner, ticket, and generation;
+  revoked records remain exact operation tombstones until operation exit.
+- The terminal fallback independently drains the lease/ContextVar, Session
+  transaction and bind, application and advisory connections, dedicated
+  transport, exact cleanup owner, and registry disposition. Probe, state-clear,
+  or state-machine `BaseException` remains secondary to the durable result or
+  original validation, cancellation, or commit-unknown outcome.
+- RED was `15 failed, 1 passed` for the initial selector (the pass was
+  strengthened to remove pre-poisoning) plus `8 failed` for the outer cleanup
+  shell. New targeted GREEN is `25 passed`; initialization plus binding is `220
+  passed`; expanded focused is `341 passed, 13 skipped`; broad affected is `911
+  passed, 16 skipped, 2128 deselected`. Real PostgreSQL is URL-gated and unrun
+  because `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate only; no `CLEAN`
+  claim and Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 seventeenth rereview candidate
+
+- The sixteenth independent rereview kept Task 13 open on four remaining
+  lifecycle/publication edges: checkout-listener revocation, split exclusive
+  owner state, separate active/revoked cleanup registries, and an operation exit
+  that did not own the final invariant when normal cleanup hooks persistently
+  failed.
+- The application checkout tracker now moves `open -> closing -> closed` under
+  its own condition. Closing rejects new arms while preserving existing armed
+  and captured responsibility, waits for its exact drain, then removes the
+  three pool listeners. Listener installation is transactional; after-effect
+  install failure is reconciled with `event.contains`, reverse removal is
+  retried, and any removal uncertainty fail-stops the shared runtime.
+- Cleanup ownership is one frozen `_PostgresExclusiveOwnerState`; ticket claim
+  creates the full capability/state before publication and restores the exact
+  prior FIFO on every injected seam. One immutable cleanup-record mapping uses
+  explicit `ACTIVE`/`REVOKED` phases plus an exact operation index, so revoke
+  never crosses a pop/install attestation gap.
+- Runtime operation exit directly inspects and drains the exact record, ticket,
+  owner, lease, and authority before retiring the lease. An orphaned `ACTIVE`
+  record unconditionally latches one-way unhealthy state without depending on
+  patchable cleanup hooks. A sealed outcome-preserving physical drain closes
+  the request authority even when both normal cleanup paths persistently fail.
+- RED was `14 failed` for the four review areas plus `4 failed` for persistent
+  dual-path cleanup. Targeted GREEN is `23 passed`; initialization plus binding
+  is `244 passed`; expanded focused is `364 passed, 13 skipped`; broad affected
+  is `934 passed, 16 skipped, 2128 deselected`. Real PostgreSQL remains
+  URL-gated and unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate
+  only; no `CLEAN` claim and Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 eighteenth rereview candidate
+
+- The seventeenth independent rereview kept Task 13 open on sticky cleanup
+  disposition, retryable checkout-tracker shutdown, and ownership of the final
+  physical cleanup fallback. Task 14 remains blocked.
+- Emergency cleanup now progresses through immutable `ACTIVE ->
+  REVOKED_UNCERTAIN -> REVOKED_CLEAN` records. The exact operation index stays
+  live until operation exit, and only a clean attestation may retire without a
+  new fail-stop. Earlier publication/drain faults remain sticky and preserve the
+  durable result or original validation, cancellation, or commit-unknown
+  outcome.
+- The trusted runtime owns a sealed per-operation cleanup responsibility before
+  application checkout or advisory effects. It captures fixed cleanup adapters
+  by value, runs each bounded resource drain outside the health-condition lock,
+  and retires the Session, application checkout, advisory connections,
+  dedicated engine, ContextVar, and authority state even if both ordinary RAG
+  cleanup paths are replaced by persistent faults.
+- The checkout tracker has a retryable `open -> closing -> closed` lifecycle
+  with an exact close owner and callback-depth tracking. Same-owner disposal
+  from a checkout callback defers without deadlock; foreign closure waits;
+  listener-removal cancellation leaves a retryable obligation. Database runtime
+  disposal reaches `DONE` only after tracker closure and application-engine
+  disposal.
+- RED was `26 failed, 166 deselected`. Targeted GREEN is `28 passed, 166
+  deselected`; binding is `194 passed`; database initialization is `68 passed,
+  10 deselected` plus the isolated-import cohort `10 passed`; broad affected is
+  `946 passed, 16 skipped, 2144 deselected`. The skipped real-PostgreSQL gates
+  remain unrun because `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a
+  rereview candidate only, not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 nineteenth rereview candidate
+
+- The eighteenth independent rereview kept Task 13 open on three PostgreSQL
+  cleanup acknowledgements: logical revoke could attest `CLEAN` before physical
+  cleanup, failed disposal could be marked complete, and a partially installed
+  SQLAlchemy pool-listener set could lose its cleanup owner. Task 14 remains
+  blocked.
+- Logical cleanup now stops at `REVOKED_UNCERTAIN`. The trusted runtime blocks
+  later operation admission, executes every sealed physical cleanup step
+  outside the health lock, and publishes `REVOKED_CLEAN` only after every
+  required step explicitly succeeds. Two failed attempts leave no clean
+  attestation and latch the shared runtime unhealthy before the captured result
+  or primary exception escapes.
+- Dedicated advisory-engine disposal has explicit `NOT_ATTEMPTED`,
+  `IN_PROGRESS`, `SUCCEEDED`, and `FAILED_UNCERTAIN` states with at most two
+  actual attempts. Application-engine disposal preserves the approved one-shot
+  policy and records `FAILED_UNCERTAIN`, rather than `DONE`, on any exception or
+  cancellation.
+- Pool-listener installation pre-registers a private exact cleanup
+  responsibility before the first listener effect. Partial installation is
+  reverse-drained with bounded retries; unresolved callbacks remain in a
+  fail-stopped private quarantine instead of losing reachability, and database
+  initialization retries only the responsibility created by that construction.
+- RED was `8 failed`. Fresh focused verification is `286 passed`; broad affected
+  verification is `976 passed, 16 skipped, 2128 deselected`. The 16 real
+  PostgreSQL cases remain URL-gated and were not run because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. Ruff `--no-fix`, compile/import, and
+  the single Alembic head `a4d5e6f7b8c9` are green. This is a rereview candidate
+  only, not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 twentieth rereview candidate
+
+- The nineteenth independent rereview kept Task 13 open on two PostgreSQL
+  admission/lifecycle gaps: a pre-issued but inactive lease could enter while
+  another operation was still physically cleaning up, and SQLAlchemy checkout
+  listeners had no exact lower-layer handoff from construction to bootstrap
+  ownership. Task 14 remains blocked.
+- Outermost effects now share the operation admission predicate, wait through
+  `REVOKED_UNCERTAIN`, and revalidate the exact runtime epoch and lease before
+  publishing an effect count. Only an already-active exact lease may nest;
+  cancellation leaves no effect or lease residue.
+- Listener installation now has a sealed per-construction responsibility that
+  is registered before the first listener side effect and retained until the
+  bootstrap atomically claims the exact registry. An unresolved responsibility
+  remains in a process quarantine; later construction first drains it or
+  refuses without installing another listener set. Concurrent constructions
+  and drains cannot remove each other's callbacks.
+- RED evidence was `10 failed` for lease admission and `5 failed` for listener
+  handoff/quarantine. Fresh focused verification is `301 passed`; affected
+  broad verification is `991 passed, 16 skipped, 2128 deselected`. The 16 real
+  PostgreSQL cases remain URL-gated and were not run because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. This is a rereview candidate only,
+  not `CLEAN`; Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 twenty-first rereview candidate
+
+- The twentieth independent rereview kept Task 13 open on two listener
+  ownership seams: an attach-then-raise callback could be omitted when
+  `event.contains` was also uncertain, and bootstrap claim could publish
+  `CLAIMED` before its separately fallible quarantine retirement completed.
+- Each listener is now owned as `ATTEMPTED` before `event.listen` and becomes
+  `INSTALLED` only after a successful return. Failure retains every attempted
+  listener until removal succeeds or `event.contains` explicitly proves it
+  absent; never-attempted listeners are excluded from cleanup.
+- Bootstrap and standalone handoff now remain cleanup-eligible as `CLAIMING`
+  through exact map retirement. Faults before or after pop/notification retain
+  the original `BaseException` and either finish exact callback cleanup or
+  leave one bounded `QUARANTINED` responsibility for the next initialization.
+- RED evidence was `11 failed`. Fresh focused initialization/binding is `312
+  passed`; affected broad verification is `1002 passed, 16 skipped, 2128
+  deselected`. The 16 real PostgreSQL cases remain unrun because
+  `PARAWORKS_TEST_POSTGRES_URL` is absent. Candidate only; no `CLEAN` claim and
+  Task 14 remains blocked.
+
+## 2026-09-01 Deliverable D Core Task 13 paused after twenty-first rereview (historical)
+
+- Work is intentionally paused at clean commit `d15e9d0` on
+  `codex/rag-orchestrator-agent`; the twenty-second remediation has not changed
+  code or added RED tests yet.
+- Independent rereview remains `NOT CLEAN` on two P1 construction-publication
+  edges: bootstrap/runtime `CALL -> STORE/RETURN` can outlive the sole listener
+  responsibility, and interruption inside `construction_failed()` can strand
+  or lose `INSTALLING/CLAIMING` ownership.
+- Resume with actual TDD implementation of an outer process-owned publication
+  responsibility retained through `DatabaseRuntime` return plus a sealed,
+  bounded emergency tombstone/fail-stop path for construction cleanup. Task 14
+  stays blocked until a fresh independent `CLEAN` review.
+- Last green candidate evidence: listener acceptance `11 passed`,
+  initialization/binding `312 passed`, affected broad `1002 passed, 16
+  skipped, 2128 deselected`, with static/security/migration checks green. Real
+  PostgreSQL remains unrun because its URL is absent.
+
+## 2026-09-12 Deliverable D Core Task 13 runtime ownership candidate
+
+- Fixed the remaining constructor ownership gap by creating the runtime shell
+  before installing listeners and publishing bootstrap ownership before claim
+  retirement. Cleanup preserves exact quarantine ownership before acquiring
+  fallible locks, retains the primary exception, and bounds waiting on another
+  unfinished construction to one second.
+- Added nine deterministic provider-free regressions, including a failed
+  runtime construction concurrent with another healthy listener installation.
+  Final adjacent Task 13 checks: `393 passed, 10 skipped`, with three existing
+  SQLAlchemy rollback warnings. Static, import, migration-head, and secret
+  checks passed. Real PostgreSQL remains unrun because its test URL is absent.
+- Documented the actual cancellation contract after an exploratory trace test
+  showed that CPython's return event lies outside the function's exception
+  handler. Finite callback failures and protected pre-return cancellation are
+  covered; arbitrary repeated bytecode interruption is not claimed. This is
+  a candidate awaiting independent review; Task 14 remains blocked.
+
+## 2026-09-12 Task 13 candidate correction: retire physically clean ownership
+
+- Review identified a distinction between completed listener removal and
+  completed quarantine retirement: one failed retirement lock could leave a
+  CLEAN record that admission drained indefinitely. Exact map retirement is
+  now retryable independently of physical removal, and the admission deadline
+  covers every retry.
+- Two new regressions failed before the fix. Acceptance is `11 passed`;
+  affected verification is `395 passed, 10 skipped`, with the same three
+  existing rollback warnings. Static/import/security checks passed. This
+  remains a candidate for independent rereview; Task 14 and real PostgreSQL
+  release verification remain pending.
+
+## 2026-09-12 Deliverable D Core Task 19 frontend contract candidate
+
+- Aligned the existing Assistant/search TypeScript DTOs with the exact backend
+  wire contract: nullable fields remain required when the server emits explicit
+  null, and search/citation source URLs remain required non-null strings.
+- Centralized Assistant GET/POST transport behind typed wrappers and declared
+  `rag-v2-plain-text-citations:v1` exactly once per Assistant request. Shared
+  auth, CSRF, and content-type headers remain intact; unrelated APIs do not
+  claim the render capability.
+- Replaced raw response text exposure with a typed `ApiError` whose code is
+  retained only for exact public RAG or Review Workflow allowlists and whose
+  message is always bounded Korean copy. Unknown, English, and inherited object
+  property names are not surfaced to users.
+- RED evidence covered 13 compile-contract failures, four initial browser
+  contract failures, four Review Workflow compatibility regressions, and one
+  prototype-property allowlist failure. Current frontend evidence is full
+  TypeScript and lint success, Task 19 `5 passed`, Assistant regression
+  `5 passed`, Review Workflow integration `22 passed`, and the final combined
+  Chromium gate `28 passed`. Diff and redacted credential-pattern checks pass.
+- This is a local implementation candidate awaiting independent review, not a
+  rollout or release claim. Tests use mocked browser routes; no backend,
+  provider, network, paid-model, Task 18 release-gate, or Task 20 UX behavior
+  changed.
+
+## 2026-09-13 Deliverable D Core Task 19 fix round 1 candidate
+
+- Independent review found the first shared error decoder accepted non-exact or
+  unbounded envelopes, omitted the existing Auto-Review remediation code, and
+  had weak DTO/test coverage. Reviewer reproductions were moved into tracked
+  tests and observed RED before product edits.
+- Error bodies now have a 2,048-code-unit ceiling before JSON parsing. Arrays,
+  extra root/detail keys, inherited/accessor properties, malformed JSON, raw
+  text, oversize bodies, and unknown codes all degrade to `code=null` plus safe
+  Korean copy while retaining HTTP status.
+- The shared decoder minimally preserves the backend's
+  `remediation_required` code for the current Auto-Review consumer, which
+  revalidates it through its own exact set. Unknown/raw/non-exact failures stay
+  generic, while the bounded exact legacy parser remains compatible.
+- DTO compile gates now require exact mutual types, required keys, and explicit
+  `any` rejection. Browser capture exercises all five Assistant endpoints,
+  including message-list GET and email-send POST, with exact-one capability and
+  preserved auth/CSRF/content-type headers.
+- Final local evidence: TypeScript and lint exit 0, focused Task 19/Auto-Review
+  `11 passed`, and combined Task 19, Assistant memory, Review Workflow,
+  Auto-Review transport/UI `59 passed`. This remains a rereview candidate; no
+  Task 20, backend, live provider, network, paid model, push, merge, or deploy.
+
+## 2026-09-13 Deliverable D Core Task 19 CLEAN
+
+- Independent cumulative review approved `9c26c971` as CLEAN: F1–F4 are
+  addressed and no new Important or Minor finding was reproduced.
+- Reviewer-fresh evidence passed non-incremental TypeScript, warning-free lint,
+  the managed 59-case Chromium gate, and additional adversarial decoder/body
+  boundary probes. Managed-server shutdown left no listener on port 3000.
+- Task 19 is complete. Task 20 safe V2 rendering and uncertain same-screen
+  delivery reconciliation is next under the approved D Core plan.
+- Closure is local mocked-UI and static/type evidence only. No backend, live
+  provider, external network, paid model, database, deploy, push, or merge is
+  claimed.
+
+## 2026-09-13 Deliverable D Core Task 20 frontend delivery candidate
+
+- The Assistant now renders V2 and unknown-version RAG output as literal React
+  text with preserved whitespace and safe wrapping. It validates citation URLs
+  as absolute credential-free HTTP(S), leaves invalid citations as labels, and
+  keeps legacy V1 Markdown/source-link behavior isolated.
+- Global search input moves to `/search` through a consume-once in-memory
+  handoff. Raw input is never placed in the URL, browser history, storage, or an
+  automatic Assistant request; legacy inbound `?q=` is discarded.
+- Request-token plus conversation ownership now reconciles uncertain POST
+  delivery through guarded authoritative GETs. Definite 403/404/422 refusals
+  remove only their optimistic row; 500/502 and budget conflicts reconcile or
+  leave one GET-only unknown row; stale results cannot replace a newer
+  conversation. Client-upgrade conflicts expose hard reload only and disable
+  all Assistant POST affordances and conversation switching.
+- RED evidence covered eight browser behavior gaps, three missing helper
+  modules, Unicode URL whitespace, budget-copy preservation, GET-side client
+  upgrade, POST affordance blocking, and conversation switching after upgrade.
+  Final Task 20 evidence is non-incremental TypeScript, lint, and production
+  build success; desktop Task 20 plus Assistant memory `21 passed`; mobile Task
+  20 `19 passed, 1 desktop-only shell-search skipped`; mock-only no-network
+  visual handoff `2 passed`.
+- Existing Review/AutoReview broad regression was `51 passed, 1 failed`; the
+  unchanged automatic-approval test also fails alone while polling its
+  `resolution_source` request. A base-scoped diff over the four exercised specs
+  and `frontend/src/app/review` exits 0. Task 20 changes no Review/AutoReview source, so
+  this is retained as an independent baseline concern rather than widened
+  scope. Normal live-seed visual smoke and real backend/provider paths remain
+  unrun. This is a local candidate awaiting independent review; no push, merge,
+  deploy, database, paid-model, Task 18 release gate, Slack, CDC, Redis/D.1, or
+  E work is claimed.
+
+## 2026-09-13 Deliverable D Core Task 20 fix round 1 candidate
+
+- Independent review of `f1442699` found five client-side gaps: same-route
+  handoff retention, exact client-upgrade classification during reconciliation
+  and stale POST races, URL parser normalization/decoded-control cases, and
+  unmount cleanup. Each reproduction was added to tracked tests and observed
+  RED before production edits; the first stale-race failure also exposed and
+  corrected an older-conversation test-fixture ordering issue.
+- Search handoff now emits a raw-free same-realm notification so an already
+  mounted `/search` consumes the module-memory value immediately. Multiple puts
+  remain last-write/consume-once, raw whitespace never enters the event, URL,
+  storage, analytics, or an automatic POST, and a later route entry sees no
+  stale value.
+- Exact `client_upgrade_required` from either the guarded GET or a delayed POST
+  is classified before generic or stale-owner handling and enters the global
+  hard-reload-only latch. A stale response cannot replace the newly selected
+  conversation; Assistant POST controls and navigation stay disabled. Other
+  stale results remain ignored.
+- Citation validation now rejects slash-normalized schemes, backslashes,
+  malformed escapes, malformed UTF-8, and percent-decoded ASCII/Unicode
+  whitespace or controls. Component lifecycle ownership invalidates late
+  requests and clears the typing interval, so unmounted Assistant continuations
+  cannot update later screens.
+- Fresh green evidence: non-incremental TypeScript, warning-free lint, and
+  production build exit 0; desktop Task 20 plus Assistant memory `27 passed`;
+  mobile Task 20 `21 passed, 5 desktop-only skipped`; mock-only visual handoff
+  `2 passed`; AutoReview trust/badge regression `5 passed`. The original broad
+  Review auto-approval polling baseline remains out of scope, normal live-seed
+  visual smoke remains unrun, and this local result is
+  **DONE_WITH_CONCERNS** pending independent rereview. No backend, provider,
+  external network, paid model, database, release gate, push, merge, deploy,
+  Slack, CDC, Redis/D.1, or E work occurred.
+
+## 2026-09-13 Deliverable D Core Task 20 fix round 2 candidate
+
+- Cumulative rereview approved F1-F5 but reproduced two additional lifecycle
+  races. A delayed conversation GET or create success could clear a previously
+  latched client-upgrade state, and the 1.6-second copy feedback callback could
+  execute after Search unmounted.
+- Four tracked browser probes were run before product edits: delayed GET,
+  delayed create, and copy-unmount failed for the expected reasons, while the
+  normal mounted copy-feedback control passed. This separated the missing
+  lifecycle behavior from test setup.
+- Client upgrade is now monotonic for a mounted Search lifetime. No asynchronous
+  success resets it; only a real hard reload/remount initializes a fresh false
+  state. Delayed work may still finish under its existing ownership guards, but
+  cannot remove reload-only UI, reveal retry, or re-enable Assistant actions.
+- Copy feedback owns one timeout handle. A new copy cancels the previous handle,
+  the callback checks mount state and retires its handle, and unmount clears the
+  timer alongside the typing timer.
+- Fresh verification: focused F6/F7 `5 passed`; managed desktop Task 20 plus
+  Assistant memory `32 passed`; mobile Task 20 `25 passed, 6 desktop-only
+  skipped`; mock-only visual handoff `2 passed`; AutoReview trust/badge `5
+  passed`; non-incremental TypeScript, warning-free lint, and production build
+  exit 0. Normal live-seed visual smoke and the unchanged broad Review polling
+  baseline remain unrun. This local candidate is **DONE_WITH_CONCERNS** pending
+  independent rereview; no backend, provider, external network, paid model,
+  database, release gate, push, merge, deploy, Slack, CDC, Redis/D.1, or E work
+  occurred.
+
+## 2026-09-13 Deliverable D Core Task 20 fix round 3 candidate
+
+- Cumulative rereview approved F1-F7 but reproduced a client-navigation bypass:
+  component-local upgrade state reset when Dashboard → Search remounted without
+  a document reload. Tracked POST-upgrade and reconciliation-GET-upgrade probes
+  both failed on the expected second reload-only assertion before product edits;
+  the wished-for helper also produced one missing-module TypeScript RED.
+- Added a browser-document-lifetime compatibility latch with `get`, idempotent
+  `activate`, and race-safe `subscribe`; there is deliberately no reset API.
+  State contains only a boolean and listener set on browser `window` under a
+  shared symbol. Server rendering uses no shared global state: get is false and
+  activate/subscribe are no-ops.
+- Search reads the latch before effects or transport, subscribes before its load
+  effect, and turns every exact client-upgrade branch into a global activation.
+  A latched client-side re-entry renders stable hard-reload-only Korean copy and
+  issues zero Assistant GET/POST requests. Only a true document reload creates
+  a new realm and restores normal loading.
+- Fresh evidence: focused F8 `3 passed`; managed desktop Task 20 plus Assistant
+  memory `35 passed`; mobile Task 20 `26 passed, 8 desktop-only skipped`;
+  mock-only visual handoff `2 passed`; AutoReview trust/badge `5 passed`; tsc,
+  lint, and production build exit 0. Tests also prove zero latch-related storage
+  writes and listener payloads, multi/late subscription, SSR isolation, and hard
+  reload reset. Normal live-seed visual and the known broad Review polling
+  baseline remain unrun. This local candidate is **DONE_WITH_CONCERNS** pending
+  independent rereview; no backend, network, provider, database, push, merge,
+  deploy, Slack, CDC, Redis/D.1, or E work occurred.
+
+## 2026-09-13 Deliverable D Core Task 20 COMPLETE / CLEAN
+
+- Independent cumulative review approved implementation HEAD
+  `78ec7abf57a5a26f6935fa39803334b00266559b` as **CLEAN**, with no open
+  Important or Minor finding. The local Task 20 chain is
+  `f1442699cd4374932904358b77212272fc91ee50` ->
+  `a958c071cca08f5988a6e06a4f1105bee07bc65a` ->
+  `bbe8281d1b4f0583e6cbac0b256eade09697f98a` ->
+  `ccb50b961b3be3a24452d2f4f2ff66240bc9c572` ->
+  `8e674b632d45e80d3c13b02992388623facab825` ->
+  `6aa53b1cd6d449645edf7d0cd9c0e4026f7f6a3c` ->
+  `78ec7abf57a5a26f6935fa39803334b00266559b`.
+- Final behavior includes literal V2/unknown RAG rendering, strict citation URL
+  validation, immediate permission notice placement, consume-once raw-free
+  same-screen handoff, request-owned uncertain delivery reconciliation, and a
+  browser-document-lifetime hard-reload-only capability latch. All six exact
+  Assistant upgrade ingress owners classify and activate that latch before
+  mounted, request-id, conversation-owner, or presentation guards; paired late
+  non-upgrade failures remain non-latching and raw-free.
+- Reviewer-fresh static evidence: non-incremental TypeScript, warning-free lint,
+  and production build each exited 0; the build generated 18 routes. Browser
+  case results were focused ingress `12/12`, desktop Task 20 plus Assistant
+  memory `48/48`, mobile `26 passed, 21 intentional desktop-shell/unmount
+  skips`, and mock-only handoff visual `2/2`.
+- Windows managed Playwright teardown hung after each final case result in the
+  independent review. The processes were interrupted only after the complete
+  expected results appeared, so a clean Playwright process exit is not claimed;
+  port 3000 was confirmed free afterward. Normal live-seed visual smoke, the
+  separately known Review polling baseline, live backend/provider, external
+  network, paid model, database, rollout/deploy, push, and merge remain outside
+  this closure.
+- The next approved-plan item is **Task 21 in Phase E of the D Core plan**:
+  staged rollout and retrieval-only shadow. It is an **actual implementation
+  task**, not planning, and it is not Deliverable E Neo4j GraphRAG.
+
+## 2026-09-13 Deliverable D Core Task 21 review-fix candidate
+
+- Task 21 implements deployment-static staged rollout and retrieval-only shadow
+  for Ask, Search, and Assistant. Keyword shadow remains provider/cost free;
+  pgvector shares one authenticated immutable query embedding with legacy only
+  for byte-identical input, records its real internal cost, and never generates
+  an answer. Public V1 DTOs and delivery ownership remain unchanged.
+- Independent review of the first candidate found seven hardening gaps. The
+  fix round now authenticates the production not-ready shadow permit, resolves
+  canonical/legacy backend settings through one precedence rule, limits public
+  identity repair to the exact pgvector `chunk:{id}` leak, rejects forged audit
+  comparisons, and fail-closes paid embedding owners across legacy failure and
+  restart without redispatch.
+- Comparison and aggregate/HMAC-only audit persistence now execute under one
+  provider-safety and corpus-generation database fence. A generation change
+  rolls back the audit and leaves the parent pending for recovery. Retained
+  provider blockers are covered across every mode, stage, and surface; the
+  actual shadow refusal path additionally runs on all three surfaces and keeps
+  exact standalone legacy delivery.
+- All automated paths use deterministic/fake transports; no live provider or
+  network call is made. A real PostgreSQL row-lock concurrency probe exists but
+  remains an explicit environment-gated release check when
+  `PARAWORKS_TEST_POSTGRES_URL` is not configured. This candidate remains
+  **DONE_WITH_CONCERNS** pending independent rereview; no rollout activation,
+  push, merge, deploy, Task 22+, Slack, CDC, Redis/D.1, or Deliverable E work is
+  included.
+
+## 2026-09-13 Deliverable D Core Task 21 review fix round 2
+
+- Cumulative rereview resolved F1-F7 and found one remaining golden-gate gap:
+  the six `v1_parity` cases executed only an ordinary V2 raw candidate, while
+  pgvector's embedding count was assigned after injecting a prepared result.
+- Each parity case now constructs a case-specific deterministic V1 observation
+  for its surface, backend, permission, and query-context contract; executes
+  the actual V2 LangChain Runnable; and compares both through
+  `ShadowComparator`. The gate asserts exact common cohort, parity outcome,
+  zero intended delta, and zero unclassified mismatch. Relabeling parity as raw
+  demonstrably removes the V1/comparator execution.
+- Pgvector golden execution now uses the production
+  `StrictQueryEmbeddingAdapter` with a countable in-process fake transport. The
+  recorded count comes from actual fake `dispatch()` calls: keyword zero and
+  pgvector exactly one. The exact 60-case manifest and all permission,
+  stale/revoked, evidence-slot, provider-zero, and network-zero gates remain.
+- Fresh local evidence is `188 passed` for the golden module, `658 passed` for
+  the Task 21 relevant suite, reviewer probes `6 passed`, and changed-file Ruff
+  clean. This is still **DONE_WITH_CONCERNS** pending final independent
+  rereview; no production runtime behavior, live provider/network, rollout,
+  push, merge, deploy, Task 22+, or Deliverable E work changed.
+
+## 2026-09-13 Deliverable D Core Task 21 review fix round 3
+
+- Fix-round-2 rereview resolved F8 but found that provider/network zeroes were
+  still authored constants rather than runtime observations. A retriever could
+  open a socket while the golden gate continued to report zero.
+- Every executable golden case now runs inside a serialized, per-case guard
+  that counts and blocks socket, sync/async HTTP, direct provider-client, and
+  production embedding-provider boundaries. The guard restores all patched
+  boundaries deterministically. The approved in-process fake query-embedding
+  transport remains separate and still records keyword zero/pgvector one.
+- Permanent negative controls inject one socket call and one external-provider
+  send into the real keyword Runnable. Both calls are blocked/countable and
+  reported as one, proving the ordinary zero-call assertions would fail under
+  either regression. No live network or provider call is performed.
+- The exact 60-case manifest, V1 parity comparator execution, and all existing
+  permission, stale/revoked, evidence-slot, and no-generation gates remain
+  unchanged. Fresh evidence is golden `190 passed`, Task 21 relevant regression
+  `660 passed`, reviewer probes `7 passed`, and Ruff clean. This candidate is
+  **DONE_WITH_CONCERNS** pending final independent rereview; no production
+  runtime, rollout, Task 22+, push, merge, deploy, or Deliverable E work changed.
+
+## 2026-09-13 Deliverable D Core Task 21 review fix round 4
+
+- The final F10 review gap was proof coverage, not a runtime defect. A new
+  parameterized golden negative-control matrix reaches all seven guarded
+  socket, sync/async HTTP, direct-provider, and production-embedding seams from
+  a real LangChain keyword Runnable. Deterministic outer fakes or the guard
+  stop every attempt before live I/O and the expected network/provider category
+  records exactly one.
+- Success and injected-error paths restore the exact seven prior hooks. A
+  synchronized two-thread test proves the global `RLock` serializes cases,
+  isolates their counters, terminates without deadlock, and leaks no patch.
+  Removing all guards as a temporary mutation produced exactly `7 failed`;
+  restoring them produced `10 passed`.
+- Fresh local evidence is golden plus review probes `207 passed` and the
+  overlapping direct-impact Task 21 regression `609 passed in 80.50s`; Ruff is
+  rerun before commit. No production runtime, live provider/network, rollout,
+  PostgreSQL release validation, Task 22+, push, merge, deploy, or Deliverable
+  E work is included. Status remains **DONE_WITH_CONCERNS** pending independent
+  rereview.
+
+## 2026-09-13 Deliverable D Core Task 21 COMPLETE / CLEAN
+
+- Independent cumulative review approved
+  `460844937f16435d8e2035b5e0f981b728d528a1` as **CLEAN**, with no open
+  Important or Minor finding. The local Task 21 chain from base
+  `b832e58920c4dbdd89fd8f201de2b43a969c316f` is `7b3b56c` -> `d09102b` ->
+  `51c8f60` -> `3e3f9ae` -> `44f0448` -> `45a117a` -> `4608449`.
+- Reviewer-fresh evidence is golden plus all independent probes `207 passed`,
+  cumulative focused rollout/shadow/golden/facade/cost/transport/Assistant/
+  settings/lifespan `580 passed`, and changed-file Ruff plus cumulative diff
+  checks clean. The PostgreSQL cost file is `1 passed, 10 skipped` because no
+  `PARAWORKS_TEST_POSTGRES_URL` is configured; the actual corpus row-lock
+  concurrency case remains an explicit release gate, not a represented pass.
+- Task 21 is complete locally. No live provider/network/paid-model call,
+  rollout activation, push, merge, or deploy occurred. The next planned item is
+  **D Core Task 22, provider-free safety administration**. It is an **actual
+  implementation** task and is not Deliverable E Neo4j GraphRAG.
+
+## 2026-09-13 Deliverable D Core Task 22 provider-free safety administration
+
+- Added a non-interactive provider-safety admin boundary for status, init,
+  bootstrap recovery, explicit mark-rebind-required, rebind, reset, and
+  supersession. Every mutating CLI command consumes one bounded exact-canonical
+  envelope from stdin and verifies a distinct external review key, operation,
+  target, current CAS context, fixed implementation-plan reference HMAC, and
+  successor snapshot where applicable. The CLI exposes no signer and emits
+  only fixed aggregate JSON/codes.
+- Rebind is now operationally two separately reviewed transitions. Production
+  and live-validation administration have separate PostgreSQL/latch/environment
+  settings and reject overlapping targets. Supersession requires both the
+  signed successor and a committed-code registry entry; the production registry
+  is deliberately empty until a concrete successor is approved. Review-key
+  rotation is outside Task 22 and unknown key ids fail closed.
+- SQLite/provider-free evidence is `32 passed`; the broader direct-impact
+  provider-safety/runtime/cost/assembly/settings regression is `113 passed, 14
+  skipped`. One new PostgreSQL concurrency test and the existing PostgreSQL
+  guards remain skipped because `PARAWORKS_TEST_POSTGRES_URL` is unavailable;
+  actual PostgreSQL serialization is therefore still a release gate. No live
+  provider/network/paid call, rollout, push, merge, or deploy occurred. This
+  candidate remains **DONE_WITH_CONCERNS pending independent review**.
+
+### Task 22 round-1 security review remediation
+
+- Independent review found two P1 and three P2 gaps. The remediation adds a
+  runtime-key-authenticated owner-only append-only review ledger, committed
+  review-key verifier registry, durable one-use nonce reservation/consumption,
+  and exact partial-bootstrap recovery identity binding. Settings-only key/id
+  replacement, nil/reused nonce, and a recovery review replayed against a
+  replacement partial latch now fail closed.
+- Latch-absent status now reads all authority/readiness/history sets without
+  creating or repairing artifacts. DB target comparison canonicalizes terminal
+  DNS dots, IDNA, IP literals, loopback aliases and default PostgreSQL ports;
+  ambiguous same-database hostname pairs are refused. Operation-specific
+  successor and acknowledgement fields are exact rather than silently ignored.
+- The retained six adversarial review probes are now green, together with
+  crash-before-mutation retry, crash-after-mutation no-double-commit, ledger
+  tamper, registry, and operation-schema controls. Public status/result DTOs and
+  PostgreSQL schema are unchanged; the new local ledger sidecar is an
+  operational artifact. Actual disposable PostgreSQL evidence and independent
+  rereview remain required. Fresh focused evidence is `36 passed, 1 skipped`
+  and direct-impact regression is `138 passed, 14 skipped`, so status stays
+  **DONE_WITH_CONCERNS**.
+
+### Task 22 round-2 missing-ledger remediation
+
+- Round-2 review isolated one remaining P1: a deleted ledger could be recreated
+  beside an existing authority when the committed key still matched. Ledger
+  creation now occurs only inside fresh init's provider-latch/advisory critical
+  section, after exact-empty DB and zero-attempt revalidation and immediately
+  before authority-file creation.
+- Existing or partial authority with a missing, unreadable, corrupt or
+  mismatched ledger now makes status inconsistent and every mutation/recovery
+  fail closed. A pending fresh-init ledger accepts only the identical pending
+  init envelope; it cannot accept a new nonce or changed plan. Legacy authority
+  adoption is deliberately deferred to a separate exact-latch reviewed
+  migration design.
+- The expanded retained review probes are `8 passed`; focused permanent and
+  review controls are `41 passed, 1 skipped`; broader direct-impact verification
+  is `143 passed, 14 skipped`. A new independent rereview remains pending, so
+  Task 22 is not CLEAN yet.
+
+## 2026-09-13 Deliverable D Core Task 22 COMPLETE / CLEAN
+
+- Independent round-3 review approved
+  `163e790779ef2024f2d43db44a0c44d6d526135f` as **CLEAN**, with no actionable
+  finding remaining. The final Task 22 chain is `ef9370b` -> `7acbdbf` ->
+  `163e790` from base `21520134844a6a0553c9213b3ea2ffd7c5e59888`.
+- Reviewer-fresh evidence is retained adversarial probes `8 passed`, focused
+  admin/PostgreSQL plus probes `41 passed, 1 skipped`, and broader
+  provider-safety/runtime/cost/default/settings `105 passed, 11 skipped`.
+  Changed-file Ruff, cumulative diff check and tracked status are clean. The
+  skipped cases require `PARAWORKS_TEST_POSTGRES_URL`; actual PostgreSQL
+  advisory-lock/concurrency validation remains a mandatory release gate and is
+  not represented as passing evidence.
+- The approved amendment is enforced: the runtime admin CLI is verifier-only;
+  every mutation requires a bounded canonical externally signed stdin envelope;
+  init/recovery are reviewed; rebind is mark then rebind; application and
+  live-validation targets are isolated; supersession is bound to a signed
+  snapshot plus committed registry; the plan reference is external and fixed;
+  key rotation is not implemented.
+- The production review-key registry remains deliberately empty until an exact
+  opaque verifier is approved and committed. Key rotation and legacy authority
+  adoption require separate future reviewed designs. No actual user
+  configuration mutation, provider/network/paid call, rollout activation,
+  push, merge, or deploy occurred. Task 22 is complete locally.
+
+## 2026-09-13 Deliverable D Core Task 23 exact-six release authority candidate
+
+- Added validation-only SQLAlchemy metadata containing exactly the six
+  `rag_live_gate_*` tables in PostgreSQL's default schema. It imports no
+  application ORM, is absent from `Base.metadata`, normal DB initialization and
+  Alembic, and is registered as a separate conditional PostgreSQL release gate.
+- The external release marker binds ledger UUID/epoch/generation, transition
+  tail, environment, immutable host and validation database OID/identity using
+  canonical keyed HMACs. Provider and release data/lock leaves are validated as
+  four pairwise-distinct non-ancestor owner-only regular files; the release
+  marker must remain outside the repository and DB backup tree.
+- Init, same-ledger rebootstrap, fresh-ledger disaster initialization and every
+  transition keep the stable release lock plus registered advisory lock through
+  marker-first replacement, DB mutation and commit. Crash gaps remain a
+  fail-stop mismatch. Status is read-only and performs no repair.
+- Added a separate verifier-only signed-stdin release review boundary. Its
+  domain, key verifier registry, nonce HMAC and operation/recovery context are
+  distinct from provider-safety administration; the CLI exposes no signer or
+  preview/authorization/runner command. The production verifier registry is
+  deliberately empty and key rotation remains out of scope.
+- Fresh Task 23 evidence is `38 passed, 4 skipped`; direct-impact Task 22,
+  advisory, DB initialization/migration, settings and release-contract evidence
+  including the release matrix is `95 passed, 7 skipped`; changed-file Ruff and
+  diff/credential scans are clean. The four Task 23 skips require
+  `PARAWORKS_TEST_POSTGRES_URL`, so actual
+  physical PostgreSQL DDL/OID/immutability, advisory race, marker-first fault,
+  CAS and recovery remain an explicit release gate.
+- A full backend attempt completed with `3937 passed, 127 skipped, 102 failed,
+  83 errors`. The 83 reported setup errors include existing PostgreSQL suites
+  that call `pytest.fail` when the DSN is absent. One Task 23-related release
+  profile count failure was isolated and fixed. Ten
+  representative non-PostgreSQL failures were isolated to unchanged deferred
+  Slack/PKCE/orchestration/mock contracts; the remaining full-suite failures
+  were not exhaustively classified and are not claimed as baseline-clean.
+- Candidate chain from `0771405` is `4b59fd8` -> `af54027` -> `ef22070` and
+  remains **DONE_WITH_CONCERNS pending independent review**. No real release
+  init/rebootstrap/disaster command, provider/network/paid call, rollout, push,
+  merge or deploy occurred. Task 24 is the next planned **actual implementation**
+  step and has not started.
+
+## 2026-09-13 Deliverable D Core Task 23 review remediation
+
+- Independent review rejected the first Task 23 candidate on nine release
+  authority invariants. The revised design composes the exact pinned Task 22
+  provider-safety whole set with the release ledger on one PostgreSQL
+  connection, in registered provider-before-release lock order, and holds both
+  locks through the release commit. A locally owned substitute file or SQLite
+  connection cannot authorize a mutation.
+- Disaster initialization cannot replace an identity in a validation database
+  that already contains release ledger history. Rebootstrap fault recovery
+  retains the ledger UUID, advances from the durable marker, and does not
+  fabricate the missing failed epoch. Signed recovery context and durable nonce
+  reuse checks are re-evaluated only after both locks are acquired.
+- Release transition affected rows now come from typed primary-key registry
+  entries and observed mutations on the same transaction. Exact lifecycle,
+  state/null-owner, count, cost, Decimal and 17-kind row matrices fail closed at
+  service and schema boundaries.
+- PostgreSQL startup/status/mutation verifies a frozen exact-six physical
+  contract: table/column/type/key/check/index/comment/trigger/version identity.
+  The database also prevents two claimed cases for one authorization.
+- Fresh deterministic evidence is `52 passed, 6 skipped` focused and `100
+  passed, 9 skipped` direct impact, with changed-file Ruff clean. The six Task
+  23 PostgreSQL cases are conditional and remain skipped without
+  `PARAWORKS_TEST_POSTGRES_URL`; SQLite is not physical proof. The earlier full
+  backend non-green result was not rerun and remains an explicit limitation.
+- This candidate schema is not in application metadata or Alembic and has not
+  been released. An earlier Task 23 candidate validation database is
+  incompatible and must not be repaired in place. No live release/provider/
+  network/paid/rollout/push/merge/deploy operation occurred.
+- F1-F9 implementation is recorded locally at `330b9a7`. Independent review
+  must inspect `66d2477..330b9a7` for the remediation or
+  `0771405..330b9a7` cumulatively. Status remains **DONE_WITH_CONCERNS pending
+  independent rereview**.
+
+## 2026-09-13 Deliverable D Core Task 23 rereview round 2
+
+- Rereview exposed four remaining P1 boundaries. A generation-zero init marker
+  crash now has one deterministic path: fresh reviewed disaster-init with a new
+  UUID, only when the old marker has the exact pending-init shape and the target
+  release schema is absent or physically exact and contains zero rows. The old
+  init review nonce cannot authorize recovery.
+- Release mutations are no longer executed before authority acquisition. A
+  sealed mutation plan performs no SQL until Task22 provider stable/advisory,
+  release stable/advisory and ordered provider/release row capabilities are all
+  held on the same PostgreSQL connection. Before/after images, semantic checks,
+  external marker, release CAS and commit share that barrier.
+- Terminal claims are substantiated from locked rows rather than payload counts:
+  exact manifest ordinals and case count, dispatch distribution, report,
+  reserved/charged sums, unique runtime link, exact-two cost children and
+  parent/child terminal states. Ten terminal/abort kinds have retained missing-
+  roster negatives.
+- Disaster physical schema attestation now precedes any marker bytes. A drift
+  rejection leaves marker and database unchanged. Conditional PostgreSQL tests
+  cover both init-crash recovery and marker preservation, but remain skipped
+  without the controlled DSN.
+- Fresh focused evidence is `66 passed, 6 skipped`; direct impact is `115 passed,
+  9 skipped`; Ruff and compile are clean. Status remains
+  **DONE_WITH_CONCERNS pending independent rereview**.
+- R1-R4 implementation is committed locally as `6e08051`. Independent review
+  should inspect `e20ccd5..6e08051` for round 2 or `0771405..6e08051`
+  cumulatively.
+
+## 2026-09-13 Deliverable D Core Task 23 semantic release evidence
+
+- The release ledger now distinguishes actual semantic mutations from locked
+  read-only proof. `affected_rows` contains only rows whose meaningful
+  before/after image changes; unchanged authorization, case, runtime, and
+  provider peers are sealed in a canonical `observation_set` instead of being
+  rewritten as no-ops.
+- Observation payloads expose only domain-separated identity/projection HMACs.
+  They are captured beneath the same provider/release barrier, rechecked before
+  commit, and included in the transition digest, so missing or changed evidence
+  fails closed without leaking raw database identities.
+- The same remediation maps the signed logical AgentRun identity to its physical
+  key, binds approval/corpus/provider/runtime identities to DB evidence, enforces
+  exact 17-kind parent/child/dispatch lifecycles, and integrates a sealed Task22
+  provider-safety incident path with external-first persistence and rollback
+  fail-stop behavior.
+- Fresh provider-free verification is `46 passed` for the Q1-Q4/Option-A probes
+  and `137 passed, 11 skipped` for release/provider/schema/advisory direct
+  impact. Conditional PostgreSQL cases remain skipped without the controlled
+  test DSN; no live release, provider, network, paid-model, rollout, push, merge,
+  or deploy operation occurred.
+
+## 2026-09-13 Deliverable D Core Task 23 round-4 lifecycle proof
+
+- The approved Option A contract now covers the complete validation roster.
+  Every unchanged authorization/case/dispatch/runtime/cost/provider row used
+  to validate a transition is captured under the provider/release barrier and
+  bound by typed identity/projection HMACs. The payload contains no raw row
+  identities or model/source content, and no no-op or clock-only writes.
+- Current provider evidence is mandatory for bootstrap and every transition.
+  The authorization retains its approved envelope; ordinary transitions require
+  exact ready equality, snapshot aborts prove drift/non-ready, and sealed
+  component incidents prove the approved-before/blocked-after delta. Crash and
+  corpus aborts retain internally valid current evidence. Observation mismatch
+  rejects before mutation SQL or sealed provider incident application.
+- Generation completion now mutates the pending parent with the exact owner
+  fence. Query success observes its unchanged parent. Pending persistence and
+  safety failure retain actual charge while observing both immutable terminal
+  children; execution/cost owners cannot rotate. A pending crash finalizes with
+  its fence retained, while an admission crash remains admission-only.
+- Real SQL append tests execute 30 sequential zero-dispatch failures and finish
+  with a 30-case/30-parent/60-child observed roster and zero charged cost.
+  Additional negatives cover owner/fence rebind, invented projection owner,
+  hidden overrun, missing/extra/changed roster proof, and current provider drift.
+- Focused release/provider/reviewer/adversarial evidence is `171 passed, 12
+  skipped`; direct runtime/cost/model/migration evidence is `133 passed, 5
+  skipped` with 21 existing Alembic deprecation warnings. The 17 skips require
+  `PARAWORKS_TEST_POSTGRES_URL`: 11 Task23, one Task22, and five migration guards.
+  No physical PostgreSQL or full-backend-green claim is made.
+- Exact-six release schema, application metadata, Alembic revisions, public
+  endpoints, and separate review authority are unchanged. Status remains
+  **DONE_WITH_CONCERNS pending scoped independent rereview**. No live
+  release/admin/provider/network/paid, push, merge or deploy operation occurred.
+
+## 2026-09-13 Deliverable D Core Task 23 final scoped runtime audit proof
+
+**Current status: IMPLEMENTED / NOT RELEASE-CLEAN / 1 load-bearing P1 carried.**
+Implementation candidate: `a9c729166c50b8b38f85fada45b7bbb96be9c1ce`.
+
+- Round-4 review found that an otherwise legal parent finalization could also
+  rewrite permission, provider/route, legacy accounting, metadata and start time.
+  Round-5 tests first reproduced 23 failures; the final implementation reconstructs
+  each permitted existing-parent/child after-image from its immutable before-image and
+  exact lifecycle values. Every unlisted column, including timestamps, is frozen.
+- Affected runtime rows now carry a domain-separated HMAC over every typed
+  before/after column. Only HMACs enter transition bytes. Locked preflight rejects
+  forbidden changes and stale/changed plans before SQL or a Task22 incident;
+  execution rechecks the actual after-image against the same proof.
+- The permanent actual-append matrix covers all 17 kinds plus both normal and
+  execution-contract finish failures. It uses real 30-case/40-dispatch completed
+  and quality-failed runs, separate 30-case safe and ordinary failure runs, and a
+  real in-process sealed Task22 incident. Every append checks SQL rows, canonical
+  bytes, independently computed HMAC, history/generation, affected/observed sets
+  and a paired invalid variant with no marker/database change.
+- Security field/signature suite: `61 passed`. Actual-append matrix: `18 passed`.
+  Expanded runtime/cost/model/migration direct impact: `215 passed, 13 skipped`,
+  with 20 existing Alembic warnings. Final combined focused gate:
+  `258 passed, 17 skipped`; Ruff, compile and diff checks passed and credential
+  signature matches were zero. All 30 skips require controlled PostgreSQL gates.
+- No physical release schema, ORM/Alembic or public endpoint changed. Prior
+  runtime transition payloads without complete mutation proofs fail closed.
+  Conditional PostgreSQL evidence is not replaced by SQLite evidence. No live
+  provider/release/admin operation, network/paid call, push, merge or deployment
+  occurred. The final reviewer accepted R4-B, but found a real insertion P1:
+  `case_claim` with `before=None` can sign forged permission/provider/route,
+  initial tokens/cost/metadata and child config/policy HMACs without proving
+  authorization. Task23 lacks the approved initial projection; Task24 introduces
+  the frozen reviewed 30-case manifest needed to define it.
+- Ruling: Task23 breaker 5/5; P1 is real and release-blocking; carry into Task24
+  mandatory first RED slice. Task24 must define canonical approved
+  manifest→case_claim AgentRun/exact-two cost-child projection, validate it before
+  SQL/incident, re-review this carryover CLEAN before preview/authorization work.
+  Cost if wrong: forged runtime/provider/cost metadata could enter release ledger.
+  This docs-only closure preserves `a9c7291` as the implementation candidate;
+  green regression counts do not make Task23 COMPLETE or CLEAN.
+
+## 2026-09-13 Task24 first-slice approved case-claim projection candidate
+
+- Implementation `da79bf0` carries only the Task23 INSERT P1 into Task24.
+  Independent CLEAN rereview is pending; neither Task24 completion nor release
+  cleanliness is claimed. Preview, authorization and OAuth remain gated.
+- The release review boundary binds the complete case-claim manifest preimage
+  to the immutable authorization `manifest_hmac`. Caller-signed SQL images are
+  compared with assembly-owned initial images before any SQL or sealed incident,
+  then rechecked against actual SQL results. Every parent/child column, exact
+  child order, case ordinal, provider policy/config identity, reserve and clock
+  is covered; six-place normalization cannot conceal subprecision money.
+- Parent defaults come from the existing `rag-run:v2` admission contract:
+  restricted visibility until final evidence projection, zero usage, unset
+  generation/ownership/completion fields and canonical admission/cost HMACs.
+  Child provider policies and exact token/cost reserves are reviewed manifest
+  inputs, revalidated against current provider readiness under the same barrier.
+  No provider-specific package or new security-policy choice was introduced.
+- RED before production edits: `80 failed, 4 passed`; the decisive rerun was
+  `7 failed, 1 passed, 76 deselected`, with forged permission/model, both child
+  config/policy HMACs and reordered children actually accepted. Additional RED
+  cases caught hidden subprecision costs and case ordinal validation after SQL.
+- Final provider-free focused gate: `327 passed, 14 skipped`; direct-impact
+  provider/runtime/cost/model and credential suite: `221 passed, 14 skipped`,
+  with 11 existing Alembic configuration warnings. Changed-file Ruff,
+  compileall and diff checks passed. The 28 PostgreSQL skips are unexecuted
+  gates, not substituted evidence. Credential scanner reported no finding.
+- This is the narrow executable manifest contract only. The full reviewed
+  30-case quality fixture/distribution, preview, authorization, process issuer
+  and runner remain future work. No application metadata, migration, exact-six
+  schema, endpoint, Option-A affected/observed contract or Task22 boundary changed.
+  No live API/provider/OAuth, paid call, actual release operation, push, merge
+  or deployment occurred.
+
+## 2026-09-13 Task24 carryover exact-type rereview round 1
+
+- Implementation `402f889`: independent rereview of `a67f76b..1de0941` is
+  **CLEAN**, with no actionable findings in the narrow Task24 carryover slice.
+- Independent T24-P2-A found that decoded child HMAC bytes could reach four/five
+  DML statements before SQLite rejected them. Rollback protected rows and marker,
+  but that did not satisfy the required pre-SQL literal validation boundary.
+- The correction validates original manifest/provider fields before copying,
+  exact issued binding and full parent/child scalar types, and recursive native
+  JSON types before signing or normalization. It preserves native JSON number
+  versus object identity and requires assembly UTC/fold on initial clocks.
+  Only trusted SQLAlchemy database column labels are normalized; no caller
+  scalar, metadata value or nested key is coerced into an accepted type.
+- New independent tests retain legitimate signatures while changing SQL literal
+  values, then count DML and sealed incidents and compare all rows, generation
+  and marker. RED evidence: initial type matrix `43 failed, 299 passed`; clock
+  zone aliases `10 failed`; policy deepcopy aliases `11 failed`; clock fold
+  aliases `5 failed`. Equal-value type/clock aliases also reproduced commits;
+  this is separate from the original forged semantic authorization P1.
+- Fresh focused gate: `716 passed, 14 skipped`; direct-impact gate: `221 passed,
+  14 skipped`, 11 existing Alembic warnings. Credential suite: `3 passed`.
+  Changed-file Ruff/format, compileall and diff checks passed. All 28 PostgreSQL
+  skips remain unexecuted because the validation DSN is absent.
+- Reviewer-fresh projection-types, case-claim and round4/round5 evidence:
+  `592 passed in 164.24s`; Ruff/format/compileall/diff green and worktree clean.
+  Rejection occurs before mutation DML or sealed incident application; barrier
+  and validation SELECTs are expected, not a violation of the zero-mutation gate.
+- No schema, endpoint, Option-A observation contract, provider policy or visibility
+  rule changed. This CLEAN disposition supersedes the carryover's pending-review
+  status only. PostgreSQL DSN remains absent and Task24 overall is incomplete;
+  no preview, authorization, OAuth or release approval is granted.
+
+## 2026-09-13 Task24-A frozen live-gate manifest and zero-call preview candidate
+
+- Implementation commit: `2460bdf`; independent review remains pending.
+- Added a committed declarative 30-case quality fixture with exact surface,
+  retrieval-backend and Assistant-context distributions. Stable sanitized
+  references resolve against explicit locked inputs; no live fingerprint-key
+  material, raw production question, source evidence or model answer is stored
+  in the fixture or preview output.
+- The user approved retaining the spec's file-based root manifest identity.
+  The full executable case preimage now carries that source identity and has
+  only an integrity digest of its own. All original complete-image, exact-type,
+  pre-mutation and provider-readiness protections remain in the claim boundary.
+- The provider-free builder freezes exact Git/file bytes, a member-complete
+  corpus snapshot, provider safety/key/DB/environment/ledger identities,
+  rubric and legacy retrieval baseline definition. It compares two reads under
+  the snapshot reader's lock before returning an opaque provenance binding.
+  Cost preview preserves 30/10/40 dispatch maxima and the exact USD `0.360000`
+  reserve envelope without truncation or rounding away overage/shortfall.
+- Preview provenance cannot authorize execution. Task24-B's approved-runtime
+  verifier remains fail-closed; its reviewer/OAuth and single-use authorization
+  work is not implemented here. The real CLI reports `evaluator_unavailable`
+  because Task25's committed evaluator is absent, without constructing a
+  release authority or reading approval material.
+- Test-first evidence includes fixture/parser RED `31 failed`, corpus/source
+  RED `11 failed, 31 passed`, provenance/row-count RED `8 failed, 64 passed`,
+  raw self-attestation RED `2 failed`, CLI RED `2 failed`, provider/source
+  cross-identity RED `3 failed`, and immutable limit RED `9 failed`.
+- Verification: release regression `799 passed, 14 skipped`; final limit/source
+  impact `97 passed`; final CLI `12 passed`; provider/cost/runtime/input and
+  credential impact `259 passed, 13 skipped`, with 11 existing Alembic warnings.
+  Final credential scan `3 passed`; Ruff, format, compileall and diff checks
+  passed. The 27 PostgreSQL skips are unexecuted gates, not substitute evidence.
+- No provider/network/OAuth call, actual release operation, push, merge or
+  deployment occurred. Task24-A is an implementation review candidate; Task24
+  overall and PostgreSQL release verification remain incomplete.
+
+## 2026-09-13 Task24-A round-1 preview contract remediation candidate
+
+- Implementation commit: `b2f247e`; independent re-review pending.
+- Reproduced all four independent-review gaps before production changes.
+  Hard negatives now require a reader-owned frozen visible non-entailing
+  candidate oracle, not only an expected-no-answer label. The exact request,
+  definition identity and candidate result bind into preview provenance; absent
+  adapters and no-match/hidden-only results refuse without provider calls.
+- Assistant context distribution now reflects the actual prepared query after
+  sanitization, deduplication and truncation. Source/Git verification follows
+  the final snapshot/oracle derivation and lock exit before provenance issuance.
+- Corpus vector state is nullable for keyword-only members. The reader's exact
+  pgvector baseline roster is frozen and all participants, including relevant/
+  required and hard-negative oracle candidates, require vector state.
+- The file-based root identity, exact 30/10/40 dispatch envelope and Decimal
+  USD 0.360000 reserve are unchanged. Task24-B remains fail-closed; Task25's
+  evaluator is still absent. No real reader/oracle adapter or execution approval
+  is created. Independent re-review and PostgreSQL verification remain pending.
+- RED evidence: initial four-gap probes `16 failed`; isolated unsafe-context
+  probe `1 failed`; oracle/participation probes `22 failed`; empty negative
+  evidence allowlists `2 failed`. GREEN: full release/carryover selection
+  `856 passed, 14 skipped`, preview impact `131 passed`, final R1 probes
+  `46 passed`, direct impact `259 passed, 13 skipped` (11 existing Alembic
+  warnings), credential `3 passed`, Ruff/format/compile/diff clean. The skips
+  remain unexecuted PostgreSQL gates; no live/network/paid/release operation,
+  OAuth, push, merge or deployment occurred.
+
+## 2026-09-13 Task24-A round-2 oracle request alias remediation candidate
+
+- Implementation commit: `a3444d8`; independent re-review pending.
+- Independent rereview reproduced a shared-request alias: the adapter could
+  mutate a frozen request and thereby alter the value used as its own baseline.
+  The preview now keeps an unexposed immutable scalar snapshot, verifies both
+  request objects against it, and serializes only the independently retained
+  binding. Oracle-result and preview HMACs bind the reader's definition identity
+  together with the independently retained exact manifest identity.
+- All six fields are tested with aliases, copies, container replacements and
+  adapter failures. Restored inputs cannot validate a tampered returned copy;
+  fully restored exact bindings preserve canonical preview bytes and HMAC.
+- This is a single-boundary fix, not a new authority or request-tracking API.
+  Fixture, pricing, runtime images, Task24-B refusal and Task25 readiness remain
+  unchanged. Independent re-review and PostgreSQL verification remain pending.
+- Verified RED `12 failed, 26 passed` before the production change; final alias
+  probes `44 passed`; release/A/remediation/CLI regression `900 passed, 14 skipped`;
+  direct impact `259 passed, 13 skipped` (11 existing Alembic warnings), credential
+  `3 passed`, Ruff/format/compile/diff clean. No live/network/paid/OAuth/release
+  operation, push, merge or deployment occurred. Task24 overall remains incomplete.
+
+## 2026-09-13 Task24-A independent CLEAN review closure
+
+- Independent round-2 rereview of `e3efbc9..ba229aa` (implementation `a3444d8`)
+  is **CLEAN, with no actionable findings**. This closes the Task24-A candidate
+  review statuses above, without completing Task24 overall.
+- Reviewer verification: combined selection `189 passed in 208.84s`, credential
+  `3 passed`, eight additional independent refusal probes, and clean
+  Ruff/format/AST/diff/status checks. The four round-1 evidence/context/Git/vector
+  fixes, independent scalar binding, single fixture-manifest authority and
+  Task24-B default refusal remain intact.
+- PostgreSQL verification, Task25's committed evaluator, production snapshot/
+  oracle/roster adapters and Task24-B remain incomplete. Actual CLI preview
+  still refuses with `evaluator_unavailable`, zero dispatch and no authorization.
+  This closure changes documentation only; no code/tests, live/provider/release
+  operation, OAuth, push, merge or deployment are included.
+
+## 2026-09-14 Task24-B round-5: IMPLEMENTED / NOT RELEASE-CLEAN
+
+The final scoped fix round addresses a reproduced payload partial-commit path:
+a source callback could replace caller payload scalars, then run comparison code after
+mutation DML. Append now owns the complete exact native payload, literal plans,
+observation identities and subsequent before/after images before acquisition.
+An identity audit covers every payload field/container, and actual callback tests
+cover reader, oracle, reviewer, clock, property and provider acquisition paths.
+
+The same audit found shared ORM Column/type objects could run late SQL bind and
+result processors. An append-local native schema registry now isolates execution,
+snapshots, runtime projections and final roster queries. Sealed incident envelopes
+are separately detached/authenticated while preserving preflight-refusal retry and
+one-use consumption. Numeric WHERE bindings enforce exact finite Decimal and
+column-owned precision/fixed scale, including equivalent-alias rejection.
+
+The exact-six physical schema, runtime evidence/cost semantics, marker-first
+failure evidence, provider barriers, reviewer/manifest authority and refusing real
+CLI are retained. Implementation `3617c0e` has final green per-file evidence:
+**1379 passed, 14 skipped** across all 19 release files; direct impact **266 passed,
+16 skipped**, 11 existing warnings; credential **3 passed**; independent probes
+**5 passed**. Four Python files pass Ruff/format/compile and diff checks. Production
+code stayed frozen; six obsolete callback-count/error-text test expectations were
+updated and their files/shard rerun. The SDD report preserves initial failures and
+the final disjoint green selections. Final independent review of `3617c0e` / docs
+`26d8337` reached **breaker 5/5**, reproducing one remaining load-bearing P1:
+sealed provider-incident SQL in `RagProviderSafetyService._apply_release_incident`
+and `_commit_transition` still uses shared ORM Table/Column/Type objects outside
+the append-local schema. The probe observed partial provider-authority generation
+and latch publication while readiness, provider history and release marker stayed
+unchanged. This independent verdict claims only that focused failure, not a rerun
+of the implementation suites above.
+
+Task24-B and Task24 overall remain **NOT RELEASE-CLEAN**; actual release and
+authorization are blocked. No open-ended sixth Task24-B fix is planned. Task25's
+mandatory first RED slice, before composite runner/quality work, must isolate all
+provider-incident SQL into authority-owned immutable schema/type metadata, enforce
+no injected callbacks after first DML, prove atomic provider authority + exact
+readiness peers + provider history + latch + release state/marker, and receive an
+independent CLEAN review. Cost if wrong: persistent provider authority/readiness/
+history divergence and reviewed recovery. PostgreSQL and production readers remain
+open. This final closure changes documentation only. No actual release,
+bootstrap/rebootstrap/authorization/OAuth/provider/network/paid operation, push,
+merge or deployment occurred.
+
+## 2026-09-14 Task24-B round-4 authority input and mutation roster candidate
+
+Independent review found four remaining input-boundary failures in round 3:
+caller path protocols could commit during final checks, generators lost root
+exclusions, a retained DB identity could run callbacks after DML, extra valid
+plans ran before roster refusal, and Numeric fields accepted coercible values.
+Permanent RED tests reproduced these failures through actual isolated operations.
+
+Authority construction now retains canonical native paths from one-time iterator
+and protocol consumption. Every operation detaches an exact native DB identity
+before callbacks and uses the independently read current identity thereafter.
+The complete frozen mutation roster and prospective locked database state are
+validated before the first DML or sealed incident, with actual after-images
+checked independently afterward. Caller money literals require exact canonical
+Decimal types and schema bounds; trusted defaults normalize separately. Existing
+six-place signing, initial child order, allowed statement reordering and one-time
+case-source acquisition are preserved.
+
+The scope retains Task23 marker-first crash evidence, active guard lifetimes,
+Task24-A/reviewer/authorization/root-manifest boundaries, exact-six schema and
+the real CLI refusal. Implementation `34b2475` has final frozen-code release
+evidence **1318 passed, 14 skipped** across all 19 files, direct-impact evidence
+**266 passed, 16 skipped** with 11 existing Alembic warnings, and credential
+**3 passed**. All six changed Python files pass Ruff/format/compile and diff
+checks; the SDD report records RED evidence and exact commands. No code/tests
+changed after final launch. Independent review, PostgreSQL, Task25 and production readers
+remain outstanding. No actual release/bootstrap/rebootstrap/disaster-init,
+OAuth/provider/network/paid call, push, merge or deployment occurred.
+
+## 2026-09-14 Task24-B round-3 publication fencing candidate
+
+Independent rereview found that round-2's global provider exit-check removal
+left non-append authority operations unfenced, and a late callable authorization
+binding could commit earlier runtime rows. Five permanent actual-operation RED
+tests reproduced both failures. Init/recovery/inspect now use locally owned
+pinned peer/release checkpoints, and append translates every mutation plan into
+schema-owned literal-image SQL before the first DML. Caller SQL, executable
+bindings, custom processors and implicit callable defaults never execute.
+
+The fix preserves Task23's marker-first crash evidence and external review
+boundary: init/recovery hooks run before release DML and are followed by a final
+transaction/peer/release check; no post-commit verifier callback or automatic
+repair is introduced. Existing fresh-reviewer/source guard lifetimes, Option-A
+observations and exact-six schema remain intact. Implementation `b1ab6af` has
+fresh whole-19-file evidence **1145 passed, 14 skipped**, direct-impact evidence
+**266 passed, 16 skipped** (11 existing Alembic warnings), focused contracts
+**38 passed** and credential **3 passed**. Four changed Python files pass
+Ruff/format/compile and diff checks; code/tests were frozen before final runs.
+Native driver timezone/ZoneInfo normalization has its own RED/GREEN while custom
+tzinfo remains callback-free refusing. Independent rereview,
+PostgreSQL, Task25 and production readers remain outstanding. No actual release,
+bootstrap/rebootstrap, OAuth/provider/network/paid call, push, merge or deployment
+occurred. This candidate is not overall Task24 CLEAN.
+
+## 2026-09-14 Task24-B round-2 callback isolation candidate
+
+Independent rereview reproduced two P1 transaction-integrity defects in the
+round-1 candidate: a late reviewer property committed corpus drift, and reader
+teardown committed partial release state before a later refusal. Three permanent
+actual-append reproducers failed before the fix, including a 90-callback post-DML
+counter. All adapter/reviewer/oracle callbacks now finish before DML; later
+checks use frozen complete images and independently owned SQL/file/key/source
+validation. The provider peer is pinned before publication, and success or
+rollback completes before trusted lock cleanup. Append accepts no publication
+callback hook. The earlier round-1 callback-free claim is superseded.
+
+Implementation `656a5c3` passes the complete 19-file release selection: **1070
+passed, 14 skipped** across three disjoint shards. Direct impact: **266 passed,
+16 skipped** (11 existing Alembic warnings); credential: **3 passed**. All 12
+Python files pass Ruff/format/compile and diff checks; code/tests were frozen
+before the final runs. Exact-six schema, guard lifetime, registry identities, provider-free
+CLI refusal and the external execution-approval boundary remain unchanged.
+Independent rereview, PostgreSQL, Task25 and production adapters remain open.
+No actual OAuth/provider/network/paid/release/bootstrap/rebootstrap operation,
+push, merge or deployment occurred. This is not overall Task24 CLEAN.
+
+## 2026-09-13 Task24-B bounded authorization candidate
+
+Round-1 independent review subsequently identified two P1 authority-lifetime
+defects; the verification below is historical, not a CLEAN review result.
+The remediation makes authority ownership/lifetime explicit and completes all
+reader callbacks before independent source/key/peer checks. Remediation commit
+`3f14376` passes the full 19-file release selection: **1041 passed, 14 skipped**
+across three disjoint file shards. Expanded direct impact: **266 passed, 16
+skipped**, with 11 existing Alembic warnings; credential: **3 passed**. All 11
+changed Python files pass Ruff/format/compile and diff checks. Independent
+rereview is pending; Task24 is not CLEAN and no actual run is authorized.
+
+- Implementation commit: `da4da6d`. Final provider-free release regression:
+  **1025 passed, 14 skipped**; direct impact: **259 passed, 13 skipped**, with
+  11 existing Alembic warnings. Credential scan: **3 passed**. All eight changed
+  Python files pass Ruff/format/compile and diff checks. PostgreSQL was not run.
+- Three distinct current Google subjects now form the exact reviewer/adjudicator
+  roster only after separate fresh, single-use OAuth2 authorization-code + PKCE
+  challenges. This reuses the signed state/nonce builder and fixed Google
+  token/userinfo endpoints; it is not an ID-token/JWKS flow or session-cookie proof.
+  Completed proof state contains role-bound HMACs, never code/token/state bytes.
+- A separately signed external canonical execution approval binds the complete
+  CLEAN preview and the exact unused ledger, marker, key, environment, host,
+  validation database, fixture, corpus, provider, baseline, reviewer and limit
+  context. Its signed actor is separate from the quality-reviewer roles. Plan
+  approval or the prior USD 100 balance statement cannot authorize execution.
+- The opaque approved-source capability is issued only by that composition;
+  raw DTOs, copies and preview provenance cannot substitute. Preparation and
+  append revalidate source bytes, current reviewers, external review-key registry
+  and locked release/provider peers. Append passes its existing sealed barrier
+  through projection validation, avoiding recursive Windows sidecar acquisition.
+- The user approved two narrow Task23 identity corrections: structured exact
+  UTF-8 environment/host registry payloads and the shared provider fingerprint
+  key-material verifier. Legacy raw-string or release-domain identities refuse
+  without mutation; there is no dual acceptance, repair or automatic migration.
+  Rebootstrap requires separate review and was not performed.
+- Task24-B is an implementation candidate awaiting independent review, not
+  Task24 CLEAN. The real preview and authorization CLI remain evaluator-first
+  refusing; Task25, production snapshot/oracle/roster adapters and PostgreSQL
+  verification remain outstanding. All authority mutations and fake Google
+  exchanges in verification use isolated automated-test fixtures. No actual
+  bootstrap/rebootstrap/authorization/provider/network/paid/release operation,
+  push, merge or deployment occurred.

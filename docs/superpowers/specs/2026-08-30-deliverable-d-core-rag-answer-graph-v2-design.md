@@ -1,5 +1,11 @@
 # Deliverable D Core — Retriever Port and RAG Answer Graph V2 설계
 
+> 2026-09-20: 구현된 계약의 **상세 참조**로 보존한다. 현재 상태·진행 순서는
+> [현재 로드맵](../../../plan.md)과 [D 마무리 spec](2026-09-20-d-core-completion-design.md)을 따른다.
+> 아래 과거 리뷰 기록·§23의 다음 단계·미시작 문구는 당시 상태다.
+> 미승인 변경안은 이 문서의 승인 계약을 자동 대체하지 않는다. R1은 별도 결정 전 NOT CLEAN이다.
+> 처음부터 전문을 읽거나 중간 구현·검증 이력을 다시 수행하지 않는다.
+
 검토 버전: 1
 작성일: 2026-08-30
 상태: 사용자 섹션별 설계 및 consolidated written-spec 승인 완료

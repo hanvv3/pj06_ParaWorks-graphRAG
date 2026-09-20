@@ -52,12 +52,18 @@ well-tested, and stable.
 
 Before starting work, read or inspect:
 
-- `plan.md`
-- `docs/portfolio-log.md`
-- `docs/superpowers/runbooks/session-handoff.md`
-- the latest relevant spec under `docs/superpowers/specs/`
-- the latest relevant plan under `docs/superpowers/plans/`
-- `git status --short`
+- `plan.md` for the active document map and execution order;
+- `docs/superpowers/runbooks/session-handoff.md` for the current blocker/next task;
+- the latest entry in `docs/portfolio-log.md`, not the complete history;
+- the common spec and selected stage spec linked by `plan.md`;
+- only the next task in the active implementation plan, then its code/tests;
+- `git status --short` and the current branch/HEAD.
+
+Archived records and older detailed specs are selective references, not mandatory
+startup context. Read the named contract section when the task changes it. Old
+unchecked checklists and old pending/unstarted statuses do not override the active
+handoff. A proposed security/public/storage contract change is not approved merely
+because it appears in a new plan.
 
 Never revert user or teammate changes unless explicitly asked.
 
@@ -274,6 +280,13 @@ flow, or verification evidence changes.
 
 Update `docs/superpowers/runbooks/session-handoff.md` when future workers need
 new context to continue safely.
+
+Keep the current handoff short: code revision, real status, unresolved gate,
+next task and required links. Put verification history in the portfolio log once;
+do not repeat every review round in spec, plan and handoff. Archive older log
+segments with a dated link when they obscure current work. Write future-stage
+plans at outcome/contract granularity; expand only the next independently
+testable slice. Apply review and test scope in proportion to the changed boundary.
 
 ## Forbidden Assistant Behavior
 

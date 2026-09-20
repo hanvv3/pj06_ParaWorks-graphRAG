@@ -869,6 +869,10 @@ rollback은 deliverable 단위로 수행한다.
 
 ## 20. GraphRAG 후속 순서
 
+> 2026-09-20: 아래는 초기 방향의 역사적 목록이다. 현재 E 초기 범위는
+> [E spec](2026-09-20-e-graphrag-design.md)을 참조한다. outbox/CDC, 유료 query classifier,
+> Knowledge Map 확장을 선행 dependency로 추가하지 않는다. 구현 진입은 D Core → D.1 → E다.
+
 1. Neo4j foundation과 최소 권한 connection
 2. PostgreSQL approved-knowledge outbox projection
 3. idempotent graph node/edge sync와 revoke/supersede

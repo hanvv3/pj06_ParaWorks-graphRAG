@@ -1,5 +1,10 @@
 # Deliverable D Core RAG Answer Graph V2 Implementation Plan
 
+> 2026-09-20: 이 27-task 문서는 기존 계약/파일/검증의 상세 참조다. 남은 실행은
+> [D 마무리 계획](2026-09-20-d-core-completion.md)을 따른다. 과거 체크박자는 현재 진행률이 아니며
+> 처음의 승인 대기·마지막 Task1 시작 안내는 역사적 지시다. 아래 기록을 새 CLEAN 증거로 읽지 않는다.
+> 현재 Task25-B는 `3f6cb0f`에서 NOT CLEAN이며 공통 spec R1 변경은 미확정이다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace ParaWorks' hard-coded RAG orchestration path with a real LangChain 1.x retriever port and a real LangGraph 1.x answer graph while preserving the V1 `/ask`, `/search`, and Assistant user experience, evidence authority, permissions, and exact cost accounting.
