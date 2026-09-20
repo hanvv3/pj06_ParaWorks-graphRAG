@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -570,6 +572,33 @@ def test_postgres_finalizer_owns_fresh_phase2_safety_and_exact_run_requirements(
         'backend.app.agent_runtime.provider_send_fence._assemble_rag_evidence_barrier',
         lambda **kwargs: object(),
     )
+    advisory_transport = object()
+    captured_transport: list[object] = []
+    if paid:
+        class ComposedProviderSafety:
+            def __init__(
+                self,
+                *,
+                latch_path,
+                identity_secret,
+                designated_environment_id,
+                advisory_capability,
+                advisory_transport,
+            ):
+                captured_transport.append(advisory_transport)
+                self.advisory_transport_authority = advisory_transport
+                self._latch_path = Path(latch_path)
+                self._secret = identity_secret
+
+        monkeypatch.setattr(
+            'backend.app.agent_runtime.rag_postgres_binding.'
+            '_bind_rag_postgres_advisory_transport',
+            lambda *args, **kwargs: advisory_transport,
+        )
+        monkeypatch.setattr(
+            'backend.app.agent_runtime.rag_provider_safety.RagProviderSafetyService',
+            ComposedProviderSafety,
+        )
     phase2 = object()
     binding = SimpleNamespace(policy_snapshot=source.policy_snapshots[1])
     unrelated = SimpleNamespace(policy_snapshot=source.policy_snapshots[0])
@@ -593,7 +622,7 @@ def test_postgres_finalizer_owns_fresh_phase2_safety_and_exact_run_requirements(
     def paid_phase2(**kwargs):
         safety = kwargs['provider_safety']
         assert safety is not assembly.provider_safety
-        assert safety.advisory_transport_authority is None
+        assert safety.advisory_transport_authority is advisory_transport
         assert safety._latch_path == (tmp_path / 'phase2-latch.json').absolute()
         assert safety._secret == settings.agent_runtime_fingerprint_secret.encode()
         assert kwargs['postgres_database'] is bound_database
@@ -627,3 +656,5 @@ def test_postgres_finalizer_owns_fresh_phase2_safety_and_exact_run_requirements(
             ),
         )
         assert type(result) is finalization.RagFinalizationService
+    if paid:
+        assert captured_transport == [advisory_transport]

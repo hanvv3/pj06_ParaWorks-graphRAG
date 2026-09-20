@@ -460,6 +460,7 @@ def _postgres_finalizer(*, db, settings, assembly, pending, prepared):
         _assemble_provider_free_rag_phase2_authority,
     )
     from backend.app.agent_runtime.rag_postgres_binding import (
+        _bind_rag_postgres_advisory_transport,
         _bind_rag_postgres_database,
     )
     from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
@@ -540,14 +541,17 @@ def _postgres_finalizer(*, db, settings, assembly, pending, prepared):
                     RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
                     identity_namespace='static',
                 )
-            # Phase 2 owns fresh pinned database connections, not phase 1's
-            # one-physical-use transport. Its concrete database authority owns
-            # lock release/disposal; retain the exact same durable safety root.
+            advisory_transport = _bind_rag_postgres_advisory_transport(
+                db,
+                trusted_bootstrap=RagPostgresDatabaseBootstrap,
+                bootstrap_capability=assembly.bootstrap_capability,
+            )
             phase2_safety = RagProviderSafetyService(
                 latch_path=settings.paraworks_provider_safety_latch_path,
                 identity_secret=fingerprint_secret_bytes(settings)[0],
                 designated_environment_id=settings.paraworks_env,
                 advisory_capability=safety_lock,
+                advisory_transport=advisory_transport,
             )
         phase2 = (
             _assemble_paid_rag_phase2_authority(
