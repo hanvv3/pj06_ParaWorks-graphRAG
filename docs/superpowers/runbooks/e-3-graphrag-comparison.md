@@ -32,10 +32,12 @@ model-answer faithfulness, citation quality, or paid cost.
 One standalone five-case run measured the retrieval portion after fixture setup
 using `perf_counter_ns`; `n=5`, one measurement per case, no provider calls.
 Raw `(relation, single, absent, restricted, revoke)` milliseconds were pgvector
-`(440.592, 58.005, 47.724, 228.292, 62.025)`, graph wrapper
-`(182.173, 6.159, 0.277, 5.508, 12.841)`, and projection synchronization
-`(173.002, 187.119, 175.017, 118.987, 87.587)`. Nearest-rank p50/p95 are
-pgvector `62.025/440.592`, graph `6.159/182.173`, and sync `173.002/187.119`.
+baseline `(437.342, 59.468, 48.151, 232.486, 58.171)`, graph enrichment
+overhead—using that precomputed seed—`(176.653, 5.815, 0.233, 5.990, 5.612)`,
+derived graph total `(613.994, 65.282, 48.384, 238.476, 63.784)`, and projection
+synchronization `(167.348, 161.109, 173.114, 111.084, 89.656)`. Nearest-rank
+p50/p95 are pgvector `59.468/437.342`, enrichment overhead `5.815/176.653`,
+derived total `65.282/613.994`, and sync `161.109/173.114`.
 Every completed scope reported generation lag `0`; this tiny cold-fixture sample
 is observability evidence, not an SLO or production latency claim.
 
@@ -57,12 +59,15 @@ driver/store after the disposable Neo4j restart. Each test leases a PostgreSQL
 schema and deletes its unique Neo4j scope.
 
 The measured run used `pgvector/pgvector:pg17` and `neo4j:2026.08.1`; the eight
-comparison/rollback tests passed in 5.82s. Review R1 initially reproduced eight
-standalone setup errors because this module omitted `lexical_pg`; importing that
-fixture is the GREEN correction. The controller-coordinated restart
+comparison/rollback tests passed in 5.79s. Review R1 initially reproduced eight
+standalone setup errors because this module omitted `lexical_pg`; Ruff's unused
+import autofix removed the first correction. The explicit self-alias import is
+the R2 GREEN correction. The controller-coordinated restart
 recovery passed in 25.74s, including test-only Neo4j readiness polling. Projection lag was
 zero for the completed relation scope. A separate controlled PostgreSQL restart
 reconstructed a fresh engine/session and reproduced the same pgvector control and
 graph result (**1 passed, 7 deselected in 16.34s**); lease cleanup reconnects once
 only for this disposable test outage. No paid providers, cache, rollout flag,
 `.env` change, or deployment RBAC claim is included.
+
+R2 code revision: `d307a2804c3aa9c8f955de386df8dd5ff12ad7d8`.

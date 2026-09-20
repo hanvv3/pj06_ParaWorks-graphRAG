@@ -9,8 +9,11 @@
   revoke retain their controls; absent returns no evidence. E-3 R1 made the
   module standalone, fed the identical case-specific request to both arms, and
   measured fixed-fixture retrieval/sync: n=5 nearest-rank p50/p95 ms is
-  pgvector 62.025/440.592, graph 6.159/182.173, sync 173.002/187.119; lag 0.
-  The corrected standalone selector: **8 passed in 5.93s**.
+  pgvector 59.468/437.342, graph enrichment overhead 5.815/176.653, derived
+  seed+overhead total 65.282/613.994, sync 161.109/173.114; lag 0. Ruff had
+  removed the first fixture import; explicit fixture alias R2 is now retained.
+  The corrected standalone selector: **8 passed in 5.79s**. R2 code revision:
+  `d307a2804c3aa9c8f955de386df8dd5ff12ad7d8`.
 - Actual default-off composition returns the unwrapped seed. Fake-store unavailable/
   stale tests preserve a controlled existing receipt; they do not claim paid-call
   savings. Existing E-2 actual-driver outage/composition evidence remains separate.
