@@ -4,6 +4,8 @@
 
 - Worktree/branch: `review-hitl-v2-design` / `codex/rag-orchestrator-agent`.
 - Base inspected: `c4623146caf78932741440ff5d0d2bd68552d36a`.
+- Final correction code revision: `9200ea3edd02590ef29e9156c3ea7f3a8fc27bf6`;
+  original F-2 evidence baseline commit: `a7a58f8`.
 - Disposable local PostgreSQL identity: database `paraworks_rag_test`, role
   `paraworks_rag_test`, pgvector `0.8.2`; no provider credentials or network
   provider calls were used.
@@ -41,24 +43,22 @@
 - Corrected pgvector test fixtures so the stale guarded upsert reaches its
   relational guard and assistant citations carry their full evidence payload.
 
-## Initial diagnosis and limitations
+## Historical initial diagnosis (superseded)
 
-`backend/tests/test_rag_v2_costs_postgres.py` exposed a real authority
-composition mismatch. The paid phase-2 assembler now fails closed unless it
-uses the exact provider-safety `RagPostgresAdvisoryTransport` with the same
-runtime-health authority as `RagPostgresDatabaseAuthority`; owner and evidence
-operations remain on the database authority. This clears the original
-`provider advisory connection authority changed` failure. The focused recovery
-test then reaches a later lifecycle failure, `pinned PostgreSQL transaction did
-not end`, so the exact suite is not yet green. Frontend lint/type/build,
-controlled-fake Playwright, final product docs, and a local commit are not
-claimed: F-2 acceptance is incomplete. Formal release remains NOT CLEAN.
+Before the later corrections, `backend/tests/test_rag_v2_costs_postgres.py`
+exposed the paid phase-2 authority mismatch and then the recovery transaction
+failure. Those observations caused the fail-closed exact advisory-transport
+and pre-commit terminal-data corrections recorded below. They are not the
+current F-2 result; formal release remains NOT CLEAN.
 
 ## Final correction and completion evidence
 
 - The recovery root cause was confirmed: constructing terminal data after
   `_commit` read expired ORM rows, reopening the pinned transaction. Finals and
   terminal are now built before commit; the focused recovery selector is green.
+- Review-round composition RED->GREEN: `_postgres_finalizer` now binds and
+  passes the bootstrap-bound advisory transport to paid safety. Its focused
+  production composition selector is **2 passed in 4.54s**.
 - Required exact real-PG command: **318 passed, 13 warnings**, no skips. It
   covers the supplied non-superuser role, same-DB/pinned transaction authority,
   cost actual-or-reserve preservation, C.5/advisory serialization, readiness,
@@ -70,7 +70,11 @@ claimed: F-2 acceptance is incomplete. Formal release remains NOT CLEAN.
   passed. Frontend lint/type/build passed. The 48-case controlled-fake Chromium
   run's two timing-sensitive initial failures passed in a fresh `--last-failed`
   retry; final Playwright state is `passed` with no failed tests.
-- Cleanup counts are `leased_schemas=0` and `active_peer_sessions=0`.
+- Initial F-2 cleanup counts were `leased_schemas=0` and
+  `active_peer_sessions=0`. A post-correction read-only check briefly observed
+  one unowned lease/session; it cleared without termination or deletion. Final
+  read-only ownership check is again `leased_schemas=0` and
+  `active_peer_sessions=0`.
 
 **D functional baseline passed / E-1 may start / formal release deferred and
 NOT CLEAN.** Actual-model quality, reviewer OAuth, 30-case publication, live

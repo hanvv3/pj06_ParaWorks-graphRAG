@@ -6,7 +6,8 @@
 
 - Worktree: `C:/Users/hanvv/Study/potenup3/pj06_ParaWorks+graphRAG/.worktrees/review-hitl-v2-design`
 - Branch: `codex/rag-orchestrator-agent`
-- 점검한 HEAD: `116347d` (제품 구현 `61eb6d7`). 재개 시 `git status --short`와 HEAD를 다시 확인.
+- 점검한 code HEAD: `9200ea3edd02590ef29e9156c3ea7f3a8fc27bf6`
+  (F-2 evidence baseline `a7a58f8`). 재개 시 `git status --short`와 HEAD를 다시 확인.
 - 진입 문서: [plan.md](../../../plan.md), [공통 spec](../specs/2026-09-20-remaining-deliverables-design.md),
   [D 마무리 spec](../specs/2026-09-20-d-core-completion-design.md), [D 계획](../plans/2026-09-20-d-core-completion.md).
 
@@ -59,4 +60,4 @@ R1 threat-model 변경과 P1 해결을 승인된 것으로 해석하지 않는�
 - 로컬 `.tmp/task25-b-authority-code-r1-review.md`와
   `.tmp/task25b-authority-spec-r1-independent-review.md`는 선택적 재현 자료다.
   ignored 파일이 없는 새 체크아웃에서도 위 요약으로 상태를 파악할 수 있다.
-  formal release 재개 때 D-0/D-1 acceptance를 확인한다. 지금의 다음 작업은 F-1이다.
+  formal release 재개 때 D-0/D-1 acceptance를 확인한다. 지금의 다음 작업은 E-1이다.

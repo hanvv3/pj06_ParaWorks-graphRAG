@@ -2,6 +2,9 @@
 
 ## 2026-09-20 — F-2 실제 PostgreSQL/pgvector 및 local-fake UI 기준선 검증
 
+- final correction code revision은
+  `9200ea3edd02590ef29e9156c3ea7f3a8fc27bf6`이며, F-2 evidence baseline commit은
+  `a7a58f8`이다. 이 항목을 기록하는 docs follow-up은 그 code revision 뒤에 있다.
 - disposable `paraworks_rag_test` PostgreSQL/pgvector `0.8.2`에서 migration,
   app/vector schema guard와 supplied non-superuser role을 확인했다. live provider,
   `.env`, Docker volume, rollout은 변경하지 않았다.
