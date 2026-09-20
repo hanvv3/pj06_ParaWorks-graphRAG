@@ -68,7 +68,6 @@ from backend.app.schemas.review_workflow import (
     ReviewItemResolutionStatus,
     ReviewWorkflowDryRunResponse,
     ReviewWorkflowDryRunResponseV21,
-    normalize_agent_names,
 )
 
 EFFECT_KEY_SCHEMA = 'review-agent-effect:v1'
@@ -593,6 +592,7 @@ class ReviewDraftService:
                     workflow_thread_id,
                     lock=False,
                     settings=self._settings,
+                    catalog=self._catalog,
                 )
                 _ensure_thread_scope(inputs, self._settings)
                 packet = _build_exact_packet(
@@ -678,6 +678,7 @@ class ReviewDraftService:
                 workflow_thread_id,
                 lock=False,
                 settings=self._settings,
+                catalog=self._catalog,
             )
             _ensure_thread_scope(inputs, self._settings)
             _ensure_thread_state(inputs.status)
@@ -725,7 +726,7 @@ class ReviewDraftService:
     ) -> _Lease:
         with self._session_factory() as db:
             thread = _locked_thread(db, workflow_thread_id)
-            inputs = _draft_inputs_for_thread(db, thread, settings=self._settings)
+            inputs = _draft_inputs_for_thread(db, thread, settings=self._settings, catalog=self._catalog)
             _ensure_thread_scope(inputs, self._settings)
             _ensure_thread_state(inputs.status)
             now = self._now()
@@ -853,7 +854,7 @@ class ReviewDraftService:
                     'invalid_state_transition', 'workflow is cancelled'
                 )
 
-            inputs = _draft_inputs_for_thread(db, thread, settings=self._settings)
+            inputs = _draft_inputs_for_thread(db, thread, settings=self._settings, catalog=self._catalog)
             _ensure_thread_scope(inputs, self._settings)
             if inputs.evidence_version_hash != lease.evidence_version_hash:
                 db.rollback()
@@ -1270,6 +1271,7 @@ def _load_draft_inputs(
     *,
     lock: bool,
     settings: Settings,
+    catalog: ReviewAgentCatalog,
 ) -> _DraftInputs:
     query = select(AgentWorkflowThread).where(
         AgentWorkflowThread.thread_id == thread_id
@@ -1279,7 +1281,7 @@ def _load_draft_inputs(
     thread = db.scalar(query)
     if thread is None:
         raise ReviewDraftError('not_found', 'workflow was not found')
-    return _draft_inputs_for_thread(db, thread, settings=settings)
+    return _draft_inputs_for_thread(db, thread, settings=settings, catalog=catalog)
 
 
 def _draft_inputs_for_thread(
@@ -1287,6 +1289,7 @@ def _draft_inputs_for_thread(
     thread: AgentWorkflowThread,
     *,
     settings: Settings,
+    catalog: ReviewAgentCatalog,
 ) -> _DraftInputs:
     if thread.security_scope_id != settings.agent_runtime_security_scope_id:
         raise ReviewDraftError('not_found', 'workflow was not found')
@@ -1317,7 +1320,7 @@ def _draft_inputs_for_thread(
     )
     raw_agent_names = tuple(request.agent_names)
     try:
-        agent_names = normalize_agent_names(raw_agent_names)
+        agent_names = catalog.normalize_stored_agent_names(raw_agent_names)
     except (TypeError, ValueError):
         raise ReviewDraftError(
             'invalid_state_transition',

@@ -1,5 +1,22 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — Slack S-2 synthetic current evidence and human Review
+
+- Explicit local in-memory Slack adapter now enters existing canonical parser/
+  signature/locking/sync; unsigned collisions and normal connector writes to
+  signed synthetic rows fail closed. Parent text is separately current evidence.
+- Internal exact Slack catalog reuses real LangGraph, ReviewDraftService, C5
+  bindings, cache/cost and current human approval. Public Review DTO/default
+  catalog, permission/approval policy and default flags remain unchanged.
+- Fresh affected SQLite **215 passed/0 external**, real disposable PG/pgvector
+  **3 passed/0 external**: late reply/cursor parity, approval/retry, incremental
+  embedding skip, and parent lifecycle exclusion. No direct approval/signature seeds.
+- [S2 runbook](superpowers/runbooks/s-2-slack-synthetic-review.md) records contracts,
+  exact commands and limits. Independent review pending; S3 graph/cache demo remains.
+- Historical ten still fail. S1's six-authority-fixture classification is corrected:
+  ranked work-signal wording is the actual cause; three PKCE and one sync fake remain.
+  No manifest change/xfail, live API, `.env`, push or rollout. Formal release/P1 NOT CLEAN.
+
 ## 2026-09-21 — Slack S-1 bounded synthetic ingestion
 
 - R1 reproduced and fixed two permission/evidence issues: unknown channel visibility

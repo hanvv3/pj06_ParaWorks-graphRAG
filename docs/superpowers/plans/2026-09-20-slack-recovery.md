@@ -7,7 +7,7 @@
 **Spec:** [Slack 설계](../specs/2026-09-20-slack-recovery-design.md).
 **Architecture:** fake Slack → SourceEvent/registry/shared sync → pending Review → 현재 승인 → indexing/search.
 **Tech:** 기존 Python/pytest·LangChain/LangGraph·SQLite smoke·PostgreSQL/pgvector·E/D.1 경계.
-**상태:** S-1 R1 수정/101-test GREEN, 재리뷰 대기. S-2/S-3 미구현. E/D.1 CLEAN 뒤 진행 중이다.
+**상태:** S-1 CLEAN; S-2 구현·검증, 독립 리뷰 대기; S-3 미구현. E/D.1 CLEAN 뒤 진행 중이다.
 
 ## 공통 제약과 리뷰 초점
 
@@ -41,15 +41,18 @@ S-1 code `1ddfc21`, [검증·한계](../runbooks/s-1-slack-synthetic-ingestion.m
 **파일 책임:** `backend/app/ingestion/service.py`, `agents/slack_agent/service.py`, 관련 runtime registry,
 `review/transitions.py`, `rag/indexing.py`; Slack review bridge·knowledge promotion·indexing 테스트.
 
-- [ ] RED: missing evidence, restricted 혼합 입력, legacy unsigned/current-version 차이,
+- [x] missing evidence, restricted 혼합 입력, legacy unsigned/current-version 차이,
   pending의 trusted 노출 거부와 기존 승인 전이를 거친 검색을 재현한다.
-- [ ] 기존 source authority/Review 계약과의 gap을 최소 범위로 연결한다. fresh ingestion과 기존 행
+- [x] 기존 source authority/Review 계약과의 gap을 최소 범위로 연결한다. fresh ingestion과 기존 행
   migration을 구분하고 정책 변경이 필요하면 범위·영향을 먼저 명시한다. 승인 데이터를 직접 seed하지 않는다.
-- [ ] RED: source 수정·삭제·권한 축소, 승인 재시도, prompt version 변경을 고정하고 최소 구현한다.
+- [x] source 수정·삭제·권한 축소, 승인 재시도, prompt version 변경을 고정하고 최소 구현한다.
   근거 version과 strictest permission, token/cost, agent cache와 incremental embedding skip을 확인한다.
 - [ ] fake 모델 기반 GREEN과 Review/권한/indexing 영향 회귀를 실행하고 변경 경계를 리뷰·커밋한다.
 
 **완료:** 수집 → pending → 현재 승인 → 검색이 연결되고, source 변경 시 오래된 지식 노출이 차단된다.
+
+구현·fresh 검증은 [S2 runbook](../runbooks/s-2-slack-synthetic-review.md).
+SQLite 영향 215 passed/실제 PG·pgvector 3 passed, external 0. 독립 리뷰는 아직 대기다.
 
 ## S-3 — 통합 데모와 실제 연결 인수인계
 

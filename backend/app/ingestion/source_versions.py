@@ -3,8 +3,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
-CanonicalSourceType = Literal['gmail', 'gmail_attachment', 'drive', 'calendar']
+CanonicalSourceType = Literal['gmail', 'gmail_attachment', 'drive', 'calendar', 'slack']
 ReviewBatchMode = Literal['v2_explicit', 'legacy_inline']
+
+
+def _valid_source_id(source_type: str, source_id: str) -> bool:
+    if source_type == 'slack':
+        return re.fullmatch(r'[A-Z0-9]+:[0-9]+\.[0-9]{6}', source_id) is not None
+    return source_id.startswith(f'{source_type}:')
 
 
 class SourceRefLike(Protocol):
@@ -36,10 +42,10 @@ def current_content_signature(source: CanonicalSourceLike) -> str | None:
 
 
 def source_version_ref(source: CanonicalSourceLike) -> SourceVersionRef | None:
-    if source.source_type not in {'gmail', 'gmail_attachment', 'drive', 'calendar'}:
+    if source.source_type not in {'gmail', 'gmail_attachment', 'drive', 'calendar', 'slack'}:
         return None
     signature = current_content_signature(source)
-    if signature is None or not source.source_id.startswith(f'{source.source_type}:'):
+    if signature is None or not _valid_source_id(source.source_type, source.source_id):
         return None
     return SourceVersionRef(
         source_type=cast(CanonicalSourceType, source.source_type),
@@ -97,7 +103,7 @@ def normalize_source_version_refs(
         if (
             not source_id
             or source_id != source_id.strip()
-            or not source_id.startswith(f'{source_type}:')
+            or not _valid_source_id(source_type, source_id)
             or not version_or_signature
             or version_or_signature != version_or_signature.strip()
         ):

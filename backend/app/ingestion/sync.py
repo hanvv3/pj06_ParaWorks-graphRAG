@@ -18,6 +18,7 @@ from backend.app.connectors.slack import (
     SlackApiError,
     SlackConnector,
 )
+from backend.app.connectors.slack_synthetic import LocalSyntheticSlackConnector
 from backend.app.core.config import Settings, get_settings
 from backend.app.ingestion.service import ingest_events_with_result
 from backend.app.ingestion.source_versions import (
@@ -99,6 +100,9 @@ def sync_connector_events(
             events,
             vector_writer=resolved_writer,
             settings=resolved_settings,
+            synthetic_slack_adapter=(
+                connector if type(connector) is LocalSyntheticSlackConnector else None
+            ),
             authenticated_source_metadata_by_id=(
                 _authenticated_source_metadata_by_id(
                     connector,

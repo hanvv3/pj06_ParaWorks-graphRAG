@@ -39,25 +39,30 @@ Changed-file Ruff and diff checks pass. No PostgreSQL/Neo4j/live API evidence is
 
 ## Historical ten: fresh classification, still unresolved
 
+S2 correction (2026-09-21): the six rows formerly described as unsigned-authority
+failures actually lose their fixture text in the ranked work-signal filter. The
+same text is excluded with or without a server signature; recognized work-action
+wording is included with either. Current source authority is a separate S2 gap.
+
 The first command runs the exact `SLACK_TEN` tuple; no skip/deselection/xfail was added.
 Before product edits: **10 failed in 2.13s**. After S1: **10 failed in 2.17s**.
 Both runs had **0 external transport attempts**. Full node IDs follow.
 
 | Node | Observed failure / classification |
 |---|---|
-| `backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_runs_real_agent_services` | Slack pending count 0 vs 1; unsigned fixture incompatible with current authority |
-| `backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_skips_agents_that_exceed_cost_budget` | `no_slack_evidence` vs `budget_exceeded`; same authority gap |
-| `backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_uses_cache_when_evidence_is_unchanged` | `skip` vs `run`; same authority gap |
+| `backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_runs_real_agent_services` | Slack pending count 0 vs 1; fixture lacks recognized work-action wording |
+| `backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_skips_agents_that_exceed_cost_budget` | `no_slack_evidence` vs `budget_exceeded`; same ranked signal filter |
+| `backend/tests/test_company_memory_orchestration_service.py::test_company_memory_orchestration_uses_cache_when_evidence_is_unchanged` | `skip` vs `run`; same ranked signal filter |
 | `backend/tests/test_oauth_pkce.py::test_slack_oauth_pkce_generation` | Missing `code_challenge`; stale default-PKCE expectation, current default is `use_pkce=False` |
 | `backend/tests/test_oauth_pkce.py::test_slack_callback_with_custom_redirect_uri_and_pkce` | Missing `code_verifier`; same default-contract mismatch |
 | `backend/tests/test_oauth_pkce.py::test_api_endpoints_support_redirect_uri` | Missing Slack `code_challenge`; same default-contract mismatch |
-| `backend/tests/test_orchestration_api.py::test_company_memory_orchestration_api_runs_agent_services` | Slack pending count 0 vs 1; unsigned source fixture gap |
-| `backend/tests/test_quality_permission_regression_suite.py::test_quality_suite_company_memory_emits_review_checkpoint_without_paid_calls` | Review IDs 5 vs 6; unsigned Slack lacks eligible authority |
-| `backend/tests/test_quality_permission_regression_suite.py::test_quality_suite_cache_hit_does_not_duplicate_agent_runs_or_review_items` | `skip` vs `use_cache`; unsigned source fixture gap |
+| `backend/tests/test_orchestration_api.py::test_company_memory_orchestration_api_runs_agent_services` | Slack pending count 0 vs 1; ranked signal fixture wording |
+| `backend/tests/test_quality_permission_regression_suite.py::test_quality_suite_company_memory_emits_review_checkpoint_without_paid_calls` | Review IDs 5 vs 6; ranked signal fixture wording |
+| `backend/tests/test_quality_permission_regression_suite.py::test_quality_suite_cache_hit_does_not_duplicate_agent_runs_or_review_items` | `skip` vs `use_cache`; ranked signal fixture wording |
 | `backend/tests/test_slack_oauth.py::test_slack_sync_endpoint_uses_installed_connection_token_without_exposing_it` | Fake sync rejects `job_id`; stale fake signature |
 
-These ten show no S1 connector defect or remaining environment failure. Six need S2's
-explicit NEW synthetic validation path; OAuth/fake tests later need current-contract
+These ten show no S1 connector defect or remaining environment failure. Six need
+meaningful work-signal fixtures; OAuth/fake tests later need current-contract
 expectations without changing OAuth policy. Release manifest is unchanged. An initial
 harness attempt had 7 failures/3 setup errors because blanket socket blocking broke
 Windows socketpair; it was corrected before classification. Those setup errors are

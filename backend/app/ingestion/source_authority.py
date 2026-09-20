@@ -39,6 +39,8 @@ def resolve_exact_source_authority(
     source: Source,
 ) -> ExactSourceAuthority | None:
     """Resolve the one exact server-owned bundle allowed to authorize serving."""
+    if source.source_type == 'slack' and (source.raw_metadata or {}).get('slack_state') != 'active':
+        return None
     signature = current_content_signature(source)
     if signature is None:
         return None
@@ -178,7 +180,8 @@ def postgres_exact_source_authority_sql(
     return f"""
         {source_alias}.server_content_signature_schema = '{SERVER_SOURCE_CONTENT_SIGNATURE_SCHEMA}'
         AND {source_alias}.server_content_signature IS NOT NULL
-        AND {source_alias}.source_type IN ('gmail', 'gmail_attachment', 'drive', 'calendar')
+        AND {source_alias}.source_type IN ('gmail', 'gmail_attachment', 'drive', 'calendar', 'slack')
+        AND ({source_alias}.source_type <> 'slack' OR {source_alias}.raw_metadata->>'slack_state' = 'active')
         AND (
             {source_alias}.source_type NOT IN ('gmail_attachment', 'drive')
             OR {mime_json_type} IS NULL

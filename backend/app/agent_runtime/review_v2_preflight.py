@@ -2,7 +2,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from threading import RLock
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from sqlalchemy import select, text
@@ -296,6 +296,12 @@ class WorkflowPreflightResult:
     shared_reuse: bool
 
 
+class ReviewThreadCreationIdentity(Protocol):
+    """Internal creation identity; source/agent validation precedes this boundary."""
+
+    client_request_id: str | None
+
+
 def build_prepared_review_identity(
     *,
     source_refs: tuple[ResolvedSourceVersion, ...],
@@ -394,7 +400,7 @@ def create_or_reuse_review_thread(
     db: Session,
     *,
     prepared: PreparedReviewRequest | PreparedReviewRequestV21,
-    request: ReviewWorkflowRunRequest,
+    request: ReviewThreadCreationIdentity,
     actor: DemoUser,
     settings: Settings,
 ) -> WorkflowPreflightResult:
@@ -519,7 +525,7 @@ def _find_creator_thread(
 def _postgres_advisory_keys(
     *,
     prepared: PreparedReviewRequest | PreparedReviewRequestV21,
-    request: ReviewWorkflowRunRequest,
+    request: ReviewThreadCreationIdentity,
     actor: DemoUser,
     settings: Settings,
 ) -> tuple[int, ...]:
@@ -777,7 +783,7 @@ def _create_thread_rows(
     db: Session,
     *,
     prepared: PreparedReviewRequest | PreparedReviewRequestV21,
-    request: ReviewWorkflowRunRequest,
+    request: ReviewThreadCreationIdentity,
     actor: DemoUser,
     settings: Settings,
     checkpoint_store: str,

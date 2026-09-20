@@ -15,6 +15,7 @@ from backend.app.agent_runtime.keyed_mutation_guard import (
     lock_runtime_state,
 )
 from backend.app.connectors.base import SourceEvent
+from backend.app.connectors.slack_synthetic import LocalSyntheticSlackConnector
 from backend.app.core.config import Settings, get_settings
 from backend.app.documents.service import (
     parsed_document_from_source_event,
@@ -128,6 +129,7 @@ def ingest_events_with_result(
     *,
     vector_writer: VectorIndexWriter | None = None,
     settings: Settings | None = None,
+    synthetic_slack_adapter: LocalSyntheticSlackConnector | None = None,
     authenticated_source_metadata_by_id: Mapping[
         str, Mapping[str, object]
     ] | None = None,
@@ -138,7 +140,10 @@ def ingest_events_with_result(
         and vector_writer.__class__.__name__ == 'PgVectorStore'
         and db.get_bind().dialect.name == 'postgresql'
     )
-    canonical_mutation = any(event.source_type in _C5_SOURCE_TYPES for event in events)
+    synthetic_slack = type(synthetic_slack_adapter) is LocalSyntheticSlackConnector
+    canonical_mutation = any(event.source_type in _C5_SOURCE_TYPES
+                             or (synthetic_slack and event.source_type == 'slack')
+                             for event in events)
     barrier = (
         KeyedMutationGuard.generation_barrier(db)
         if production_vector_mutation or canonical_mutation
@@ -168,6 +173,7 @@ def ingest_events_with_result(
                 settings=resolved_settings,
                 key_context=key_context,
                 rag_generation_context=generation_context,
+                synthetic_slack=synthetic_slack,
                 authenticated_source_metadata_by_id=(
                     authenticated_source_metadata_by_id or {}
                 ),
@@ -185,6 +191,7 @@ def _ingest_events_transaction(
     settings: Settings,
     key_context: KeyGenerationLockedContext | None,
     rag_generation_context: RagServingGenerationLockedContext | None,
+    synthetic_slack: bool,
     authenticated_source_metadata_by_id: Mapping[
         str, Mapping[str, object]
     ],
@@ -201,7 +208,12 @@ def _ingest_events_transaction(
     for event in events:
         existing_source = existing_sources.get(event.source_id)
         _validate_source_event_identity(event, existing_source=existing_source)
-        if event.source_type == 'slack':
+        if (event.source_type == 'slack' and synthetic_slack
+                and existing_source is not None and not existing_source.server_content_signature):
+            raise ValueError('unsigned Slack source collision')
+        if event.source_type == 'slack' and not synthetic_slack:
+            if existing_source is not None and existing_source.server_content_signature:
+                raise ValueError('normal connector cannot update signed synthetic Slack source')
             if _legacy_slack_event_is_unchanged(existing_source, event):
                 skipped_events += 1
                 continue
@@ -213,7 +225,7 @@ def _ingest_events_transaction(
             existing_sources[event.source_id] = source
             changed_source_ids.append(event.source_id)
             continue
-        if event.source_type not in _C5_SOURCE_TYPES:
+        if event.source_type not in _C5_SOURCE_TYPES and not (synthetic_slack and event.source_type == 'slack'):
             raise ValueError('unsupported ingestion source type')
 
         current_parser_run = _current_parser_run(db, existing_source)
@@ -405,7 +417,7 @@ def _lock_existing_document_state(
     source_ids = sorted(
         source.id
         for source in sources
-        if source.source_type in _C5_SOURCE_TYPES
+        if source.source_type in _C5_SOURCE_TYPES or source.server_content_signature is not None
     )
     if not source_ids:
         return

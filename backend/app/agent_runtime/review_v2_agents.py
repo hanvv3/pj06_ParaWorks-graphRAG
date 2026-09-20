@@ -137,19 +137,22 @@ class _ReviewAgentAdapter:
 
 
 class ReviewAgentCatalog:
+    approved_manifests = APPROVED_REVIEW_AGENT_MANIFESTS
+    ordered_names = DEFAULT_REVIEW_AGENT_NAMES
+
     def __init__(self, adapters: Sequence[ReviewAgentAdapter]) -> None:
         by_name = {adapter.manifest.name: adapter for adapter in adapters}
         if (
             len(by_name) != len(adapters)
-            or set(by_name) != set(DEFAULT_REVIEW_AGENT_NAMES)
-            or tuple(APPROVED_REVIEW_AGENT_MANIFESTS) != DEFAULT_REVIEW_AGENT_NAMES
+            or set(by_name) != set(self.ordered_names)
+            or tuple(self.approved_manifests) != self.ordered_names
         ):
             raise ValueError('review agent catalog must contain the exact public manifests')
         self._registry = _FixedAgentRegistry()
         self._adapters: dict[str, ReviewAgentAdapter] = {}
-        for name in DEFAULT_REVIEW_AGENT_NAMES:
+        for name in self.ordered_names:
             adapter = by_name[name]
-            if adapter.manifest != APPROVED_REVIEW_AGENT_MANIFESTS[name]:
+            if adapter.manifest != self.approved_manifests[name]:
                 raise ValueError('review agent catalog must contain the exact public manifests')
             self._registry.register(adapter.manifest)
             self._adapters[name] = adapter
@@ -162,6 +165,14 @@ class ReviewAgentCatalog:
     def get(self, name: str) -> ReviewAgentAdapter:
         self._registry.get(name)
         return self._adapters[name]
+
+    def normalize_stored_agent_names(self, names: tuple[str, ...]) -> tuple[str, ...]:
+        if len(names) != len(set(names)) or any(name not in self._adapters for name in names):
+            raise ValueError('unsupported stored agent name')
+        for name in names:
+            if self.get(name).manifest != self.approved_manifests[name]:
+                raise ValueError('stored agent manifest changed')
+        return tuple(name for name in self.ordered_names if name in names)
 
 
 class _FixedAgentRegistry(AgentRegistry):

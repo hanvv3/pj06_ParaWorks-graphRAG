@@ -68,7 +68,7 @@ _TRUSTED_TYPES = {
     'timeline_event',
     'todo',
 }
-_SUPPORTED_SOURCE_TYPES = {'gmail', 'gmail_attachment', 'drive', 'calendar'}
+_SUPPORTED_SOURCE_TYPES = {'gmail', 'gmail_attachment', 'drive', 'calendar', 'slack'}
 _RESOLUTION_PRIORITY = {'human': 0, 'auto_policy': 1}
 
 

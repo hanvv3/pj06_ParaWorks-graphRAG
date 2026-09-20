@@ -6,6 +6,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Protocol
 
 from backend.app.connectors.base import SourceEvent
@@ -17,6 +18,7 @@ SERVER_CHUNK_POLICY_VERSION = 'paragraph-chunks:1200:v1'
 SERVER_CHUNK_MAX_CHARS = 1_200
 
 _SEMANTIC_METADATA_KEYS: dict[str, tuple[str, ...]] = {
+    'slack': ('workspace_id', 'workspace_url', 'channel_id', 'thread_ts', 'slack_state'),
     'gmail': (),
     'gmail_attachment': ('filename', 'mime_type'),
     'drive': ('mime_type',),
@@ -304,7 +306,12 @@ def _semantic_timestamp(event: SourceEvent) -> str | dict[str, str]:
     if not isinstance(raw, str) or not raw or raw != raw.strip():
         raise SourceContentUnverifiableError('semantic timestamp is missing or malformed')
     try:
-        if event.source_type in {'gmail', 'gmail_attachment'}:
+        if event.source_type == 'slack':
+            if re.fullmatch(r'[0-9]+\.[0-9]{6}', raw) is None:
+                raise ValueError('Slack timestamp must have six decimal places')
+            value = datetime.fromtimestamp(int(Decimal(raw)), tz=UTC).replace(
+                microsecond=int(raw.split('.')[1]))
+        elif event.source_type in {'gmail', 'gmail_attachment'}:
             if not raw.isascii() or _GOOGLE_MILLIS.fullmatch(raw) is None:
                 raise ValueError('Gmail semantic timestamp must be internalDate millis')
             value = datetime.fromtimestamp(int(raw) / 1_000, tz=UTC)

@@ -1,6 +1,22 @@
 # ParaWorks — 현재 인수인계
 
-갱신: 2026-09-21. 단계: **E/D.1 CLEAN; Slack S-1 implemented, independent review pending; formal release NOT CLEAN**.
+갱신: 2026-09-21. 단계: **E/D.1/S-1 CLEAN; Slack S-2 implemented, independent review pending; formal release NOT CLEAN**.
+
+## Slack S-2 → S-3
+
+- [S2 runbook](s-2-slack-synthetic-review.md): exact local synthetic adapter → canonical
+  shared sync → internal registered Slack/C5 draft → current human Review → retrieval.
+  Public Review DTO/default catalog and raw V2 observation whitelist are unchanged.
+- Source signatures/approval are never seeded. Unsigned collisions reject; signed
+  replies carry only their own text, with separate current parent evidence bindings.
+- SQLite affected 215 passed/0 external; actual disposable PG/pgvector 3 passed/0
+  external closes S1 cursor query parity and covers parent lifecycle/vector exclusion.
+- Historical ten remain. Six are ranked work-signal wording failures (S1's unsigned
+  authority diagnosis was incorrect), three PKCE opt-in expectations, one fake job_id.
+  S3 repairs meaningful fixtures and updates manifest only after fresh evidence.
+- Next: independent S2 review, then S3 E/D.1 lifecycle demo and integration handoff.
+  Use working interpreter/fresh .tmp. PG DSN stays process-only; no .env/live calls.
+  S1 subsection below is historical entry context, superseded by this S2 summary.
 
 ## Slack S-1 → S-2
 

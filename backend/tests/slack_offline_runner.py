@@ -15,7 +15,7 @@ import pytest
 from pydantic_settings import BaseSettings
 
 
-def main() -> int:
+def main(*, postgres_url: str | None = None) -> int:
     # Change settings sources BEFORE importing any application module.
     BaseSettings.settings_customise_sources = classmethod(
         lambda cls, settings_cls, init_settings, env_settings, dotenv_settings,
@@ -34,6 +34,15 @@ def main() -> int:
                       PARAWORKS_DATABASE_URL='sqlite://',
                       PARAWORKS_DEMO_DATABASE_URL='sqlite://',
                       PYTEST_DISABLE_PLUGIN_AUTOLOAD='1')
+    if postgres_url is not None:
+        from sqlalchemy.engine import make_url
+        locator = make_url(postgres_url)
+        if (locator.get_backend_name() != 'postgresql'
+                or locator.host != '127.0.0.1'
+                or not (locator.database or '').endswith('_test')
+                or not (locator.username or '').endswith('_test')):
+            raise ValueError('disposable local PostgreSQL required')
+        os.environ['PARAWORKS_TEST_POSTGRES_URL'] = postgres_url
     blocked_calls = []
 
     def blocked(*args, **kwargs):
