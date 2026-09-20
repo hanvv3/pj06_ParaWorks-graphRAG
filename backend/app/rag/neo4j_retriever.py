@@ -79,9 +79,14 @@ def validate_graph_paths(db, paths, *, settings, scope):
 def _evidence(db, document_id, *, settings, scope):
     kind, identifier = document_id.split(':')
     if kind == 'chunk':
-        row = CanonicalSourceObservationResolver(
+        resolver = CanonicalSourceObservationResolver(
             db=db, settings=settings
-        ).resolve_projection_for_scope_strict(int(identifier), scope=scope)
+        )
+        row = resolver.resolve_projection_for_scope_strict(int(identifier), scope=scope)
+        if row is None:
+            row = resolver.resolve_approved_slack_child_for_scope_strict(
+                int(identifier), scope=scope
+            )
     else:
         row = TrustedServingEnvelopeResolver(
             db=db, settings=settings

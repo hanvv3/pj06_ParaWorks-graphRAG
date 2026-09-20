@@ -15,7 +15,6 @@ from backend.app.connectors.slack_oauth import (
     SlackOAuthStateSigner,
     build_slack_oauth_install_url,
     complete_slack_oauth_callback,
-    pkce_challenge,
 )
 from backend.app.core.config import Settings, get_settings
 
@@ -25,20 +24,19 @@ def test_slack_oauth_pkce_generation() -> None:
         slack_client_id='C123',
         slack_oauth_state_secret='state-secret',
     )
-    
-    # PKCE 사용 설정 (기본값)
-    install = build_slack_oauth_install_url(settings=settings)
+
+    # Slack PKCE is disabled, including the retained compatibility argument.
+    default_install = build_slack_oauth_install_url(settings=settings)
+    assert default_install.code_verifier is None
+    assert 'code_challenge' not in parse_qs(urlparse(default_install.install_url).query)
+    install = build_slack_oauth_install_url(settings=settings, use_pkce=True)
     parsed = urlparse(install.install_url)
     params = parse_qs(parsed.query)
-    
-    assert 'code_challenge' in params
-    assert params['code_challenge_method'] == ['S256']
-    assert install.code_verifier is not None
-    
-    # code_challenge 검증
-    expected_challenge = pkce_challenge(install.code_verifier)
-    assert params['code_challenge'] == [expected_challenge]
-    
+
+    assert 'code_challenge' not in params
+    assert 'code_challenge_method' not in params
+    assert install.code_verifier is None
+
     # state 내에 code_verifier가 포함되어 있는지 확인
     state = SlackOAuthStateSigner('state-secret').validate(install.state)
     assert state.code_verifier == install.code_verifier
@@ -49,12 +47,12 @@ def test_slack_oauth_custom_redirect_uri() -> None:
         slack_oauth_redirect_uri='http://localhost:3000/callback',
         slack_oauth_state_secret='state-secret',
     )
-    
+
     custom_uri = 'paraworks://oauth-callback'
-    install = build_slack_oauth_install_url(settings=settings, redirect_uri=custom_uri)
+    install = build_slack_oauth_install_url(settings=settings, redirect_uri=custom_uri, use_pkce=True)
     parsed = urlparse(install.install_url)
     params = parse_qs(parsed.query)
-    
+
     assert params['redirect_uri'] == [custom_uri]
 
 def test_google_oauth_pkce_generation() -> None:
@@ -62,11 +60,11 @@ def test_google_oauth_pkce_generation() -> None:
         google_client_id='G123',
         google_oauth_state_secret='state-secret',
     )
-    
+
     install = build_google_oauth_install_url(settings=settings, connector_type='gmail')
     parsed = urlparse(install.install_url)
     params = parse_qs(parsed.query)
-    
+
     assert 'code_challenge' in params
     assert params['code_challenge_method'] == ['S256']
     assert install.code_verifier is not None
@@ -76,11 +74,11 @@ def test_google_identity_pkce_generation() -> None:
         google_client_id='G123',
         google_identity_state_secret='state-secret',
     )
-    
+
     login = build_google_identity_login_url(settings=settings)
     parsed = urlparse(login.login_url)
     params = parse_qs(parsed.query)
-    
+
     assert 'code_challenge' in params
     assert params['code_challenge_method'] == ['S256']
     assert login.code_verifier is not None
@@ -92,11 +90,11 @@ def test_slack_callback_with_custom_redirect_uri_and_pkce(db_session: Session, m
         slack_oauth_state_secret='state-secret',
         slack_oauth_redirect_uri='http://localhost:3000/callback'
     )
-    
-    # 1. Install URL 생성 (PKCE 포함)
+
+    # A legacy request for PKCE retains current Slack non-PKCE policy.
     custom_uri = 'http://localhost:9999/callback'
     install = build_slack_oauth_install_url(settings=settings, redirect_uri=custom_uri)
-    
+
     # 2. Mock Slack API exchange
     captured_data = {}
     def mock_post(self, url, *args, **kwargs):
@@ -111,9 +109,9 @@ def test_slack_callback_with_custom_redirect_uri_and_pkce(db_session: Session, m
         })
         res._request = httpx.Request('POST', url)
         return res
-    
+
     monkeypatch.setattr(httpx.Client, 'post', mock_post)
-    
+
     # 3. Callback 수행
     connection = complete_slack_oauth_callback(
         db=db_session,
@@ -122,11 +120,12 @@ def test_slack_callback_with_custom_redirect_uri_and_pkce(db_session: Session, m
         state=install.state,
         redirect_uri=custom_uri
     )
-    
+
     assert captured_data['code'] == 'test-code'
     assert captured_data['redirect_uri'] == custom_uri
-    assert captured_data['code_verifier'] == install.code_verifier
-    assert connection.raw_metadata['pkce_used'] is True
+    assert 'code_verifier' not in captured_data
+    assert install.code_verifier is None
+    assert connection.raw_metadata['pkce_used'] is False
 
 def test_google_callback_with_custom_redirect_uri_and_pkce(db_session: Session, monkeypatch) -> None:
     settings = Settings(
@@ -135,10 +134,10 @@ def test_google_callback_with_custom_redirect_uri_and_pkce(db_session: Session, 
         google_oauth_state_secret='state-secret',
         google_oauth_redirect_uri='http://localhost:3000/callback'
     )
-    
+
     custom_uri = 'http://localhost:9999/callback'
     install = build_google_oauth_install_url(settings=settings, connector_type='gmail', redirect_uri=custom_uri)
-    
+
     # Mock Google Token API
     def mock_post(self, url, data=None, **kwargs):
         res = httpx.Response(200, json={
@@ -149,18 +148,18 @@ def test_google_callback_with_custom_redirect_uri_and_pkce(db_session: Session, 
         })
         res._request = httpx.Request('POST', url)
         return res
-    
+
     # Mock Userinfo API
     def mock_get(self, url, **kwargs):
         res = httpx.Response(200, json={'sub': 'user-123', 'email': 'test@example.com'})
         res._request = httpx.Request('GET', url)
         return res
-        
+
     monkeypatch.setattr(httpx.Client, 'post', mock_post)
     monkeypatch.setattr(httpx.Client, 'get', mock_get)
-    
+
     from backend.app.connectors.slack_oauth import LOCAL_TOKEN_VAULT
-    
+
     connection = complete_google_oauth_callback(
         db=db_session,
         settings=settings,
@@ -170,7 +169,7 @@ def test_google_callback_with_custom_redirect_uri_and_pkce(db_session: Session, 
         token_vault=LOCAL_TOKEN_VAULT,
         redirect_uri=custom_uri
     )
-    
+
     assert connection.raw_metadata['pkce_used'] is True
     assert connection.raw_metadata['token_kind'] == 'refresh_token'
 
@@ -183,22 +182,23 @@ def test_api_endpoints_support_redirect_uri(client: TestClient) -> None:
             google_oauth_state_secret='state-secret'
         )
     client.app.dependency_overrides[get_settings] = override_settings
-    
+
     # Slack Install URL
     custom_uri = 'paraworks://slack'
     response = client.get('/api/v1/integrations/slack/oauth/install-url', params={'redirect_uri': custom_uri})
     assert response.status_code == 200
-    
+
     install_url = response.json()['install_url']
     parsed = urlparse(install_url)
     params = parse_qs(parsed.query)
     assert params['redirect_uri'] == [custom_uri]
-    assert 'code_challenge' in params
-    
+    assert 'code_challenge' not in params
+    assert 'code_challenge_method' not in params
+
     # Google Install URL
     response = client.get('/api/v1/integrations/gmail/oauth/install-url', params={'redirect_uri': custom_uri})
     assert response.status_code == 200
-    
+
     install_url = response.json()['install_url']
     parsed = urlparse(install_url)
     params = parse_qs(parsed.query)

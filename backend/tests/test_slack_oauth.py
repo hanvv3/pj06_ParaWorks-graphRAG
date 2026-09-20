@@ -285,7 +285,8 @@ def test_slack_sync_endpoint_uses_installed_connection_token_without_exposing_it
 
     captured: dict[str, object] = {}
 
-    def fake_sync_connector_events(*, db: Session, connector):
+    def fake_sync_connector_events(*, db: Session, connector, job_id=None):
+        assert job_id is None  # synchronous route has no preallocated background job
         captured['bot_token'] = connector.config.bot_token
         captured['channel_ids'] = connector.config.channel_ids
         return SimpleNamespace(

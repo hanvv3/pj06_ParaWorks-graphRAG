@@ -169,7 +169,7 @@ def test_quality_suite_company_memory_emits_review_checkpoint_without_paid_calls
         db_session,
         source_type='slack',
         source_id='slack-quality-redis',
-        text='Redis should support queue and job progress workflows.',
+        text='Use Redis to support queue and job progress workflows.',
     )
     seed_chunk(
         db_session,
@@ -198,7 +198,7 @@ def test_quality_suite_cache_hit_does_not_duplicate_agent_runs_or_review_items(d
         db_session,
         source_type='slack',
         source_id='slack-quality-cache',
-        text='Redis should support queue and job progress workflows.',
+        text='Use Redis to support queue and job progress workflows.',
     )
     seed_chunk(
         db_session,
@@ -206,6 +206,7 @@ def test_quality_suite_cache_hit_does_not_duplicate_agent_runs_or_review_items(d
         source_id='gmail-quality-cache',
         text='PostgreSQL remains durable while Redis handles transient job state.',
     )
+    initial_review_count = db_session.query(ReviewItem).count()
 
     first = run_company_memory_agent_orchestration(
         db=db_session,
@@ -224,4 +225,4 @@ def test_quality_suite_cache_hit_does_not_duplicate_agent_runs_or_review_items(d
     assert second.outputs['cost_plan']['mail_document_agent']['action'] == 'use_cache'
     assert second.outputs['cost_plan']['rag_orchestrator_agent']['action'] == 'use_cache'
     assert db_session.query(AgentRun).count() == 7
-    assert db_session.query(ReviewItem).count() == 6
+    assert db_session.query(ReviewItem).count() == initial_review_count + 6

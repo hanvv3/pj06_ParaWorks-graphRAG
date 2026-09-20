@@ -56,7 +56,10 @@ from backend.app.rag.trusted_evidence import ServingEvidenceResolver
 
 DependencyRole = Literal['selected_citation', 'unselected_model_influence']
 _SLOT_IDS: tuple[EvidenceSlotId, ...] = ('E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8')
-_RAW_PUBLIC_SOURCE_TYPES = {'gmail', 'gmail_attachment', 'drive', 'calendar'}
+# Structural recognition is not discovery or serving authority. Slack bytes can
+# arrive only through the current scoped approved-child resolver; raw indexing
+# and direct raw observation eligibility deliberately still exclude Slack.
+_RAW_PROJECTION_FORMAT_TYPES = {'gmail', 'gmail_attachment', 'drive', 'calendar', 'slack'}
 
 
 class CanonicalProjectionResolverPort(Protocol):
@@ -1085,7 +1088,7 @@ def _validate_identity_authority(
             identity.serving_document_id != f'chunk:{envelope.document_chunk_id}'
             or identity.serving_document_id != envelope.serving_document_id
             or identity.public_source_id != envelope.public_source_id
-            or identity.public_source_type not in _RAW_PUBLIC_SOURCE_TYPES
+            or identity.public_source_type not in _RAW_PROJECTION_FORMAT_TYPES
         ):
             raise ValueError('canonical raw identity mapping is invalid')
     else:
@@ -1188,7 +1191,7 @@ def _validate_row(
             and type(evidence.support_mode) is str
             and evidence.support_mode == 'source_observation'
             and type(evidence.public_source_type) is str
-            and evidence.public_source_type in _RAW_PUBLIC_SOURCE_TYPES
+            and evidence.public_source_type in _RAW_PROJECTION_FORMAT_TYPES
             and type(envelope) is RawServingVersionEnvelope
             and type(evidence.provenance) is RawChunkProvenance
             and type(evidence.provenance.branch) is str

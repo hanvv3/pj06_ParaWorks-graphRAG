@@ -264,6 +264,8 @@ def _verify_profile(profile: str, sidecars: Sequence[ReleaseEvidenceSidecar], *,
     if counts['skipped'] or counts['xfailed']:
         return counts, 'verification_failed', failures
     if profile == 'full':
+        # Historical Slack selectors are not an allowed-failure list. The active
+        # deferred set can be empty; then every full-suite failure is unexpected.
         expected = tuple(sorted(build_manifest().deferred_slack_failure_nodeids))
         return counts, 'passed' if failures == expected else 'baseline_mismatch', tuple(node for node in failures if node not in expected)
     return counts, 'passed' if not failures else 'verification_failed', failures

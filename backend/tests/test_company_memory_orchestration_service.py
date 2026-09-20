@@ -54,7 +54,7 @@ def test_company_memory_orchestration_runs_real_agent_services(db_session: Sessi
         db_session,
         'slack',
         'slack-redis',
-        'Redis should support queue and job progress workflows.',
+        'Use Redis to support queue and job progress workflows.',
     )
     seed_chunk(
         db_session,
@@ -164,7 +164,7 @@ def test_company_memory_orchestration_skips_agents_that_exceed_cost_budget(db_se
         db_session,
         'slack',
         'slack-large-channel',
-        'Redis budget pressure requires selective summarization. ' * 3_000,
+        'Use Redis with selective summarization to limit budget. ' * 3_000,
     )
 
     result = run_company_memory_agent_orchestration(
@@ -190,7 +190,7 @@ def test_company_memory_orchestration_uses_cache_when_evidence_is_unchanged(db_s
         db_session,
         'slack',
         'slack-cache-redis',
-        'Redis should support queue and job progress workflows.',
+        'Use Redis to support queue and job progress workflows.',
     )
     seed_chunk(
         db_session,

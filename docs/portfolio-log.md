@@ -1,5 +1,26 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — Slack S-3 integrated synthetic evidence
+
+- S1/S2 current signed ingestion and actual human Review now drive actual
+  PG/pgvector and Neo4j into D1 cold/warm answers: four influencing slots,
+  two incremental embedding skips, fresh run/cost/audit and zero warm generation.
+- Raw Slack discovery remains closed. The narrow approved-child resolver and
+  exact C5 bound-path revalidation reject unsigned, forged, unapproved, changed
+  or inaccessible evidence; source changes also refuse old cached answers.
+- Exact historical ten now pass (six action-wording fixtures, three existing
+  hard-disabled PKCE expectations, one job-id fake). Historical selectors remain;
+  active deferred Slack failures are empty. No skip/xfail or OAuth policy change.
+- Affected gates: 214 passed/3 PG-gated skips, later explicit PG selection 8 passed
+  including those three; API/Review/secret 104 passed; frontend typecheck exit 0.
+  Final actual PG/pgvector/Neo4j lifecycle/path/cache-race demo: 7 passed in 228.41s,
+  external attempts 0.
+  [S3 runbook](superpowers/runbooks/s-3-slack-integrated-demo.md) records reproduction,
+  final demo artifact, boundaries and next decision. Independent review pending.
+- E/D1/S1/S2 are CLEAN; earlier entries below are historical. Formal release/P1
+  remain NOT CLEAN. Live source selection requires separate access/consent;
+  no live APIs, paid run, rollout, `.env` or push.
+
 ## 2026-09-21 — Slack S-2 synthetic current evidence and human Review
 
 - Explicit local in-memory Slack adapter now enters existing canonical parser/

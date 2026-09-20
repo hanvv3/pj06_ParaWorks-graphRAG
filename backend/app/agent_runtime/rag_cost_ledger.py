@@ -1183,6 +1183,7 @@ class RagCostLedger:
                 )
             return
         graph_key = prepared.prepared_invocation_hmac
+        current_graph_paths = ()
         if graph_key in self._graph_answer_invocations:
             binding = self._graph_answer_bindings.get(graph_key)
             if binding is None or binding[0].aggregate_observation_hmac != binding[1]:
@@ -1202,6 +1203,7 @@ class RagCostLedger:
                 )
             except ValueError:
                 raise RagServingEvidenceChangedError('graph influence changed before send') from None
+            current_graph_paths = binding[0].graph_paths
         observations = prepared.model_influence
         if (
             type(observations) is not tuple
@@ -1235,6 +1237,27 @@ class RagCostLedger:
                 .with_for_update(read=True)
                 .execution_options(populate_existing=True)
             )
+            # Approved Slack graph children deliberately have no raw discovery
+            # row. Only the exact node in the bound path just reconstructed from
+            # current PG approval/source authority above can satisfy this check.
+            if row is None and current_graph_paths:
+                import json
+                from dataclasses import asdict
+
+                identity = observation.lookup_identity
+                if (identity.serving_kind == 'raw_chunk'
+                        and identity.public_source_type == 'slack'
+                        and any(
+                            node.document_id == identity.serving_document_id
+                            and node.version == observation.serving_version_fingerprint
+                            and node.permission == observation.effective_permission
+                            and node.source_id == identity.public_source_id
+                            and node.canonical_ref == json.dumps(
+                                asdict(identity.version_envelope), sort_keys=True,
+                                separators=(',', ':'), ensure_ascii=True)
+                            for path in current_graph_paths for node in path.nodes
+                        )):
+                    continue
             if row is not None and (
                 row.fingerprint_key_version != key_state.fingerprint_key_version
                 or not hmac.compare_digest(

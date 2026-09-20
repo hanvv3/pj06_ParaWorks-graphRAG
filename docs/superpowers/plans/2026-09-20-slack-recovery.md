@@ -7,7 +7,7 @@
 **Spec:** [Slack 설계](../specs/2026-09-20-slack-recovery-design.md).
 **Architecture:** fake Slack → SourceEvent/registry/shared sync → pending Review → 현재 승인 → indexing/search.
 **Tech:** 기존 Python/pytest·LangChain/LangGraph·SQLite smoke·PostgreSQL/pgvector·E/D.1 경계.
-**상태:** S-1 CLEAN; S-2 구현·검증, 독립 리뷰 대기; S-3 미구현. E/D.1 CLEAN 뒤 진행 중이다.
+**상태:** S-1/S-2 CLEAN; S-3 합성 통합 구현·독립 리뷰 대기. 다음은 정식 출시 준비 계획 결정이다.
 
 ## 공통 제약과 리뷰 초점
 
@@ -29,12 +29,12 @@
   cursor 경계, 동일 이벤트 replay와 fetched/created/skipped count를 fake API로 재현한다.
 - [x] 공통 connector/sync 경계 안에서 최소 수정하고 GREEN을 확인한다. pending 생성을 아직 못 하는
   legacy 경로는 S-2 의존성으로 기록하며 수집 성공만으로 전체 복구를 선언하지 않는다.
-- [ ] 외부 호출 0과 기존 connector 영향 회귀를 확인하고 fixture·실패 분류·코드를 리뷰·커밋한다.
+- [x] 외부 호출 0과 기존 connector 영향 회귀를 확인하고 fixture·실패 분류·코드를 리뷰·커밋한다.
 
 **완료:** 합성 source가 식별자·문맥·근거를 보존해 재수집되고 중복 count가 설명된다.
 
 S-1 code `1ddfc21`, [검증·한계](../runbooks/s-1-slack-synthetic-ingestion.md).
-외부 attempts 0, R1 영향 테스트 101 passed. 재리뷰 대기이며 기존 10개 실패는 유지한다.
+외부 attempts 0, R1 영향 테스트 101 passed; 독립 리뷰 CLEAN. 당시 10개 실패는 S3에서 수정했다.
 
 ## S-2 — 현재 Review·source lifecycle과 검색 연결
 
@@ -47,23 +47,23 @@ S-1 code `1ddfc21`, [검증·한계](../runbooks/s-1-slack-synthetic-ingestion.m
   migration을 구분하고 정책 변경이 필요하면 범위·영향을 먼저 명시한다. 승인 데이터를 직접 seed하지 않는다.
 - [x] source 수정·삭제·권한 축소, 승인 재시도, prompt version 변경을 고정하고 최소 구현한다.
   근거 version과 strictest permission, token/cost, agent cache와 incremental embedding skip을 확인한다.
-- [ ] fake 모델 기반 GREEN과 Review/권한/indexing 영향 회귀를 실행하고 변경 경계를 리뷰·커밋한다.
+- [x] fake 모델 기반 GREEN과 Review/권한/indexing 영향 회귀를 실행하고 변경 경계를 리뷰·커밋한다.
 
 **완료:** 수집 → pending → 현재 승인 → 검색이 연결되고, source 변경 시 오래된 지식 노출이 차단된다.
 
 구현·fresh 검증은 [S2 runbook](../runbooks/s-2-slack-synthetic-review.md).
-SQLite 영향 215 passed/실제 PG·pgvector 3 passed, external 0. 독립 리뷰는 아직 대기다.
+SQLite 영향 215 passed/실제 PG·pgvector 3 passed, external 0. `d91ed9d` 독립 리뷰 CLEAN.
 
 ## S-3 — 통합 데모와 실제 연결 인수인계
 
 **파일 책임:** S-1 fixture의 로컬 smoke 시나리오, `scripts/backend_release_matrix.py`와
 `backend/tests/release_contracts.py`의 증거 기반 기대값, portfolio/handoff의 결과 기록.
 
-- [ ] S-2의 승인 시나리오에 E 관계 검색·D.1 캐시를 연결한다. 수정/철회/권한 축소 때 graph/cache가
+- [x] S-2의 승인 시나리오에 E 관계 검색·D.1 캐시를 연결한다. 수정/철회/권한 축소 때 graph/cache가
   과거 근거를 노출하는 실패부터 고정하고 fresh GREEN과 flag off 복귀를 확인한다.
-- [ ] disposable DB/fake 주입으로 수집 count, pending/approved 결과, 근거 검색, replay와 saved calls를
+- [x] disposable DB/fake 주입으로 수집 count, pending/approved 결과, 근거 검색, replay와 saved calls를
   보여준다. SQLite smoke와 PostgreSQL/pgvector/Neo4j 증거를 구분하고 실제 외부 호출 0을 확인한다.
-- [ ] 해결한 Slack node id만 검증 결과와 함께 baseline에서 갱신한다. 미해결 실패를 숨기지 않고
+- [x] 해결한 Slack node id만 검증 결과와 함께 baseline에서 갱신한다. 미해결 실패를 숨기지 않고
   backend 통합·관련 frontend 검증 결과를 release readiness로 넘긴다.
 - [ ] 합성 완료/남은 실패/live 준비 상태를 코드 revision과 함께 기록하고 리뷰·커밋한다.
 

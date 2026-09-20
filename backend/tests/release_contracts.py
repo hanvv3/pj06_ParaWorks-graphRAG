@@ -123,6 +123,9 @@ SLACK_TEN = (
     'backend/tests/test_quality_permission_regression_suite.py::test_quality_suite_cache_hit_does_not_duplicate_agent_runs_or_review_items',
     'backend/tests/test_slack_oauth.py::test_slack_sync_endpoint_uses_installed_connection_token_without_exposing_it',
 )
+# Keep the historical selectors reproducible after repair. Only unresolved
+# failures belong in active release deselections / the full expected baseline.
+DEFERRED_SLACK_FAILURES: tuple[str, ...] = ()
 COMPATIBILITY_GROUPS = (
     ('compatibility-contracts-provenance', (
         'backend/tests/test_auto_review_contracts.py', 'backend/tests/test_auto_review_cost_policy.py', 'backend/tests/test_auto_review_migration.py', 'backend/tests/test_assistant_models.py', 'backend/tests/test_keyed_mutation_guard.py', 'backend/tests/test_auto_review_key_bootstrap.py', 'backend/tests/test_provider_send_fence.py', 'backend/tests/test_review_v21_preflight.py', 'backend/tests/test_review_v21_drafting.py', 'backend/tests/test_review_v21_extraction.py', 'backend/tests/test_review_resolution_actors.py', 'backend/tests/test_auto_review_provenance.py',
@@ -157,19 +160,19 @@ def build_manifest() -> ReleaseManifest:
         argv = (module, '-vv', '--tb=long') if child_id == 'postgres-review-v2' else (module, '-q')
         postgres_children.append(ReleaseChild(child_id, 'verification', argv, 1800))
     postgres = ReleaseProfile('postgres', tuple(postgres_children), 3600)
-    deselect = tuple(f'--deselect={node}' for node in SLACK_TEN)
+    deselect = tuple(f'--deselect={node}' for node in DEFERRED_SLACK_FAILURES)
     compat_selectors = tuple(dict.fromkeys(node for _, group in COMPATIBILITY_GROUPS for node in group)) + deselect
     compatibility_slack = tuple(
         node
-        for node in SLACK_TEN
+        for node in DEFERRED_SLACK_FAILURES
         if node.split('::', 1)[0]
         in {path for _, group in COMPATIBILITY_GROUPS for path in group}
     )
     compatibility = ReleaseProfile('compatibility', (_child('compatibility-collection', compat_selectors, collect=True), *(_child(name, group + deselect) for name, group in COMPATIBILITY_GROUPS)), 3600, compatibility_slack)
     non_slack_args = ('backend/tests',) + deselect
-    non_slack = ReleaseProfile('non-slack', (_child('non-slack-collection', non_slack_args, collect=True), _child('non-slack-backend', non_slack_args)), 3600, SLACK_TEN)
+    non_slack = ReleaseProfile('non-slack', (_child('non-slack-collection', non_slack_args, collect=True), _child('non-slack-backend', non_slack_args)), 3600, DEFERRED_SLACK_FAILURES)
     full = ReleaseProfile('full', (_child('full-collection', ('backend/tests',), collect=True), _child('full-backend', ('backend/tests',), exits=(0, 1))), 3600)
-    return ReleaseManifest(1, 1, ('backend.tests.release_evidence_plugin',), SLACK_TEN, POSTGRES_MODULES, {}, {p.name: p for p in (settings, postgres, compatibility, non_slack, full)})
+    return ReleaseManifest(1, 1, ('backend.tests.release_evidence_plugin',), DEFERRED_SLACK_FAILURES, POSTGRES_MODULES, {}, {p.name: p for p in (settings, postgres, compatibility, non_slack, full)})
 
 
 def invocation_hash(*, profile: str, child: ReleaseChild, commit_sha: str) -> str:

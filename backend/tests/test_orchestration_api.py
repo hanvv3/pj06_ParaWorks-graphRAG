@@ -94,7 +94,7 @@ def test_company_memory_orchestration_api_runs_agent_services(client, db_session
         db_session,
         'slack',
         'slack-api-redis',
-        'Redis should support queue and job progress workflows.',
+        'Use Redis to support queue and job progress workflows.',
     )
     seed_chunk(
         db_session,

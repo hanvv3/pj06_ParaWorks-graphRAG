@@ -1,6 +1,6 @@
 # Slack — 합성 데이터 기반 복구 설계
 
-상태: **S-1 CLEAN; S-2 구현·검증, 독립 리뷰 대기; S-3 미구현** / 2026-09-21.
+상태: **S-1/S-2 CLEAN; S-3 합성 통합 구현·독립 리뷰 대기** / 2026-09-21.
 [공통 계약](2026-09-20-remaining-deliverables-design.md) / [구현 계획](../plans/2026-09-20-slack-recovery.md).
 순서: **D 기능 기준선 → E GraphRAG → D.1 캐시 → Slack → release readiness**.
 Slack은 마지막 기능 단계다. 실제 source 부재는 앞선 기능이나 합성 검증의 진입 조건이 아니다.
@@ -25,7 +25,10 @@ S-1 `connectors/slack.py`는 private/DM 및 제한 parent 문맥을 `restricted`
 일반 Slack ingestion은 legacy dedupe를 유지하며 C.5 current-source authority를 부여하지 않는다.
 S2의 명시적 로컬 합성 어댑터만 새 source 검증을 수행하며 unsigned ID 충돌은 거부한다.
 [S2 runbook](../runbooks/s-2-slack-synthetic-review.md)에 현재 Review/검색 연결, 내부 계약,
-실제 PG와 fake 경계를 기록했다. E/D.1 통합 데모는 S3에 남아 있다.
+실제 PG와 fake 경계를 기록했다. [S3 통합 결과](../runbooks/s-3-slack-integrated-demo.md)는
+실제 로컬 PG/Neo4j, 승인된 Slack 관계 근거, D1 캐시와 변경 후 차단을 연결한다.
+일반 raw Slack 검색·색인 허용 목록은 유지한다. 현재 scoped 승인 관계의 자식만 별도
+재구성하며 structural format 인식은 권한이 아니다. 공개 DTO·승인 정책은 변경하지 않는다.
 
 ## 수집·근거·승인 경계
 

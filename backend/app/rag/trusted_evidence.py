@@ -773,10 +773,17 @@ class ServingEvidenceResolver:
             )
             if chunk_id is None:
                 return None
-            observation = CanonicalSourceObservationResolver(
+            resolver = CanonicalSourceObservationResolver(
                 db=db,
                 settings=self._settings,
-            ).resolve_for_index(chunk_id)
+            )
+            observation = resolver.resolve_for_index(chunk_id)
+            if observation is None:
+                projection = resolver.resolve_approved_slack_child_for_scope_strict(
+                    chunk_id, scope=scope
+                )
+                return (projection.evidence if projection is not None
+                        and projection.identity == identity else None)
             if observation is None or observation.identity != identity:
                 return None
             classification = (
@@ -882,11 +889,16 @@ class ServingEvidenceResolver:
             envelope = identity.version_envelope
             if type(envelope) is not RawServingVersionEnvelope:
                 return None
-            projection = CanonicalSourceObservationResolver(
+            resolver = CanonicalSourceObservationResolver(
                 db=db, settings=self._settings
-            ).resolve_projection_for_scope_strict(
+            )
+            projection = resolver.resolve_projection_for_scope_strict(
                 envelope.document_chunk_id, scope=scope
             )
+            if projection is None:
+                projection = resolver.resolve_approved_slack_child_for_scope_strict(
+                    envelope.document_chunk_id, scope=scope
+                )
             if projection is None or projection.identity != identity:
                 return None
             return projection

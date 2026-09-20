@@ -294,6 +294,10 @@ def read_projection_page(
             # Same source/snippet duplicated in a parse is resolved stably.
             chunk = min(matches, key=lambda value: value.id)
             projection = raw.resolve_projection_for_scope_strict(chunk.id, scope=scope)
+            if projection is None and source.source_type == 'slack':
+                projection = raw.resolve_approved_slack_child_for_scope_strict(
+                    chunk.id, scope=scope
+                )
             if projection is None:
                 local_edges = []
                 break

@@ -662,6 +662,19 @@ def test_hmac_domains_bind_order_bits_nullable_keys_empty_and_role() -> None:
     )
     projector, prepared_set = _prepare_rows((row,), rendered_input_hmac='b' * 64)
     prepared = prepared_set.aggregate_observation_hmac
+    # E's current v3 aggregate authenticates graph_paths, including the empty
+    # sequence. The former golden below still used the pre-E v2 domain.
+    from backend.app.agent_runtime.fingerprints import keyed_fingerprint
+
+    assert prepared == keyed_fingerprint(
+        {'entries': [{'observation_hmac': prepared_set.observations[0].observation_hmac,
+                      'ordinal': 0, 'slot_id': 'E1'}],
+         'prepared_corpus_generation': 1, 'prepared_index_generation': None,
+         'prepared_readiness_hmac': None, 'rendered_input_hmac': 'b' * 64,
+         'graph_paths': []},
+        secret=settings.agent_runtime_fingerprint_secret.encode(),
+        schema_version='rag-prepared-model-influence-set:v3', policy_version='rag-answer:v2',
+    )
     selected_dep = build_model_influence_dependency_hmac(
         row=row,
         slot_id='E1',
@@ -720,7 +733,7 @@ def test_hmac_domains_bind_order_bits_nullable_keys_empty_and_role() -> None:
         '790b585220f3c9147d20e593dab74cadf75d16424b3b0850eb313e99a77a5d36',
         '4f08fe7bb2aa66b637ee74824cf3ab5cb0802f96baac70bb3331b074236bf70b',
         '106c275260bfbb72e8b0b3a2fbfa86b4507401c71f186a5307bd8eacc74d5539',
-        'c4ba54ec47b9f0da6e5e194ca0f5173a2d8aea312deb2e2629adf9155b34b3f1',
+        'a42694a7ccb5ca256b8bd345bb3362718f63ba64a01f39d269617858e9a61a7a',
         '885d56f3d313746c850614c65c92fd38a9e5e29a3d4d6bacda927a0599a702d3',
         '8f0c0ccc7dc401027a4ead4bdab6b01a16c8e35b134ad980e14637f26092124e',
         '6021d66c5bef567f91a76f1d1063a313d9f24416ce8e0e09d5a226ae5c8a5f4b',

@@ -73,6 +73,81 @@ class CanonicalSourceObservationResolver:
     ) -> CanonicalServingProjection | None:
         """Return public raw bytes only after a fresh scoped canonical read."""
         observation = self.resolve_for_index_strict(chunk_id)
+        return self._project_observation(observation, scope=scope)
+
+    def resolve_approved_slack_child_for_scope_strict(
+        self, chunk_id: int, *, scope: SecurityScope
+    ) -> CanonicalServingProjection | None:
+        """Approved graph child/exact candidate reconstruction, never discovery.
+
+        A link row or caller-supplied identity is not authority. Reconstruct the
+        entire current approved envelope, including every source binding, before
+        resolving this exact source/snippet. Bound fan-out and fail closed.
+        """
+        from backend.app.models import (
+            ReviewItem,
+            TrustedKnowledgeApprovalLink,
+            TrustedKnowledgeEvidenceLink,
+        )
+        from backend.app.rag.serving_contracts import ExplicitApprovalProvenance
+        from backend.app.rag.trusted_evidence import TrustedServingEnvelopeResolver
+
+        chunk = self._db.get(DocumentChunk, chunk_id)
+        source = self._db.get(Source, chunk.source_id) if chunk is not None else None
+        if (
+            source is None
+            or source.source_type != 'slack'
+            or source_version_ref(source) is None
+            or self._is_tombstoned(f'chunk:{chunk_id}')
+        ):
+            return None
+        links = tuple(
+            self._db.scalars(
+                select(TrustedKnowledgeApprovalLink)
+                .join(
+                    TrustedKnowledgeEvidenceLink,
+                    TrustedKnowledgeEvidenceLink.approval_link_id
+                    == TrustedKnowledgeApprovalLink.id,
+                )
+                .where(
+                    TrustedKnowledgeEvidenceLink.canonical_source_id == str(source.id),
+                    TrustedKnowledgeEvidenceLink.canonical_source_kind == 'slack',
+                    TrustedKnowledgeApprovalLink.active.is_(True),
+                )
+                .order_by(TrustedKnowledgeApprovalLink.id)
+                .limit(51)
+            )
+        )
+        if len(links) > 50:
+            return None
+        resolver = TrustedServingEnvelopeResolver(db=self._db, settings=self._settings)
+        for link in links:
+            envelope = resolver.resolve_for_scope_strict(
+                link.knowledge_type, link.knowledge_id, scope=scope
+            )
+            if envelope is None:
+                continue
+            provenance = envelope.evidence.provenance
+            if (
+                not isinstance(provenance, ExplicitApprovalProvenance)
+                or provenance.approval_link_id != link.id
+                or not any(
+                    child.canonical_source_kind == 'slack'
+                    and child.canonical_source_id == str(source.id)
+                    for child in provenance.evidence_links
+                )
+            ):
+                continue
+            item = self._db.get(ReviewItem, provenance.review_item_id)
+            if (source.source_url, chunk.source_snippet) not in set(
+                zip(item.source_links, item.source_snippets, strict=True)
+            ):
+                continue
+            observation = self._resolve_current_chunk(chunk, source)
+            return self._project_observation(observation, scope=scope)
+        return None
+
+    def _project_observation(self, observation, *, scope):
         if observation is None:
             return None
         access = CanonicalSourceObservationEligibilityService().classify_access(
@@ -127,6 +202,9 @@ class CanonicalSourceObservationResolver:
             or self._is_tombstoned(f'chunk:{chunk.id}')
         ):
             return None
+        return self._resolve_current_chunk(chunk, source)
+
+    def _resolve_current_chunk(self, chunk, source):
         authority = resolve_exact_source_authority(self._db, source=source)
         if (
             authority is None
