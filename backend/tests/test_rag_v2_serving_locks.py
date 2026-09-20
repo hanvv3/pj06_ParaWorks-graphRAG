@@ -161,7 +161,9 @@ def test_postgres_finalization_prefix_and_tail_serialize_c5_mutation() -> None:
         scope_name='d13_tail',
     ) as lease:
         engine = create_engine(lease.database_url)
-        Base.metadata.create_all(engine)
+        # The lease has a local search_path while public may already be at head.
+        # Materialize this test's tables in the leased schema, not public.
+        Base.metadata.create_all(engine, checkfirst=False)
         settings = _settings(lease.database_url)
         session_local = sessionmaker(bind=engine, autoflush=False, autocommit=False)
         with session_local() as setup:

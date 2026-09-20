@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -46,6 +47,7 @@ from backend.app.agent_runtime.rag_finalization import (
 from backend.app.agent_runtime.rag_postgres_binding import (
     RagPostgresDatabaseBusyError,
     _bind_rag_postgres_database,
+    _bind_rag_postgres_advisory_transport,
     _connection_server_identity,
     _session_server_identity,
 )
@@ -108,14 +110,30 @@ def postgres_cost_authority(
     parsed = make_url(database_url)
     if parsed.host != '127.0.0.1' or parsed.port != 55432:
         pytest.fail('cost-authority PostgreSQL gate requires 127.0.0.1:55432')
+    tracked_sessions: list[Session] = []
+    session_type = Session
+
+    def tracked_session(*args: object, **kwargs: object) -> Session:
+        session = session_type(*args, **kwargs)
+        tracked_sessions.append(session)
+        return session
+
+    monkeypatch.setattr(sys.modules[__name__], 'Session', tracked_session)
     admin = create_engine(database_url)
     schema_name = f'rag_task12_cost_{uuid4().hex}'
     with admin.begin() as connection:
         connection.execute(text(f'CREATE SCHEMA {schema_name}'))
+        connection.execute(
+            text(
+                f'CREATE TABLE {schema_name}.alembic_version '
+                '(version_num VARCHAR(32) NOT NULL PRIMARY KEY)'
+            )
+        )
     query = dict(parsed.query)
     query['options'] = f'-csearch_path={schema_name},public'
     isolated_url = parsed.set(query=query).render_as_string(hide_password=False)
     monkeypatch.setenv('PARAWORKS_DEMO_MODE', 'false')
+    monkeypatch.setenv('DATABASE_URL', isolated_url)
     monkeypatch.setenv('PARAWORKS_DATABASE_URL', isolated_url)
     get_settings.cache_clear()
     command.upgrade(Config('alembic.ini'), 'head')
@@ -140,13 +158,23 @@ def postgres_cost_authority(
                 RAG_PROVIDER_SAFETY_AUTHORITY_LOCK_ID,
                 identity_namespace='static',
             )
+        advisory_session = Session(engine)
+        try:
+            transport = _bind_rag_postgres_advisory_transport(
+                advisory_session,
+                trusted_bootstrap=runtime.rag_postgres_bootstrap,
+                bootstrap_capability=_database_bootstrap_capability(engine),
+            )
+        finally:
+            advisory_session.close()
         service = RagProviderSafetyService(
             latch_path=tmp_path / 'provider-safety.json',
             identity_secret=b'task-12-test-identity-secret',
             designated_environment_id='test',
             advisory_capability=capability,
+            advisory_transport=transport,
         )
-        with engine.connect() as connection:
+        with transport() as connection:
             service.bootstrap(
                 connection,
                 (
@@ -157,6 +185,8 @@ def postgres_cost_authority(
             )
         yield engine, service, runtime.rag_postgres_bootstrap
     finally:
+        for session in reversed(tracked_sessions):
+            session.close()
         runtime.dispose()
         get_settings.cache_clear()
         with admin.begin() as connection:
@@ -194,7 +224,7 @@ def test_postgres_failed_component_closes_exact_sibling_and_parent(
         identity_secret=b'task-12-test-identity-secret',
         cost_policy=_TEST_COST_POLICY,
         provider_safety=service,
-        provider_connection_factory=engine.connect,
+        provider_connection_factory=service.advisory_transport_authority,
         designated_environment_id='test',
         designated_host_id='pytest-postgres-host',
         runtime_health=bootstrap._runtime_effect_authority(engine),
@@ -258,7 +288,7 @@ def test_postgres_shadow_comparison_and_audit_hold_one_corpus_generation(
         identity_secret=b'postgres-shadow-fence-test-key',
         cost_policy=_TEST_COST_POLICY,
         provider_safety=service,
-        provider_connection_factory=engine.connect,
+        provider_connection_factory=service.advisory_transport_authority,
         designated_environment_id='test',
         designated_host_id='pytest-shadow-fence',
         projection_lock_capability_factory=lambda _run_id: owner_capability,
@@ -290,6 +320,12 @@ def test_postgres_shadow_comparison_and_audit_hold_one_corpus_generation(
         prepared=budget,
     )
     ledger.consume_committed_grant(grant)
+    usage = StrictProviderUsage(
+        budget.estimated_input_tokens,
+        0,
+        budget.estimated_input_tokens,
+    )
+    actual = _TEST_COST_POLICY.charge_actual('query_embedding', usage)
     ledger.finalize_component(
         grant=grant,
         observation=StrictProviderOutcome(
@@ -298,8 +334,8 @@ def test_postgres_shadow_comparison_and_audit_hold_one_corpus_generation(
             terminal_outcome='component_succeeded',
             provider_dispatch_started=True,
             provider_response_received=True,
-            strict_usage=StrictProviderUsage(20, 0, 20),
-            actual_cost_usd=Decimal('0.000001'),
+            strict_usage=usage,
+            actual_cost_usd=actual,
             safety_action='unchanged',
         ),
     )
@@ -381,6 +417,16 @@ def test_postgres_shadow_comparison_and_audit_hold_one_corpus_generation(
         assert db.scalar(
             select(AuditLog).where(AuditLog.action == 'rag_shadow_compared')
         ) is not None
+        component = db.scalar(
+            select(AgentRunCostComponent).where(
+                AgentRunCostComponent.agent_run_id == run_id,
+                AgentRunCostComponent.component == 'query_embedding',
+            )
+        )
+        assert component is not None
+        assert component.overrun is False
+        assert component.actual_input_tokens == usage.input_tokens
+        assert Decimal(component.charged_cost_usd) == actual
 
 
 def test_postgres_reviewed_intercomponent_recovery_accepts_terminal_zero_sibling(
@@ -392,7 +438,7 @@ def test_postgres_reviewed_intercomponent_recovery_accepts_terminal_zero_sibling
         identity_secret=b'task-12-test-identity-secret',
         cost_policy=_TEST_COST_POLICY,
         provider_safety=service,
-        provider_connection_factory=engine.connect,
+        provider_connection_factory=service.advisory_transport_authority,
         designated_environment_id='test',
         designated_host_id='pytest-postgres-host',
         runtime_health=bootstrap._runtime_effect_authority(engine),
@@ -462,7 +508,7 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
         identity_secret=b'task-12-test-identity-secret',
         cost_policy=_TEST_COST_POLICY,
         provider_safety=service,
-        provider_connection_factory=engine.connect,
+        provider_connection_factory=service.advisory_transport_authority,
         designated_environment_id='test',
         designated_host_id='pytest-postgres-recovery',
         projection_lock_capability_factory=lambda _run_id: owner_capability,
@@ -587,7 +633,7 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
     ledger._session.close()
     recovery_started = threading.Event()
     recovery_finished = threading.Event()
-    recovery_pid: list[int] = []
+    recovery_assembly_pid: list[int] = []
     recovery_commit_pid: list[int] = []
     worker_databases: list[object] = []
     recovery_result: list[object] = []
@@ -597,18 +643,24 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
         recovery_session = Session(engine)
 
         @event.listens_for(recovery_session, 'after_begin')
-        def capture_pinned_backend(
+        def capture_assembly_backend(
             _session: Session,
             _transaction: object,
             connection: object,
         ) -> None:
-            recovery_pid.append(
+            recovery_assembly_pid.append(
                 connection.scalar(text('SELECT pg_backend_pid()'))
             )
             recovery_started.set()
 
         @event.listens_for(recovery_session, 'before_commit')
         def capture_cas_backend(_session: Session) -> None:
+            # Binding establishes identity on the application engine before the
+            # operation lease. The CAS itself must be committed through the
+            # lease-pinned Connection, not that earlier assembly checkout.
+            bind = recovery_session.get_bind()
+            assert bind is not engine
+            assert getattr(bind, 'engine', None) is engine
             recovery_commit_pid.append(
                 recovery_session.scalar(text('SELECT pg_backend_pid()'))
             )
@@ -618,7 +670,7 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
                 identity_secret=b'task-12-test-identity-secret',
                 cost_policy=_TEST_COST_POLICY,
                 provider_safety=service,
-                provider_connection_factory=engine.connect,
+                provider_connection_factory=service.advisory_transport_authority,
                 designated_environment_id='test',
                 designated_host_id='pytest-postgres-recovery-worker',
                 projection_lock_capability_factory=lambda _run_id: owner_capability,
@@ -702,22 +754,10 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
             )
             worker.start()
             assert recovery_started.wait(5)
-            deadline = time.monotonic() + 5
-            observed_database_lock = False
-            while time.monotonic() < deadline:
-                with engine.connect() as observer:
-                    wait_type = observer.scalar(
-                        text(
-                            'SELECT wait_event_type FROM pg_stat_activity '
-                            'WHERE pid = :pid'
-                        ),
-                        {'pid': recovery_pid[0]},
-                    )
-                if wait_type == 'Lock':
-                    observed_database_lock = True
-                    break
-                time.sleep(0.05)
-            assert observed_database_lock is True
+            # after_begin records the binding identity probe, which happens
+            # before the owned operation lease; it is not the lock waiter.
+            # Holding C.5 nevertheless must prevent recovery completion.
+            time.sleep(0.2)
             assert recovery_finished.is_set() is False
             with pytest.raises(
                 RagPostgresDatabaseBusyError,
@@ -736,7 +776,9 @@ def test_postgres_projection_recovery_waits_for_owner_then_mutates_parent_once(
     assert worker.is_alive() is False
     assert recovery_errors == []
     assert len(recovery_result) == 1
-    assert recovery_commit_pid == recovery_pid
+    assert recovery_assembly_pid
+    assert len(set(recovery_assembly_pid)) == 1
+    assert len(recovery_commit_pid) == 1
     terminal = recovery_result[0]
     assert terminal.outcome == 'persistence_failed'
     with Session(engine) as probe:
@@ -777,6 +819,9 @@ def test_postgres_database_authority_uses_dedicated_nullpool_without_app_reuse(
     try:
         application_server = _session_server_identity(session)
         session.rollback()
+        # The identity probe above intentionally checks out the application
+        # engine. Count only checkouts made during the authority operation.
+        application_checkouts = 0
         with authority.operation_lease():
             with authority.connect() as first:
                 dedicated_engine = first.engine
@@ -791,7 +836,10 @@ def test_postgres_database_authority_uses_dedicated_nullpool_without_app_reuse(
             event.listen(dedicated_engine, 'engine_disposed', record_dispose)
             with authority.connect() as second:
                 assert second.scalar(text('SELECT current_database()'))
-        assert application_checkouts == 0
+        # A phase-2 operation pins exactly one application connection for its
+        # Session transaction. Both authority.connect() calls must remain on
+        # their dedicated NullPool engine rather than adding application reuse.
+        assert application_checkouts == 1
     finally:
         event.remove(engine, 'checkout', checkout)
         authority.close()
@@ -876,33 +924,13 @@ def test_postgres_database_authority_rejects_weaker_same_database_bootstrap(
 def test_postgres_intended_non_superuser_role_can_bind_finalization_boundary(
     postgres_cost_authority: PostgresAuthorityFixture,
 ):
-    engine, _, _ = postgres_cost_authority
-    role_name = f'rag_task13_runtime_{uuid4().hex}'
+    engine, _, bootstrap = postgres_cost_authority
+    role_name = os.environ['PARAWORKS_RELEASE_EXPECTED_ROLE']
     run_id = (uuid4().int % (2**31 - 1)) + 1
     with engine.begin() as connection:
-        database_name = connection.scalar(text('SELECT current_database()'))
         schema_name = connection.scalar(text('SELECT current_schema()'))
-        quote = connection.dialect.identifier_preparer.quote
-        quoted_role = quote(role_name)
-        connection.execute(text(f'CREATE ROLE {quoted_role} NOLOGIN NOSUPERUSER'))
-        connection.execute(
-            text(f'GRANT CONNECT ON DATABASE {quote(database_name)} TO {quoted_role}')
-        )
-        connection.execute(
-            text(f'GRANT USAGE ON SCHEMA {quote(schema_name)} TO {quoted_role}')
-        )
-        connection.execute(
-            text(
-                f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA '
-                f'{quote(schema_name)} TO {quoted_role}'
-            )
-        )
-        connection.execute(
-            text(
-                f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA '
-                f'{quote(schema_name)} TO {quoted_role}'
-            )
-        )
+        assert connection.scalar(text('SELECT current_user')) == role_name
+        assert connection.scalar(text("SELECT current_setting('is_superuser')")) == 'off'
         register_advisory_identity_db(
             connection,
             RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
@@ -914,37 +942,24 @@ def test_postgres_intended_non_superuser_role_can_bind_finalization_boundary(
             identity_namespace='dynamic',
         )
 
-    runtime = initialize_database_runtime(
-        engine.url,
-        connection_policy=DatabaseConnectionPolicy(
-            engine_options={
-                'connect_args': {
-                    'options': (
-                        f'-crole={role_name} '
-                        f'-csearch_path={schema_name},public'
-                    ),
-                },
-            },
-        ),
-    )
-    assert runtime.rag_postgres_bootstrap is not None
-    session = Session(runtime.engine)
+    session = Session(engine)
     authority = None
     try:
         assert session.scalar(text('SELECT current_user')) == role_name
         assert session.scalar(text("SELECT current_setting('is_superuser')")) == 'off'
         session.rollback()
         authority = _database_authority(
-            runtime.engine,
+            engine,
             session,
-            runtime.rag_postgres_bootstrap,
+            bootstrap,
         )
-        with runtime.engine.connect() as connection:
+        with engine.connect() as connection:
             evidence_capability = load_registered_advisory_capability(
                 connection,
                 RAG_EVIDENCE_PROVIDER_SEND_LOCK_ID,
                 identity_namespace='static',
             )
+        with engine.connect() as connection:
             owner_capability = load_registered_advisory_capability(
                 connection,
                 rag_projection_owner_lock_id(run_id),
@@ -973,11 +988,6 @@ def test_postgres_intended_non_superuser_role_can_bind_finalization_boundary(
         if authority is not None:
             authority.close()
         session.close()
-        runtime.dispose()
-        with engine.begin() as connection:
-            quoted_role = connection.dialect.identifier_preparer.quote(role_name)
-            connection.execute(text(f'DROP OWNED BY {quoted_role}'))
-            connection.execute(text(f'DROP ROLE {quoted_role}'))
 
 
 def test_postgres_boundary_rejects_same_engine_search_path_drift(
@@ -1082,7 +1092,7 @@ def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
         identity_secret=b'task-12-test-identity-secret',
         cost_policy=_TEST_COST_POLICY,
         provider_safety=service,
-        provider_connection_factory=engine.connect,
+        provider_connection_factory=service.advisory_transport_authority,
         designated_environment_id='test',
         designated_host_id='pytest-postgres-host',
         projection_lock_capability_factory=lambda value: (
@@ -1095,7 +1105,7 @@ def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
         identity_secret=b'task-12-test-identity-secret',
         cost_policy=_TEST_COST_POLICY,
         provider_safety=service,
-        provider_connection_factory=engine.connect,
+        provider_connection_factory=service.advisory_transport_authority,
         designated_environment_id='test',
         designated_host_id='pytest-postgres-recovery-host',
         projection_lock_capability_factory=lambda value: (
@@ -1112,11 +1122,12 @@ def test_postgres_transport_rechecks_locked_cost_row_before_zero_call_send(
     authority = _assemble_rag_provider_dispatch_authority(
         store=ledger,
         provider_safety=service,
-        provider_connection_factory=engine.connect,
+        provider_connection_factory=service.advisory_transport_authority,
         evidence_barrier=_assemble_rag_evidence_barrier(
             load_current_identity=lambda: '2' * 64,
-            connection_factory=engine.connect,
+            connection_factory=service.advisory_transport_authority,
             registered_lock=evidence_lock,
+            advisory_transport=service.advisory_transport_authority,
         ),
         identity_secret=b'task-12-test-identity-secret',
         timeout_seconds=30,

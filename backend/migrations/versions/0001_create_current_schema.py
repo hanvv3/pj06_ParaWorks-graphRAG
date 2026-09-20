@@ -21,7 +21,7 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
-    Base.metadata.create_all(bind=bind)
+    Base.metadata.create_all(bind=bind, checkfirst=False)
     if bind.dialect.name == 'postgresql':
         session = Session(bind=bind)
         try:

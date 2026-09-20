@@ -79,6 +79,7 @@ from backend.app.review.auto_review_source_reconciliation import (
 from backend.tests.test_auto_review_source_reconciliation import (
     _seed_explicit_history,
 )
+from backend.tests.postgres_isolation import lease_postgres_schema
 
 
 class RefusingEmbeddingModel:
@@ -89,6 +90,27 @@ class RefusingEmbeddingModel:
 
     def embed_many(self, texts: list[str]):
         raise AssertionError('stale evidence reached the embedding provider')
+
+
+@pytest.fixture(autouse=True)
+def isolated_pgvector_database(monkeypatch: pytest.MonkeyPatch):
+    base_url = os.getenv('PARAWORKS_TEST_POSTGRES_URL')
+    if not base_url or not os.getenv('PARAWORKS_PGVECTOR_TEST_DATABASE_URL'):
+        yield
+        return
+    with lease_postgres_schema(
+        base_url,
+        run_id=uuid4().hex[:12],
+        scope_name='pgvector',
+    ) as lease:
+        for name in (
+            'PARAWORKS_TEST_POSTGRES_URL',
+            'PARAWORKS_PGVECTOR_TEST_DATABASE_URL',
+            'DATABASE_URL',
+            'PARAWORKS_DATABASE_URL',
+        ):
+            monkeypatch.setenv(name, lease.database_url)
+        yield
 
 
 def test_rag_v2_pgvector_sql_accepts_only_validated_carrier_and_ranks_before_permission() -> None:
@@ -303,7 +325,7 @@ def _pgvector_test_db(database_url: str):
     session_local = sessionmaker(bind=engine)
     table_name = f'rag_vector_documents_test_{uuid4().hex[:8]}'
     settings = Settings(database_url=database_url, openai_embedding_dimensions=8)
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             yield db, table_name, settings
@@ -471,7 +493,7 @@ def test_startup_recovery_removes_stale_physical_pgvector_before_ready() -> None
         openai_embedding_dimensions=8,
     )
     try:
-        Base.metadata.create_all(engine)
+        Base.metadata.create_all(engine, checkfirst=False)
         with session_local() as db:
             history, _, source, store, _ = _seed_pg_schedule(
                 db,
@@ -547,7 +569,7 @@ def test_pgvector_reindex_path_with_fake_embedding() -> None:
     table_name = f'rag_vector_documents_test_{test_id}'
     settings = Settings(database_url=database_url)
 
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             signature = 'a' * 64
@@ -690,7 +712,7 @@ def test_pgvector_reindex_path_with_fake_embedding() -> None:
                         serving_documents[0],
                         text='Stale bytes must not cross relational guard.',
                     ),
-                    [0.0] * 8,
+                    [1.0, *([0.0] * 7)],
                     locked_context=locked,
                 )
                 db.commit()
@@ -728,7 +750,7 @@ def test_pgvector_live_filter_rejects_python_invalid_source_authority(
         database_url=database_url,
         openai_embedding_dimensions=8,
     )
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             history, _, source, store, document = _seed_pg_schedule(
@@ -805,7 +827,7 @@ def test_pgvector_live_filter_accepts_legacy_decision_link_under_canonical_id(
         database_url=database_url,
         openai_embedding_dimensions=8,
     )
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             history, item, _, store, _ = _seed_pg_schedule(
@@ -933,7 +955,17 @@ def test_pgvector_candidate_persists_exact_decision_link_dependency(
             USERS['viewer'],
             conversation,
             content='Bound pgvector decision answer',
-            citations=[{'source_id': candidate.source_id}],
+            citations=[
+                {
+                    'source_id': candidate.source_id,
+                    'source_url': candidate.source_url,
+                    'source_type': candidate.metadata['source_type'],
+                    'permission_level': candidate.permission_level,
+                    'source_snippet': candidate.source_snippet,
+                    'relevance_score': candidate.relevance_score,
+                    'matched_terms': candidate.matched_terms,
+                }
+            ],
             source_ids=[candidate.source_id],
             source_links=[candidate.source_url],
             source_snippets=[candidate.source_snippet],
@@ -1033,7 +1065,17 @@ def test_pgvector_candidate_snapshot_uses_canonical_text_for_every_knowledge_typ
             USERS['viewer'],
             conversation,
             content=f'Bound {knowledge_type} answer',
-            citations=[{'source_id': candidates[0].source_id}],
+            citations=[
+                {
+                    'source_id': candidates[0].source_id,
+                    'source_url': candidates[0].source_url,
+                    'source_type': candidates[0].metadata['source_type'],
+                    'permission_level': candidates[0].permission_level,
+                    'source_snippet': candidates[0].source_snippet,
+                    'relevance_score': candidates[0].relevance_score,
+                    'matched_terms': candidates[0].matched_terms,
+                }
+            ],
             source_ids=[candidates[0].source_id],
             source_links=[candidates[0].source_url],
             source_snippets=[candidates[0].source_snippet],
@@ -1247,7 +1289,7 @@ def test_pgvector_reindex_rechecks_live_evidence_before_provider_input() -> None
     table_name = f'rag_vector_documents_test_{test_id}'
     settings = Settings(database_url=database_url)
 
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             signature = 'b' * 64
@@ -1382,7 +1424,7 @@ def test_pgvector_knowledge_permission_is_strict_before_ranking_and_hidden_count
     session_local = sessionmaker(bind=engine)
     test_id = uuid4().hex[:8]
     table_name = f'rag_vector_documents_test_{test_id}'
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             source = Source(
@@ -1560,7 +1602,7 @@ def test_pgvector_workflow_evidence_snapshot_is_strict_before_rank_and_hidden_co
     session_local = sessionmaker(bind=engine)
     test_id = uuid4().hex[:8]
     table_name = f'rag_vector_documents_test_{test_id}'
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             history, item, source, link = _seed_explicit_history(
@@ -1671,7 +1713,7 @@ def test_pgvector_preserves_narrow_proven_pre_c5_human_knowledge() -> None:
     session_local = sessionmaker(bind=engine)
     test_id = uuid4().hex[:8]
     table_name = f'rag_vector_documents_test_{test_id}'
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             item = ReviewItem(
@@ -1752,7 +1794,7 @@ def test_pgvector_schedule_reindex_commit_then_revoke_deletes_vector() -> None:
     session_local = sessionmaker(bind=engine)
     table_name = f'rag_vector_documents_test_{uuid4().hex[:8]}'
     settings = Settings(database_url=database_url)
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             _, item, _, store, document = _seed_pg_schedule(
@@ -1806,7 +1848,7 @@ def test_pgvector_schedule_revoke_commit_then_guarded_upsert_affects_zero() -> N
     session_local = sessionmaker(bind=engine)
     table_name = f'rag_vector_documents_test_{uuid4().hex[:8]}'
     settings = Settings(database_url=database_url)
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             _, item, _, store, detached = _seed_pg_schedule(
@@ -1853,7 +1895,7 @@ def test_pgvector_schedule_initial_reindex_read_then_revoke_blocks_stale_write()
     session_local = sessionmaker(bind=engine)
     table_name = f'rag_vector_documents_test_{uuid4().hex[:8]}'
     settings = Settings(database_url=database_url)
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             _, item, _, store, detached = _seed_pg_schedule(
@@ -1928,7 +1970,7 @@ def test_pgvector_reindex_skips_still_eligible_canonical_drift_after_provider() 
     session_local = sessionmaker(bind=engine)
     table_name = f'rag_vector_documents_test_{uuid4().hex[:8]}'
     settings = Settings(database_url=database_url)
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             history, _, source, store, detached = _seed_pg_schedule(
@@ -1998,7 +2040,7 @@ def test_pgvector_reindex_applies_permission_only_narrowing_after_provider() -> 
     session_local = sessionmaker(bind=engine)
     table_name = f'rag_vector_documents_test_{uuid4().hex[:8]}'
     settings = Settings(database_url=database_url)
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             history, item, source, store, _ = _seed_pg_schedule(
@@ -2088,7 +2130,7 @@ def test_pgvector_reconciliation_narrows_under_coordinator_context() -> None:
     session_local = sessionmaker(bind=engine)
     table_name = f'rag_vector_documents_test_{uuid4().hex[:8]}'
     settings = Settings(database_url=database_url)
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, checkfirst=False)
     try:
         with session_local() as db:
             history, item, source, store, _ = _seed_pg_schedule(
@@ -2186,7 +2228,7 @@ def test_permission_recovery_only_certifies_proven_canonical_index_states(
             return self._delegate.embed_many(texts)
 
     try:
-        Base.metadata.create_all(engine)
+        Base.metadata.create_all(engine, checkfirst=False)
         with session_local() as db:
             target, link, store, _ = _seed_pg_canonical_knowledge_schedule(
                 db,

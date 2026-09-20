@@ -290,16 +290,23 @@ def _sqlite_statements():
 
 
 def _checks(values, previous):
+    bind = op.get_bind()
     for table, prefix in (
         ('assistant_messages', 'ck_assistant_messages_'),
         ('assistant_message_evidence_dependencies', 'ck_assistant_message_dependency_'),
     ):
+        existing_names = {
+            constraint['name']
+            for constraint in sa.inspect(bind).get_check_constraints(table)
+        }
         with op.batch_alter_table(table) as batch:
             for name in previous:
                 if name.startswith(prefix):
                     batch.drop_constraint(name, type_='check')
             for name, sql in values.items():
-                if name.startswith(prefix):
+                if name.startswith(prefix) and (
+                    name in previous or name not in existing_names
+                ):
                     batch.create_check_constraint(name, sql)
 
 

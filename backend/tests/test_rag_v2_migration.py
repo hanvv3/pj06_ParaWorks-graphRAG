@@ -453,6 +453,7 @@ def postgres_migration(monkeypatch: pytest.MonkeyPatch) -> Iterator[Engine]:
     query['options'] = f'-csearch_path={schema_name},public'
     isolated_url = parsed.set(query=query).render_as_string(hide_password=False)
     monkeypatch.setenv('PARAWORKS_DEMO_MODE', 'false')
+    monkeypatch.setenv('DATABASE_URL', isolated_url)
     monkeypatch.setenv('PARAWORKS_DATABASE_URL', isolated_url)
     get_settings.cache_clear()
     command.upgrade(Config('alembic.ini'), 'head')
@@ -505,6 +506,13 @@ def test_postgresql_enforces_serving_and_vector_projection_contracts(
                 "'indexed', CURRENT_TIMESTAMP, 'raw_chunk')"
             ),
             {'content_hash': '0' * 64},
+        )
+
+
+def test_postgresql_fresh_schema_reaches_head(postgres_migration) -> None:
+    with postgres_migration.connect() as connection:
+        assert connection.scalar(text('SELECT version_num FROM alembic_version')) == (
+            'd7a8b9c0d1e2'
         )
 
 

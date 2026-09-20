@@ -1,6 +1,6 @@
 # ParaWorks — 현재 인수인계
 
-갱신: 2026-09-20. 단계: **승인된 비상용 프로토타입 우선 계획 반영; 제품 구현 변경 없음**.
+갱신: 2026-09-20. 단계: **D functional baseline passed; E-1 may start; formal release deferred and NOT CLEAN**.
 
 ## 작업 위치
 
@@ -21,7 +21,9 @@
 - 이전 Git source 검증·DTO-only 경로·소비 시 freshness 관련 재현은 수정 기록이 있다.
 - CLI의 마지막 기록은 `preview_snapshot_reader_unavailable`, dispatch 0, authorization false.
   실제 reader/30-case runner/reviewer session/quality publication/`run` CLI가 남아 있다.
-- 기능 기준선/PG/live gate의 새 실행 증거가 없다. 이번 문서 작업에서 DB 상태나 제품 테스트를 실행하지 않았다.
+- F-1/F-2 기능 기준선 증거가 있다. F-2 exact real-PG suite는 318 passed, 13 warnings,
+  frontend local-fake gates도 passed다. 상세 selector/cleanup은 portfolio 최신 항목과
+  `.superpowers/sdd/d-core-completion/task-F-2-report.md`를 따른다.
 - v1 provider rebind 이력은 이전 정책 재료 부족으로 fail-closed다. 정상 recovery/재bootstrap
   결정 없이 실행을 열지 않는다. 대상 데이터가 없는 disposable fixture와 운영 복구는 구분한다.
 
@@ -31,12 +33,8 @@
 release reviewer/OAuth·30-case runner·quality publication은 보류되며 지식용 Review Queue는 유지한다.
 R1 threat-model 변경과 P1 해결을 승인된 것으로 해석하지 않는다. 보류된 D-0에서 결정한다.
 
-1. **F-1 (실제 개발·검증):** 기존 graph/API/Assistant의 provider-free 회귀와 coverage를 확인한다.
-   실패/누락이 있으면 RED를 확인한 뒤 해당 코드만 보완한다. 새 release authority를 먼저 만들지 않는다.
-2. **F-2 (실제 개발·검증):** disposable PG+pgvector의 runtime 권한·근거·비용·transaction과 UI 통합을 확인한다.
-   둘 다 통과하면 “D 기능 기준선 통과, 정식 release 보류/NOT CLEAN”으로 구분한다.
-3. **E-1~E-3:** 캐시 없이 관계 검색/근거 경로를 구현·비교한다. 이어 **C-1~C-3**에서 캐시를 연결한다.
-4. **S-1~S-3:** 합성 Slack의 수집→Review→검색을 재현한다. 실제 데이터 선택은 live 연동 때 묻는다.
+1. **E-1~E-3:** 캐시 없이 관계 검색/근거 경로를 구현·비교한다. 이어 **C-1~C-3**에서 캐시를 연결한다.
+2. **S-1~S-3:** 합성 Slack의 수집→Review→검색을 재현한다. 실제 데이터 선택은 live 연동 때 묻는다.
 
 이번 턴은 planning 문서 변경까지만 수행했다. 구현 재개 시 기존 subagent-driven 방식을 유지한다.
 

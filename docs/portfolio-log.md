@@ -1,5 +1,23 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-20 — F-2 실제 PostgreSQL/pgvector 및 local-fake UI 기준선 검증
+
+- disposable `paraworks_rag_test` PostgreSQL/pgvector `0.8.2`에서 migration,
+  app/vector schema guard와 supplied non-superuser role을 확인했다. live provider,
+  `.env`, Docker volume, rollout은 변경하지 않았다.
+- F-2 exact real-PG suite는 **318 passed, 13 warnings**, PG selector skip 0이다.
+  비용/transaction recovery, C.5/advisory, permission/hidden match·evidence
+  revoke, readiness, fake embedding의 native pgvector write/search를 확인했다.
+- RED/GREEN으로 b5 check 중복, leased schema `checkfirst` public 오인, paid
+  phase-2 safety authority, commit 뒤 expired ORM read의 transaction 재개를
+  보완했다. safety transport는 exact shared advisory/runtime health만 수락한다.
+- frontend lint/type/build과 controlled-fake Chromium desktop UI evidence가
+  통과했다. 48-case run의 두 timing-sensitive initial failures는 fresh retry에서
+  passed/no failed tests가 됐다. cleanup은 leased schema 0, active peer session 0.
+- 결론: **D functional baseline passed / E-1 may start / formal release deferred
+  and NOT CLEAN**. capability P1, OAuth/reviewer, 30-case quality, actual-model
+  quality와 live rollout은 통과로 표시하지 않는다.
+
 ## 2026-09-20 — F-1 provider-free RAG 기능 기준선 검증
 
 - 최초 provider-free baseline 검증 code revision은

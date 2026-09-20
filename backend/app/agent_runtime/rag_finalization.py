@@ -36,6 +36,7 @@ from backend.app.agent_runtime.rag_embedding_delivery import (
     embedding_dispatch_receipt_hmac,
 )
 from backend.app.agent_runtime.rag_postgres_binding import (
+    RagPostgresAdvisoryTransport,
     RagPostgresDatabaseAuthority,
     RagPostgresDatabaseCleanupFailure,
 )
@@ -106,6 +107,43 @@ from backend.app.rag.serving_locks import (
 
 class RagFinalizationError(RuntimeError):
     """No immutable product was committed; callers must not synthesize one."""
+
+
+@contextmanager
+def _paid_phase2_provider_safety_barrier(
+    *,
+    provider_safety: RagProviderSafetyService,
+    connection_factory: Callable[[], object],
+    requirements: tuple[
+        tuple[AuthorizedProviderPolicySnapshot, RagProviderSafetyBinding], ...
+    ],
+    order: object,
+    sidecar_capability: object,
+    safety_capability: object,
+):
+    if type(connection_factory) is RagPostgresAdvisoryTransport:
+        with connection_factory() as connection:
+            with provider_safety.finalization_barrier(
+                connection,
+                requirements,
+                order=order,  # type: ignore[arg-type]
+                sidecar_capability=sidecar_capability,  # type: ignore[arg-type]
+                safety_capability=safety_capability,  # type: ignore[arg-type]
+            ):
+                yield
+        return
+    connection = connection_factory()
+    try:
+        with provider_safety.finalization_barrier(
+            connection,  # type: ignore[arg-type]
+            requirements,
+            order=order,  # type: ignore[arg-type]
+            sidecar_capability=sidecar_capability,  # type: ignore[arg-type]
+            safety_capability=safety_capability,  # type: ignore[arg-type]
+        ):
+            yield
+    finally:
+        connection.close()  # type: ignore[attr-defined]
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,11 +521,11 @@ class PaidRagPhase2Authority:
         order = begin_rag_lock_order('ordinary')
         sidecar_order = order.acquire('provider_stable_sidecar')
         safety_order = order.acquire('provider_safety_rows')
-        safety_connection = assembly.safety_connection_factory()
         try:
-            with assembly.provider_safety.finalization_barrier(
-                safety_connection,  # type: ignore[arg-type]
-                assembly.safety_requirements,
+            with _paid_phase2_provider_safety_barrier(
+                provider_safety=assembly.provider_safety,
+                connection_factory=assembly.safety_connection_factory,
+                requirements=assembly.safety_requirements,
                 order=order,
                 sidecar_capability=sidecar_order,
                 safety_capability=safety_order,
@@ -574,8 +612,6 @@ class PaidRagPhase2Authority:
                         owner_connection.close()  # type: ignore[attr-defined]
         except RagProviderSafetyError as exc:
             raise RagFinalizationError('phase-2 provider safety changed') from exc
-        finally:
-            safety_connection.close()  # type: ignore[attr-defined]
 
     @contextmanager
     def acquire_recovery(self, snapshot: PendingProjectionRecoverySnapshot):
@@ -618,11 +654,11 @@ class PaidRagPhase2Authority:
         order = begin_rag_lock_order('ordinary')
         sidecar_order = order.acquire('provider_stable_sidecar')
         safety_order = order.acquire('provider_safety_rows')
-        safety_connection = assembly.safety_connection_factory()
         try:
-            with assembly.provider_safety.finalization_barrier(
-                safety_connection,  # type: ignore[arg-type]
-                assembly.safety_requirements,
+            with _paid_phase2_provider_safety_barrier(
+                provider_safety=assembly.provider_safety,
+                connection_factory=assembly.safety_connection_factory,
+                requirements=assembly.safety_requirements,
                 order=order,
                 sidecar_capability=sidecar_order,
                 safety_capability=safety_order,
@@ -684,8 +720,6 @@ class PaidRagPhase2Authority:
             raise RagFinalizationError(
                 'phase-2 provider safety changed'
             ) from exc
-        finally:
-            safety_connection.close()  # type: ignore[attr-defined]
 
 
 def _assemble_provider_free_rag_phase2_authority(
@@ -736,7 +770,13 @@ def _assemble_paid_rag_phase2_authority(
             or owner_connection_factory is not None
         ):
             raise TypeError('paid PostgreSQL authority is invalid')
-        safety_connection_factory = postgres_database.connect
+        safety_connection_factory = provider_safety.advisory_transport_authority
+        if (
+            type(safety_connection_factory) is not RagPostgresAdvisoryTransport
+            or safety_connection_factory.runtime_health_authority
+            is not postgres_database.runtime_health_authority
+        ):
+            raise TypeError('paid PostgreSQL advisory transport is unavailable')
         owner_connection_factory = postgres_database.connect
     if not callable(safety_connection_factory) or not callable(
         owner_connection_factory

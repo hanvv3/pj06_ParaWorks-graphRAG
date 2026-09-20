@@ -2725,12 +2725,11 @@ class RagCostLedger:
             if type(assistant_finalizer) is not AssistantInterComponentFailureFinalizer or admission_only:
                 raise RagCostLedgerError('assistant finalization authority is invalid')
             assistant_finalizer.append(self._session, parent)
-        self._commit()
         finals = cast(
             tuple[RagComponentFinal, RagComponentFinal],
             tuple(self._component_final(parent, row) for row in rows),
         )
-        return RagRunTerminal(
+        terminal = RagRunTerminal(
             agent_run_id=parent.id,
             status='failed',
             run_record_phase=phase,  # type: ignore[arg-type]
@@ -2746,6 +2745,8 @@ class RagCostLedger:
             terminal_identity_hmac=terminal_hmac,
             completed_at=timestamp,
         )
+        self._commit()
+        return terminal
 
     def _component_final(
         self, parent: AgentRun, row: AgentRunCostComponent
