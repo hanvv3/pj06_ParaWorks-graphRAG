@@ -1,6 +1,18 @@
 # ParaWorks — 현재 인수인계
 
-갱신: 2026-09-21. 단계: **E-2 relationship retrieval implemented; independent review/E-3 next; formal release deferred and NOT CLEAN**.
+갱신: 2026-09-21. 단계: **E GraphRAG prototype accepted; D.1 C-1 next; formal release deferred and NOT CLEAN**.
+
+## E-3 완료 후속
+
+- E-3 fixed corpus comparison shows relation public-source recall 0.5→1.0 at
+  precision 1.0; single/absent/restricted/revoke preserve E-1 expectations.
+  Default-off/unavailable/stale rollback and receipt reuse are covered. See
+  [E-3 runbook](e-3-graphrag-comparison.md).
+- After controller-coordinated Neo4j restart and PostgreSQL restart/fresh-session
+  reconstruction, E-2 retrieval recovered the same relation evidence. No paid
+  provider/cache/flag activation occurred.
+- Next is **D.1 C-1**, reusing E-2 graph dependencies in cache key/hit/finalization.
+  Actual-model quality, production RBAC, capability P1 and formal release remain deferred.
 
 ## E-2 후속 진입
 

@@ -1,5 +1,19 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — E-3 fixed-corpus GraphRAG comparison and rollback
+
+- Actual PostgreSQL plus official Neo4j driver ran E-1's same corpus/principal,
+  cache-off 50-candidate/5-visible comparison. Relation preserves ordered
+  `history_event:1`, `chunk:1` and adds `chunk:2`; evaluation-only public-source
+  dedup raises recall 0.5→1.0 while precision remains 1.0. Single/restricted/
+  revoke retain their controls; absent returns no evidence: **8 passed in 6.10s**.
+- Default-off/unavailable/stale rollback preserves the seed and embedding receipt.
+  Controller-coordinated Neo4j restart then fresh official driver/store recovery
+  passed (**1 in 25.74s**). A controlled PostgreSQL restart and fresh engine/session
+  also reproduced pgvector+graph (**1 in 16.34s**). [E-3 runbook](superpowers/runbooks/e-3-graphrag-comparison.md)
+  records commands and limits. Actual-model quality, paid cost, rollout/RBAC,
+  formal release NOT CLEAN, and capability P1 remain deferred.
+
 ## 2026-09-21 — E-2 permission-preserving relationship retrieval
 
 - E-2 review R1: `/ask`의 기존 8개 seed를 graph cap5로 줄이던 fallback 회귀를

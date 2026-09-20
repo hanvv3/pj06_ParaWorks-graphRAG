@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 
 from backend.tests.release_evidence_plugin import record_lease_event
 
@@ -51,12 +52,22 @@ def lease_postgres_schema(base_url: str, *, run_id: str, scope_name: str) -> Ite
         yield PostgresSchemaLease(base_url, leased.render_as_string(hide_password=False), schema)
     finally:
         if created:
-            with engine.begin() as connection:
-                connection.execute(text("SET LOCAL lock_timeout = '5s'"))
-                connection.execute(text("SET LOCAL statement_timeout = '30s'"))
-                connection.execute(text(f'DROP SCHEMA {quoted} CASCADE'))
-                if connection.scalar(text('SELECT count(*) FROM pg_namespace WHERE nspname=:name'), {'name': schema}) != 0:
-                    raise RuntimeError('schema_cleanup_failed')
+            # A controlled disposable PostgreSQL restart invalidates the pool's
+            # cleanup connection.  Rebuild it once; this is test lease cleanup,
+            # not application retry behavior.
+            for attempt in range(2):
+                try:
+                    with engine.begin() as connection:
+                        connection.execute(text("SET LOCAL lock_timeout = '5s'"))
+                        connection.execute(text("SET LOCAL statement_timeout = '30s'"))
+                        connection.execute(text(f'DROP SCHEMA {quoted} CASCADE'))
+                        if connection.scalar(text('SELECT count(*) FROM pg_namespace WHERE nspname=:name'), {'name': schema}) != 0:
+                            raise RuntimeError('schema_cleanup_failed')
+                    break
+                except OperationalError:
+                    if attempt or os.getenv('PARAWORKS_TEST_POSTGRES_RESTART_PAUSE') != '1':
+                        raise
+                    engine.dispose()
             record_lease_event(lease_identity=lease_identity, state='dropped')
         engine.dispose()
 
