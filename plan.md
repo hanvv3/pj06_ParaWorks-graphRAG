@@ -22,7 +22,7 @@
 |---|---|---|---|
 | A/B/C/C.5 | 과거 구현·검증 기록 있음. C.5 rollout disabled | [이력](docs/superpowers/archive/2026-09-20-product-plan-history.md) | 재구현하지 않음 |
 | D Core 기능 | F-1/F-2 fresh 기능 기준선 통과; 정식 release는 NOT CLEAN으로 보류 | [D spec](docs/superpowers/specs/2026-09-20-d-core-completion-design.md) | [F-1/F-2](docs/superpowers/plans/2026-09-20-d-core-completion.md) |
-| E | 미구현. D 기능 기준선 이후, 캐시 없이 시작 | [GraphRAG spec](docs/superpowers/specs/2026-09-20-e-graphrag-design.md) | [E-1~E-3](docs/superpowers/plans/2026-09-20-e-graphrag.md) |
+| E | 최소 GraphRAG prototype acceptance 완료. cache 없이 관계 검색/rollback 비교 확인 | [GraphRAG spec](docs/superpowers/specs/2026-09-20-e-graphrag-design.md) | [E-1~E-3](docs/superpowers/plans/2026-09-20-e-graphrag.md) |
 | D.1 | 미구현. E의 근거·관계 계약을 재사용 | [캐시 spec](docs/superpowers/specs/2026-09-20-d1-answer-cache-design.md) | [C-1~C-3](docs/superpowers/plans/2026-09-20-d1-answer-cache.md) |
 | Slack | 마지막 기능; 합성 검증과 실제 연동 분리 | [Slack spec](docs/superpowers/specs/2026-09-20-slack-recovery-design.md) | [S-1~S-3](docs/superpowers/plans/2026-09-20-slack-recovery.md) |
 | 정식 출시 준비 | 보류. D release NOT CLEAN/P1 미해결 | [D release 계약](docs/superpowers/specs/2026-09-20-d-core-completion-design.md#보류한-정식-release-계약) | [기존 D-0~D-5](docs/superpowers/plans/2026-09-20-d-core-completion.md#보류한-정식-release-작업) |
@@ -34,7 +34,7 @@
 3. 선택한 단계의 spec과 **다음 작업 한 개**. [portfolio](docs/portfolio-log.md)의 최신 항목만 확인.
 4. 그 작업의 코드·테스트. 기존 긴 문서는 해당 계약이 필요할 때 지정된 절만 조회.
 
-다음은 **E-1: cache 없이 GraphRAG 관계 검색의 근거 경로를 구현·비교**한다.
+다음은 **D.1 C-1: E의 graph path dependency를 재사용하는 answer cache contract**다.
 F-1/F-2 기능 기준선은 통과했고 formal release는 NOT CLEAN으로 보류한다.
 Tasks1~22를 다시 구현하지 않는다.
 현재 승인은 계획 수정에 대한 것이며 제품 구현·테스트·서비스 실행은 이 문서 변경에서 하지 않았다.

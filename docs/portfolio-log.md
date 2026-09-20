@@ -6,8 +6,14 @@
   cache-off 50-candidate/5-visible comparison. Relation preserves ordered
   `history_event:1`, `chunk:1` and adds `chunk:2`; evaluation-only public-source
   dedup raises recall 0.5→1.0 while precision remains 1.0. Single/restricted/
-  revoke retain their controls; absent returns no evidence: **8 passed in 6.10s**.
-- Default-off/unavailable/stale rollback preserves the seed and embedding receipt.
+  revoke retain their controls; absent returns no evidence. E-3 R1 made the
+  module standalone, fed the identical case-specific request to both arms, and
+  measured fixed-fixture retrieval/sync: n=5 nearest-rank p50/p95 ms is
+  pgvector 62.025/440.592, graph 6.159/182.173, sync 173.002/187.119; lag 0.
+  The corrected standalone selector: **8 passed in 5.93s**.
+- Actual default-off composition returns the unwrapped seed. Fake-store unavailable/
+  stale tests preserve a controlled existing receipt; they do not claim paid-call
+  savings. Existing E-2 actual-driver outage/composition evidence remains separate.
   Controller-coordinated Neo4j restart then fresh official driver/store recovery
   passed (**1 in 25.74s**). A controlled PostgreSQL restart and fresh engine/session
   also reproduced pgvector+graph (**1 in 16.34s**). [E-3 runbook](superpowers/runbooks/e-3-graphrag-comparison.md)

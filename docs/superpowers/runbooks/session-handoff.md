@@ -8,6 +8,8 @@
   precision 1.0; single/absent/restricted/revoke preserve E-1 expectations.
   Default-off/unavailable/stale rollback and receipt reuse are covered. See
   [E-3 runbook](e-3-graphrag-comparison.md).
+- E-3 R1 fixed the standalone fixture import and records one raw timing sample
+  per fixed case; those measurements are fixture observability, not a latency SLO.
 - After controller-coordinated Neo4j restart and PostgreSQL restart/fresh-session
   reconstruction, E-2 retrieval recovered the same relation evidence. No paid
   provider/cache/flag activation occurred.

@@ -63,6 +63,11 @@ def _complete_projection(db, store, scope):
     pytest.fail('fixed corpus projection did not converge')
 
 
+def _case_request(scope, case):
+    """Same case-specific request object feeds both pgvector and graph arms."""
+    return replace(request(scope), retrieval_query_text=CASES[case]['query'])
+
+
 def _source_ids(result):
     # Trusted serving identity is intentionally `history_event:1`; it cites the
     # same public source as chunk:1.  Normalize this fixture-only alias here,
@@ -84,7 +89,7 @@ def _comparison_metrics(expected, result):
     )
 
 
-def _pgvector_seed(db, scope, case, *, populate=True):
+def _pgvector_seed(db, request_value, case, *, populate=True):
     """Run E-1's actual fixed-vector pgvector control before graph enrichment."""
     store = PgVectorStore(session=db, config=PgVectorConfig(embedding_dimensions=1536))
     if populate:
@@ -111,14 +116,14 @@ def _pgvector_seed(db, scope, case, *, populate=True):
                 },
             )
         db.commit()
-    control_request = replace(request(scope), retrieval_query_text=CASES[case]['query'])
+    started = time.perf_counter_ns()
     query = vector(2 if case == 'single' else 3 if case == 'absent' else 0)
     rows = SqlAlchemyPgVectorSearchStore(
         db=db,
         store=PgVectorStore(session=db, config=store.config, settings=SETTINGS),
         settings=SETTINGS,
     ).search(
-        control_request,
+        request_value,
         validate_query_embedding_vector(query, expected_dimensions=1536),
     )
     visible = tuple(
@@ -133,6 +138,7 @@ def _pgvector_seed(db, scope, case, *, populate=True):
     assert tuple(c.evidence.serving_document_id for c in visible) == CASES[case][
         'baseline_ids'
     ]
+    elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
     return RetrievalResult(
         configured_backend='pgvector',
         effective_backend='pgvector',
@@ -146,10 +152,10 @@ def _pgvector_seed(db, scope, case, *, populate=True):
             visible_count=len(visible),
             hidden_match_count=0,
             provider_attempt_count=0,
-            latency_ms=0,
+            latency_ms=round(elapsed_ms),
             fallback_category=None,
         ),
-    )
+    ), elapsed_ms
 
 
 @pytest.mark.parametrize('case', tuple(CASES))
@@ -158,19 +164,31 @@ def test_e3_fixed_corpus_compares_ordered_ids_and_public_source_coverage(
 ):
     """Actual PG + official Neo4j driver, deterministic vectors and no provider."""
     db = lexical_pg
+    # A unique principal isolates each disposable Neo4j namespace.  It retains
+    # E-1's workspace, permission set and constraints, and is identical across
+    # pgvector and graph arms of this one case.
     scope = replace(SCOPE, principal_subject=f'e3-{case}-{uuid4().hex}')
+    case_request = _case_request(scope, case)
     seed_corpus(db, case)
     driver = _driver()
     store = Neo4jGraphStore(driver)
     scope_id = security_scope_fingerprint(scope, settings=SETTINGS)
     try:
         store.ensure_schema()
+        sync_started = time.perf_counter_ns()
         status = _complete_projection(db, store, scope)
-        baseline = _pgvector_seed(db, scope, case)
+        sync_ms = (time.perf_counter_ns() - sync_started) / 1_000_000
+        baseline, pgvector_ms = _pgvector_seed(db, case_request, case)
         from langchain_core.runnables import RunnableLambda
 
-        result = adapter(db, store, RunnableLambda(lambda _: baseline)).invoke(
-            request(scope)
+        graph_started = time.perf_counter_ns()
+        result = adapter(db, store, RunnableLambda(lambda _: baseline)).invoke(case_request)
+        graph_ms = (time.perf_counter_ns() - graph_started) / 1_000_000
+        print(
+            f'E3_TIMING case={case} n=1 pgvector_ms={pgvector_ms:.3f} '
+            f'graph_ms={graph_ms:.3f} sync_ms={sync_ms:.3f} '
+            f'generation_lag={status.generation_lag}',
+            flush=True,
         )
         expected = CASES[case]['expected_sources']
         metrics = _comparison_metrics(expected, result)
@@ -201,7 +219,7 @@ def test_e3_fixed_corpus_compares_ordered_ids_and_public_source_coverage(
                 while time.monotonic() < deadline:
                     recovered = adapter(
                         db, store, RunnableLambda(lambda _: baseline)
-                    ).invoke(request(scope))
+                    ).invoke(case_request)
                     if tuple(
                         candidate.evidence.serving_document_id
                         for candidate in recovered.visible
@@ -227,10 +245,12 @@ def test_e3_fixed_corpus_compares_ordered_ids_and_public_source_coverage(
                 # outage, not a production transparent retry claim.
                 engine.dispose()
                 db = Session(engine)
-                recovered_baseline = _pgvector_seed(db, scope, case, populate=False)
+                recovered_baseline, _ = _pgvector_seed(
+                    db, case_request, case, populate=False
+                )
                 recovered = adapter(
                     db, store, RunnableLambda(lambda _: recovered_baseline)
-                ).invoke(request(scope))
+                ).invoke(case_request)
                 assert tuple(
                     candidate.evidence.serving_document_id
                     for candidate in recovered_baseline.visible
@@ -250,9 +270,9 @@ def test_e3_fixed_corpus_compares_ordered_ids_and_public_source_coverage(
         db.close()
 
 
-@pytest.mark.parametrize('mode', ('unavailable', 'stale', 'flag_off'))
+@pytest.mark.parametrize('mode', ('unavailable', 'stale'))
 def test_e3_rollback_keeps_seed_path_and_embedding_receipt(lexical_pg, mode):
-    """Graph disablement/failure never creates a second embedding/provider call."""
+    """Fake failure boundary preserves an existing receipt; no live call is made."""
     from decimal import Decimal
 
     from langchain_core.runnables import RunnableLambda
@@ -287,15 +307,21 @@ def test_e3_rollback_keeps_seed_path_and_embedding_receipt(lexical_pg, mode):
                 raise GraphUnavailable('disposable graph unavailable')
             return ()
 
-    if mode == 'flag_off':
-        # Default-off composition selects the unwrapped seed Runnable.
-        result = RunnableLambda(lambda value: original).invoke(request())
-    else:
-        result = adapter(
-            db, Store(), RunnableLambda(lambda value: original)
-        ).invoke(request())
+    result = adapter(
+        db, Store(), RunnableLambda(lambda value: original)
+    ).invoke(request())
     assert result.visible == original.visible
     assert result.query_embedding_receipt is receipt
     assert result.top_candidate_window_hmac == original.top_candidate_window_hmac
     assert result.trace.provider_attempt_count == 0
-    assert len(calls) == (0 if mode == 'flag_off' else 1)
+    assert len(calls) == 1
+
+
+def test_e3_default_off_composition_uses_unwrapped_seed(lexical_pg):
+    """Config rollback is exercised through the production composition helper."""
+    from langchain_core.runnables import RunnableLambda
+
+    from backend.app.agent_runtime.rag_v2_composition import _graph_enrichment
+
+    seed = RunnableLambda(lambda value: value)
+    assert _graph_enrichment(lexical_pg, SETTINGS, seed) is seed

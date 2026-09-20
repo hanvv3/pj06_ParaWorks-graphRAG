@@ -6,7 +6,7 @@
 **Spec:** [E 설계](../specs/2026-09-20-e-graphrag-design.md).
 **Architecture:** PostgreSQL-derived projection → bounded graph retrieval → canonical evidence 검증 → 기존 answer graph.
 **Tech:** 기존 LangChain Runnable/LangGraph, PostgreSQL, 공식 Neo4j driver; 필요한 SDK만 착수 시 lock.
-**상태:** E-1 projection 완료, E-2 구현/검증 후 독립 리뷰 대기, E-3 미구현. 상세 계약과 재현은
+**상태:** E-1 projection, E-2 retrieval, E-3 comparative/rollback evidence 완료. 다음은 D.1 C-1이다. 상세 계약과 재현은
 [E-1 runbook](../runbooks/e-1-graph-projection.md)을 따른다.
 정식 D release green은 선행 조건이 아니다. 순서는 E → D.1 → Slack → 정식 릴리스 준비다.
 
@@ -57,7 +57,7 @@ backend union·내부 path carrier·state/fingerprint version 변경의 소비�
   최종 노출 검증까지 연결한다. keyword/pgvector의 빈 dependency 호환과 fallback/disabled를 보존한다.
 - [x] 캐시가 없는 경로에서 generation 도중 중간 edge revoke/version/permission 변경을 RED로 재현하고,
   전체 relation dependency를 최종 PG 검증에 포함한다. endpoint 문서 검증만으로 통과시키지 않는다.
-- [ ] fake graph+실제 PG/Neo4j 계약, 기존 API/Assistant 회귀를 검증·리뷰하고 커밋한다.
+- [x] fake graph+실제 PG/Neo4j 계약, 기존 API/Assistant 회귀를 검증·리뷰하고 커밋한다.
   graph 장애 fallback도 seed/embedding을 재사용하고 동일 budget을 유지하며 authority 장애는 거부한다.
 
 **Acceptance:** 버전이 명시된 내부 결과가 전체 path 검증을 보존하고 공개 route/화면은 늘리지 않는다.
@@ -68,14 +68,14 @@ E-2의 dependency 계약을 후속 D.1에 넘기며 아직 캐시 저장소나 h
 
 ## E-3 — 관계 질의 개선과 rollback 증명
 
-- [ ] E-1의 같은 corpus·principal·모델·예산과 cache-off 조건으로 pgvector/graph를 비교한다.
+- [x] E-1의 같은 corpus·principal·모델·예산과 cache-off 조건으로 pgvector/graph를 비교한다.
   기대 source ID 기준 precision/recall·관계 coverage와 단일 근거/no-match 회귀를 기록한다.
-- [ ] fake 모델의 기능 계약과 실제 모델의 관계 답변 성공·faithfulness·citation 평가를 분리한다.
+- [x] fake 모델의 기능 계약과 실제 모델의 관계 답변 성공·faithfulness·citation 평가를 분리한다.
   실제 모델 평가는 별도 승인된 실행 범위에서만 수행하며 미실행이면 품질 미평가로 남긴다.
   latency·비용·projection lag도 기록하되 baseline 없는 임의 SLO나 fake 결과를 live 통과라 하지 않는다.
-- [ ] graph unavailable/stale/revoke, flag rollback·PG/Neo4j 재시작을 검증한다.
+- [x] graph unavailable/stale/revoke, flag rollback·PG/Neo4j 재시작을 검증한다.
   prototype 기능 결과와 향후 shadow·제한 활성화 판단을 구분하며 flag를 자동 활성화하지 않는다.
-- [ ] 코드 revision/fixture/검색 결과·DB 증거·실제 모델 미평가 항목을 한 evidence 항목에 남긴다.
+- [x] 코드 revision/fixture/검색 결과·DB 증거·실제 모델 미평가 항목을 한 evidence 항목에 남긴다.
 
 **Prototype 기능 완료:** cache-off 관계 검색의 이점, 현재 permission/evidence/citation 보존,
 실제 PG/Neo4j 동작과 장애 복귀가 확인됨. 실제 모델 품질/정식 live 평가 미완료는 별도 남긴다.
