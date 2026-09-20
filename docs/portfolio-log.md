@@ -2,9 +2,11 @@
 
 ## 2026-09-20 — F-1 provider-free RAG 기능 기준선 검증
 
-- 검증 코드 revision: `5af21b5fc957f5aa2a57dd22097fe73b0aa1d2c5`
-  (`codex/rag-orchestrator-agent`). 시작/종료에 확인한 문서의 CRLF/stat-only `M` 항목은
-  기존 변경이며 product diff/staged diff는 없었다. 이번 변경은 이 검증 기록뿐이다.
+- 최초 provider-free baseline 검증 code revision은
+  `5af21b5fc957f5aa2a57dd22097fe73b0aa1d2c5` (`codex/rag-orchestrator-agent`)다.
+  그 최초 실행의 evidence-only 기록은 `3495a80`이고, review round 1의 unselected-influence
+  regression은 `611c033`에 추가했다. 시작/종료에 확인한 나머지 CRLF/stat-only 문서 `M` 항목은
+  기존 변경이며 product diff/staged diff는 없었다; F-1은 production code를 변경하지 않았다.
 - 우선 명령을 fake provider/SQLite와 zero-network guard로 실행했다:
   `uv run --no-cache --locked pytest backend/tests/test_rag_v2_graph.py backend/tests/test_rag_default_runtime.py backend/tests/test_rag_api_delivery.py backend/tests/test_rag_v2_provider_free_golden.py backend/tests/test_rag_v2_sqlite_smoke.py -q` →
   **346 passed in 211.95s**, failure/skip 0. 정상 답변·no-match·actor permission denial,
@@ -21,10 +23,12 @@
 - 후속 리뷰가 지적한 unselected model influence의 생성 후 revoke 경계는 두 provider-visible slot을
   실제 graph에 넣어 E1만 선택하고 E2를 생성 뒤 `restricted`로 revoke하는 회귀로 보완했다:
   `test_answer_graph_post_generation_unselected_influence_revoke_redacts_full_product` →
-  **1 passed in 4.61s**. 전체 answer product/citation/influence를 redaction하고 한 번만 dispatch하며,
-  비용과 full-influence audit HMAC을 보존함을 확인했다. 관련 graph/finalization 영향 명령은
-  **95 passed, 1 skipped in 104.92s**, failure 0이었다. 기존 구현이 이미 계약을 만족해 새 test의
-  첫 실행도 GREEN이었고 product code 변경은 없었다.
+  review round 2에서 이 selector를 exact parent/component cost equality, actual 10/5 token usage,
+  `charge_basis=actual`, dispatch 1까지 강화해 **1 passed in 4.15s**를 확인했다. 전체 answer
+  product/citation/influence를 redaction하고 한 번만 dispatch하며, exact committed cost와
+  full-influence audit HMAC을 보존한다. 관련 graph/finalization 영향 명령은
+  **95 passed, 1 skipped in 102.58s**, failure 0이었다. 기존 implementation은 이 계약을 만족해
+  product code 변경은 없었다.
 - 이 기록은 provider-free F-1 증거만 뜻한다. 실제 PostgreSQL+pgvector/UI 통합은 F-2에서,
   actual-model 품질·30-case formal release와 capability P1/NOT CLEAN 해소는 보류된 D-0~D-5에서
   별도로 검증해야 하며, 이번 결과로 이를 통과라고 표시하지 않는다.

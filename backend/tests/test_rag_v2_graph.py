@@ -916,17 +916,32 @@ def test_answer_graph_post_generation_unselected_influence_revoke_redacts_full_p
 ):
     """Every provider-visible influence is revalidated, including non-citations."""
     from sqlalchemy import select
+    from sqlalchemy.orm import Session
 
     from backend.app.agent_runtime.rag_graph import (
         build_company_memory_rag_answer_v2_graph,
     )
-    from backend.app.models import Source
+    from backend.app.models import AgentRunCostComponent, Source
 
     context, client = _answer_context(tmp_path, mixed_sources=True)
     captured = {}
     finalizer_factory = context.services.finalizer_factory
 
     def capture_full_influence(pending, prepared):
+        with Session(context.services.db.get_bind()) as db:
+            parent = db.get(AgentRun, 161)
+            answer_cost = db.query(AgentRunCostComponent).filter_by(
+                agent_run_id=161, component='answer_generation'
+            ).one()
+            assert parent.run_record_phase == 'cost_finalized_pending_projection'
+            captured['parent_cost_usd'] = parent.total_charged_cost_usd
+            captured['answer_cost'] = (
+                answer_cost.charged_cost_usd,
+                answer_cost.actual_input_tokens,
+                answer_cost.actual_output_tokens,
+                answer_cost.charge_basis,
+                answer_cost.dispatch_count,
+            )
         captured['slot_ids'] = tuple(
             observation.slot_id
             for observation in prepared.model_influence_observations
@@ -969,9 +984,25 @@ def test_answer_graph_post_generation_unselected_influence_revoke_redacts_full_p
     assert result['evidence_projection'].citations == ()
     assert result['model_influence'] == ()
     assert len(client.seen) == 1
-    assert result['charged_cost_usd'] > 0
+    assert result['charged_cost_usd'] == captured['parent_cost_usd']
     parent = context.services.db.get(AgentRun, 161)
     assert parent.status == 'complete' and parent.run_record_phase == 'final'
+    answer_cost = context.services.db.query(AgentRunCostComponent).filter_by(
+        agent_run_id=161, component='answer_generation'
+    ).one()
+    assert (
+        answer_cost.charged_cost_usd,
+        answer_cost.actual_input_tokens,
+        answer_cost.actual_output_tokens,
+        answer_cost.charge_basis,
+        answer_cost.dispatch_count,
+    ) == captured['answer_cost']
+    assert (
+        answer_cost.actual_input_tokens,
+        answer_cost.actual_output_tokens,
+        answer_cost.charge_basis,
+        answer_cost.dispatch_count,
+    ) == (10, 5, 'actual', 1)
     assert (
         parent.metadata_['prepared_model_influence_observation_hmac']
         == captured['observation_hmac']
