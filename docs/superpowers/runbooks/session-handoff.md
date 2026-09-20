@@ -1,6 +1,16 @@
 # ParaWorks — 현재 인수인계
 
-갱신: 2026-09-21. 단계: **E accepted; D.1 C-2 implemented, independent review then C-3; formal release deferred and NOT CLEAN**.
+갱신: 2026-09-21. 단계: **E/C-1/C-2 CLEAN; C-3 measured implementation awaits review; next Slack synthetic S-1; formal release NOT CLEAN**.
+
+## C-3 측정과 다음 단계
+
+- 같은 실제 PG/backend에서 baseline과 cold/warm 생성 호출·DB 작업·시간을 측정했다.
+  [C-3 runbook](c-3-answer-cache-comparison.md)에 원시 표·측정 범위·재현 명령·한계가 있다.
+  fake 모델 비용이며 embedding 절감이나 live 응답속도 개선을 주장하지 않는다.
+- cache-off는 fresh graph generation, graph-off는 별도 key의 keyword로 복귀한다.
+  기존 감사 기록을 보존한다. 기본 flag·권한·Review·비용 정책은 바꾸지 않았다.
+- C-3 독립 리뷰 뒤 Slack S-1 합성 ingestion을 진행한다. 실제 Slack/OAuth·유료 호출·
+  rollout은 실행하지 않았다. capability P1과 formal release NOT CLEAN은 유지한다.
 
 ## C-2 runtime 연결
 
@@ -11,7 +21,7 @@
 - [C-2 runbook](c-2-answer-cache-runtime.md)에 내부 HMAC 소비자, bounded cleanup/운영 명령,
   실제 PG와 fake 테스트 경계가 있다. PG 조립 검증은 E metadata/scorer fixture이며
   전체 migration trigger 또는 정식 release 통과를 뜻하지 않는다.
-- 새 의존성/DB migration/공개 DTO 변경은 없다. C-2 독립 리뷰를 마친 뒤 C-3으로 진행한다.
+- 새 의존성/DB migration/공개 DTO 변경은 없다. C-2 R1 독립 리뷰는 CLEAN이다.
 
 ## C-1 독립 저장소
 
@@ -104,7 +114,7 @@ R1 threat-model 변경과 P1 해결을 승인된 것으로 해석하지 않는�
 1. **E-1~E-3:** 캐시 없이 관계 검색/근거 경로를 구현·비교한다. 이어 **C-1~C-3**에서 캐시를 연결한다.
 2. **S-1~S-3:** 합성 Slack의 수집→Review→검색을 재현한다. 실제 데이터 선택은 live 연동 때 묻는다.
 
-계획 승인 이후 E와 C-1/C-2 구현을 진행했다. 다음 작업은 C-2 독립 리뷰 후 C-3다.
+계획 승인 이후 E와 C-1~C-3 구현을 진행했다. 다음 기능은 C-3 독립 리뷰 후 Slack S-1이다.
 
 ## 검증과 운영 경계
 
@@ -127,4 +137,4 @@ R1 threat-model 변경과 P1 해결을 승인된 것으로 해석하지 않는�
 - 로컬 `.tmp/task25-b-authority-code-r1-review.md`와
   `.tmp/task25b-authority-spec-r1-independent-review.md`는 선택적 재현 자료다.
   ignored 파일이 없는 새 체크아웃에서도 위 요약으로 상태를 파악할 수 있다.
-  formal release 재개 때 D-0/D-1 acceptance를 확인한다. 현재 다음 작업은 위 C-1 후속을 따른다.
+  formal release 재개 때 D-0/D-1 acceptance를 확인한다. 현재 다음 작업은 위 Slack S-1 순서를 따른다.

@@ -1,5 +1,31 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — D.1 C-3 measured reuse and rollback
+
+- Reused C-2 actual PostgreSQL authority/cost/cache/finalization composition,
+  with fake external generation and Neo4j traversal. Added repeatable per-request
+  SQL counts/timing, wall samples, usage and run/cache-audit observations.
+  [C-3 runbook](superpowers/runbooks/c-3-answer-cache-comparison.md) holds the
+  measurement boundary, all 16 raw request samples and inherited-test limits.
+- Same corpus/principal/backend/budgets: six baseline requests generated six
+  times; three cold/warm pairs generated three times, hit rate 50%, simulated
+  cost USD 0.000180→0.000090. Warm-only generation is zero. Each request retained
+  two actual retrieval calls and fresh run; each hit wrote two distinct cache
+  audits. Citation HMACs matched. Keyword seed means no embedding-saving claim.
+- Warm p50/p95 wall 7271.826/7625.794 ms was slower than baseline
+  5937.132/6333.620 ms, despite 2696 vs 3205 SQL executions per request. Fake
+  generation lacks remote latency; totals include authority/bootstrap/advisory
+  work. This establishes neither live speed improvement nor a latency SLO.
+- Cache-off restored fresh graph generation. Graph-off produced keyword
+  retrieval with a segregated cache key; graph-on recovered its earlier entry.
+  Existing audit action/target/metadata survived all four rollback requests.
+- Fresh final comparison + PG integration + API/Assistant + secret-hygiene
+  selection: **113 passed in 339.78s**, no failures/skips/warnings. Two changed
+  test files pass Ruff; 47 local Markdown targets and diff whitespace checks pass.
+  No production code, public contracts, runtime defaults, live provider, .env,
+  scheduler, rollout or remote push changed. C-3 independent review precedes
+  Slack synthetic S-1; formal release remains NOT CLEAN and capability P1 remains.
+
 ## 2026-09-21 — D.1 C-2 substantive answer-cache integration
 
 - Review R1 distinguishes operator cleanup failure from an empty batch: strict

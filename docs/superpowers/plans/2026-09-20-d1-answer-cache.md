@@ -6,7 +6,7 @@
 **Spec:** [D.1 설계](../specs/2026-09-20-d1-answer-cache-design.md).
 **Architecture:** 작은 cache port + PostgreSQL store + SQLite Null store, D evidence/E path finalization 재사용.
 **Tech:** 기존 SQLAlchemy/Alembic/PostgreSQL/LangGraph, fake model 테스트.
-**상태:** C-1 저장소와 C-2 graph/회계/finalization 연결 구현. C-2 독립 리뷰 대기, C-3 미착수.
+**상태:** C-1/C-2 리뷰 CLEAN. C-3 측정·rollback 구현, 독립 리뷰 대기.
 세부 schema/API는 착수 시 정한다. D release green은 선행 조건이 아니며 정식 live gate는 뒤에 남는다.
 
 ## 공통 제약과 검토 초점
@@ -48,7 +48,7 @@ hit substantive 비용·audit다. 아래 작업에서 각각 실패 재현과 �
 - [x] 새 관련 근거/Assistant 문맥 변화와 lookup→publication 사이 drift를 거부한다.
   endpoint 문서가 그대로인 relation version/permission 변경도 포함한다.
   store 오류는 miss, 권한 authority 오류는 fail-closed로 처리한다.
-- [ ] 직접 영향 RAG/API/Assistant 회귀 뒤 독립 리뷰·커밋한다.
+- [x] 직접 영향 RAG/API/Assistant 회귀 뒤 독립 리뷰·커밋한다.
 
 **Acceptance:** hit이 공개 계약/권한/비용 기록을 약화하지 않으면서 generation 호출을 실제로 절감한다.
 
@@ -58,14 +58,17 @@ hit substantive 비용·audit다. 아래 작업에서 각각 실패 재현과 �
 
 ## C-3 — generation 절감 비교와 rollback
 
-- [ ] E fixture의 같은 corpus·principal·retrieval 예산·모델 설정과 동일 backend로 cold/warm
+- [x] E fixture의 같은 corpus·principal·retrieval 예산·모델 설정과 동일 backend로 cold/warm
   generation 호출·비용·p50/p95·DB queries·hit-rate를 비교한다. GraphRAG 검색 개선은 E의
   cache-off pgvector/graph 결과로, cache 절감은 이 cold/warm 결과로 따로 보고한다.
   fake 추정 비용과 실제 provider 측정은 분리하며 유료 측정은 별도 승인 범위에서만 실행한다.
-- [ ] 다른 사용자/동일 role, TTL, policy/key 변경, drift, DB 장애, flag rollback을 확인한다.
+- [x] 다른 사용자/동일 role, TTL, policy/key 변경, drift, DB 장애, flag rollback을 확인한다.
   cache-off가 E fresh retrieval/generation으로, graph-off가 keyword/pgvector로 복귀하는지 검증한다.
-- [ ] PG·API·Assistant 통합 및 secret 검증 후 안전·비용 성과를 handoff 한 항목에 남긴다.
+- [x] PG·API·Assistant 통합 및 secret 검증 후 안전·비용 성과를 handoff 한 항목에 남긴다.
   운영 flag 활성화와 유료 측정은 별도 범위로 다룬다.
+
+실측 표·재현 명령·fake/실제 PG 경계·상속한 C-1 증거는
+[C-3 runbook](../runbooks/c-3-answer-cache-comparison.md)에 기록한다. 독립 리뷰 대기다.
 
 **완료:** 정확한 isolation/revalidation, 새 audit와 zero-generation accounting, 측정된 절감,
 기존 경로 rollback이 확인됨. embedding 절감·Redis·semantic cache는 완료 요건에 추가하지 않는다.

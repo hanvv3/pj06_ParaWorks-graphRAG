@@ -569,19 +569,8 @@ def seed_graph_relations(db, settings, scope):
     return second.id, source2.id
 
 
-@pytest.mark.parametrize(
-    'surface,drift',
-    [
-        ('ask', 'none'),
-        ('assistant', 'none'),
-        ('ask', 'edge'),
-        ('ask', 'node'),
-        ('ask', 'new_before'),
-    ],
-)
-def test_real_postgres_production_composition_cold_warm(
-    tmp_path, pg_engine, monkeypatch, surface, drift
-):
+@pytest.fixture
+def real_pg_composition(tmp_path, pg_engine, monkeypatch):
     # E's isolated canonical-PG fixture shape, with real lexical SQL functions.
     import importlib
 
@@ -593,7 +582,6 @@ def test_real_postgres_production_composition_cold_warm(
     from backend.app.agent_runtime import rag_advisory_locks as locks
     from backend.app.agent_runtime import rag_provider_transport as transport
     from backend.app.agent_runtime import rag_v2_composition as composition
-    from backend.app.agent_runtime.rag_v2_state import RagRuntimeContext
     from backend.app.core.demo_auth import DemoUser
     from backend.app.db import session as session_module
     from backend.app.db.base import Base
@@ -736,134 +724,166 @@ def test_real_postgres_production_composition_cold_warm(
         from backend.app.rag.graph_store import Neo4jGraphStore
 
         monkeypatch.setattr(Neo4jGraphStore, 'traverse', lambda self, **kwargs: paths)
-        results = []
-        for iteration in range(2):
-            if iteration == 1 and drift == 'new_before':
-                with runtime.session_factory() as added:
-                    _seed_source_chunk(
-                        added,
-                        source_type='calendar',
-                        text='Canonical approved knowledge newly related evidence',
-                    )
-                    refresh_rag_lexical_projections(
-                        added, settings=settings, corpus_generation=1
-                    )
-                    added.commit()
-            with (
-                runtime.session_factory() as db,
-                composition._postgres_request_services(
-                    db=db, settings=settings, session_factory=runtime.session_factory
-                ) as services,
-            ):
-                target = None
-                if surface == 'assistant':
-                    from backend.app.agent_runtime.rag_finalization import (
-                        AssistantProjectionTarget,
-                    )
-                    from backend.app.models import (
-                        AssistantConversation,
-                        AssistantMessage,
-                    )
+        from types import SimpleNamespace
 
-                    conversation = AssistantConversation(user_id=actor.id)
-                    db.add(conversation)
-                    db.flush()
-                    message = AssistantMessage(
-                        conversation_id=conversation.id,
-                        role='user',
-                        content='Canonical approved knowledge',
-                    )
-                    db.add(message)
-                    db.flush()
-                    target = AssistantProjectionTarget(
-                        conversation.id, message.id, actor.id
-                    )
-                    db.commit()
-                context = RagRuntimeContext(
-                    actor=actor,
-                    surface=surface,
-                    settings=settings,
-                    services=services,
-                    assistant_target=target,
-                )
-                if iteration == 1 and drift in {'edge', 'node'}:
-                    get = services.answer_cache.get
-
-                    def revoke_after_lookup(*args, get=get, **kwargs):
-                        hit = get(*args, **kwargs)
-                        assert hit is not None
-                        from backend.app.models import (
-                            Source,
-                            TrustedKnowledgeEvidenceLink,
-                        )
-
-                        with runtime.session_factory() as mutation:
-                            if drift == 'edge':
-                                mutation.get(
-                                    TrustedKnowledgeEvidenceLink, edge_id
-                                ).evidence_hash = 'e' * 64
-                            else:
-                                mutation.get(
-                                    Source, source_id
-                                ).permission_level = 'restricted'
-                            refresh_rag_lexical_projections(
-                                mutation, settings=settings, corpus_generation=1
-                            )
-                            mutation.commit()
-                        return hit
-
-                    services.answer_cache.get = revoke_after_lookup
-                text_value = prepare_direct_request_text(
-                    'Canonical approved knowledge',
-                    key=settings.agent_runtime_fingerprint_secret.encode(),
-                )
-                if surface == 'assistant':
-                    from backend.app.agents.rag_orchestrator_agent.v2_input import (
-                        _prepared,
-                    )
-
-                    text_value = _prepared(
-                        caller_text='Canonical approved knowledge',
-                        normalized_current_user_text='Canonical approved knowledge',
-                        answer_question_text='Canonical approved knowledge',
-                        retrieval_query_text='Canonical approved knowledge',
-                        query_context_version='assistant-context:v1',
-                        key=settings.agent_runtime_fingerprint_secret.encode(),
-                    )
-                results.append(
-                    build_company_memory_rag_answer_v2_graph().invoke(
-                        {'prepared_text': text_value}, context=context
-                    )
-                )
-        assert [r['outcome'] for r in results] == [
-            'supported',
-            'evidence_unavailable' if drift in {'edge', 'node'} else 'supported',
-        ]
-        assert len(client.seen) == (2 if drift == 'new_before' else 1)
-        assert (results[1]['charged_cost_usd'] > 0) == (drift == 'new_before')
-        assert results[0]['run_id'] != results[1]['run_id']
-        assert len(results[0]['model_influence']) == 4
-        if surface == 'assistant':
-            assert (
-                results[1]['assistant_finalization'].finalization_kind == 'substantive'
-            )
-        with runtime.session_factory() as db:
-            assert len(list(db.scalars(select(AgentRun)))) == 2
-            assert (
-                db.scalar(
-                    select(AuditLog).where(AuditLog.action == 'rag_answer_cache_hit')
-                )
-                is not None
-            ) == (drift != 'new_before')
-            if surface == 'assistant':
-                messages = list(
-                    db.scalars(
-                        select(AssistantMessage).where(
-                            AssistantMessage.role == 'assistant'
-                        )
-                    )
-                )
-                assert len(messages) == 2
-                assert all(m.content_origin == 'rag_assembled' for m in messages)
+        yield SimpleNamespace(
+            runtime=runtime,
+            settings=settings,
+            actor=actor,
+            client=client,
+            edge_id=edge_id,
+            source_id=source_id,
+        )
     finally:
         runtime.dispose()
+
+
+@pytest.mark.parametrize(
+    'surface,drift',
+    [
+        ('ask', 'none'),
+        ('assistant', 'none'),
+        ('ask', 'edge'),
+        ('ask', 'node'),
+        ('ask', 'new_before'),
+    ],
+)
+def test_real_postgres_production_composition_cold_warm(
+    real_pg_composition, surface, drift
+):
+    from backend.app.agent_runtime import rag_v2_composition as composition
+    from backend.app.agent_runtime.rag_v2_state import RagRuntimeContext
+    from backend.app.rag.lexical_projection import refresh_rag_lexical_projections
+    from backend.tests.test_rag_source_observations import _seed_source_chunk
+
+    fixture = real_pg_composition
+    runtime, settings, actor, client = (
+        fixture.runtime,
+        fixture.settings,
+        fixture.actor,
+        fixture.client,
+    )
+    edge_id, source_id = fixture.edge_id, fixture.source_id
+    results = []
+    for iteration in range(2):
+        if iteration == 1 and drift == 'new_before':
+            with runtime.session_factory() as added:
+                _seed_source_chunk(
+                    added,
+                    source_type='calendar',
+                    text='Canonical approved knowledge newly related evidence',
+                )
+                refresh_rag_lexical_projections(
+                    added, settings=settings, corpus_generation=1
+                )
+                added.commit()
+        with (
+            runtime.session_factory() as db,
+            composition._postgres_request_services(
+                db=db, settings=settings, session_factory=runtime.session_factory
+            ) as services,
+        ):
+            target = None
+            if surface == 'assistant':
+                from backend.app.agent_runtime.rag_finalization import (
+                    AssistantProjectionTarget,
+                )
+                from backend.app.models import (
+                    AssistantConversation,
+                    AssistantMessage,
+                )
+
+                conversation = AssistantConversation(user_id=actor.id)
+                db.add(conversation)
+                db.flush()
+                message = AssistantMessage(
+                    conversation_id=conversation.id,
+                    role='user',
+                    content='Canonical approved knowledge',
+                )
+                db.add(message)
+                db.flush()
+                target = AssistantProjectionTarget(
+                    conversation.id, message.id, actor.id
+                )
+                db.commit()
+            context = RagRuntimeContext(
+                actor=actor,
+                surface=surface,
+                settings=settings,
+                services=services,
+                assistant_target=target,
+            )
+            if iteration == 1 and drift in {'edge', 'node'}:
+                get = services.answer_cache.get
+
+                def revoke_after_lookup(*args, get=get, **kwargs):
+                    hit = get(*args, **kwargs)
+                    assert hit is not None
+                    from backend.app.models import (
+                        Source,
+                        TrustedKnowledgeEvidenceLink,
+                    )
+
+                    with runtime.session_factory() as mutation:
+                        if drift == 'edge':
+                            mutation.get(
+                                TrustedKnowledgeEvidenceLink, edge_id
+                            ).evidence_hash = 'e' * 64
+                        else:
+                            mutation.get(
+                                Source, source_id
+                            ).permission_level = 'restricted'
+                        refresh_rag_lexical_projections(
+                            mutation, settings=settings, corpus_generation=1
+                        )
+                        mutation.commit()
+                    return hit
+
+                services.answer_cache.get = revoke_after_lookup
+            text_value = prepare_direct_request_text(
+                'Canonical approved knowledge',
+                key=settings.agent_runtime_fingerprint_secret.encode(),
+            )
+            if surface == 'assistant':
+                from backend.app.agents.rag_orchestrator_agent.v2_input import (
+                    _prepared,
+                )
+
+                text_value = _prepared(
+                    caller_text='Canonical approved knowledge',
+                    normalized_current_user_text='Canonical approved knowledge',
+                    answer_question_text='Canonical approved knowledge',
+                    retrieval_query_text='Canonical approved knowledge',
+                    query_context_version='assistant-context:v1',
+                    key=settings.agent_runtime_fingerprint_secret.encode(),
+                )
+            results.append(
+                build_company_memory_rag_answer_v2_graph().invoke(
+                    {'prepared_text': text_value}, context=context
+                )
+            )
+    assert [r['outcome'] for r in results] == [
+        'supported',
+        'evidence_unavailable' if drift in {'edge', 'node'} else 'supported',
+    ]
+    assert len(client.seen) == (2 if drift == 'new_before' else 1)
+    assert (results[1]['charged_cost_usd'] > 0) == (drift == 'new_before')
+    assert results[0]['run_id'] != results[1]['run_id']
+    assert len(results[0]['model_influence']) == 4
+    if surface == 'assistant':
+        assert results[1]['assistant_finalization'].finalization_kind == 'substantive'
+    with runtime.session_factory() as db:
+        assert len(list(db.scalars(select(AgentRun)))) == 2
+        assert (
+            db.scalar(select(AuditLog).where(AuditLog.action == 'rag_answer_cache_hit'))
+            is not None
+        ) == (drift != 'new_before')
+        if surface == 'assistant':
+            messages = list(
+                db.scalars(
+                    select(AssistantMessage).where(AssistantMessage.role == 'assistant')
+                )
+            )
+            assert len(messages) == 2
+            assert all(m.content_origin == 'rag_assembled' for m in messages)
