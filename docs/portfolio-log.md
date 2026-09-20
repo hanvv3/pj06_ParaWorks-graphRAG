@@ -2,6 +2,11 @@
 
 ## 2026-09-21 — D.1 C-2 substantive answer-cache integration
 
+- Review R1 distinguishes operator cleanup failure from an empty batch: strict
+  CLI cleanup exits nonzero with sanitized stderr, while request cleanup remains
+  best effort. DELETE/connection failure REDs exposed false `deleted_count=0`;
+  focused cleanup/operator/Null verification passed **8 tests**. Actual CLI
+  unavailable-connection exit 1 and SQLite exit 0 were checked without live APIs.
 - Connected C-1 after fresh full retrieval/preparation in the existing graph.
   Authenticated hits use explicit internal `answer-cache-hit:v1`, not canned
   text or fabricated provider receipts. Durable hit identities and audit survive

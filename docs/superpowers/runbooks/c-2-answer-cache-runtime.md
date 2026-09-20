@@ -45,8 +45,10 @@ expired rows in a separate short transaction before admission. This traffic
 cleanup is opportunistic, not a scheduling guarantee. Operators should also
 schedule `python -m backend.scripts.cleanup_answer_cache --limit 100` with the
 deployment's process environment, independently of traffic, at least hourly.
-Repeat bounded batches until `deleted_count=0`; monitor database failures and
-backlog. The command can clean expired entries while the runtime flag is off,
+Repeat bounded batches until a successful exit reports `deleted_count=0`;
+monitor database failures and backlog. The operator command uses strict cleanup:
+database/DELETE failure exits 1, emits only a sanitized error on stderr and no
+deleted count. Request cleanup remains best effort. The command can clean expired entries while the runtime flag is off,
 does not activate it, and performs no SQLite I/O. No scheduler or flag was
 activated by C-2. TTL rejects expired reads even during cleanup outages.
 

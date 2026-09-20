@@ -28,7 +28,7 @@ class NullAnswerCache:
     def put(self, key, *, answer, slots):
         return False
 
-    def cleanup(self, *, limit=100):
+    def cleanup(self, *, limit=100, strict=False):
         return 0
 
 
@@ -165,7 +165,8 @@ class PostgresAnswerCache:
         except SQLAlchemyError:
             return False
 
-    def cleanup(self, *, limit=100):
+    def cleanup(self, *, limit=100, strict=False):
+        """Strict operator calls must distinguish database failure from drained."""
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError('cleanup limit must be between 1 and 1000')
         table = RagAnswerCacheEntry.__table__
@@ -184,6 +185,8 @@ class PostgresAnswerCache:
                     delete(table).where(table.c.key_hmac.in_(expired))
                 ).rowcount
         except SQLAlchemyError:
+            if strict:
+                raise
             return 0
 
 

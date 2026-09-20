@@ -22,6 +22,89 @@ from backend.tests.test_rag_v2_graph import (
 )
 
 
+@pytest.mark.parametrize('failure', [None, 'delete', 'connection'])
+def test_operator_cleanup_distinguishes_empty_from_database_failure(
+    pg_engine, monkeypatch, capsys, failure
+):
+    import sys
+
+    import sqlalchemy
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+
+    from backend.scripts import cleanup_answer_cache
+    from backend.tests.graph_projection_fixtures import SETTINGS
+    from backend.tests.test_rag_answer_cache import migrate
+
+    migrate(pg_engine)
+
+    def fail(*args, **kwargs):
+        raise OperationalError(
+            'DELETE synthetic_private_sql',
+            {'secret': 'synthetic_private_credential'},
+            Exception('synthetic_private_connection'),
+        )
+
+    def fail_delete(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith('DELETE'):
+            fail()
+
+    monkeypatch.setattr(sys, 'argv', ['cleanup_answer_cache', '--limit', '1'])
+    monkeypatch.setattr(cleanup_answer_cache, 'get_settings', lambda: SETTINGS)
+    monkeypatch.setattr(sqlalchemy, 'create_engine', lambda _url: pg_engine)
+    hook = 'engine_connect' if failure == 'connection' else 'before_cursor_execute'
+    handler = fail if failure == 'connection' else fail_delete
+    if failure:
+        event.listen(pg_engine, hook, handler)
+    try:
+        if failure:
+            cache = create_answer_cache(
+                engine=pg_engine, settings=SETTINGS, validator=None, enabled=True
+            )
+            assert cache.cleanup(limit=1) == 0  # Request path stays best effort.
+        status = cleanup_answer_cache.main()
+    finally:
+        if failure:
+            event.remove(pg_engine, hook, handler)
+    captured = capsys.readouterr()
+    if failure:
+        assert captured.out == ''
+        assert status != 0 and status is not None
+        assert (
+            captured.err
+            == 'answer cache cleanup failed; database operation unavailable\n'
+        )
+        assert 'synthetic_private' not in captured.out + captured.err
+    else:
+        assert status == 0
+        assert captured.out == 'deleted_count=0\n'
+        assert captured.err == ''
+
+
+def test_operator_cleanup_sqlite_null_does_not_connect(monkeypatch, capsys):
+    import sys
+
+    import sqlalchemy
+    from sqlalchemy import event
+
+    from backend.scripts import cleanup_answer_cache
+    from backend.tests.graph_projection_fixtures import SETTINGS
+
+    engine = sqlalchemy.create_engine('sqlite://')
+
+    def forbid(*args, **kwargs):
+        pytest.fail('SQLite operator cleanup must not open a connection')
+
+    event.listen(engine, 'do_connect', forbid)
+    monkeypatch.setattr(sys, 'argv', ['cleanup_answer_cache'])
+    monkeypatch.setattr(cleanup_answer_cache, 'get_settings', lambda: SETTINGS)
+    monkeypatch.setattr(sqlalchemy, 'create_engine', lambda _url: engine)
+    assert cleanup_answer_cache.main() == 0
+    captured = capsys.readouterr()
+    assert captured.out == 'deleted_count=0\n'
+    assert captured.err == ''
+
+
 class CacheBoundary(_KeywordFinalizationPort):
     def __init__(self, ledger, pending, retriever, settings):
         super().__init__(ledger, pending, retriever, settings)
