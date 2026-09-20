@@ -1,5 +1,36 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — E-1 canonical Neo4j projection
+
+- `349b7cd` 기준에서 최소 `SUPPORTED_BY` projection을 추가했다. 승인/원본 canonical
+  resolver와 scope fingerprint를 재사용하며 원문/embedding은 graph에 저장하지 않는다.
+  ordered node/edge provenance v1, 제한된 batch/cursor, atomic replay, generation fence,
+  삭제/revoke/supersede sweep, lag/count를 제공한다. 검색 adapter/flag/public API는 미변경이다.
+- 고정 3-source/1-approval corpus의 **실제 PG cache-off baseline 5 passed**를 구현 전에
+  확보했다. 관계 질문은 `history_event:1`, `chunk:1`만 검색해 source 2를 놓쳤다.
+  상세 기대 ID/버전/예산/제약은 [E-1 runbook](superpowers/runbooks/e-1-graph-projection.md).
+  실제 pgvector baseline에서 tuple의 SQL array 바인딩 실패를 RED로 재현해 세 bind를 list로
+  고쳤다. 테스트 vector는 결정적이며 유료 embedding/model 호출은 0이다.
+- RED: projection 부재 6 unit + 1 integration 실패, oversized source/policy bound 2 실패,
+  incomplete-generation lag 1 실패, driver ValueError 비밀 노출 1 실패를 확인한 뒤 수정했다.
+  최종 focused 명령은 `test_graph_projection.py`, `test_graph_projection_baseline.py`,
+  `test_graph_projection_neo4j.py`, `test_rag_v2_pgvector_retriever.py`,
+  `test_pgvector_store.py`, `test_rag_default_runtime.py` → **85 passed in 36.25s**.
+- 실제 PostgreSQL leased schema → Neo4j Community `2026.08.1`, 공식 driver `6.3.1`에서
+  atomic rollback/crash, 중복 replay, worker 재시작, scope isolation, revoke/delete,
+  source revision supersede, stale generation/cursor 거부를 검증했다. 별도 server restart
+  gate도 committed cursor 2와 node 2를 보존한 채 4 nodes/2 edges로 수렴했다:
+  **1 passed in 91.81s**(운영자 재시작 대기 포함). 낡은 socket 1회 실패 후 driver 재연결은
+  예상된 장애 증거이며 새 provider 호출은 없었다. 각 DB test의 scope/schema cleanup이 수행됐다.
+- exact disposable Neo4j 컨테이너를 중지한 상태에서 기존 default runtime의 search/ask/Assistant
+  정상·no-match selector를 실행해 **5 passed, 12 deselected in 9.75s**를 확인했고, 같은
+  컨테이너를 다시 시작했다. 이는 graph-off 기존 경로의 장애 독립성 증거다.
+- fake-driver 테스트는 sanitized failure와 cursor 미전진 계약이고, 위 실제 DB 결과와 구별한다.
+  최소권한 운영 RBAC, E-2 path 소비/최종 재검증, E-3 검색 개선과 실제 모델 품질은 미검증이다.
+  기존 keyword SQL tuple bind도 E-2 fallback에서 재현할 구체적 점검 항목으로 남긴다.
+  `neo4j`/`pytz`만 lock 추가, Ruff/lock consistency/diff checks 통과. paid API, `.env`,
+  push/rollout 없음. 정식 release **NOT CLEAN/deferred** 상태는 유지한다.
+
 ## 2026-09-20 — F-2 실제 PostgreSQL/pgvector 및 local-fake UI 기준선 검증
 
 - final correction code revision은

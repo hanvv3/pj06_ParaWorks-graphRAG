@@ -1,6 +1,23 @@
 # ParaWorks — 현재 인수인계
 
-갱신: 2026-09-20. 단계: **D functional baseline passed; E-1 may start; formal release deferred and NOT CLEAN**.
+갱신: 2026-09-21. 단계: **E-1 projection implemented/verified; E-2 next; formal release deferred and NOT CLEAN**.
+
+## E-1 후속 진입
+
+- projection 코드/고정 fixture/실제 DB 검증은 [E-1 runbook](e-1-graph-projection.md),
+  fresh 수치는 [portfolio](../../portfolio-log.md)의 최신 E-1 항목에 있다.
+- 다음은 E-2다. `GraphPathDependency` v1 ordered node/edge와 canonical references를
+  RetrievalResult→graph state→모델 전송 전→최종 노출 PG 검증으로 운반한다.
+  Neo4j scope는 principal까지 포함한 기존 scope fingerprint이며 complete/current generation만
+  소비할 수 있다. endpoint-only 검증으로 edge 변경을 통과시키지 않는다.
+- GraphRouting/public API/Review/permission/cost 정책은 바뀌지 않았다. 실제 모델 품질·E-3
+  검색 효과·배포 최소권한 RBAC는 미검증이다. 공식 Neo4j driver 6.3.1이 lock에 추가됐다.
+- E-1 actual PG baseline의 배열 tuple 오류는 pgvector SQL 경계 3곳만 list로 수정했다.
+  기존 keyword `_postgresql_search`에도 tuple bind가 있으므로 E-2 fallback에서 실제 PG로
+  재현·수정해야 할 점검 항목이다. 유료 호출이나 fallback 안전장치를 우회하지 않는다.
+- 테스트는 fresh `.tmp` basetemp/cache와 `.venv-task4-r3-review/Scripts/python.exe`를 사용한다.
+  기존 `.venv` launcher는 깨져 있어 uv는 `UV_PROJECT_ENVIRONMENT=.venv-task4-r3-review`와
+  workspace cache를 명시한다. DB credentials는 프로세스 환경으로만 공급하고 저장하지 않는다.
 
 ## 작업 위치
 

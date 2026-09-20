@@ -313,9 +313,9 @@ class PgVectorStore:
             'query_embedding': _embedding_literal(query_embedding.coordinates),
             'fingerprint_key_version': bind_values['fingerprint_key_version'],
             'key_material_verifier': bind_values['key_material_verifier'],
-            'project_keys': bind_values['project_keys'],
-            'source_ids': bind_values['source_ids'],
-            'source_id_texts': bind_values['source_id_texts'],
+            'project_keys': list(bind_values['project_keys']),
+            'source_ids': list(bind_values['source_ids']),
+            'source_id_texts': list(bind_values['source_id_texts']),
             'workspace_scope_id': bind_values['workspace_scope_id'],
         }
         rows = tuple(

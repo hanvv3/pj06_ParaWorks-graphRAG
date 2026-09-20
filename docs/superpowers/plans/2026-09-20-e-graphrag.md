@@ -6,7 +6,8 @@
 **Spec:** [E 설계](../specs/2026-09-20-e-graphrag-design.md).
 **Architecture:** PostgreSQL-derived projection → bounded graph retrieval → canonical evidence 검증 → 기존 answer graph.
 **Tech:** 기존 LangChain Runnable/LangGraph, PostgreSQL, 공식 Neo4j driver; 필요한 SDK만 착수 시 lock.
-**상태:** 미구현. D 기능 baseline(F-1 fake API/Assistant, F-2 실제 disposable PG/pgvector) 뒤 착수한다.
+**상태:** E-1 projection 구현/집중 검증 완료, E-2/E-3 미구현. 상세 계약과 재현은
+[E-1 runbook](../runbooks/e-1-graph-projection.md)을 따른다.
 정식 D release green은 선행 조건이 아니다. 순서는 E → D.1 → Slack → 정식 릴리스 준비다.
 
 ## 공통 제약과 검토 초점
@@ -22,19 +23,20 @@ graph 장애 시 중복 embedding·budget, 도움이 없는 질문의 회귀다.
 `graph_store.py`(driver 경계), 관련 admin job·모델/테스트.
 기존 `indexing.py`, `serving_generation.py`, canonical models의 lifecycle를 재사용한다.
 
-- [ ] 구현 전에 spec의 관계/단일 근거/근거 없음/restricted/revoke 질문군을 작은 synthetic fixture로
+- [x] 구현 전에 spec의 관계/단일 근거/근거 없음/restricted/revoke 질문군을 작은 synthetic fixture로
   고른다. 기대 source ID·version·승인 연결 및 principal별 허용/금지 ID를 고정한다.
   같은 corpus·principal·질문·모델·retrieval/evidence 예산과 cache-off 조건의 pgvector baseline을 기록한다.
-- [ ] fixture에서 필요한 최소 explicit relation allowlist와 PG provenance/version 판정법을 정한다.
+- [x] fixture에서 필요한 최소 explicit relation allowlist와 PG provenance/version 판정법을 정한다.
   각 관계가 어떤 canonical source/승인 연결에서 재구성되는지 명시한다. PG에서 검증할 수 없는
   관계는 제외한다. keyword/pgvector seed 재사용·seed cap·hop/candidate/time 한도도 함께 정한다.
-- [ ] E-2가 운반할 최소 내부 path dependency 계약을 정한다: 영향을 준 ordered node/edge/중간 근거의
+- [x] E-2가 운반할 최소 내부 path dependency 계약을 정한다: 영향을 준 ordered node/edge/중간 근거의
   canonical identity/version·scope/permission 검증 참조. 현재 RetrievalResult에 이미 있다고 가정하지 않는다.
   구체 필드와 기존 state/fingerprint 소비자의 변경 범위를 고르고 SDK는 lock·현재 공식 문서로 확인한다.
-- [ ] RED: 중복 sync·crash/restart·revoke/delete/supersede·scope 충돌·stale generation을 재현한다.
-- [ ] stable identity/version 기반 bounded reconcile와 tombstone 처리·lag/count 관측을 구현한다.
-  실제 Neo4j connection은 최소 권한, 자동 테스트는 fake driver로 시작한다.
-- [ ] disposable Neo4j에서 재시작/중복/삭제 수렴을 검증하고 코드·증거를 커밋한다.
+- [x] RED: 중복 sync·crash/restart·revoke/delete/supersede·scope 충돌·stale generation을 재현한다.
+- [x] stable identity/version 기반 bounded reconcile와 tombstone 처리·lag/count 관측을 구현한다.
+  fake driver와 disposable Community DB로 검증했다. **실제 배포 최소 권한 RBAC는 미검증**이며
+  schema admin/worker 분리 지침을 runbook에 남겼다. Community 테스트 계정을 운영 권한 증거로 쓰지 않는다.
+- [x] disposable Neo4j에서 재시작/중복/삭제 수렴을 검증하고 코드·증거를 커밋한다.
 
 **Acceptance:** 동일 입력의 재실행이 중복 graph를 만들지 않고 PostgreSQL 현재 상태로 수렴한다.
 fixture 기대 근거와 PG에서 확인 가능한 relation dependency 계약이 고정돼야 E-2로 진행한다.
