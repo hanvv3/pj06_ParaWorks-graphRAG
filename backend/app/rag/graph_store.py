@@ -85,8 +85,10 @@ class Neo4jGraphStore:
                   AND a.permission IN $permissions AND b.permission IN $permissions
                   AND r.permission IN $permissions
                 WITH DISTINCT startNode(r) AS left, r, endNode(r) AS right
+                ORDER BY r.edge_id
+                LIMIT $limit
                 RETURN properties(left) AS left, properties(r) AS edge, properties(right) AS right
-                LIMIT $limit""",
+                """,
                 scope=scope_id,
                 generation=generation,
                 seeds=list(seeds),

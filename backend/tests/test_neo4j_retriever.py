@@ -90,6 +90,101 @@ def test_relation_adds_only_canonical_evidence_and_preserves_ordered_paths(db_se
     assert result.trace.candidate_window_count <= 50
 
 
+@pytest.mark.parametrize('graph_state', ['unavailable', 'stale', 'no_benefit'])
+def test_eight_seed_ask_preserves_exact_evidence_and_receipt(db_session, graph_state):
+    from decimal import Decimal
+
+    from backend.app.rag.lexical_projection import refresh_rag_lexical_projections
+    from backend.app.rag.retrieval import QueryEmbeddingReceipt
+    from backend.tests.test_rag_trusted_evidence import _seed_source
+
+    seed_corpus(db_session)
+    for ordinal in range(4, 9):
+        _seed_source(db_session, ordinal=ordinal)
+    refresh_rag_lexical_projections(db_session, settings=SETTINGS, corpus_generation=1)
+    db_session.commit()
+    ask = replace(request(), retrieval_query_text='Exact evidence', visible_limit=8)
+    original = KeywordEvidenceRetriever(
+        store=SqlAlchemyKeywordSearchStore(db=db_session, settings=SETTINGS),
+        settings=SETTINGS,
+    ).invoke(ask)
+    assert len(original.visible) == 8
+    receipt = QueryEmbeddingReceipt(
+        True, 10, Decimal('0.000001'), 1, 'component_succeeded', 'a' * 64, 'b' * 64
+    )
+    original = replace(original, query_embedding_receipt=receipt)
+    calls = []
+
+    class Store:
+        def traverse(self, **kwargs):
+            calls.append(kwargs)
+            if graph_state == 'unavailable':
+                raise GraphUnavailable('offline')
+            return ()  # incomplete/stale projection or no matching relation
+
+    result = adapter(db_session, Store(), RunnableLambda(lambda _: original)).invoke(
+        ask
+    )
+    assert result.visible == original.visible
+    assert result.query_embedding_receipt is receipt
+    assert result.top_candidate_window_hmac == original.top_candidate_window_hmac
+    assert result.trace.visible_count == 8
+    assert not result.graph_paths
+    assert not calls  # Decline enrichment before graph I/O when seed fills its cap.
+
+
+def test_driver_orders_oversubscribed_subset_before_limit(db_session):
+    from dataclasses import asdict
+
+    from backend.app.rag.graph_projection import GraphTraversalPolicy
+    from backend.app.rag.graph_store import Neo4jGraphStore
+
+    seed_corpus(db_session)
+    expected = paths(db_session)
+    physical_orders = iter((expected[::-1], expected))
+
+    class Transaction:
+        def run(self, query, **parameters):
+            rows = next(physical_orders)
+            if 'ORDER BY r.edge_id' in query:
+                rows = sorted(rows, key=lambda p: p.edges[0].edge_id)
+            return [
+                {
+                    'left': asdict(p.nodes[0]),
+                    'right': asdict(p.nodes[1]),
+                    'edge': asdict(p.edges[0]),
+                }
+                for p in rows[: parameters['limit']]
+            ]
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute_read(self, callback):
+            return callback(Transaction())
+
+    class Driver:
+        def session(self, **kwargs):
+            return Session()
+
+    store = Neo4jGraphStore(Driver())
+    results = [
+        store.traverse(
+            scope_id=expected[0].nodes[0].scope_id,
+            generation=1,
+            seeds=('history_event:1',),
+            permissions=('public', 'internal'),
+            policy=GraphTraversalPolicy(candidate_limit=1),
+        )
+        for _ in range(2)
+    ]
+    assert results == [(expected[0],), (expected[0],)]
+
+
 @pytest.mark.parametrize(
     'change', ['restricted', 'revoke', 'edge_version', 'delete', 'scope']
 )
@@ -259,6 +354,18 @@ def test_real_pg_neo4j_parameterized_traversal(lexical_pg):
         assert result.effective_backend == 'neo4j'
         assert len(result.graph_paths) == 2
         assert len(result.visible) == 3
+        # Two eligible edges exceed the remaining one-candidate budget.
+        # Seed/physical visitation order must not select a different subset.
+        expected_edge = min(p.edges[0].edge_id for p in result.graph_paths)
+        for seeds in (('history_event:1', 'chunk:1'), ('chunk:1', 'history_event:1')):
+            bounded = store.traverse(
+                scope_id=scope_id,
+                generation=1,
+                seeds=seeds,
+                permissions=('public', 'internal'),
+                policy=GraphTraversalPolicy(candidate_limit=1),
+            )
+            assert tuple(p.edges[0].edge_id for p in bounded) == (expected_edge,)
         assert not store.traverse(
             scope_id=scope_id,
             generation=2,

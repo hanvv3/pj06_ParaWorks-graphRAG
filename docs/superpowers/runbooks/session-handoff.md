@@ -6,6 +6,9 @@
 
 - default-off `rag_graph_enrichment_enabled`로 기존 keyword/pgvector seed Runnable을
   감싼다. paid embedding/receipt와 50 candidate·5 evidence 예산을 그대로 재사용한다.
+- E-2 R1은 기존 `/ask` 8개 seed를 보존한다. graph enrichment 자체는 cap5이며
+  seed가 그 공간을 채우면 graph I/O 없이 원래 근거를 반환한다. edge ID 정렬 후 LIMIT으로
+  제한 후보를 안정적으로 선택한다.
 - ordered graph path v1을 retrieval→prepared influence v3→실제 provider-send C.5 검증→
   최종 PG 검증으로 운반한다. edge만 바뀌어도 전송 전 0 call 차단 또는 전송 후 답변/citation
   redaction으로 처리하며 실제 비용을 보존한다. 공개 응답/Review/권한 정책은 미변경이다.

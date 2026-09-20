@@ -26,10 +26,13 @@ after each traversal. Graph rows include identifiers/provenance, never model tex
 
 The combined trace has at most 50 candidate slots, with graph path proposals
 charged conservatively against `50 - seed.candidate_window_count`; this is not
-50 graph candidates after 50 seed candidates. Visible/evidence count is capped
-at five. Permission-filtered graph paths do not produce public edge counts;
+50 graph candidates after 50 seed candidates. Enriched evidence is capped at five.
+Existing seed evidence is never truncated: `/ask` can already contain eight
+items, in which case enrichment is declined before graph I/O and all eight
+seeds retain their order and receipt. Graph candidates are ordered by stable
+edge ID before applying the remaining-candidate LIMIT. Permission-filtered graph paths do not produce public edge counts;
 the seed's bounded hidden-match count is retained. Outage, stale/incomplete
-projection and no improvement reuse seed evidence under these same caps.
+projection and no improvement preserve the original seed evidence and receipt.
 Authority read errors propagate closed instead of allowing graph data through.
 
 ## Internal contract and consumers

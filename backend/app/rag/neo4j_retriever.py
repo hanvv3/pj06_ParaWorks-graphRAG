@@ -108,25 +108,25 @@ class Neo4jEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
             min(self.policy.candidate_limit, input.candidate_scan_limit)
             - seed.trace.candidate_window_count
         )
-        visible = list(
-            seed.visible[: min(input.visible_limit, self.policy.visible_limit)]
-        )
+        visible = list(seed.visible)
+        visible_cap = min(input.visible_limit, self.policy.visible_limit)
 
         def fallback(category):
             return replace(
                 seed,
-                visible=tuple(visible),
                 graph_paths=(),
                 graph_policy_version=GRAPH_POLICY_VERSION,
                 trace=replace(
                     seed.trace,
-                    visible_count=len(visible),
+                    visible_count=len(seed.visible),
                     fallback_category=category,
                     latency_ms=max(0, (perf_counter_ns() - started) // 1_000_000),
                 ),
             )
 
-        if not visible or remaining <= 0:
+        # Enrichment must never evict valid seed evidence (ask allows eight).
+        # If seeds already fill the graph's five-item cap, retain them exactly.
+        if not visible or remaining <= 0 or len(visible) >= visible_cap:
             return fallback('graph_no_benefit')
         generation = self.db.scalar(
             select(RagServingCorpusGeneration.corpus_generation).where(
@@ -161,7 +161,7 @@ class Neo4jEvidenceRetriever(Runnable[RetrievalRequest, RetrievalResult]):
                 continue
             added = False
             for node in path.nodes:
-                if node.document_id in ids or len(visible) >= self.policy.visible_limit:
+                if node.document_id in ids or len(visible) >= visible_cap:
                     continue
                 evidence = _evidence(
                     self.db,

@@ -2,6 +2,12 @@
 
 ## 2026-09-21 — E-2 permission-preserving relationship retrieval
 
+- E-2 review R1: `/ask`의 기존 8개 seed를 graph cap5로 줄이던 fallback 회귀를
+  3개 RED로 재현했다. seed 순서·전체 근거·receipt를 보존하고, graph 공간이 없으면
+  조회 전에 enrichment를 생략한다. graph 후보는 `edge_id` 정렬 후 LIMIT을 적용해
+  물리 방문 순서가 달라도 동일한 제한 부분집합을 고른다(추가 RED 1개).
+  E-2/keyword/pgvector 집중 검증은 실제 PG/Neo4j 설정으로 **117 passed in29.23s**.
+
 - default-off graph enrichment Runnable을 실제 PostgreSQL request/finalizer 조립에
   연결했다. 기존 keyword/pgvector seed와 embedding receipt를 재사용하고, 합계 candidate50 /
   evidence5 예산 안에서 공식 Neo4j driver의 1-hop `SUPPORTED_BY`만 조회한다.
