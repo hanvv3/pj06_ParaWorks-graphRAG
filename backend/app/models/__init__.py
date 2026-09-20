@@ -5,6 +5,7 @@ from backend.app.models.agent_workflows import (
     AgentWorkflowRequest,
     AgentWorkflowThread,
 )
+from backend.app.models.answer_cache import RagAnswerCacheEntry
 from backend.app.models.assistant import AssistantConversation, AssistantMessage
 from backend.app.models.audit import AuditLog
 from backend.app.models.auth import AuthUser, RefreshToken
@@ -62,6 +63,7 @@ from backend.app.models.source import (
 from backend.app.models.vector_index import VectorIndexState
 
 __all__ = [
+    'RagAnswerCacheEntry',
     'SyncJob',
     'AgentRun',
     'AgentRunCostComponent',

@@ -1,6 +1,6 @@
 # D.1 — PostgreSQL 답변 캐시 설계
 
-상태: **승인된 프로토타입 우선순위, 미구현**. D 기능 baseline과 E 최소 GraphRAG 뒤 착수한다.
+상태: **C-1 독립 저장소 구현·검증, C-2/C-3 미구현**. D 기능 baseline과 E 최소 GraphRAG 뒤 진행한다.
 [공통 계약](2026-09-20-remaining-deliverables-design.md) / [계획](../plans/2026-09-20-d1-answer-cache.md).
 
 순서: `D 기능 baseline → E 최소 GraphRAG → D.1 캐시 → Slack → 정식 릴리스 준비`.

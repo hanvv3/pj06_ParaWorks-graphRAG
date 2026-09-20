@@ -1,6 +1,16 @@
 # ParaWorks — 현재 인수인계
 
-갱신: 2026-09-21. 단계: **E GraphRAG prototype accepted; D.1 C-1 next; formal release deferred and NOT CLEAN**.
+갱신: 2026-09-21. 단계: **E GraphRAG prototype accepted; D.1 C-1 storage implemented, review then C-2; formal release deferred and NOT CLEAN**.
+
+## C-1 독립 저장소
+
+- `rag_answer_cache_entries`는 한 시간 고정 TTL과 signed value를 사용한다. factory 기본 off,
+  SQLite Null이며 현재 graph/API/finalizer에는 연결하지 않았다.
+- E prepared influence v3와 ordered path v1 전체를 인증하고 exact principal/scope·입력·
+  model/prompt/output/retrieval/graph/policy/key 버전을 key에 묶는다. 검증된 selected blocks만
+  저장한다. [C-1 runbook](c-1-answer-cache-storage.md)의 consumer 계약을 먼저 읽는다.
+- 다음 C-2는 새 run/audit의 zero-generation 회계, 현재 citation 재구성, hit 이후 최종
+  전체 근거/관계 재검증을 연결한다. cache hit은 권한 authority가 아니다.
 
 ## E-3 완료 후속
 
@@ -13,7 +23,7 @@
 - After controller-coordinated Neo4j restart and PostgreSQL restart/fresh-session
   reconstruction, E-2 retrieval recovered the same relation evidence. No paid
   provider/cache/flag activation occurred.
-- Next is **D.1 C-1**, reusing E-2 graph dependencies in cache key/hit/finalization.
+- E 전체 리뷰는 CLEAN이며 C-1 저장소가 E-2 graph dependencies를 재사용한다.
   Actual-model quality, production RBAC, capability P1 and formal release remain deferred.
 
 ## E-2 후속 진입
@@ -28,7 +38,7 @@
   redaction으로 처리하며 실제 비용을 보존한다. 공개 응답/Review/권한 정책은 미변경이다.
 - [E-2 runbook](e-2-relationship-retrieval.md)에 config, 내부 fingerprint 소비자와 fake/real DB
   검증 경계를 정리했다. keyword tuple-array 오류도 실제 PG에서 재현 후 SQL 경계만 수정했다.
-- 다음은 독립 리뷰와 E-3 동일 corpus 비교다. 자동 flag 활성화·유료 호출·cache는 하지 않았다.
+- E-2 독립 리뷰와 E-3 동일 corpus 비교는 완료됐다. 자동 flag 활성화·유료 호출은 하지 않았다.
 
 ## E-1 기반 계약
 
@@ -51,15 +61,15 @@
 
 - Worktree: `C:/Users/hanvv/Study/potenup3/pj06_ParaWorks+graphRAG/.worktrees/review-hitl-v2-design`
 - Branch: `codex/rag-orchestrator-agent`
-- 점검한 code HEAD: `9200ea3edd02590ef29e9156c3ea7f3a8fc27bf6`
-  (F-2 evidence baseline `a7a58f8`). 재개 시 `git status --short`와 HEAD를 다시 확인.
+- C-1 착수 code HEAD: `c9c94e0bb1ef4445ae2b37eec3df6ad6b515f6b4`
+  (E 전체 리뷰 CLEAN). 재개 시 `git status --short`와 HEAD를 다시 확인.
 - 진입 문서: [plan.md](../../../plan.md), [공통 spec](../specs/2026-09-20-remaining-deliverables-design.md),
   [D 마무리 spec](../specs/2026-09-20-d-core-completion-design.md), [D 계획](../plans/2026-09-20-d-core-completion.md).
 
 ## 현재 사실
 
 - D의 retriever/answer graph·API/Assistant·비용/권한 기반 코드가 존재한다.
-  완료된 Tasks1~22를 다시 시작하지 않는다. F-1/F-2에서 실제 기능/PG 기준선을 새로 검증한다.
+  완료된 Tasks1~22를 다시 시작하지 않는다. F-1/F-2 기능/PG 기준선은 검증됐다.
 - Task23/24 release ledger·preview/authorization 기반, Task25-A evaluator,
   Task25-B memory capability가 구현돼 있다. D 전체 릴리스 완료를 뜻하지 않는다.
 - `3f6cb0f`의 최신 독립 spec/code 리뷰는 **NOT CLEAN**이다. 메모리 registry 복제와
@@ -75,14 +85,15 @@
 
 ## 승인된 변경과 다음 작업
 
-사용자가 승인한 것은 **D 기능 기준선 → E → D.1 → Slack → 정식 출시 준비**의 문서 변경이다.
+2026-09-20 사용자는 **D 기능 기준선 → E → D.1 → Slack → 정식 출시 준비** 순서를 승인했다.
+이후 구현 지시로 E와 C-1을 진행했다.
 release reviewer/OAuth·30-case runner·quality publication은 보류되며 지식용 Review Queue는 유지한다.
 R1 threat-model 변경과 P1 해결을 승인된 것으로 해석하지 않는다. 보류된 D-0에서 결정한다.
 
 1. **E-1~E-3:** 캐시 없이 관계 검색/근거 경로를 구현·비교한다. 이어 **C-1~C-3**에서 캐시를 연결한다.
 2. **S-1~S-3:** 합성 Slack의 수집→Review→검색을 재현한다. 실제 데이터 선택은 live 연동 때 묻는다.
 
-이번 턴은 planning 문서 변경까지만 수행했다. 구현 재개 시 기존 subagent-driven 방식을 유지한다.
+계획 승인 이후 E와 C-1 구현을 진행했다. 다음 작업은 C-1 리뷰 후 C-2다.
 
 ## 검증과 운영 경계
 
@@ -105,4 +116,4 @@ R1 threat-model 변경과 P1 해결을 승인된 것으로 해석하지 않는�
 - 로컬 `.tmp/task25-b-authority-code-r1-review.md`와
   `.tmp/task25b-authority-spec-r1-independent-review.md`는 선택적 재현 자료다.
   ignored 파일이 없는 새 체크아웃에서도 위 요약으로 상태를 파악할 수 있다.
-  formal release 재개 때 D-0/D-1 acceptance를 확인한다. 지금의 다음 작업은 E-1이다.
+  formal release 재개 때 D-0/D-1 acceptance를 확인한다. 현재 다음 작업은 위 C-1 후속을 따른다.

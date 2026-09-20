@@ -1,5 +1,33 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — D.1 C-1 standalone authenticated answer cache
+
+- Added an independent PostgreSQL cache port/model/migration; production answer
+  reuse is deliberately left to C-2. The factory is default-off and SQLite is a
+  no-I/O Null store. No E/runtime authority, public response, permission, Review
+  or cost policy changed. [C-1 consumer contract](superpowers/runbooks/c-1-answer-cache-storage.md).
+- Keys bind exact principal/workspace/scope, full prepared input and ordered
+  model influences, E graph paths, model/prompt/output/retrieval/graph/backend/
+  policy/key identities. Only real-validator-authenticated substantive selected
+  blocks and dependency references are stored; no duplicated prompt/question/
+  citation metadata or provider receipts. Signed timestamps impose a fixed
+  one-hour non-sliding TTL, with a 24-hour DB cap and bounded expired-row cleanup.
+- RED/GREEN covered missing storage, new hit identity, migration head alignment,
+  and expiry crossing during reads. Actual leased PostgreSQL storage/cleanup,
+  signed mutations, scope isolation and full upgrade/downgrade/re-upgrade passed:
+  **8 focused tests**, four existing Alembic deprecation warnings. The adjacent
+  answer schema/migration/default-runtime/SQLite selectors passed **78 tests,
+  6 skipped**, 21 existing Alembic warnings; skips are gated legacy PG suites,
+  separate from the actual PG C-1 evidence. Ruff and `git diff --check` passed.
+- The broad root `pytest` selector also discovered unrelated scratch code that
+  attempts local PostgreSQL at import and failed collection. An all-backend run
+  was then stopped on controller direction; neither is claimed as full-suite
+  success. Focused selectors above are the completion evidence.
+- No paid model/provider calls, `.env` changes, flag activation or push occurred.
+  C-2 must still revalidate canonical evidence/relations at publication, rebuild
+  citations and account a new run/audit with zero generation cost. Cache savings
+  and live quality are not yet measured; formal release NOT CLEAN/P1 remain.
+
 ## 2026-09-21 — E-3 fixed-corpus GraphRAG comparison and rollback
 
 - Actual PostgreSQL plus official Neo4j driver ran E-1's same corpus/principal,
