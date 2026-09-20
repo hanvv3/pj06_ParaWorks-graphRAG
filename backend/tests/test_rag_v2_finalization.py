@@ -41,6 +41,7 @@ from backend.app.agent_runtime.rag_finalization import (
     _pre_projection_cost_snapshot_hmac,
 )
 from backend.app.agent_runtime.rag_postgres_binding import (
+    RagPostgresAdvisoryTransport,
     RagPostgresDatabaseAuthority,
 )
 from backend.app.agent_runtime.rag_provider_safety import RagProviderSafetyService
@@ -902,8 +903,14 @@ def _recovery_bundle(
         evidence_barrier=provider_free_barrier,
         postgres_database=postgres_database,
     )
+    # Identity-boundary tests use fake synchronization, but still supply the
+    # exact transport type and shared health required by the current assembler.
+    advisory = object.__new__(RagPostgresAdvisoryTransport)
+    advisory._assembly = SimpleNamespace(runtime_health=postgres_database.runtime_health_authority)
+    safety = object.__new__(RagProviderSafetyService)
+    safety._advisory_transport = advisory
     paid = _assemble_paid_rag_phase2_authority(
-        provider_safety=object.__new__(RagProviderSafetyService),
+        provider_safety=safety,
         safety_connection_factory=None,
         safety_requirements=(),
         owner_connection_factory=None,
@@ -1678,30 +1685,23 @@ def test_projection_recovery_refuses_unbound_authority_before_snapshot(
     reason='disposable PostgreSQL projection-owner gate is not configured',
 )
 def test_postgres_live_projection_owner_blocks_recovery_until_exact_reacquire() -> None:
-    engine = create_engine(os.environ['PARAWORKS_TEST_POSTGRES_URL'])
-    run_id = (uuid4().int % (2**31 - 1)) + 1
-    identity = rag_projection_owner_lock_id(run_id)
-    with engine.begin() as connection:
-        register_advisory_identity_db(
-            connection, identity, identity_namespace='dynamic'
-        )
-    owner = engine.connect()
-    recovery = engine.connect()
-    try:
-        capability = load_registered_advisory_capability(
-            owner, identity, identity_namespace='dynamic'
-        )
-        owner.rollback()
-        acquire_advisory_lock(owner, capability, shared=False)
-        assert try_acquire_advisory_lock(
-            recovery, capability, shared=False
-        ) is False
-        release_advisory_lock(owner, capability, shared=False)
-        assert try_acquire_advisory_lock(
-            recovery, capability, shared=False
-        ) is True
-        release_advisory_lock(recovery, capability, shared=False)
-    finally:
-        owner.close()
-        recovery.close()
-        engine.dispose()
+    from backend.tests.postgres_isolation import lease_postgres_schema
+    with lease_postgres_schema(os.environ['PARAWORKS_TEST_POSTGRES_URL'],
+        run_id=uuid4().hex[:12], scope_name='projection_owner') as lease:
+        engine = create_engine(lease.database_url)
+        try:
+            RagAdvisoryLockKey.__table__.create(engine)
+            run_id = (uuid4().int % (2**31 - 1)) + 1
+            identity = rag_projection_owner_lock_id(run_id)
+            with engine.begin() as connection:
+                register_advisory_identity_db(connection, identity, identity_namespace='dynamic')
+            with engine.connect() as owner, engine.connect() as recovery:
+                capability = load_registered_advisory_capability(owner, identity, identity_namespace='dynamic')
+                owner.rollback()
+                acquire_advisory_lock(owner, capability, shared=False)
+                assert try_acquire_advisory_lock(recovery, capability, shared=False) is False
+                release_advisory_lock(owner, capability, shared=False)
+                assert try_acquire_advisory_lock(recovery, capability, shared=False) is True
+                release_advisory_lock(recovery, capability, shared=False)
+        finally:
+            engine.dispose()
