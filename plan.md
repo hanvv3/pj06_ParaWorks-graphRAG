@@ -1,6 +1,6 @@
 # ParaWorks — 현재 로드맵
 
-갱신: 2026-09-21, E 완료 및 D.1 C-1 독립 저장소 반영.
+갱신: 2026-09-21, E 완료 및 D.1 C-2 runtime 연결 반영(독립 리뷰 대기).
 C-1 착수 기준: `c9c94e0` / `codex/rag-orchestrator-agent`.
 이 파일은 제품 방향·문서 탐색·작업 순서의 source of truth다.
 
@@ -23,7 +23,7 @@ C-1 착수 기준: `c9c94e0` / `codex/rag-orchestrator-agent`.
 | A/B/C/C.5 | 과거 구현·검증 기록 있음. C.5 rollout disabled | [이력](docs/superpowers/archive/2026-09-20-product-plan-history.md) | 재구현하지 않음 |
 | D Core 기능 | F-1/F-2 fresh 기능 기준선 통과; 정식 release는 NOT CLEAN으로 보류 | [D spec](docs/superpowers/specs/2026-09-20-d-core-completion-design.md) | [F-1/F-2](docs/superpowers/plans/2026-09-20-d-core-completion.md) |
 | E | 최소 GraphRAG prototype acceptance 완료. cache 없이 관계 검색/rollback 비교 확인 | [GraphRAG spec](docs/superpowers/specs/2026-09-20-e-graphrag-design.md) | [E-1~E-3](docs/superpowers/plans/2026-09-20-e-graphrag.md) |
-| D.1 | C-1 독립 저장소 구현, 제품 답변 재사용은 C-2에서 연결 | [캐시 spec](docs/superpowers/specs/2026-09-20-d1-answer-cache-design.md) | [C-1~C-3](docs/superpowers/plans/2026-09-20-d1-answer-cache.md) |
+| D.1 | C-1 저장소 + C-2 답변 재사용 구현, C-2 독립 리뷰 후 C-3 | [캐시 spec](docs/superpowers/specs/2026-09-20-d1-answer-cache-design.md) | [C-1~C-3](docs/superpowers/plans/2026-09-20-d1-answer-cache.md) |
 | Slack | 마지막 기능; 합성 검증과 실제 연동 분리 | [Slack spec](docs/superpowers/specs/2026-09-20-slack-recovery-design.md) | [S-1~S-3](docs/superpowers/plans/2026-09-20-slack-recovery.md) |
 | 정식 출시 준비 | 보류. D release NOT CLEAN/P1 미해결 | [D release 계약](docs/superpowers/specs/2026-09-20-d-core-completion-design.md#보류한-정식-release-계약) | [기존 D-0~D-5](docs/superpowers/plans/2026-09-20-d-core-completion.md#보류한-정식-release-작업) |
 
@@ -34,11 +34,12 @@ C-1 착수 기준: `c9c94e0` / `codex/rag-orchestrator-agent`.
 3. 선택한 단계의 spec과 **다음 작업 한 개**. [portfolio](docs/portfolio-log.md)의 최신 항목만 확인.
 4. 그 작업의 코드·테스트. 기존 긴 문서는 해당 계약이 필요할 때 지정된 절만 조회.
 
-다음은 **D.1 C-1 리뷰 후 C-2: 캐시 hit의 graph·권한·회계 연결**이다.
+다음은 **D.1 C-2 독립 리뷰 후 C-3: cold/warm 비교와 rollback 검증**이다.
 F-1/F-2 기능 기준선은 통과했고 formal release는 NOT CLEAN으로 보류한다.
 Tasks1~22를 다시 구현하지 않는다.
-2026-09-20의 계획 정리 이후 E와 C-1 구현·검증이 진행됐다. C-1은 default-off 독립
-저장소이며 generation 재사용·유료 호출·rollout은 수행하지 않았다.
+2026-09-20의 계획 정리 이후 E와 C-1/C-2 구현·검증이 진행됐다. 캐시는 default-off이며
+C-2는 fake 모델과 disposable PostgreSQL에서 generation 재사용을 검증했다.
+유료 호출·운영 flag 활성화·rollout은 수행하지 않았다.
 
 ## 계획을 유지하는 방법
 

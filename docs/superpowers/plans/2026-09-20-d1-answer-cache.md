@@ -1,12 +1,12 @@
 # D.1 답변 캐시 구현 계획
 
-> **실행 방식:** 기존 `superpowers:subagent-driven-development` 선택을 유지한다. C-1은 독립 저장소까지 구현했으며 C-2/C-3은 후속 작업이다.
+> **실행 방식:** 기존 `superpowers:subagent-driven-development` 선택을 유지한다. C-1/C-2 구현 후 C-2 독립 리뷰, 이어 C-3을 진행한다.
 
 **Goal:** 현재 근거 검색 뒤 generation 재사용으로 비용을 줄인다.
 **Spec:** [D.1 설계](../specs/2026-09-20-d1-answer-cache-design.md).
 **Architecture:** 작은 cache port + PostgreSQL store + SQLite Null store, D evidence/E path finalization 재사용.
 **Tech:** 기존 SQLAlchemy/Alembic/PostgreSQL/LangGraph, fake model 테스트.
-**상태:** C-1 독립 저장소 구현·검증, 리뷰 후 C-2 진입. 답변 재사용은 아직 미연결이다.
+**상태:** C-1 저장소와 C-2 graph/회계/finalization 연결 구현. C-2 독립 리뷰 대기, C-3 미착수.
 세부 schema/API는 착수 시 정한다. D release green은 선행 조건이 아니며 정식 live gate는 뒤에 남는다.
 
 ## 공통 제약과 검토 초점
@@ -41,16 +41,20 @@ hit substantive 비용·audit다. 아래 작업에서 각각 실패 재현과 �
 `backend/app/rag/evidence_projection.py`, E의 path carrier/PG validator, C-1 store.
 새 focused cache 통합 테스트.
 
-- [ ] RED: fresh retrieval 뒤 valid hit은 generation0, miss는 기존 generation1;
+- [x] RED: fresh retrieval 뒤 valid hit은 generation0, miss는 기존 generation1;
   query embedding 실제 비용, 새 AgentRun/Audit, selected/nonselected 및 중간 node/edge revoke를 검증한다.
-- [ ] cache-hit substantive finalization을 명시적으로 정의하고 기존 paid/canned 경로와 구별한다.
+- [x] cache-hit substantive finalization을 명시적으로 정의하고 기존 paid/canned 경로와 구별한다.
   current citation 재구성·전체 영향 근거/relation의 PG 재검증을 공통 경로로 사용한다.
-- [ ] 새 관련 근거/Assistant 문맥 변화와 lookup→publication 사이 drift를 거부한다.
+- [x] 새 관련 근거/Assistant 문맥 변화와 lookup→publication 사이 drift를 거부한다.
   endpoint 문서가 그대로인 relation version/permission 변경도 포함한다.
   store 오류는 miss, 권한 authority 오류는 fail-closed로 처리한다.
 - [ ] 직접 영향 RAG/API/Assistant 회귀 뒤 독립 리뷰·커밋한다.
 
 **Acceptance:** hit이 공개 계약/권한/비용 기록을 약화하지 않으면서 generation 호출을 실제로 절감한다.
+
+내부 `answer-cache-hit:v1` 모드, 감사/보존/운영 경계는
+[C-2 runbook](../runbooks/c-2-answer-cache-runtime.md)을 따른다.
+실제 PG 조립 테스트는 E의 metadata schema/scorer fixture이며 전체 migration-trigger 검증이 아니다.
 
 ## C-3 — generation 절감 비교와 rollback
 

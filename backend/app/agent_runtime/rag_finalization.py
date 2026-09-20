@@ -287,9 +287,9 @@ class ProviderFreeRagPhase2Authority:
         branch: str,
     ):
         if (
-            branch != 'provider_free'
+            branch not in {'provider_free', 'answer-cache-hit:v1'}
             or prepared.query_embedding_result is not None
-            or prepared.model_influence_observations
+            or (prepared.model_influence_observations and branch != 'answer-cache-hit:v1')
         ):
             raise RagFinalizationError('provider-free phase-2 branch is invalid')
         assembly = self._assembly
@@ -512,7 +512,7 @@ class PaidRagPhase2Authority:
         *,
         branch: str,
     ):
-        if branch not in {'paid_embedding_only', 'paid_prepared'}:
+        if branch not in {'paid_embedding_only', 'paid_prepared', 'answer-cache-hit:v1'}:
             raise RagFinalizationError('paid phase-2 branch is invalid')
         self._require_exact_requirement_components(
             _expected_paid_components(prepared, branch=branch)
@@ -1025,6 +1025,7 @@ class PreparedRagFinalization:
     rendered_input_hmac: str | None = None
     answer_model_config_snapshot_hmac: str | None = None
     audit_only_prepared_observation_hmac: str | None = None
+    answer_cache_hit: object | None = None
 
     @property
     def prepared_observation_hmac(self) -> str | None:
@@ -1035,6 +1036,12 @@ class PreparedRagFinalization:
         )
 
     def __post_init__(self) -> None:
+        if self.answer_cache_hit is not None:
+            from backend.app.rag.answer_cache import AnswerCacheHit
+            if (type(self.answer_cache_hit) is not AnswerCacheHit
+                or self.tentative_outcome != 'supported'
+                or self.validated_answer != self.answer_cache_hit.answer):
+                raise ValueError('cache-hit substantive product is invalid')
         if self.product_kind not in {'answer', 'search'}:
             raise ValueError('RAG finalization product kind is invalid')
         if type(self.prepared_text) is not PreparedRagRequestText:
@@ -1151,7 +1158,7 @@ class RagFinalizationService:
                     pending,
                     prepared,
                     None,
-                    branch='paid_prepared',
+                    branch='answer-cache-hit:v1' if prepared.answer_cache_hit is not None else 'paid_prepared',
                 )
             ),
         )
@@ -1169,7 +1176,7 @@ class RagFinalizationService:
                     pending,
                     prepared,
                     target,
-                    branch='paid_prepared',
+                    branch='answer-cache-hit:v1' if prepared.answer_cache_hit is not None else 'paid_prepared',
                 )
             ),
         )
@@ -1361,7 +1368,7 @@ class RagFinalizationService:
         prepared: PreparedRagFinalization,
         assistant_target: AssistantProjectionTarget | None,
         *,
-        branch: Literal['provider_free', 'paid_embedding_only', 'paid_prepared'],
+        branch: Literal['provider_free', 'paid_embedding_only', 'paid_prepared', 'answer-cache-hit:v1'],
         force_drift: bool = False,
     ) -> RagFinalProjection:
         if type(pending) is not RagProjectionPending:
@@ -1665,7 +1672,10 @@ class SqlAlchemyRagFinalizationBoundary:
         ):
             raise RagFinalizationError('exact-two RAG cost authority is unavailable')
         query, answer = children
-        if branch != 'provider_free':
+        cache_hit = branch == 'answer-cache-hit:v1'
+        if cache_hit and prepared.answer_cache_hit is None:
+            raise RagFinalizationError('cache-hit authority is unavailable')
+        if branch != 'provider_free' and not (cache_hit and prepared.query_embedding_result is None):
             if type(self._phase2_authority) is not PaidRagPhase2Authority:
                 raise RagFinalizationError(
                     'paid phase-2 safety authority is unavailable'
@@ -1685,7 +1695,7 @@ class SqlAlchemyRagFinalizationBoundary:
                 children,
                 expected_components=attempted_components,
             )
-        if branch == 'provider_free':
+        if branch == 'provider_free' or (cache_hit and prepared.query_embedding_result is None):
             if not all(_exact_terminal_zero(value) for value in children):
                 raise RagFinalizationError('provider-free cost shape is invalid')
             return
@@ -1695,6 +1705,10 @@ class SqlAlchemyRagFinalizationBoundary:
                 raise RagFinalizationError('query embedding cost shape is invalid')
         elif not _exact_paid_embedding_cost(query, embedding, secret=self._secret):
             raise RagFinalizationError('paid embedding cost shape is invalid')
+        if cache_hit:
+            if not _exact_terminal_zero(answer):
+                raise RagFinalizationError('cache generation cost shape is invalid')
+            return
         if branch == 'paid_embedding_only':
             if embedding is None or not _exact_terminal_zero(answer):
                 raise RagFinalizationError(
@@ -1730,6 +1744,20 @@ class SqlAlchemyRagFinalizationBoundary:
     ) -> None:
         parent = self._require_parent(pending)
         metadata = parent.metadata_ or {}
+        if prepared.answer_cache_hit is not None:
+            from backend.app.rag.answer_cache import (
+                runtime_answer_cache_key,
+                validate_answer_cache_hit,
+            )
+            key = runtime_answer_cache_key(scope=prepared.security_scope,
+                prepared=prepared.prepared_model_influence, text=prepared.prepared_text,
+                retrieval=prepared.retrieval_result, settings=self._settings)
+            identity = validate_answer_cache_hit(prepared.answer_cache_hit, key,
+                slots=prepared.evidence_slots, settings=self._settings)
+            if any(metadata.get(name) != value for name, value in identity.items()):
+                raise RagFinalizationError('durable cache-hit identity changed')
+        elif metadata.get('answer_finalization_mode') is not None:
+            raise RagFinalizationError('cache-hit finalization mode changed')
         expected_surface = (
             'search'
             if prepared.product_kind == 'search'
@@ -1911,6 +1939,14 @@ class SqlAlchemyRagFinalizationBoundary:
     ) -> None:
         parent = self._require_parent(pending)
         _apply_parent_final(parent, projection, secret=self._secret)
+        if parent.metadata_.get('answer_finalization_mode') == 'answer-cache-hit:v1':
+            from backend.app.models import AuditLog
+            self._db.add(AuditLog(actor_id='rag-runtime', actor_email='system@paraworks.local',
+                actor_role='system', action='rag_answer_cache_finalized', target_type='agent_run',
+                target_id=str(parent.id), status=projection.outcome,
+                metadata_={name: parent.metadata_[name] for name in (
+                    'answer_finalization_mode', 'answer_cache_key_hmac',
+                    'answer_cache_value_hmac', 'security_scope_fingerprint', 'rag_result_hmac')}))
         self._db.flush([parent])
 
     def finalize_assistant_product(
@@ -2292,10 +2328,14 @@ def _build_result_hmac(
             )
         ),
     }
+    if prepared.answer_cache_hit is not None:
+        payload.update(answer_finalization_mode='answer-cache-hit:v1',
+            answer_cache_key_hmac=prepared.answer_cache_hit.key_hmac,
+            answer_cache_value_hmac=prepared.answer_cache_hit.value_hmac)
     return keyed_fingerprint(
         payload,
         secret=secret,
-        schema_version='rag-result:v1',
+        schema_version='rag-result-cache-hit:v1' if prepared.answer_cache_hit is not None else 'rag-result:v1',
         policy_version='company-memory-rag-answer-v2.0',
     )
 
@@ -2880,6 +2920,10 @@ def _expected_paid_components(
     *,
     branch: str,
 ) -> tuple[str, ...]:
+    if branch == 'answer-cache-hit:v1':
+        if prepared.answer_cache_hit is None or prepared.query_embedding_result is None:
+            raise RagFinalizationError('paid cache-hit embedding authority is unavailable')
+        return ('query_embedding',)
     if branch == 'paid_embedding_only':
         return ('query_embedding',)
     if branch != 'paid_prepared':

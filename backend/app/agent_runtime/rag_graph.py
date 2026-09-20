@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import replace
 from decimal import Decimal
 from functools import wraps
@@ -703,6 +704,29 @@ def generate_structured_answer_blocks(
 ):
     services = runtime.context.services
     prepared = state['prepared_answer']
+    cache_key = None
+    if services.answer_cache is not None and services.sqlite_scope is None:
+        from backend.app.rag.answer_cache import (
+            runtime_answer_cache_key,
+            validate_answer_cache_hit,
+        )
+        cache_key = runtime_answer_cache_key(scope=state['security_scope'],
+            prepared=state['prepared_model_influence'], text=state['prepared_text'],
+            retrieval=state['retrieval'], settings=runtime.context.settings)
+        # Only store I/O is best effort; canonical reads above remain fail-closed.
+        try:
+            hit = services.answer_cache.get(cache_key, slots=state['evidence_slots'])
+        except Exception:
+            hit = None
+        if hit is not None:
+            try:
+                validate_answer_cache_hit(hit, cache_key, slots=state['evidence_slots'],
+                                          settings=runtime.context.settings)
+            except (ValueError, TypeError, AttributeError):
+                hit = None
+        if hit is not None:
+            return {'answer_cache_key': cache_key, 'answer_cache_hit': hit,
+                    'validated_answer': hit.answer, 'answer_generation_attempted': False}
     if services.sqlite_scope is not None:
         try:
             answer = services.sqlite_scope.generate_deterministic_answer(prepared)
@@ -761,6 +785,7 @@ def generate_structured_answer_blocks(
     return {
         'validated_answer': delivery.output, 'answer_generation_attempted': True,
         'generation_component': delivery.component_final,
+        **({'answer_cache_key': cache_key} if cache_key is not None else {}),
     }
 
 
@@ -789,6 +814,12 @@ def commit_cost_components_and_mark_projection_pending(
             )
         }
     corpus, index = state['generations']
+    if state.get('answer_cache_hit') is not None:
+        return {'pending': runtime.context.services.cost_ledger.commit_answer_cache_pending(
+            run_id=state['run_id'], corpus_generation=corpus, vector_index_generation=index,
+            hit=state['answer_cache_hit'], key=state['answer_cache_key'],
+            slots=state['evidence_slots'], settings=runtime.context.settings,
+            embedding_only=state.get('query_embedding_result') is not None)}
     return {
         'pending': runtime.context.services.cost_ledger.load_pending_projection(
             run_id=state['run_id'],
@@ -852,6 +883,7 @@ def project_selected_server_citations(
             prepared_model_influence=state['prepared_model_influence'],
             rendered_input_hmac=prepared.rendered_input_hmac,
             answer_model_config_snapshot_hmac=prepared.model_config_snapshot_hmac,
+            answer_cache_hit=state.get('answer_cache_hit'),
         )
     }
 
@@ -889,6 +921,11 @@ def finalize_run_and_answer_projection_or_assistant_message(
         )
     assistant_record = projection if type(projection) is AssistantFinalizationRecord else None
     projection = _committed_canonical(projection)
+    if (projection.outcome == 'supported' and state.get('answer_cache_key') is not None
+        and state.get('answer_cache_hit') is None and services.answer_cache is not None):
+        with suppress(Exception):
+            services.answer_cache.put(state['answer_cache_key'],
+                answer=state['validated_answer'], slots=state['evidence_slots'])
     return {
         **({'assistant_finalization': assistant_record} if assistant_record else {}),
         'committed_projection': projection,

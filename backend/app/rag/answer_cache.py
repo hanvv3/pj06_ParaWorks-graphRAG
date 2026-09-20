@@ -6,8 +6,10 @@ again before publication. No cache result carries an old provider receipt.
 
 from __future__ import annotations
 
+import hmac
 import json
 from dataclasses import asdict, dataclass
+from time import time
 from typing import Protocol
 
 from backend.app.agent_runtime.fingerprints import (
@@ -221,3 +223,93 @@ class AnswerCache(Protocol):
         slots: tuple[EvidenceSlot, ...],
     ) -> bool: ...
     def cleanup(self, *, limit: int = 100) -> int: ...
+
+
+def runtime_answer_cache_key(*, scope, prepared, text, retrieval, settings):
+    """Bind the current runtime policy and complete Assistant retrieval context."""
+    from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
+    from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
+        build_answer_output_schema_hmac,
+        build_answer_prompt_renderer_hmac,
+    )
+
+    prompt = build_answer_prompt_renderer_hmac(settings)
+    output = build_answer_output_schema_hmac(settings)
+    policy = RagCostPolicy(
+        settings=settings,
+        answer_output_schema_hmac=output,
+        answer_prompt_renderer_hmac=prompt,
+    )
+    versions = AnswerCacheVersions(
+        prompt_hmac=prompt,
+        model_hmac=policy.answer_model_config_snapshot_hmac,
+        output_hmac=output,
+        policy_hmac=cache_hmac(
+            {
+                'policy': policy.authorized_policy_snapshot_hmac('answer_generation'),
+                'retrieval_query': text.retrieval_query_hmac,
+                'context_version': text.query_context_version,
+                'question': text.answer_question_hmac,
+            },
+            settings=settings,
+            domain='rag-answer-cache-context-policy:v1',
+        ),
+        retrieval_policy='rag-retrieval-policy:v2.0',
+        graph_policy='company-memory-rag-answer-v2.0:'
+        + (retrieval.graph_policy_version or 'graph-disabled'),
+        seed_backend=retrieval.configured_backend,
+        effective_backend=retrieval.effective_backend,
+    )
+    return build_answer_cache_key(
+        scope=scope, prepared=prepared, versions=versions, settings=settings
+    )
+
+
+def validate_answer_cache_hit(hit, key, *, slots, settings, now=None):
+    """Reauthenticate the exact reusable value, including expiry at publication."""
+    from backend.app.agent_runtime.rag_cost_policy import RagCostPolicy
+
+    validate_cache_key(key, slots=slots, settings=settings)
+    if type(hit) is not AnswerCacheHit:
+        raise ValueError('cache hit carrier is invalid')
+    policy = RagCostPolicy(
+        settings=settings,
+        answer_output_schema_hmac=key.versions.output_hmac,
+        answer_prompt_renderer_hmac=key.versions.prompt_hmac,
+    )
+    payload = eligible_answer_payload(
+        hit.answer,
+        slots=slots,
+        validator=RagAnswerOutputValidator(signer=policy.sign_answer_artifact),
+    )
+    instant = time() if now is None else now
+    if (
+        payload is None
+        or hit.key_hmac != key.key_hmac
+        or hit.scope_hmac != key.scope_hmac
+        or type(hit.created_at) is not int
+        or type(hit.expires_at) is not int
+        or not 0 <= hit.created_at <= instant < hit.expires_at
+        or not 0 < hit.expires_at - hit.created_at <= ANSWER_CACHE_TTL_SECONDS
+    ):
+        raise ValueError('cache hit identity or expiry changed')
+    expected = cache_hmac(
+        {
+            'key_hmac': key.key_hmac,
+            'scope_hmac': key.scope_hmac,
+            'dependencies_json': key.dependencies_json,
+            'answer_json': exact_json(payload),
+            'created_at': hit.created_at,
+            'expires_at': hit.expires_at,
+        },
+        settings=settings,
+        domain='rag-answer-cache-value:v1',
+    )
+    if not hmac.compare_digest(hit.value_hmac, expected):
+        raise ValueError('cache hit signature changed')
+    return {
+        'answer_finalization_mode': 'answer-cache-hit:v1',
+        'answer_cache_key_hmac': key.key_hmac,
+        'answer_cache_value_hmac': hit.value_hmac,
+        'answer_cache_expires_at': hit.expires_at,
+    }

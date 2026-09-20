@@ -469,6 +469,9 @@ def _assemble_rag_request_cost_authority(
 
     def load_provider_capability(identity: object):
         with provider_connection_factory() as connection:
+            # The dedicated transport validates database identity with reads.
+            # End that read transaction before the registry's fresh-read gate.
+            connection.rollback()
             return load_registered_advisory_capability(
                 connection,
                 identity,
@@ -504,6 +507,7 @@ def _assemble_rag_request_cost_authority(
 
     def load_projection_capability(agent_run_id: int):
         with provider_connection_factory() as connection:
+            connection.rollback()
             return load_registered_advisory_capability(
                 connection,
                 rag_projection_owner_lock_id(agent_run_id),

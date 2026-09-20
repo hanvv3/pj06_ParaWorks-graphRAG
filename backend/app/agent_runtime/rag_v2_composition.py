@@ -465,6 +465,7 @@ def _postgres_request_services(*, db, settings, session_factory):
             index_readiness=readiness,
             answer_model=model,
             provider_transport_factory=provider_factory,
+            answer_cache=_answer_cache(db, settings, policy),
         )
     finally:
         closers = [final_db.close for final_db in final_sessions]
@@ -477,6 +478,18 @@ def _postgres_request_services(*, db, settings, session_factory):
                 # Cleanup cannot replace a primary failure or acknowledged
                 # product. Existing trusted health poisons future paid work.
                 assembly.runtime_health._poison()
+
+
+def _answer_cache(db, settings, policy):
+    from backend.app.agents.rag_orchestrator_agent.v2_answer_schema import (
+        RagAnswerOutputValidator,
+    )
+    from backend.app.rag.answer_cache_store import create_answer_cache
+    cache = create_answer_cache(engine=db.get_bind(), settings=settings,
+        validator=RagAnswerOutputValidator(signer=policy.sign_answer_artifact),
+        enabled=settings.rag_answer_cache_enabled)
+    cache.cleanup(limit=100)
+    return cache
 
 
 def _postgres_finalizer(*, db, settings, assembly, pending, prepared):
@@ -533,6 +546,9 @@ def _postgres_finalizer(*, db, settings, assembly, pending, prepared):
 
         def capability(run_id):
             with database.connect() as connection:
+                # Only this newly owned connection's identity-validation reads
+                # precede the registry's required fresh committed read.
+                connection.rollback()
                 return load_registered_advisory_capability(
                     connection,
                     rag_projection_owner_lock_id(run_id),

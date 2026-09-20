@@ -139,6 +139,7 @@ class Settings(BaseSettings):
     )
     rag_use_pgvector_search: bool = Field(default=False, frozen=True)
     rag_graph_enrichment_enabled: bool = Field(default=False, frozen=True)
+    rag_answer_cache_enabled: bool = Field(default=False, frozen=True)
     rag_neo4j_uri: str = Field(default='', frozen=True)
     rag_neo4j_username: str = Field(default='', frozen=True)
     rag_neo4j_password: str = Field(default='', frozen=True, repr=False)

@@ -1,16 +1,27 @@
 # ParaWorks — 현재 인수인계
 
-갱신: 2026-09-21. 단계: **E GraphRAG prototype accepted; D.1 C-1 storage implemented, review then C-2; formal release deferred and NOT CLEAN**.
+갱신: 2026-09-21. 단계: **E accepted; D.1 C-2 implemented, independent review then C-3; formal release deferred and NOT CLEAN**.
+
+## C-2 runtime 연결
+
+- default-off `rag_answer_cache_enabled`를 fresh retrieval/preparation 뒤 연결했다.
+  `answer-cache-hit:v1`은 새 run/감사와 generation 미호출·0원, 실제 embedding 비용을 보존한다.
+- lookup은 노출 권한이 아니다. 현재 key/value/expiry와 durable parent를 재인증한 뒤 기존
+  PG C.5/owner/canonical transaction에서 전체 influence/path와 citation을 검증한다.
+- [C-2 runbook](c-2-answer-cache-runtime.md)에 내부 HMAC 소비자, bounded cleanup/운영 명령,
+  실제 PG와 fake 테스트 경계가 있다. PG 조립 검증은 E metadata/scorer fixture이며
+  전체 migration trigger 또는 정식 release 통과를 뜻하지 않는다.
+- 새 의존성/DB migration/공개 DTO 변경은 없다. C-2 독립 리뷰를 마친 뒤 C-3으로 진행한다.
 
 ## C-1 독립 저장소
 
 - `rag_answer_cache_entries`는 한 시간 고정 TTL과 signed value를 사용한다. factory 기본 off,
-  SQLite Null이며 현재 graph/API/finalizer에는 연결하지 않았다.
+  SQLite Null이다. 독립 저장소에 C-2가 graph/finalization 연결을 추가했다.
 - E prepared influence v3와 ordered path v1 전체를 인증하고 exact principal/scope·입력·
   model/prompt/output/retrieval/graph/policy/key 버전을 key에 묶는다. 검증된 selected blocks만
   저장한다. [C-1 runbook](c-1-answer-cache-storage.md)의 consumer 계약을 먼저 읽는다.
-- 다음 C-2는 새 run/audit의 zero-generation 회계, 현재 citation 재구성, hit 이후 최종
-  전체 근거/관계 재검증을 연결한다. cache hit은 권한 authority가 아니다.
+- C-2는 새 run/audit의 zero-generation 회계, 현재 citation 재구성, hit 이후 최종
+  전체 근거/관계 재검증을 연결했다. cache hit은 권한 authority가 아니다.
 
 ## E-3 완료 후속
 
@@ -93,7 +104,7 @@ R1 threat-model 변경과 P1 해결을 승인된 것으로 해석하지 않는�
 1. **E-1~E-3:** 캐시 없이 관계 검색/근거 경로를 구현·비교한다. 이어 **C-1~C-3**에서 캐시를 연결한다.
 2. **S-1~S-3:** 합성 Slack의 수집→Review→검색을 재현한다. 실제 데이터 선택은 live 연동 때 묻는다.
 
-계획 승인 이후 E와 C-1 구현을 진행했다. 다음 작업은 C-1 리뷰 후 C-2다.
+계획 승인 이후 E와 C-1/C-2 구현을 진행했다. 다음 작업은 C-2 독립 리뷰 후 C-3다.
 
 ## 검증과 운영 경계
 

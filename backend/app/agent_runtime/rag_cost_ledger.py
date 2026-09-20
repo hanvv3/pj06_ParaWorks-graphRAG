@@ -1974,6 +1974,7 @@ class RagCostLedger:
         self, *, run_id: int, corpus_generation: int,
         vector_index_generation: int | None, embedding_only: bool,
         refused_grant: CommittedRagDispatchGrant | None = None,
+        cache_identity: dict | None = None,
     ) -> RagProjectionPending:
         from backend.app.agent_runtime.rag_finalization import RagProjectionPending
 
@@ -1990,6 +1991,13 @@ class RagCostLedger:
         with self._answer_binding_lock, self._safe_pending_owner(run_id, embedding_only=embedding_only):
             parent, rows = self._locked_run(run_id)
             query, answer = rows
+            if cache_identity is not None:
+                if (parent.metadata_.get('answer_finalization_mode') is not None
+                    or any(parent.metadata_.get(name) != cache_identity[name] for name in (
+                        'rendered_input_hmac', 'answer_model_config_snapshot_hmac',
+                        'prepared_model_influence_observation_hmac', 'security_scope_fingerprint'))):
+                    raise RagCostLedgerError('cache preparation binding changed')
+                parent.metadata_ = {**parent.metadata_, **cache_identity}
             if refused_grant is not None and (
                 self._evidence_refused_grants.get(run_id) is not refused_grant
                 or refused_grant.consumed is not False
@@ -2053,6 +2061,11 @@ class RagCostLedger:
             )
             self._answer_reservations.pop(run_id, None)
             self._admission_budgets.pop((run_id, 'answer_generation'), None)
+            if cache_identity is not None:
+                from backend.app.models import AuditLog
+                self._session.add(AuditLog(actor_id='rag-runtime', actor_email='system@paraworks.local',
+                    actor_role='system', action='rag_answer_cache_hit', target_type='agent_run',
+                    target_id=str(run_id), status='pending_projection', metadata_=dict(cache_identity)))
             self._commit()
             if refused_grant is not None:
                 self._evidence_refused_grants.pop(run_id)
@@ -2063,6 +2076,22 @@ class RagCostLedger:
                 pending.terminal_cost_snapshot_hmac,
             )
         return pending
+
+    @_runtime_health_effect
+    def commit_answer_cache_pending(self, *, run_id, corpus_generation,
+                                    vector_index_generation, hit, key, slots, settings,
+                                    embedding_only):
+        from backend.app.rag.answer_cache import validate_answer_cache_hit
+        identity = validate_answer_cache_hit(hit, key, slots=slots, settings=settings)
+        if key.versions.model_hmac != self._cost_policy.answer_model_config_snapshot_hmac:
+            raise RagCostLedgerError('cache model policy changed')
+        identity.update(rendered_input_hmac=key.prepared.rendered_input_hmac,
+            answer_model_config_snapshot_hmac=key.versions.model_hmac,
+            prepared_model_influence_observation_hmac=key.prepared.aggregate_observation_hmac,
+            security_scope_fingerprint=key.scope_hmac)
+        return self._commit_safe_pending(run_id=run_id, corpus_generation=corpus_generation,
+            vector_index_generation=vector_index_generation, embedding_only=embedding_only,
+            cache_identity=identity)
 
     def _require_terminal_cost_row(self, run_id: int, row: AgentRunCostComponent) -> None:
         expected = self._terminal_cost_rows.get((run_id, row.component))

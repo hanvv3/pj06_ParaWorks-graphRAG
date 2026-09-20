@@ -46,6 +46,7 @@ from backend.app.agents.rag_orchestrator_agent.v2_embedding import (
 from backend.app.agents.rag_orchestrator_agent.v2_input import PreparedRagRequestText
 from backend.app.core.config import Settings
 from backend.app.core.demo_auth import DemoUser
+from backend.app.rag.answer_cache import AnswerCache, AnswerCacheHit, AnswerCacheKey
 from backend.app.rag.evidence_projection import (
     ModelInfluenceDependencySnapshot,
     PreparedModelInfluenceSet,
@@ -128,6 +129,7 @@ class RagRequestServices:
     answer_model: StructuredRagAnswerModel | None = None
     sqlite_scope: SQLiteRagGraphScope | None = None
     provider_transport_factory: Callable[[], RagProviderDispatchAuthority] | None = None
+    answer_cache: AnswerCache | None = None
 
 
 @dataclass(slots=True)
@@ -180,6 +182,8 @@ class RagGraphOutput(TypedDict):
 
 
 class RagGraphState(RagGraphInput, RagGraphOutput, total=False):
+    answer_cache_key: AnswerCacheKey
+    answer_cache_hit: AnswerCacheHit
     security_scope: SecurityScope
     scope_fingerprint: str
     configured_backend: str

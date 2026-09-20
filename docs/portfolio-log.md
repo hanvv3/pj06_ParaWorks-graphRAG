@@ -1,5 +1,36 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — D.1 C-2 substantive answer-cache integration
+
+- Connected C-1 after fresh full retrieval/preparation in the existing graph.
+  Authenticated hits use explicit internal `answer-cache-hit:v1`, not canned
+  text or fabricated provider receipts. Durable hit identities and audit survive
+  later authority denial; publication rechecks signature/expiry, current scope,
+  all selected/nonselected influences and complete E paths, rebuilding citations.
+  Assistant retains `rag_assembled`; public schemas and permission policy stay
+  unchanged. [C-2 runtime runbook](superpowers/runbooks/c-2-answer-cache-runtime.md).
+- A hit closes undispatched generation at exact zero while preserving actual
+  query-embedding charges and authority. Only committed substantive generations
+  enter the cache. Default-off/SQLite behavior and paid misses remain unchanged.
+  Bounded cleanup runs separately before admission; an independent operator CLI
+  supports scheduled cleanup without activating the runtime flag.
+- Fresh focused verification: **29 passed in 229.41s**, four existing Alembic
+  warnings. Direct affected regression: **310 passed, 1 skipped in 317.74s**;
+  the skip is a legacy PG environment gate, separate from the focused real-PG
+  cases. Production composition covers cold/warm Ask/Assistant, graph edge/node
+  drift and added evidence, using actual PostgreSQL authority/cost/finalization
+  and fake external model/traversal. Its metadata schema plus lexical fixture
+  is not full migration-trigger acceptance. Smaller fake-sync cases cover paid
+  embedding accounting, denied/expired/forged hits, isolation and storage faults.
+- Actual PG assembly exposed a pre-existing fresh-read registry mismatch.
+  Three dedicated connection loaders now close only their identity-validation
+  read transactions; registry, application transaction and owner guards remain.
+  TDD also covered distinct result-HMAC domain, denied-hit audit and cleanup.
+  Changed-file lint passes excluding the unchanged legacy `SIM117`; diff checks
+  and operator CLI help pass. Independent review and C-3 comparison remain next;
+  formal release NOT CLEAN/P1 remain. No live API, rollout, secret-file change,
+  scheduler activation or push occurred.
+
 ## 2026-09-21 — D.1 C-1 standalone authenticated answer cache
 
 - Added an independent PostgreSQL cache port/model/migration; production answer
