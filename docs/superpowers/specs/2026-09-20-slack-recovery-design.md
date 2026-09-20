@@ -1,9 +1,17 @@
 # Slack — 합성 데이터 기반 복구 설계
 
-상태: **향후 단계 설계, 미구현** / 2026-09-20 / 코드 점검 `116347d`.
+상태: **S-1 구현·검증, 독립 리뷰 대기; S-2/S-3 미구현** / 2026-09-21 / S-1 `1ddfc21`.
 [공통 계약](2026-09-20-remaining-deliverables-design.md) / [구현 계획](../plans/2026-09-20-slack-recovery.md).
 순서: **D 기능 기준선 → E GraphRAG → D.1 캐시 → Slack → release readiness**.
 Slack은 마지막 기능 단계다. 실제 source 부재는 앞선 기능이나 합성 검증의 진입 조건이 아니다.
+
+## 2026-09-21 사용자 승인 범위
+
+새로 수집한 **합성 Slack 데이터만** 기존 문서와 같은 서버측 버전·서명 검증에
+연결하는 확장을 승인했다. 기존 unsigned Slack 행의 자동 신뢰/일괄 migration,
+Review 승인 생략, 실제 Slack 연결은 승인에 포함하지 않는다. 합성 경로는 명시적
+로컬 fixture/adapter 주입으로 한정하며, 외부 payload의 synthetic 표시만으로
+검증 권한을 부여하지 않는다. 승인된 구현 순서는 D.1 완료 후 S-1~S-3이다.
 
 ## 목표와 현재 한계
 
@@ -11,7 +19,9 @@ Slack은 마지막 기능 단계다. 실제 source 부재는 앞선 기능이나
 검토·승인·검색까지 재현한다. 이를 과거 회사 대화 복구나 live Slack 검증으로 표시하지 않는다.
 첫 결과는 비상용 프로토타입의 작은 로컬 데모이며, 실제 source 선택은 이후 별도 결정이다.
 
-`connectors/slack.py`는 thread metadata를 만들지만 현재 권한을 `internal`로 고정한다.
+S-1 `connectors/slack.py`는 private/DM 및 제한 parent 문맥을 `restricted`로 보존하며
+공개 channel은 `internal`을 유지한다. bounded known-thread cursor/원문 근거를 추가했다.
+현재 범위·실패 10개 분류·검증은 [S-1 runbook](../runbooks/s-1-slack-synthetic-ingestion.md)을 따른다.
 `ingestion/service.py`의 Slack 분기는 legacy dedupe를 유지하며 C.5 current-source authority를
 부여하지 않는다. 기존 unsigned Slack 행은 계속 fail-closed다. 아래 흐름은 달성할 목표이지
 현재 완성됐다는 주장이 아니다. 이 호환성 차이를 테스트로 드러낸 뒤 기존 정책에 맞춰 연결한다.

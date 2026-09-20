@@ -1,6 +1,18 @@
 # ParaWorks — 현재 인수인계
 
-갱신: 2026-09-21. 단계: **E/C-1/C-2 CLEAN; C-3 measured implementation awaits review; next Slack synthetic S-1; formal release NOT CLEAN**.
+갱신: 2026-09-21. 단계: **E/D.1 CLEAN; Slack S-1 implemented, independent review pending; formal release NOT CLEAN**.
+
+## Slack S-1 → S-2
+
+- Code `1ddfc21`, [S-1 runbook](s-1-slack-synthetic-ingestion.md): bounded known-thread
+  cursors, raw evidence/participants, restricted context. Fresh tests 93 passed,
+  external attempts 0. Historical ten still fail with explicit classification.
+- S1 review 뒤 S2를 진행한다. 사용자 승인은 NEW synthetic source의 서버 버전/서명
+  검증 확장뿐이며 기존 unsigned 행 자동 신뢰·Review 생략·live 연결 승인은 없다.
+- `SyntheticSlackClient`/`SyntheticSlackConnector`는 fixture이며 라벨은 authority가
+  아니다. 공유 sync는 Review 0개인 legacy observation만 보존한다. S2는 현재
+  source/Review 경계로 pending을 만들어야 한다. 미발견 old thread/관찰 50개 밖의
+  thread는 발견 보장이 없다. SourceEvent DTO와 legacy IDs는 유지했다.
 
 ## C-3 측정과 다음 단계
 
@@ -9,7 +21,7 @@
   fake 모델 비용이며 embedding 절감이나 live 응답속도 개선을 주장하지 않는다.
 - cache-off는 fresh graph generation, graph-off는 별도 key의 keyword로 복귀한다.
   기존 감사 기록을 보존한다. 기본 flag·권한·Review·비용 정책은 바꾸지 않았다.
-- C-3 독립 리뷰 뒤 Slack S-1 합성 ingestion을 진행한다. 실제 Slack/OAuth·유료 호출·
+- C-3 독립 리뷰는 CLEAN이며 Slack S-1 합성 ingestion을 구현했다. 실제 Slack/OAuth·유료 호출·
   rollout은 실행하지 않았다. capability P1과 formal release NOT CLEAN은 유지한다.
 
 ## C-2 runtime 연결
@@ -114,7 +126,7 @@ R1 threat-model 변경과 P1 해결을 승인된 것으로 해석하지 않는�
 1. **E-1~E-3:** 캐시 없이 관계 검색/근거 경로를 구현·비교한다. 이어 **C-1~C-3**에서 캐시를 연결한다.
 2. **S-1~S-3:** 합성 Slack의 수집→Review→검색을 재현한다. 실제 데이터 선택은 live 연동 때 묻는다.
 
-계획 승인 이후 E와 C-1~C-3 구현을 진행했다. 다음 기능은 C-3 독립 리뷰 후 Slack S-1이다.
+계획 승인 이후 E와 D.1 리뷰를 완료했다. 다음 기능은 S-1 독립 리뷰 후 Slack S-2다.
 
 ## 검증과 운영 경계
 

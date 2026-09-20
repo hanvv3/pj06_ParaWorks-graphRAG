@@ -7,7 +7,7 @@
 **Spec:** [Slack 설계](../specs/2026-09-20-slack-recovery-design.md).
 **Architecture:** fake Slack → SourceEvent/registry/shared sync → pending Review → 현재 승인 → indexing/search.
 **Tech:** 기존 Python/pytest·LangChain/LangGraph·SQLite smoke·PostgreSQL/pgvector·E/D.1 경계.
-**상태:** 미구현. D 기능 기준선 → E → D.1 다음 마지막 기능 단계이며 실제 source 선택 없이 시작한다.
+**상태:** S-1 구현/93-test GREEN, 독립 리뷰 대기. S-2/S-3 미구현. E/D.1 CLEAN 뒤 진행 중이다.
 
 ## 공통 제약과 리뷰 초점
 
@@ -23,15 +23,18 @@
 **파일 책임:** `backend/app/connectors/slack.py`, `registry.py`, `ingestion/sync.py`;
 `backend/tests/test_slack_connector.py`, `test_connector_ingestion_contract.py`, 관련 합성 fixture.
 
-- [ ] 현재 `backend/tests/release_contracts.py`의 보류 Slack test id를 실행해 과거 10개 실패와 비교한다.
+- [x] 현재 `backend/tests/release_contracts.py`의 보류 Slack test id를 실행해 과거 10개 실패와 비교한다.
   실제 결과를 계약 결함/fixture 부적합/환경 부족으로 분류하고 unresolved 항목을 보존한다.
-- [ ] RED: channel/thread/participants/source 근거, bounded reply window, 오래된 parent의 새 reply,
+- [x] RED: channel/thread/participants/source 근거, bounded reply window, 오래된 parent의 새 reply,
   cursor 경계, 동일 이벤트 replay와 fetched/created/skipped count를 fake API로 재현한다.
-- [ ] 공통 connector/sync 경계 안에서 최소 수정하고 GREEN을 확인한다. pending 생성을 아직 못 하는
+- [x] 공통 connector/sync 경계 안에서 최소 수정하고 GREEN을 확인한다. pending 생성을 아직 못 하는
   legacy 경로는 S-2 의존성으로 기록하며 수집 성공만으로 전체 복구를 선언하지 않는다.
 - [ ] 외부 호출 0과 기존 connector 영향 회귀를 확인하고 fixture·실패 분류·코드를 리뷰·커밋한다.
 
 **완료:** 합성 source가 식별자·문맥·근거를 보존해 재수집되고 중복 count가 설명된다.
+
+S-1 code `1ddfc21`, [검증·한계](../runbooks/s-1-slack-synthetic-ingestion.md).
+외부 attempts 0, 영향 테스트 93 passed. 코드 커밋 완료/독립 리뷰 대기이며 기존 10개 실패는 유지한다.
 
 ## S-2 — 현재 Review·source lifecycle과 검색 연결
 

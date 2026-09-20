@@ -1,5 +1,19 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — Slack S-1 bounded synthetic ingestion
+
+- Code `1ddfc21`: bounded thread cursors preserve late replies and channel separation;
+  raw evidence/participant IDs and strictest private/parent permissions survive sync.
+  Registry scopes match the adapter. Labeled invented fixture counts are 3/0/0 initial,
+  1/0/0 late reply, 1/0/1 replay (fetched/review-created/skipped). Authority/pending is S2.
+- Fresh targeted tests: **93 passed in 3.82s**, external transport attempts **0**;
+  changed-file Ruff/diff checks pass. Exact historical ten remain **10 failed**:
+  six authority fixtures, three PKCE expectations, one stale sync fake signature.
+  No failure was deleted/skipped or removed from the release manifest.
+- [S-1 runbook](superpowers/runbooks/s-1-slack-synthetic-ingestion.md) records exact IDs,
+  commands and discovery limits. SQLite/fake evidence only; no live Slack, paid API,
+  rollout or push. E/D.1 reviews CLEAN; S1 awaits review before S2. Formal release/P1 NOT CLEAN.
+
 ## 2026-09-21 — D.1 C-3 measured reuse and rollback
 
 - Reused C-2 actual PostgreSQL authority/cost/cache/finalization composition,
