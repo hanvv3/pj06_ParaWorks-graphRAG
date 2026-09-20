@@ -1,5 +1,27 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-20 — F-1 provider-free RAG 기능 기준선 검증
+
+- 검증 코드 revision: `5af21b5fc957f5aa2a57dd22097fe73b0aa1d2c5`
+  (`codex/rag-orchestrator-agent`). 시작/종료에 확인한 문서의 CRLF/stat-only `M` 항목은
+  기존 변경이며 product diff/staged diff는 없었다. 이번 변경은 이 검증 기록뿐이다.
+- 우선 명령을 fake provider/SQLite와 zero-network guard로 실행했다:
+  `uv run --no-cache --locked pytest backend/tests/test_rag_v2_graph.py backend/tests/test_rag_default_runtime.py backend/tests/test_rag_api_delivery.py backend/tests/test_rag_v2_provider_free_golden.py backend/tests/test_rag_v2_sqlite_smoke.py -q` →
+  **346 passed in 211.95s**, failure/skip 0. 정상 답변·no-match·actor permission denial,
+  citation/full-model-influence 변조, 전송 전/생성 후 evidence revoke, cost/audit와 zero external
+  provider/network guard를 실제 graph/facade 경로에서 확인했다.
+- 직접 영향 명령:
+  `uv run --no-cache --locked pytest backend/tests/test_assistant_task18.py backend/tests/test_rag_v2_finalization.py backend/tests/test_rag_v2_costs.py backend/tests/test_rag_v2_provider_safety.py -q` →
+  **156 passed, 1 skipped in 45.51s**, failure 0. skip은
+  `PARAWORKS_TEST_POSTGRES_URL`이 없는 disposable PostgreSQL projection-owner gate이며 F-2 범위다.
+  Assistant의 단일 committed safe message, finalization의 fresh projection/owner fence,
+  reserve/actual/unknown 비용 보존·no-redispatch, provider safety sidecar/disabled latch를 확인했다.
+- 실제 기능/coverage gap은 발견되지 않아 RED/GREEN 또는 product code 변경은 없었다. API/router의
+  formal `live_gate`·provider readiness·permission/cost 제한을 변경하거나 우회하지 않았다.
+- 이 기록은 provider-free F-1 증거만 뜻한다. 실제 PostgreSQL+pgvector/UI 통합은 F-2에서,
+  actual-model 품질·30-case formal release와 capability P1/NOT CLEAN 해소는 보류된 D-0~D-5에서
+  별도로 검증해야 하며, 이번 결과로 이를 통과라고 표시하지 않는다.
+
 ## 2026-09-20 — 비상용 프로토타입 우선 순서 승인 반영
 
 - 사용자 결정: 최적화와 GraphRAG 효과 검증을 먼저 진행하며, 기본 안전장치는 유지한다.
