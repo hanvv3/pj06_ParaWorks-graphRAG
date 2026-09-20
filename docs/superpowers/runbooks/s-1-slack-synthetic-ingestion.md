@@ -4,6 +4,23 @@
 `1ddfc21f5bfcf1ccf4537af4cc1d58308fc847ec`. S1 implemented, independent review pending.
 Invented fixture ingestion only, not recovered company history or live Slack.
 
+## R1 corrections
+
+- Missing/failed/incomplete channel metadata now yields `restricted`. Only explicit
+  `is_channel=True` plus `is_private=False` permits internal, and private/IM/MPIM
+  metadata overrides it. Fetch-budget exceptions propagate through optional metadata
+  and fallback paths, so a conversations.list page overflow cannot persist a partial sync.
+- History-only thread broadcasts are replies from their first observation. Missing
+  parent text/user remains missing (`thread_parent_missing`, `reply_without_parent`);
+  a reply's own text/user is never substituted for a root. When a real root observation
+  exists, it supplies context without rewinding the newer per-thread cursor.
+- New failures reproduced before fixes: **6 failed, 8 deselected in 1.15s**. Focused
+  GREEN **48 passed in 1.98s**; final affected selection below **101 passed in 3.94s**,
+  zero external attempts, no skips/warnings. Ruff and diff checks pass.
+- SQLite/fake evidence only. The production PostgreSQL JSON/numeric cursor aggregate
+  remains unverified on a real PostgreSQL server; S2/integration must establish parity.
+  The earlier historical-ten classification and source authority/S2 boundary remain.
+
 ## Offline reproduction
 
 ```powershell
@@ -16,7 +33,8 @@ variables before application startup, forces in-memory SQLite, disables plugin a
 and creates fresh `.tmp/slack-s1-*` temp/cache directories. It blocks real HTTP transports
 and socket connects, counts attempts, and permits only the Windows stdlib socketpair's
 own connection for TestClient. MockTransport remains usable. No local `.env` is read.
-Final affected selection: **93 passed in 3.82s**, attempts **0**, no skips/warnings.
+Initial affected selection: **93 passed in 3.82s**; R1 final: **101 passed in 3.94s**.
+Both had attempts **0**, no skips/warnings.
 Changed-file Ruff and diff checks pass. No PostgreSQL/Neo4j/live API evidence is claimed.
 
 ## Historical ten: fresh classification, still unresolved

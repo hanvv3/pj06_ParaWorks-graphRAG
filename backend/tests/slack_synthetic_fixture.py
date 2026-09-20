@@ -44,7 +44,8 @@ class SyntheticSlackClient:
                 {'id': 'UREPLY', 'real_name': '가상 개발자'}]
 
     def conversations_list(self):
-        return [{'id': 'CPUBLIC', 'name': 'synthetic-public', 'is_member': True},
+        return [{'id': 'CPUBLIC', 'name': 'synthetic-public', 'is_member': True,
+                 'is_channel': True, 'is_private': False},
                 {'id': 'CPRIVATE', 'name': 'synthetic-private', 'is_member': True, 'is_private': True}]
 
     def conversation_history(self, channel_id, *, oldest=None):

@@ -70,7 +70,8 @@ def test_slack_connector_maps_history_messages_to_source_events() -> None:
     assert event.author == 'U123'
     assert event.participants == ['U123']
     assert event.timestamp == datetime.fromtimestamp(1777600800.000100, tz=UTC)
-    assert event.permission_level == 'internal'
+    # This minimal fake supplies no channel visibility metadata.
+    assert event.permission_level == 'restricted'
     assert event.raw_metadata['required_scopes'] == list(SLACK_REQUIRED_SCOPES)
 
 

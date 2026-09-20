@@ -5,8 +5,11 @@
 ## Slack S-1 → S-2
 
 - Code `1ddfc21`, [S-1 runbook](s-1-slack-synthetic-ingestion.md): bounded known-thread
-  cursors, raw evidence/participants, restricted context. Fresh tests 93 passed,
+  cursors, raw evidence/participants, restricted context. R1 tests 101 passed,
   external attempts 0. Historical ten still fail with explicit classification.
+- R1: 공개 metadata가 없으면 restricted; metadata page overflow는 sync 중단.
+  parent 없는 broadcast reply는 missing-parent로 보존하며 다른 reply를 parent로
+  합성하지 않는다. PostgreSQL numeric aggregate는 실제 PG parity 미검증이다.
 - S1 review 뒤 S2를 진행한다. 사용자 승인은 NEW synthetic source의 서버 버전/서명
   검증 확장뿐이며 기존 unsigned 행 자동 신뢰·Review 생략·live 연결 승인은 없다.
 - `SyntheticSlackClient`/`SyntheticSlackConnector`는 fixture이며 라벨은 authority가

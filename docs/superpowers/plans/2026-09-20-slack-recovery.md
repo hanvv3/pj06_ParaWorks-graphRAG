@@ -7,7 +7,7 @@
 **Spec:** [Slack 설계](../specs/2026-09-20-slack-recovery-design.md).
 **Architecture:** fake Slack → SourceEvent/registry/shared sync → pending Review → 현재 승인 → indexing/search.
 **Tech:** 기존 Python/pytest·LangChain/LangGraph·SQLite smoke·PostgreSQL/pgvector·E/D.1 경계.
-**상태:** S-1 구현/93-test GREEN, 독립 리뷰 대기. S-2/S-3 미구현. E/D.1 CLEAN 뒤 진행 중이다.
+**상태:** S-1 R1 수정/101-test GREEN, 재리뷰 대기. S-2/S-3 미구현. E/D.1 CLEAN 뒤 진행 중이다.
 
 ## 공통 제약과 리뷰 초점
 
@@ -34,7 +34,7 @@
 **완료:** 합성 source가 식별자·문맥·근거를 보존해 재수집되고 중복 count가 설명된다.
 
 S-1 code `1ddfc21`, [검증·한계](../runbooks/s-1-slack-synthetic-ingestion.md).
-외부 attempts 0, 영향 테스트 93 passed. 코드 커밋 완료/독립 리뷰 대기이며 기존 10개 실패는 유지한다.
+외부 attempts 0, R1 영향 테스트 101 passed. 재리뷰 대기이며 기존 10개 실패는 유지한다.
 
 ## S-2 — 현재 Review·source lifecycle과 검색 연결
 

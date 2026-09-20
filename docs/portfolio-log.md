@@ -2,6 +2,12 @@
 
 ## 2026-09-21 — Slack S-1 bounded synthetic ingestion
 
+- R1 reproduced and fixed two permission/evidence issues: unknown channel visibility
+  defaults restricted and page-limit failures abort; a history-only broadcast is a reply
+  with missing parent, never fabricated parent text/user. Root context and newer cursor
+  are combined independently. Final affected tests **101 passed in 3.94s**, external
+  attempts **0**, Ruff/diff clean. Actual PostgreSQL aggregate parity remains unverified.
+
 - Code `1ddfc21`: bounded thread cursors preserve late replies and channel separation;
   raw evidence/participant IDs and strictest private/parent permissions survive sync.
   Registry scopes match the adapter. Labeled invented fixture counts are 3/0/0 initial,

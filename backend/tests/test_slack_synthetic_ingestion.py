@@ -133,3 +133,101 @@ def test_known_thread_keeps_strictest_permission_across_observations():
         ]})
     assert len(events) == 1
     assert events[0].permission_level == 'restricted'
+
+
+@pytest.mark.parametrize('listing', ['missing', 'failed', 'incomplete'])
+def test_configured_channel_without_positive_public_metadata_is_restricted(db_session, listing):
+    class UnknownChannelClient(SyntheticSlackClient):
+        def conversations_list(self):
+            if listing == 'failed':
+                raise SlackApiError('Slack conversations.list failed: missing_scope')
+            if listing == 'incomplete':
+                return [{'id': 'CPRIVATE', 'is_member': True}]
+            return []
+
+    fake = UnknownChannelClient()
+    sync_connector_events(db_session, fake.connector())
+    sources = db_session.scalars(select(Source)).all()
+    assert len(sources) == 3
+    assert all(source.permission_level == 'restricted' for source in sources)
+
+
+def test_channel_listing_page_limit_aborts_before_history_or_source_writes(db_session):
+    paths = []
+
+    def handle(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith('users.list'):
+            return httpx.Response(200, json={'ok': True, 'members': []})
+        if request.url.path.endswith('conversations.list'):
+            return httpx.Response(200, json={'ok': True, 'channels': [],
+                                            'response_metadata': {'next_cursor': 'next'}})
+        return httpx.Response(200, json={'ok': True, 'messages': [
+            SyntheticSlackClient.message('1777600800.000001', 'Private evidence', 'UPRIVATE')]})
+
+    from backend.app.connectors.slack import SlackConnector, SlackConnectorConfig
+
+    connector = SlackConnector(SlackConnectorConfig('fixture-only', ['CPRIVATE']),
+        SlackWebApiClient(bot_token='fixture-only', http_client=httpx.Client(
+            transport=httpx.MockTransport(handle))))
+    with pytest.raises(SlackApiError, match='page_limit_exceeded'):
+        sync_connector_events(db_session, connector)
+    assert db_session.scalar(select(Source)) is None
+    assert not any(path.endswith('conversations.history') for path in paths)
+
+
+def _history_only_broadcast_client():
+    fake = SyntheticSlackClient()
+    fake.histories = {'CPUBLIC': [dict(fake.message(
+        fake.reply_ts, 'First reply, not parent', 'UFIRST'),
+        thread_ts=fake.parent_ts, subtype='thread_broadcast')], 'CPRIVATE': []}
+    return fake
+
+
+def test_history_only_broadcast_is_a_reply_with_explicit_missing_parent(db_session):
+    fake = _history_only_broadcast_client()
+    sync_connector_events(db_session, fake.connector())
+    source = db_session.scalar(select(Source))
+    assert source.raw_metadata['is_thread_reply'] is True
+    assert source.raw_metadata['parent_ts'] == fake.parent_ts
+    assert source.raw_metadata['thread_parent_missing'] is True
+    assert source.raw_metadata['thread_parent_text'] is None
+    assert source.raw_metadata['thread_parent_user_id'] is None
+
+
+def test_second_sync_never_uses_broadcast_reply_as_parent_evidence(db_session):
+    fake = _history_only_broadcast_client()
+    sync_connector_events(db_session, fake.connector())
+    fake.histories = {'CPUBLIC': [], 'CPRIVATE': []}
+    fake.replies['CPUBLIC', fake.parent_ts] = [dict(fake.message(
+        fake.cursor_ts, 'Second reply', 'USECOND'), thread_ts=fake.parent_ts)]
+    second = sync_connector_events(db_session, fake.connector())
+    assert (second.fetched_events, second.created_review_items) == (1, 0)
+    source = db_session.scalar(select(Source).where(Source.source_id == f'CPUBLIC:{fake.cursor_ts}'))
+    chunk = db_session.scalar(select(DocumentChunk).where(DocumentChunk.source_id == source.id))
+    assert chunk.text == 'Second reply'
+    assert source.raw_metadata['slack_participant_ids'] == ['USECOND']
+    assert source.raw_metadata['thread_parent_missing'] is True
+    assert source.raw_metadata['thread_parent_text'] is None
+    assert source.raw_metadata['thread_parent_user_id'] is None
+    assert source.raw_metadata['thread_context_window'] == 'reply_without_parent'
+
+
+@pytest.mark.parametrize('root_first', [True, False])
+def test_observed_root_supplies_context_without_resetting_newer_reply_cursor(root_first):
+    fake = SyntheticSlackClient()
+    fake.histories = {'CPUBLIC': [], 'CPRIVATE': []}
+    fake.replies['CPUBLIC', fake.parent_ts] = [dict(fake.message(
+        fake.cursor_ts, 'Second reply', 'USECOND'), thread_ts=fake.parent_ts)]
+    root = {'ts': fake.parent_ts, 'thread_ts': fake.parent_ts,
+            'raw_text': 'Actual root', 'slack_user_id': 'UPARENT'}
+    broadcast = {'ts': fake.reply_ts, 'thread_ts': fake.parent_ts,
+                 'raw_text': 'First reply, not parent', 'slack_user_id': 'UFIRST'}
+    observations = [root, broadcast] if root_first else [broadcast, root]
+    events = fake.connector().fetch_events_since({}, known_messages_by_channel={
+        'CPUBLIC': observations})
+    assert len(events) == 1
+    assert events[0].body == 'Thread parent: Actual root\nThread reply: Second reply'
+    assert events[0].raw_metadata['slack_participant_ids'] == ['UPARENT', 'USECOND']
+    assert events[0].raw_metadata['thread_parent_missing'] is False
+    assert ('replies', 'CPUBLIC', fake.parent_ts, fake.reply_ts) in fake.calls
