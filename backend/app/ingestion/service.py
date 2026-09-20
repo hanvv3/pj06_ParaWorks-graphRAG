@@ -215,7 +215,12 @@ def _ingest_events_transaction(
             if existing_source is not None and existing_source.server_content_signature:
                 raise ValueError('normal connector cannot update signed synthetic Slack source')
             if _legacy_slack_event_is_unchanged(existing_source, event):
-                skipped_events += 1
+                if _narrow_legacy_slack_permissions(
+                    db, source=existing_source, event=event, mutations=mutations
+                ):
+                    changed_source_ids.append(event.source_id)
+                else:
+                    skipped_events += 1
                 continue
             source = _persist_legacy_slack_event(
                 db,
@@ -850,6 +855,37 @@ def _apply_vector_mutations(
             )
         )
     return d_vector_mutated
+
+
+def _narrow_legacy_slack_permissions(
+    db: Session,
+    *,
+    source: Source,
+    event: SourceEvent,
+    mutations: _VectorMutations,
+) -> bool:
+    # A connector body hash is not a permission fingerprint. Preserve unsigned
+    # authority while narrowing even previously inconsistent stored chunks.
+    effective = max(
+        (normalize_source_permission(source.permission_level),
+         normalize_source_permission(event.permission_level)),
+        key=lambda value: _PERMISSION_RANK.get(value, len(_PERMISSION_RANK)),
+    )
+    chunk_permissions = db.scalars(
+        select(DocumentChunk.permission_level).where(DocumentChunk.source_id == source.id)
+    )
+    chunk_narrows = any(
+        _PERMISSION_RANK.get(normalize_source_permission(value), len(_PERMISSION_RANK))
+        < _PERMISSION_RANK.get(effective, len(_PERMISSION_RANK))
+        for value in chunk_permissions
+    )
+    if source.permission_level == effective and not chunk_narrows:
+        return False
+    source.permission_level = effective
+    _apply_permission_only_change(
+        db, source=source, incoming_permission=effective, mutations=mutations
+    )
+    return True
 
 
 def _legacy_slack_event_is_unchanged(

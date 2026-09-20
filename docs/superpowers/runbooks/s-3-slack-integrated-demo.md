@@ -126,3 +126,26 @@ authorized export, or another approved source. Exports do not prove live API
 behavior. No live Slack/OAuth/provider call, production rollout, paid authority,
 `.env` use, secret file, push or bulk trust migration occurred. Unknown/out-of-
 window threads or undelivered source changes remain outside discovery claims.
+
+## Final whole-Slack review fix — unsigned permission-only delivery
+
+The final review found a P1 in ordinary unsigned Slack ingestion: same-body
+deduplication ignored delivered restrictions, leaving stored chunks visible at
+the old level. The final fix wave narrows source and existing chunks even when
+the body hash is unchanged, including a previously restricted source with stale
+internal chunks. It neither signs nor reparses legacy data; subsequent unchanged
+replay remains skipped and a lower-permission replay cannot broaden visibility.
+
+The regression also exposed missing permission filtering in the shared Slack
+packet builder. It now checks both source and chunk against the current allowed
+levels before ranking/windowing and retains their strictest label. This enforces
+the existing policy for `/slack/agent-review` and company-memory consumers; role
+names alone confer no visibility. Tests cover low-privilege exclusion, authorized
+restricted inclusion, both mismatch directions and no-input cost semantics.
+Final-fix affected tests: **155 passed in 20.09s**, historical ten **10 passed in
+1.31s**, external attempts **0**; changed-file Ruff/diff clean. The existing bridge
+fixture now explicitly allows restricted evidence, instead of relying on an admin
+role label with public/internal default permissions. Verification commands and raw
+logs are appended to the S3 task report. Independent
+final review remains pending; formal release/P1 status above is unchanged (this
+Slack finding is distinct from the deferred formal-release capability P1).

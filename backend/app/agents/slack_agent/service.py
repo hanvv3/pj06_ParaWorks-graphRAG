@@ -51,6 +51,7 @@ _TECH_COST_KEYWORDS = (
     'langgraph',
 )
 _LOW_SIGNAL_KEYWORDS = ('넵', '네', '좋아요', '확인', '굿', '감사')
+_PERMISSION_RANK = {'public': 0, 'internal': 1, 'restricted': 2}
 
 def create_slack_agent_review_items(
     *,
@@ -206,6 +207,8 @@ def build_slack_evidence_packet(
         select(DocumentChunk, Source)
         .join(Source, DocumentChunk.source_id == Source.id)
         .where(Source.source_type == 'slack')
+        .where(Source.permission_level.in_(permission_context.allowed_permission_levels))
+        .where(DocumentChunk.permission_level.in_(permission_context.allowed_permission_levels))
         .order_by(DocumentChunk.id)
     )
     if source_ids is not None:
@@ -231,7 +234,10 @@ def build_slack_evidence_packet(
             text=chunk.text,
             author=source.author,
             timestamp=str(source.raw_metadata.get('ts') or source.created_at.isoformat()),
-            permission_level=chunk.permission_level,
+            permission_level=max(
+                (source.permission_level, chunk.permission_level),
+                key=lambda level: _PERMISSION_RANK.get(level, len(_PERMISSION_RANK)),
+            ),
             metadata=_slack_message_metadata(
                 chunk=chunk,
                 source=source,

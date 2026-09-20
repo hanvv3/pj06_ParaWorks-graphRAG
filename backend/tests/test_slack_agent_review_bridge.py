@@ -122,7 +122,10 @@ def test_slack_agent_bridge_persists_review_item(db_session: Session) -> None:
     created = create_slack_agent_review_items(
         db=db_session,
         agent=agent,
-        permission_context=PermissionContext(user_id='demo-admin', role='admin'),
+        permission_context=PermissionContext(
+            user_id='demo-admin', role='admin',
+            allowed_permission_levels=('public', 'internal', 'restricted'),
+        ),
         source_window='C123:2026-05-01',
     )
 

@@ -2,6 +2,13 @@
 
 ## 2026-09-21 — Slack S-3 integrated synthetic evidence
 
+- Final whole-Slack review found a legacy unsigned permission-only dedupe gap.
+  The final fix wave narrows source/chunks without signing/reparsing and filters
+  the shared Slack packet by both current permissions before model/window use.
+  Mixed stale labels retain strictest output permission; replay remains cheap.
+  Fresh affected 155 passed/20.09s and historical ten 10 passed/1.31s, external 0;
+  existing authorized bridge fixture now declares its restricted allowed level.
+  Final re-review is pending; the distinct formal-release capability P1 remains.
 - S1/S2 current signed ingestion and actual human Review now drive actual
   PG/pgvector and Neo4j into D1 cold/warm answers: four influencing slots,
   two incremental embedding skips, fresh run/cost/audit and zero warm generation.
