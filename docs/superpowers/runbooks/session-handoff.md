@@ -5,6 +5,15 @@ Formal release remains NOT CLEAN and capability P1 is unresolved.**
 
 ## Resume here
 
+- Local service script maintenance: see [scripts guide](../../../scripts/README.md)
+  for start/stop/restart, service checks, provider configuration vs metadata
+  connectivity, and missing `.env` entries. Reuse the existing key; actual `.env`
+  remains unchanged. Normal launch is non-demo and does not auto-seed or auto-start
+  Docker. Old unmanaged listeners must be stopped by their original owner, not
+  by port-based killing. No paid model call, rollout or release authority granted.
+  `.env.example` now documents E/D1 settings and explicit optional consumers;
+  never copy it wholesale over a populated environment. Formal R1 remains planning.
+
 - Local UI startup fix: demo seeding must bootstrap the runtime key identity
   before ingesting keyed sample sources. `init_db` now uses the existing bootstrap
   first; orphaned keyed DBs still fail closed. Original `.tmp/paraworks-smoke.db`

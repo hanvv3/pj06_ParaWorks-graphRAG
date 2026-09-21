@@ -1,5 +1,31 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — local service scripts and environment documentation
+
+- Separate normal PostgreSQL service launch from SQLite demo, configuration-only
+  provider checks from optional metadata connectivity, and both from paid app
+  workflows. Shared ownership-aware start/stop/restart replaces divergent launchers.
+- Refresh root/scripts README and `.env.example` for GraphRAG/cache settings,
+  opt-in provider/sync consumers and current-price configuration. Existing private
+  `.env` and its credentials remain untouched; do not regenerate durable DB keys.
+- Fresh selection after review fixes: runtime scripts + env/template/bootstrap
+  28 passed/18.47s
+  under normal pytest. Scripts alone also passed 16/16 with offline transport 0.
+  The Slack offline runner deliberately disables dotenv sources and is not a
+  valid runner for the env-file tests (combined attempt: 20 passed/5 failed).
+  Scoped Ruff and PowerShell parse checks passed. Secret-hygiene selection:
+  3 passed/7.01s. No live provider call.
+- Task review fixed indirect visual-test seed POSTs and unnecessary app-port
+  checks in service-only mode; focused RED3 → GREEN3 and scoped re-review Approved.
+- Final independent scripts/env/docs review: no Critical/Important/Minor findings;
+  Ready within this change scope, not a formal product release verdict.
+- Actual configuration-only provider wrapper recognized the existing key without
+  transport. Read-only service check returned PostgreSQL connection/schema failure;
+  Docker inspection showed all three retained task/project DB containers stopped.
+  No container was started and no existing database was initialized or migrated.
+- Formal release capability P1 remains NOT CLEAN; no rollout, R1 contract change,
+  production migration, paid run, actual Slack connection or remote push.
+
 ## 2026-09-21 — local demo startup/login recovery
 
 - Reproduced uvicorn startup refusal: sample ingestion created retained C.5 keyed

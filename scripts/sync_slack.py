@@ -1,52 +1,66 @@
+"""Explicit Slack ingestion utility; failures never print provider payloads."""
+
+import argparse
+import json
 import os
 import sys
-import logging
-from sqlalchemy.orm import Session
+from pathlib import Path
 
-# 프로젝트 루트를 경로에 추가
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from backend.app.db.session import SessionLocal
-from backend.app.agents.slack_agent.sync_service import trigger_slack_agent_analysis
-from backend.app.connectors.factory import get_sync_connector
-from backend.app.core.config import get_settings
-from backend.app.ingestion.sync import sync_connector_events
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("sync_slack_script")
+def run_sync():
+    from scripts.local_runtime import load_environment
 
-def main():
-    db = SessionLocal()
-    settings = get_settings()
-    
+    os.environ.update(load_environment(ROOT))
+    os.chdir(ROOT)
+    from backend.app.connectors.factory import get_sync_connector
+    from backend.app.core.config import get_settings
+    from backend.app.db.session import SessionLocal
+    from backend.app.ingestion.sync import sync_connector_events
+
+    with SessionLocal() as db:
+        settings = get_settings()
+        connector = get_sync_connector('slack', settings, db=db)
+        result = sync_connector_events(
+            db=db,
+            connector=connector,
+            # The shared ingestion boundary skips automatic paid reindexing
+            # without an embedding key. Keep the live connector credentials;
+            # do not enqueue a fake job that can never complete.
+            settings=settings.model_copy(update={'openai_api_key': None}),
+        )
+        return {
+            'status': result.status,
+            'fetched_count': result.fetched_events,
+            'created_count': result.created_review_items,
+            'skipped_count': result.skipped_events,
+            'analysis': 'use_application_review_workflow',
+            'embedding': 'not_dispatched',
+        }
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description='Explicit Slack ingestion; no analysis or paid embedding dispatch.'
+    )
+    parser.add_argument('--execute', action='store_true')
+    args = parser.parse_args(argv)
+    if not args.execute:
+        print(
+            'No writes: use --execute only for an authorized Slack source; use the application for review and indexing.'
+        )
+        return 2
     try:
-        print("\n" + "="*70)
-        print(" [ParaWorks] 슬랙 동기화 및 에이전트 분석 시작 ".center(70, "="))
-        print("="*70 + "\n")
+        report = run_sync()
+    except Exception:
+        print(json.dumps({'error': 'slack_sync_or_analysis_failed'}), file=sys.stderr)
+        return 1
+    print(json.dumps(report))
+    return 0
 
-        # 1. 슬랙 이벤트 동기화 (Slack API -> Source 테이블)
-        print("[*] 1. 슬랙 데이터 수집 중...")
-        connector = get_sync_connector("slack", settings, db=db)
-        sync_result = sync_connector_events(db=db, connector=connector)
-        print(f"[*] 수집 완료: {sync_result.fetched_events}건의 이벤트 발견")
 
-        # 2. 에이전트 분석 (Source 테이블 -> ReviewItem 테이블)
-        print("\n[*] 2. 에이전트 분석 및 지식 추출 중 (최근 7일)...")
-        trigger_slack_agent_analysis(db=db, days=7)
-        print("[*] 분석 완료: 지식 후보가 데이터베이스에 저장되었습니다.")
-
-        print("\n" + "="*70)
-        print(" [동기화 성공] ".center(70, "="))
-        print("="*70 + "\n")
-
-    except Exception as e:
-        print(f"\n [!] 오류 발생: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        db.close()
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    raise SystemExit(main())

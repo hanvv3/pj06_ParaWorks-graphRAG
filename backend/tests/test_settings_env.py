@@ -5,6 +5,24 @@ import pytest
 from backend.app.core.config import Settings
 
 
+def test_template_documents_optional_graph_cache_and_opt_in_consumers(monkeypatch):
+    from dotenv import dotenv_values
+
+    for name in Settings.model_fields:
+        monkeypatch.delenv(name.upper(), raising=False)
+    template = Path(__file__).parents[2] / '.env.example'
+    values = dotenv_values(template)
+    settings = Settings(_env_file=template)
+    for name in ('RAG_GRAPH_ENRICHMENT_ENABLED', 'RAG_ANSWER_CACHE_ENABLED',
+                 'ASSISTANT_EMAIL_AGENT_ENABLED', 'GOOGLE_DRIVE_SYNC_ENABLED',
+                 'GMAIL_SYNC_ENABLED'):
+        assert values[name] == 'false'
+        assert getattr(settings, name.lower()) is False
+    for name in ('RAG_NEO4J_URI', 'RAG_NEO4J_USERNAME', 'RAG_NEO4J_PASSWORD'):
+        assert values[name] == ''
+    assert values['OPENAI_API_KEY'] == ''
+
+
 def test_tracked_env_template_loads_with_safe_disabled_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,26 +1,10 @@
-param(
-    [string]$RedisUrl = "redis://localhost:6379/0",
-    [string]$DatabaseUrl = "postgresql+psycopg://paraworks:paraworks@localhost:5432/paraworks"
-)
-
-$ErrorActionPreference = "Stop"
-
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-
-Write-Host "ParaWorks Celery worker"
-Write-Host "Repository: $repoRoot"
-Write-Host "Redis:      $RedisUrl"
-Write-Host "Database:   $DatabaseUrl"
-Write-Host ""
-
-Push-Location $repoRoot
+param([string]$RedisUrl = '', [string]$DatabaseUrl = '', [string]$PythonPath = '')
+. (Join-Path $PSScriptRoot 'local-runtime-common.ps1')
+$oldRedis = $env:REDIS_URL
+$oldDatabase = $env:PARAWORKS_DATABASE_URL
 try {
-    $env:REDIS_URL = $RedisUrl
-    $env:DATABASE_URL = $DatabaseUrl
-    $env:CELERY_TASK_ALWAYS_EAGER = 'false'
-
-    uv run celery -A backend.app.tasks.celery_app.celery_app worker --loglevel=info --pool=solo
+    if ($RedisUrl) { $env:REDIS_URL = $RedisUrl }
+    if ($DatabaseUrl) { $env:PARAWORKS_DATABASE_URL = $DatabaseUrl }
+    Invoke-LocalRuntime -PythonPath $PythonPath -RuntimeArguments @('worker')
 }
-finally {
-    Pop-Location
-}
+finally { $env:REDIS_URL = $oldRedis; $env:PARAWORKS_DATABASE_URL = $oldDatabase }
