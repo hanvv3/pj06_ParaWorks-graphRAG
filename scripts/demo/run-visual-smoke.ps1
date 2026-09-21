@@ -1,7 +1,7 @@
 param([string]$HostAddress = '127.0.0.1', [int]$BackendPort = 8000, [int]$FrontendPort = 3000,
     [string]$DatabasePath = '.tmp/paraworks-visual-smoke.db', [string]$PythonPath = '')
 $ErrorActionPreference = 'Stop'
-$workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$workspace = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $started = $false
 $oldWeb = $env:PLAYWRIGHT_BASE_URL
 $oldApi = $env:PLAYWRIGHT_API_BASE_URL
@@ -24,5 +24,5 @@ finally {
     $env:PLAYWRIGHT_BASE_URL = $oldWeb
     $env:PLAYWRIGHT_API_BASE_URL = $oldApi
     $env:PLAYWRIGHT_SKIP_BACKEND_SEED = $oldSkipSeed
-    if ($started) { & (Join-Path $PSScriptRoot 'stop.ps1') -PythonPath $PythonPath }
+    if ($started) { & (Join-Path $PSScriptRoot '../stop.ps1') -PythonPath $PythonPath }
 }

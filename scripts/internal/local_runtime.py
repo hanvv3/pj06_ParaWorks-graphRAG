@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -153,7 +153,7 @@ def check_services(settings, *, include_api=False, host='127.0.0.1', port=8000):
     from sqlalchemy import create_engine, text
     from sqlalchemy.engine import make_url
 
-    from scripts.check_db_schema import check_schema
+    from scripts.checks.check_db_schema import check_schema
 
     if make_url(settings.resolved_database_url()).get_backend_name() != 'postgresql':
         raise OperationRefused('postgresql_required')

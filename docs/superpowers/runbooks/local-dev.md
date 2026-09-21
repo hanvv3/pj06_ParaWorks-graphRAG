@@ -1,78 +1,31 @@
-# Local Development Runbook
+# 로컬 개발
 
-Run commands from the repository root.
-
-For quick UI demos without Docker, use
-`docs/superpowers/runbooks/sqlite-smoke.md`.
-
-## Configure the Local Environment
-
-ParaWorks uses one ignored root `.env` file for the backend, Docker Compose,
-local Python scripts, and the Next.js frontend. For a new checkout—or to fill
-missing local signing secrets without replacing existing provider keys—run:
+표준 작업 위치는 원래 저장소 루트 `main`이다. [작업 위치 안내](workspace.md)를 따른다.
+설정은 루트 `.env`, Python은 루트 `.venv`, frontend는 루트 `frontend`를 사용한다.
 
 ```powershell
-uv run python scripts/bootstrap_local_env.py
+uv sync --locked
+npm --prefix frontend ci
+docker compose up -d postgres
+.\scripts\test-provider.ps1
+.\scripts\test-services.ps1
+.\scripts\start.ps1
 ```
 
-The bootstrap copies `.env.example` only when `.env` is missing, then generates
-independent cryptographic values for the C.5 fingerprint, session, Google OAuth,
-Google identity, and deferred Slack state signers. It preserves existing values,
-including `OPENAI_API_KEY`, and prints names only—never secret values. This step
-is required before the ParaWorks application starts against PostgreSQL because
-the durable C.5 key boundary is enforced even while automatic-review rollout is
-disabled.
+기존 `.env`와 서명/API 키를 보존한다. 신규 설치에서만 `.env.example`을 복사하거나
+`scripts/admin/bootstrap_local_env.py`로 새 비밀값을 준비한다. 기존 DB의 서명 키를
+재생성하는 것은 단순 환경 정리가 아니다. frontend용 별도 env를 만들지 않는다.
 
-Do not commit `.env` or create a second `frontend/.env.local`. The frontend
-reads only `NEXT_PUBLIC_API_BASE_URL` and `NEXT_DIST_DIR` from the root file;
-provider keys and other backend-only values are never copied into the frontend
-environment. `.env.example` documents optional settings, while defaults not
-listed in `.env` continue to come from `backend/app/core/config.py`.
-
-Slack settings remain in the template as a deferred integration section. Leave
-them empty until a replacement Slack data source is designed.
-
-## Start Runtime Services
+DB 초기화/마이그레이션은 [pgvector 안내](pgvector-dev.md)를 따른다.
+Redis는 eager 작업 모드에서 필요 없고, Neo4j는 GraphRAG에 필요한 별도 인스턴스다.
+실제 source의 OAuth/API 설정과 권한은 따로 준비하며 실제 Slack source는 아직 별도 선택 사항이다.
 
 ```powershell
-docker compose up -d postgres redis minio
+.\scripts\status.ps1
+.\scripts\stop.ps1
+.\scripts\restart.ps1
 ```
 
-## Initialize Database Schema
-
-```powershell
-uv run alembic upgrade head
-uv run python scripts/check_db_schema.py
-```
-
-`alembic upgrade head` applies the tracked schema migrations. The schema check
-fails loudly when an existing local database is missing a table or column that a
-newer branch expects.
-
-## Seed Local Demo Data
-
-```powershell
-uv run python -m backend.app.db.init_db
-```
-
-This keeps local seed users and optional demo data available. It still has a
-`create_all()` fallback for brand-new local databases, but migrations are the
-source of truth for schema changes.
-
-## Start Backend
-
-```powershell
-uv run uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-## Start Frontend
-
-```powershell
-cd frontend
-npm.cmd run dev -- --hostname 127.0.0.1 --port 3000
-```
-
-## Demo Users
-
-- `X-Demo-User: admin` can see `public`, `internal`, and `restricted` sources.
-- `X-Demo-User: viewer` can see `public` and `internal` sources.
+자세한 옵션·설정은 [scripts README](../../../scripts/README.md).
+일반 서버 시작이 실제 GraphRAG final demo 완료를 뜻하지 않는다.
+[Final demo 준비와 미구현 연결 항목](final-demo.md)을 확인한다.

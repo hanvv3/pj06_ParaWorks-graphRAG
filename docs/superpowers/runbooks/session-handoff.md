@@ -5,6 +5,22 @@ Formal release remains NOT CLEAN and capability P1 is unresolved.**
 
 ## Resume here
 
+- **Current workspace changed by explicit user approval:** use original repository
+  ROOT, branch `main`, ROOT `.env` and `.venv`. Latest development through e62fc65 was
+  fast-forwarded into local main; no remote push. Seven obsolete checkouts removed,
+  branches retained and material local files archived; old review checkout remains
+  only for local-data preservation. See [workspace](workspace.md).
+- Scripts now expose only six everyday commands at top level, with admin/checks/
+  demo/internal subdirectories. Retired compatibility launchers were deleted.
+  See [scripts guide](../../../scripts/README.md) for current paths.
+- User wants a live GraphRAG final demo, not fake/SQLite smoke. Read
+  [final-demo gaps](final-demo.md): reviewed provider-safety provisioning, operational
+  V2 indexing and scoped graph reconcile still need implementation. Do not bypass
+  guards or label flags alone a fully functional demo. Formal P1/R1 remains deferred.
+
+The following records describe the previous worktree session; use the root paths
+and current guides above for new execution.
+
 - Local service script maintenance: see [scripts guide](../../../scripts/README.md)
   for start/stop/restart, service checks, provider configuration vs metadata
   connectivity, and missing `.env` entries. Reuse the existing key; actual `.env`
@@ -18,7 +34,7 @@ Formal release remains NOT CLEAN and capability P1 is unresolved.**
   before ingesting keyed sample sources. `init_db` now uses the existing bootstrap
   first; orphaned keyed DBs still fail closed. Original `.tmp/paraworks-smoke.db`
   was preserved; the recovered local demo uses `.tmp/paraworks-smoke-keyed-20260921.db`.
-  Start via `scripts/start-smoke.ps1 -DatabasePath .tmp/paraworks-smoke-keyed-20260921.db`
+  Historical startup used `scripts/start-smoke.ps1 -DatabasePath .tmp/paraworks-smoke-keyed-20260921.db`
   after stopping existing servers, not by launching duplicate listeners. Keep
   `UV_PROJECT_ENVIRONMENT=.venv-task4-r3-review` for this workstation.
   This is SQLite UI smoke, not enabled production GraphRAG or release approval.

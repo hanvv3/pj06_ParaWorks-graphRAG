@@ -1,5 +1,5 @@
 param([string]$RedisUrl = '', [string]$DatabaseUrl = '', [string]$PythonPath = '')
-. (Join-Path $PSScriptRoot 'local-runtime-common.ps1')
+. (Join-Path $PSScriptRoot '../internal/local-runtime-common.ps1')
 $oldRedis = $env:REDIS_URL
 $oldDatabase = $env:PARAWORKS_DATABASE_URL
 try {

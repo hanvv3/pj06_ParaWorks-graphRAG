@@ -11,6 +11,8 @@ GraphRAG와 답변 캐시는 구현되어 있지만 기본 비활성화입니다
 
 이 README가 있는 체크아웃 루트에서 실행합니다. 의존성과 PostgreSQL을 먼저 준비하고
 [설정·실행·종료 안내](scripts/README.md)를 확인하세요. 기존 `.env`는 덮어쓰지 마세요.
+현재 표준 작업 위치는 원래 프로젝트 루트 `main`, Python 환경은 `.venv`입니다.
+과거 `.worktrees/review-hitl-v2-design` 또는 `.venv-task4-r3-review`를 지정하지 않습니다.
 
 ```powershell
 .\scripts\test-provider.ps1     # 설정만 확인: 외부 호출 없음
@@ -27,6 +29,7 @@ GraphRAG와 답변 캐시는 구현되어 있지만 기본 비활성화입니다
 ## 문서
 
 - [scripts 사용법과 기존 .env 업데이트](scripts/README.md)
+- [실제 GraphRAG final demo: 준비 상태와 남은 연결 작업](docs/superpowers/runbooks/final-demo.md)
 - [현재 로드맵](plan.md)
 - [작업 인수인계](docs/superpowers/runbooks/session-handoff.md)
 - [변경·검증 이력](docs/portfolio-log.md)

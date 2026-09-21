@@ -1,72 +1,24 @@
-# SQLite Smoke Mode Runbook
+# SQLite UI smoke — final demo 아님
 
-Use this mode when you want to run the ParaWorks backend and frontend without
-Docker, PostgreSQL, Redis, or MinIO. It is intended for quick UI checks,
-Playwright smoke tests, and product review sessions.
+Docker나 provider 없이 UI를 점검하는 보조 모드다. 실제 PostgreSQL/Neo4j/모델 호출을
+검증하려면 [final demo 안내](final-demo.md)를 따른다.
 
-Run commands from the repository root:
-
-```powershell
-C:\Users\hanvv\Study\potenup3\pj04_ParaWorks
-```
-
-## One-Command Start
+저장소 루트에서 실행:
 
 ```powershell
-.\scripts\start-smoke.ps1
+.\scripts\demo\start-smoke.ps1 -DatabasePath .tmp/paraworks-ui-smoke.db
+.\scripts\status.ps1
+.\scripts\stop.ps1
 ```
 
-The script:
+명시한 SQLite DB를 초기화하고 키 bootstrap 후 demo seed를 넣는다. 기존 orphaned DB를
+강제로 채택하지 않으며 키를 바꾸어 오류를 우회하지 않는다. 원본 DB는 지우지 말고 보존한다.
+smoke는 child process의 provider 키/유료 기능을 비활성화하고 `.next-smoke`를 사용한다.
+포트가 사용 중이면 거절하며 다른 서버를 재사용하거나 종료하지 않는다.
 
-1. Creates `.tmp/paraworks-smoke.db` if needed.
-2. Sets `DATABASE_URL=sqlite:///.tmp/paraworks-smoke.db`.
-3. Runs `uv run python -m backend.app.db.init_db`.
-4. Removes `frontend/.next` so `next dev` does not reuse a stale production build cache.
-5. Starts FastAPI on `http://127.0.0.1:8000`.
-6. Starts Next.js on `http://127.0.0.1:3000`.
+브라우저: `http://localhost:3000`, API health: `http://127.0.0.1:8000/health`.
+일반 PostgreSQL 데이터/계정과 이 모드의 seeded 데이터/계정은 다르다.
 
-Open:
-
-- Dashboard: `http://127.0.0.1:3000/dashboard`
-- Messenger: `http://127.0.0.1:3000/messages`
-- Backend health: `http://127.0.0.1:8000/health`
-
-## Manual Start
-
-Backend:
-
-```powershell
-$env:DATABASE_URL="sqlite:///.tmp/paraworks-smoke.db"
-uv run python -m backend.app.db.init_db
-uv run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
-```
-
-Frontend:
-
-```powershell
-cd frontend
-npm.cmd run dev -- --hostname 127.0.0.1 --port 3000
-```
-
-## Reset Smoke Data
-
-Stop the backend, then remove the smoke database:
-
-```powershell
-Remove-Item -LiteralPath .tmp\paraworks-smoke.db -Force
-```
-
-Run the start command again to recreate the schema.
-
-## What This Mode Does Not Cover
-
-SQLite smoke mode does not verify:
-
-- PostgreSQL-specific behavior.
-- pgvector extension availability.
-- Redis or Celery queue behavior.
-- MinIO object storage behavior.
-- Docker Compose configuration.
-
-Use `docs/superpowers/runbooks/local-dev.md` for the full Docker-backed local
-runtime.
+자동 visual 테스트는 `scripts/demo/run-visual-smoke.ps1`을 사용한다.
+이 스크립트는 자신이 시작한 서버를 finally에서 종료하며 오래된 자동 sync POST는 수행하지 않는다.
+실제 브라우저 테스트는 별도 설치된 Playwright 런타임이 필요하다.

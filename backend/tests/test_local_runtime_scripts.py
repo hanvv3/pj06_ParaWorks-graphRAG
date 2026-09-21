@@ -12,7 +12,7 @@ import pytest
 
 def runtime():
     try:
-        return importlib.import_module('scripts.local_runtime')
+        return importlib.import_module('scripts.internal.local_runtime')
     except ModuleNotFoundError:
         pytest.fail('shared safe local runtime is missing')
 
@@ -205,7 +205,8 @@ def test_powershell_wrapper_preflight_and_failure_exit(tmp_path):
     root = Path(__file__).resolve().parents[2]
     scripts = tmp_path / 'scripts'
     scripts.mkdir()
-    for name in ('test-provider.ps1', 'local-runtime-common.ps1', 'local_runtime.py'):
+    (scripts / 'internal').mkdir()
+    for name in ('test-provider.ps1', 'internal/local-runtime-common.ps1', 'internal/local_runtime.py'):
         shutil.copy(root / 'scripts' / name, scripts / name)
     # Select the real module from the project while using an isolated dotenv root.
     env = dict(
@@ -234,22 +235,8 @@ def test_powershell_wrapper_preflight_and_failure_exit(tmp_path):
     assert 'canary-secret' not in result.stdout + result.stderr
 
 
-def test_legacy_demo_refuses_without_touching_database(tmp_path):
-    root = Path(__file__).resolve().parents[2]
-    result = subprocess.run(
-        [sys.executable, str(root / 'scripts/run_e2e_demo.py')],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        env=dict(os.environ, DATABASE_URL='sqlite:///must-not-create.db'),
-    )
-    assert result.returncode == 2
-    assert 'retired' in result.stderr
-    assert not (tmp_path / 'must-not-create.db').exists()
-
-
 def test_sync_cli_defaults_to_no_write_and_redacts_failures(monkeypatch, capsys):
-    from scripts import sync_slack
+    from scripts.admin import sync_slack
 
     def fails():
         raise RuntimeError('provider-secret-canary')
@@ -403,6 +390,42 @@ def test_skip_app_checks_services_even_when_app_port_is_occupied(tmp_path, monke
     assert not (tmp_path / '.tmp/local-runtime/state.json').exists()
 
 
+def test_worker_disables_eager_mode_and_preserves_child_exit(tmp_path, monkeypatch):
+    module = runtime()
+    original_env, original_cwd = dict(os.environ), Path.cwd()
+    checked = []
+    monkeypatch.setattr(module, 'check_services', lambda settings: checked.append(settings.celery_task_always_eager))
+
+    def launch(command, *, env, cwd):
+        assert command == [sys.executable, '-m', 'celery', '-A',
+                           'backend.app.tasks.celery_app.celery_app', 'worker',
+                           '--loglevel=warning', '--pool=solo']
+        assert env['CELERY_TASK_ALWAYS_EAGER'] == 'false'
+        assert cwd == tmp_path
+        assert checked == [False]
+        return 17
+
+    monkeypatch.setattr(module.subprocess, 'call', launch)
+    try:
+        assert module.main(['worker', '--workspace', str(tmp_path)]) == 17
+    finally:
+        os.chdir(original_cwd)
+        os.environ.clear()
+        os.environ.update(original_env)
+
+
+def test_existing_state_refuses_start_without_replacing_managed_state(tmp_path):
+    from argparse import Namespace
+
+    module = runtime()
+    state = {'version': 1, 'workspace': str(tmp_path.resolve()),
+             'processes': [], 'launch': {'backend_port': 18531}}
+    module.save_state(tmp_path, state)
+    with pytest.raises(module.OperationRefused, match='existing_state_use_status_or_stop'):
+        module.start_application(Namespace(), tmp_path, {})
+    assert module.read_state(tmp_path) == state
+
+
 @pytest.mark.skipif(os.name != 'nt', reason='PowerShell wrapper behavior')
 @pytest.mark.parametrize('native_failure', [False, True])
 def test_visual_wrapper_blocks_backend_seed_and_restores_environment(
@@ -411,12 +434,12 @@ def test_visual_wrapper_blocks_backend_seed_and_restores_environment(
     import shutil
 
     root = Path(__file__).resolve().parents[2]
-    scripts = tmp_path / 'scripts'
-    scripts.mkdir()
+    scripts = tmp_path / 'scripts' / 'demo'
+    scripts.mkdir(parents=True)
     (tmp_path / 'frontend').mkdir()
-    shutil.copy(root / 'scripts/run-visual-smoke.ps1', scripts / 'run-visual-smoke.ps1')
+    shutil.copy(root / 'scripts/demo/run-visual-smoke.ps1', scripts / 'run-visual-smoke.ps1')
     (scripts / 'start-smoke.ps1').write_text("Write-Output 'fixture-started'\n")
-    (scripts / 'stop.ps1').write_text("Write-Output 'fixture-stopped'\n")
+    (scripts.parent / 'stop.ps1').write_text("Write-Output 'fixture-stopped'\n")
     driver = tmp_path / 'run-fixture.ps1'
     driver.write_text(
         "$env:PLAYWRIGHT_SKIP_BACKEND_SEED = 'original-value'\n"
@@ -424,7 +447,7 @@ def test_visual_wrapper_blocks_backend_seed_and_restores_environment(
         "    Write-Output ('suite-seed=' + $env:PLAYWRIGHT_SKIP_BACKEND_SEED)\n"
         f'    $global:LASTEXITCODE = {17 if native_failure else 0}\n'
         '}\n'
-        "try { & (Join-Path $PSScriptRoot 'scripts/run-visual-smoke.ps1') }\n"
+        "try { & (Join-Path $PSScriptRoot 'scripts/demo/run-visual-smoke.ps1') }\n"
         "catch { Write-Output 'fixture-native-failure' }\n"
         "Write-Output ('restored-seed=' + $env:PLAYWRIGHT_SKIP_BACKEND_SEED)\n",
         encoding='utf-8',

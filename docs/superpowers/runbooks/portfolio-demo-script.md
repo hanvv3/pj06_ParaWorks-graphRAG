@@ -2,6 +2,9 @@
 
 Updated: 2026-05-03
 
+This is the historical smoke presentation flow, not live GraphRAG acceptance.
+For the current final-demo target and prerequisites, use [final-demo.md](final-demo.md).
+
 ## Goal
 
 Show ParaWorks as a Korean-first company memory product, not a generic chatbot.
@@ -11,7 +14,7 @@ one product story.
 
 ## Demo Preconditions
 
-- Smoke backend and frontend are running through `scripts/start-smoke.ps1`.
+- Smoke backend and frontend are running through `scripts/demo/start-smoke.ps1`.
 - Backend health returns `demo_mode=true` for local route regression.
 - Slack and Google OAuth cards may show configured or reconnect-needed status;
   do not expose secrets.

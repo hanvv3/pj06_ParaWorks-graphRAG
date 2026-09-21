@@ -2,12 +2,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from backend.tests.release_contracts import LeaseLifecycleEvent, build_manifest
-from scripts.backend_release_matrix import _coverage_counts, _lease_counts
+from scripts.checks.backend_release_matrix import _coverage_counts, _lease_counts
 
 
 def test_repaired_historical_slack_failure_is_now_unexpected():
     from backend.tests.release_contracts import SLACK_TEN, ReleaseEvent
-    from scripts.backend_release_matrix import _verify_profile
+    from scripts.checks.backend_release_matrix import _verify_profile
 
     node = SLACK_TEN[0]
     canonical = SimpleNamespace(
@@ -51,7 +51,7 @@ def test_controller_uses_exact_profile_children_and_argument_vectors():
 
 def test_controller_has_no_application_settings_or_session_import():
     source = (
-        Path(__file__).parents[2] / 'scripts' / 'backend_release_matrix.py'
+        Path(__file__).parents[2] / 'scripts' / 'checks' / 'backend_release_matrix.py'
     ).read_text(encoding='utf-8')
     assert 'backend.app.core.config' not in source
     assert 'backend.app.db.session' not in source

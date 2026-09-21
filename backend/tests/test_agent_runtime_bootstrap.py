@@ -18,13 +18,13 @@ from backend.app.agent_runtime.bootstrap import (
 )
 from backend.app.core.config import Settings
 from backend.app.models import AgentRuntimeSchemaVersion
-from scripts import bootstrap_langgraph_checkpointer as bootstrap_command
+from scripts.admin import bootstrap_langgraph_checkpointer as bootstrap_command
 
 _PACKAGE_VERSION = '3.1.2-test'
 _EXPECTED_REVISION = len(PostgresSaver.MIGRATIONS) - 1
 _APPLIED_AT = datetime(2026, 8, 26, 9, 30, tzinfo=UTC)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_BOOTSTRAP_SCRIPT = _REPO_ROOT / 'scripts' / 'bootstrap_langgraph_checkpointer.py'
+_BOOTSTRAP_SCRIPT = _REPO_ROOT / 'scripts' / 'admin' / 'bootstrap_langgraph_checkpointer.py'
 
 
 class _FakeQueryResult:
@@ -486,7 +486,7 @@ def test_importing_operator_command_has_no_settings_side_effect() -> None:
         [
             sys.executable,
             '-c',
-            'import scripts.bootstrap_langgraph_checkpointer; print("imported")',
+            'import scripts.admin.bootstrap_langgraph_checkpointer; print("imported")',
         ],
         cwd=_REPO_ROOT,
         env=environment,

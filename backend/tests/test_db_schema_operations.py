@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SAWarning
 
 from backend.app.db.base import Base
-from scripts.check_db_schema import check_schema
+from scripts.checks.check_db_schema import check_schema
 
 
 def test_alembic_operational_files_exist() -> None:
@@ -90,9 +90,9 @@ class FakeSchemaInspector:
 def test_schema_checker_reports_pgvector_embedding_dimension_mismatch(monkeypatch) -> None:
     engine = FakePostgresEngine()
 
-    monkeypatch.setattr('scripts.check_db_schema.inspect', lambda _engine: FakeSchemaInspector())
+    monkeypatch.setattr('scripts.checks.check_db_schema.inspect', lambda _engine: FakeSchemaInspector())
     monkeypatch.setattr(
-        'scripts.check_db_schema._postgres_column_type',
+        'scripts.checks.check_db_schema._postgres_column_type',
         lambda _engine, _table_name, _column_name: 'vector(3072)',
     )
 
@@ -112,9 +112,9 @@ def test_schema_checker_reports_pgvector_embedding_dimension_mismatch(monkeypatc
 def test_schema_checker_uses_default_pgvector_dimension_when_not_overridden(monkeypatch) -> None:
     engine = FakePostgresEngine()
 
-    monkeypatch.setattr('scripts.check_db_schema.inspect', lambda _engine: FakeSchemaInspector())
+    monkeypatch.setattr('scripts.checks.check_db_schema.inspect', lambda _engine: FakeSchemaInspector())
     monkeypatch.setattr(
-        'scripts.check_db_schema._postgres_column_type',
+        'scripts.checks.check_db_schema._postgres_column_type',
         lambda _engine, _table_name, _column_name: 'vector(3072)',
     )
 
@@ -141,9 +141,9 @@ class WarningPgvectorInspector(FakeSchemaInspector):
 def test_schema_checker_suppresses_expected_pgvector_reflection_warning(monkeypatch) -> None:
     engine = FakePostgresEngine()
 
-    monkeypatch.setattr('scripts.check_db_schema.inspect', lambda _engine: WarningPgvectorInspector())
+    monkeypatch.setattr('scripts.checks.check_db_schema.inspect', lambda _engine: WarningPgvectorInspector())
     monkeypatch.setattr(
-        'scripts.check_db_schema._postgres_column_type',
+        'scripts.checks.check_db_schema._postgres_column_type',
         lambda _engine, _table_name, _column_name: 'vector(1536)',
     )
 

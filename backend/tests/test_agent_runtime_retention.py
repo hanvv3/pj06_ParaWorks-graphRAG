@@ -21,12 +21,12 @@ from backend.app.agent_runtime.retention import (
 )
 from backend.app.core.config import Settings
 from backend.app.models import AgentWorkflowThread
-from scripts import prune_langgraph_checkpoints as prune_command
+from scripts.admin import prune_langgraph_checkpoints as prune_command
 
 _NOW = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
 _CUTOFF = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PRUNE_SCRIPT = _REPO_ROOT / 'scripts' / 'prune_langgraph_checkpoints.py'
+_PRUNE_SCRIPT = _REPO_ROOT / 'scripts' / 'admin' / 'prune_langgraph_checkpoints.py'
 
 
 class _DeleteResult:

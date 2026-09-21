@@ -62,5 +62,9 @@ R1 threat-model 변경 자체는 보류된 D-0에서 확정한다. capability P1
 [27-task 계획](docs/superpowers/plans/2026-08-31-deliverable-d-core-rag-answer-graph-v2.md)은
 구현된 wire/storage/cost 계약의 상세 참조로 보존한다. 오래된 체크박스로 진행률을 판단하지 않는다.
 
-원래 루트 `main`과 이 작업트리는 별도 체크아웃이다. 최신 작업 위치는
-`.worktrees/review-hitl-v2-design`이며 이번 정리는 main 동기화나 원격 반영을 수행하지 않는다.
+2026-09-21 사용자 승인으로 최신 개발 코드를 원래 저장소 루트 `main`에 fast-forward했다.
+앞으로 개발·실행은 루트 `.env`/`.venv`를 사용한다. 원격 push는 수행하지 않았다.
+과거 작업트리와 로컬 데이터 보존 내역은 [작업 위치](docs/superpowers/runbooks/workspace.md)를 따른다.
+실제 GraphRAG final demo의 운영 연결 공백과 실행 준비는
+[final-demo 안내](docs/superpowers/runbooks/final-demo.md)를 따른다. scripts 정리만으로
+provider 승인·V2 인덱싱·그래프 갱신 운영 경로가 완성된 것은 아니다.

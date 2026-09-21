@@ -9,10 +9,10 @@ import pytest
 from dotenv import dotenv_values, set_key
 
 from backend.app.core.config import Settings
-from scripts import bootstrap_local_env as bootstrap_module
+from scripts.admin import bootstrap_local_env as bootstrap_module
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-BOOTSTRAP_SCRIPT = REPOSITORY_ROOT / 'scripts' / 'bootstrap_local_env.py'
+BOOTSTRAP_SCRIPT = REPOSITORY_ROOT / 'scripts' / 'admin' / 'bootstrap_local_env.py'
 SECRET_NAMES = (
     'AGENT_RUNTIME_FINGERPRINT_SECRET',
     'AUTH_SESSION_SECRET',

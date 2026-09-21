@@ -4,7 +4,7 @@ Updated: 2026-08-30
 
 ## Purpose
 
-`scripts/backend_release_matrix.py` is the authoritative non-paid backend
+`scripts/checks/backend_release_matrix.py` is the authoritative non-paid backend
 release verifier for C.5. It proves exact pytest coverage, PostgreSQL isolation,
 the user-deferred Slack baseline, privacy-safe evidence, and cleanup. A focused
 `--child-id` run is development evidence only and always reports
@@ -30,11 +30,11 @@ calls an LLM, embedding provider, connector, or OAuth service.
 Run all five profiles serially:
 
 ```powershell
-uv run --locked python scripts/backend_release_matrix.py --profile settings-diagnostic
-uv run --locked python scripts/backend_release_matrix.py --profile postgres
-uv run --locked python scripts/backend_release_matrix.py --profile compatibility
-uv run --locked python scripts/backend_release_matrix.py --profile non-slack
-uv run --locked python scripts/backend_release_matrix.py --profile full
+uv run --locked python scripts/checks/backend_release_matrix.py --profile settings-diagnostic
+uv run --locked python scripts/checks/backend_release_matrix.py --profile postgres
+uv run --locked python scripts/checks/backend_release_matrix.py --profile compatibility
+uv run --locked python scripts/checks/backend_release_matrix.py --profile non-slack
+uv run --locked python scripts/checks/backend_release_matrix.py --profile full
 ```
 
 Observed on 2026-08-30 at behavior commit `4b9132a`:

@@ -1,7 +1,8 @@
 # 로컬 서비스 실행 및 설정
 
 Windows PowerShell 기준입니다. 모든 명령은 해당 체크아웃 루트에서 실행합니다.
-상위 저장소와 worktree는 서로 다른 `.env`를 사용합니다. 실제 키는 출력·커밋하지 마세요.
+일상 작업·실행 위치는 원래 저장소 루트 `main`으로 통일했습니다. 루트 `.env`와 `.venv`를
+사용하며 과거 `.worktrees` 폴더에서 실행하지 않습니다. 실제 키는 출력·커밋하지 마세요.
 런처는 `.env` 값을 그대로 읽으며 `${OTHER_VARIABLE}` 치환은 하지 않습니다.
 같은 이름의 터미널 환경변수가 있으면 파일보다 우선합니다. 기존
 `PARAWORKS_DATABASE_URL` 별칭은 일반 모드에서 `DATABASE_URL`보다 우선합니다.
@@ -19,13 +20,13 @@ uv sync --locked
 npm --prefix frontend ci
 ```
 
-현재 개발 PC의 기존 환경 재사용 예:
+과거 터미널에 임시 가상환경 선택값이 남아 있다면 해제합니다:
 
 ```powershell
-$env:UV_PROJECT_ENVIRONMENT = '.venv-task4-r3-review'
+Remove-Item Env:UV_PROJECT_ENVIRONMENT -ErrorAction SilentlyContinue
 ```
 
-신규 설치만 `.env.example`을 `.env`로 복사합니다. `bootstrap_local_env.py`는 새 환경의
+신규 설치만 `.env.example`을 `.env`로 복사합니다. `admin/bootstrap_local_env.py`는 새 환경의
 비밀값 생성 도구입니다. 기존 DB의 fingerprint 키를 교체할 수 있으므로 기존 환경
 정리 목적으로 실행하지 마세요.
 
@@ -134,22 +135,29 @@ preflight와 유료 실행 확인 흐름으로 테스트하세요. 결과는 pen
 작업에도 영향을 주므로 활성화 후 모든 호출이 무과금이라고 가정하지 마세요.
 스크립트는 유료 실행 authority나 RAG V2 cutover 승인을 만들어 주지 않습니다.
 
-## 전문 도구
+## scripts 구성
 
-기존 `start-pgvector-dev.ps1`/`paraworks-docker.ps1`은 공통 실행기로 연결됩니다.
-자동 Docker 시작·포트 변경·임의 프로세스 종료는 제거되었습니다. 과거 `-Down`이나
-Docker 포트 인자 대신 Docker Compose 명령과 `.env`를 명시적으로 사용하세요.
-Unix 셸의 이전 `paraworks-docker.sh`는 Windows 프로세스 관리 대체가 아닙니다.
+| 위치 | 용도 |
+|---|---|
+| 최상위 6개 `.ps1` | start / stop / restart / status / test-services / test-provider |
+| `internal/` | 실행기의 내부 구현. 직접 사용할 필요 없음 |
+| `admin/` | env 초기화, 체크포인트 관리, 데이터 reset, 명시적 Slack 수집, Celery worker |
+| `checks/` | DB 스키마·pgvector 점검, 별도 release 검증 |
+| `demo/` | SQLite smoke·visual 테스트. 실제 final demo와 다름 |
 
-- `bootstrap_langgraph_checkpointer.py`, `prune_langgraph_checkpoints.py`: 체크포인트 관리.
-- `check_db_schema.py`, `check_pgvector_dev.py`: 스키마/벡터 개발 점검.
-- `backend_release_matrix.py`: 별도 release 검증. 로컬 시작 성공과 release 통과는 다름.
-- `reset_connector_data.py`: 데이터 삭제 도구. 일반 실행/종료에서 호출하지 않음.
-- `sync_slack.py`: `--execute`로 명시적으로 수집만 실행. 실제 Slack 자격증명과 source가
-  필요하며 이번 작업에서는 실행하지 않음. 분석은 앱의 검토 흐름 사용.
-- `run_e2e_demo.py`: 오래된 우회 데모는 폐기 안내 후 종료. 현재 UI smoke 또는
-  `docs/superpowers/runbooks/s-3-slack-integrated-demo.md`의 검증 흐름 사용.
-- `start-smoke.ps1`, `run-visual-smoke.ps1`: 오프라인 UI/데모 목적. 실제 서비스 검증 대체 불가.
+`paraworks-docker.ps1`, `paraworks-docker.sh`, `start-pgvector-dev.ps1`,
+`run_e2e_demo.py`는 삭제했습니다. 기존 명령은 위 최상위 실행 명령과 명시적 Docker Compose
+명령으로 대체하세요. 과거 spec/이력에 나온 경로는 당시 기록이며 현재 실행 안내가 아닙니다.
+
+관리 도구 예: `.venv\Scripts\python.exe scripts/checks/check_db_schema.py --help`.
+`admin/reset_connector_data.py`는 삭제 도구이며 일반 시작/종료에는 필요 없습니다.
+`admin/sync_slack.py --execute`는 명시적 수집만 수행하며 실제 source/접근권한이 필요합니다.
+
+## GraphRAG final demo
+
+[Final demo 준비 상태와 절차](../docs/superpowers/runbooks/final-demo.md)를 먼저 읽으세요.
+일반 서버 시작과 fully functional GraphRAG 시연은 다릅니다. 실제 V2 provider 설정,
+V2 인덱싱·그래프 갱신의 운영 진입점이 아직 필요하며 flag만 켜서 완료되지 않습니다.
 
 전문 진단·reset 도구 일부는 원래 예외 메시지를 출력합니다. 오류 출력을 그대로
 공유하지 마세요. 일반 서비스 점검은 비밀값이 출력되지 않는 `test-services.ps1`을 사용하세요.

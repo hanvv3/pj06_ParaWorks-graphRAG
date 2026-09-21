@@ -55,5 +55,5 @@ npm.cmd run build
 For an interactive smoke run, use:
 
 ```powershell
-.\scripts\start-smoke.ps1
+.\scripts\demo\start-smoke.ps1
 ```

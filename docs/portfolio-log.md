@@ -1,5 +1,32 @@
 # ParaWorks Portfolio Log
 
+## 2026-09-21 — single-root workspace and final-demo readiness
+
+- Explicitly approved consolidation: local main fast-forwarded through e62fc65;
+  previous main retained at codex/pre-root-unification-20260921. No remote push.
+  Root .env copied byte-for-byte from the existing configured worktree; no key
+  rotation. Root .venv synchronized with uv.lock and frontend installed with npm ci.
+- Seven obsolete checkouts removed after preserving material local files/notes in
+  ignored .tmp/worktree-preservation/20260921; all branches retained. Old review
+  checkout remains for SQLite DB/history preservation, not active development.
+  Identified old-project Next/uvicorn processes stopped; Docker volumes untouched.
+- Scripts top level now has six everyday commands; admin/checks/demo/internal
+  groups hold specialist tools. Four retired compatibility/demo files removed,
+  recoverable from Git. Path consumers/tests updated; obsolete source-text tests
+  requiring removed automatic Docker/port-fallback behavior replaced by current
+  CLI/ownership behavior coverage.
+- Fresh affected selection: 95 passed/33.01s. Relocated CLI RED9 observed before
+  moves; all PowerShell files parse. Root frontend TypeScript check exit0.
+- Controller final selection including secret hygiene: 98 passed/38.89s. Root
+  default provider config-only and status commands exit0; existing env values
+  preserved exactly. Independent review found no code blocker, only three current
+  runbooks' moved-path references, corrected without runtime changes.
+- Code audit distinguishes implementation from runnable final demo: production
+  V2 composition exists, but fresh provider-safety verifier provisioning, operational
+  V2 indexing and scoped graph reconcile entrypoints remain missing. New final-demo
+  guide records these blockers; no flag rollout, live API, paid inference or DB
+  migration performed. Formal release P1/R1 unchanged.
+
 ## 2026-09-21 — local service scripts and environment documentation
 
 - Separate normal PostgreSQL service launch from SQLite demo, configuration-only
